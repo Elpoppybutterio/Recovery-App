@@ -1,0 +1,38 @@
+{
+  "name": "recovery-accountability-app",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.6.1",
+  "scripts": {
+    "dev": "turbo run dev --parallel --filter=@recovery/api --filter=@recovery/dashboard --filter=@recovery/worker",
+    "dev:all": "turbo run dev --parallel --filter=@recovery/api --filter=@recovery/dashboard --filter=@recovery/worker --filter=@recovery/mobile",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "format": "prettier --write .",
+    "db:migrate": "pnpm --filter @recovery/api db:migrate",
+    "db:seed": "node -e \"console.log('No database configured yet. Add seed scripts under /apps/api and run your seed tool here.')\"",
+    "ci": "pnpm lint && pnpm typecheck && pnpm test",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@typescript-eslint/eslint-plugin": "^8.24.1",
+    "@typescript-eslint/parser": "^8.24.1",
+    "eslint": "^9.20.1",
+    "eslint-config-next": "^15.1.7",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.3",
+    "prettier": "^3.5.1",
+    "tsx": "^4.19.3",
+    "turbo": "^2.4.4",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "Recovery Accountability",
+    "slug": "recovery-accountability",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": ["**/*"],
+    "extra": {
+      "apiUrl": "http://localhost:3001",
+      "devAuthUserId": "enduser-a1"
+    }
+  }
+}
