@@ -110,7 +110,7 @@ export default async function HomePage(): Promise<JSX.Element> {
   const attendance = await getSupervisorAttendance();
   const liveLocations = await getSupervisorLiveLocations();
   const devUserId = process.env.DASHBOARD_DEV_USER_ID ?? "supervisor-a";
-  const liveLocations = await getSupervisorLiveLocations();
+  const supervisorLiveLocations = await getSupervisorLiveLocations();
 
   return (
     <main style={{ fontFamily: "sans-serif", padding: "2rem" }}>
