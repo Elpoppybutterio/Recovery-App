@@ -1,11 +1,5 @@
 import { createLogger } from "@recovery/shared-utils";
-import {
-  IncidentStatus,
-  IncidentType,
-  Permission,
-  Role,
-  locationPingSchema,
-} from "@recovery/shared-types";
+import { IncidentStatus, IncidentType, Permission, Role } from "@recovery/shared-types";
 import Fastify from "fastify";
 import { z } from "zod";
 import { auditResponseIfNeeded, createAuditLogger } from "./audit";
@@ -92,50 +86,6 @@ const supervisorIncidentsQuerySchema = z.object({
   status: z.nativeEnum(IncidentStatus).optional(),
   type: z.nativeEnum(IncidentType).optional(),
 });
-
-const supervisorLiveQuerySchema = z.object({
-  userId: z.string().min(1).optional(),
-});
-
-const supervisionUpdateParamsSchema = z.object({
-  userId: z.string().min(1),
-});
-
-const supervisionUpdateBodySchema = z.object({
-  enabled: z.boolean(),
-  supervisionEndDate: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .optional(),
-});
-
-const WARNING_DISTANCE_FEET = 200;
-const FEET_TO_METERS = 0.3048;
-const WARNING_DISTANCE_METERS = WARNING_DISTANCE_FEET * FEET_TO_METERS;
-const INCIDENT_DEDUPE_WINDOW_MINUTES = 10;
-const EARTH_RADIUS_METERS = 6371000;
-
-function toRadians(value: number): number {
-  return (value * Math.PI) / 180;
-}
-
-function distanceMetersBetween(
-  leftLat: number,
-  leftLng: number,
-  rightLat: number,
-  rightLng: number,
-): number {
-  const latDelta = toRadians(rightLat - leftLat);
-  const lngDelta = toRadians(rightLng - leftLng);
-  const leftLatRad = toRadians(leftLat);
-  const rightLatRad = toRadians(rightLat);
-
-  const value =
-    Math.sin(latDelta / 2) * Math.sin(latDelta / 2) +
-    Math.cos(leftLatRad) * Math.cos(rightLatRad) * Math.sin(lngDelta / 2) * Math.sin(lngDelta / 2);
-  const arc = 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
-  return EARTH_RADIUS_METERS * arc;
-}
 
 export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date } = {}) {
   const env = options.env ?? loadApiEnv();
