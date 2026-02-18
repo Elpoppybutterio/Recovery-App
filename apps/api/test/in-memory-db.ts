@@ -1,3 +1,4 @@
+import type { IncidentStatus, IncidentType } from "@recovery/shared-types";
 import type { DbPool, DbQueryResult } from "../src/db/client";
 import type { AttendanceStatus } from "../src/db/repositories";
 
@@ -80,6 +81,53 @@ type VerifierSignature = {
   created_at: string;
 };
 
+type ExclusionZone = {
+  id: string;
+  tenant_id: string;
+  label: string;
+  zone_type: "CIRCLE" | "POLYGON";
+  active: boolean;
+  center_lat: number | null;
+  center_lng: number | null;
+  radius_m: number | null;
+  polygon_geojson: unknown | null;
+  created_at: string;
+  created_by_user_id: string;
+};
+
+type UserZoneRule = {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  zone_id: string;
+  buffer_m: number;
+  active: boolean;
+};
+
+type Incident = {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  zone_id: string;
+  incident_type: IncidentType;
+  occurred_at: string;
+  status: IncidentStatus;
+  metadata_json: unknown;
+  created_at: string;
+};
+
+type NotificationEvent = {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  channel: "EMAIL" | "SMS";
+  recipient: string;
+  template_key: string;
+  payload_json: unknown;
+  status: string;
+  created_at: string;
+};
+
 export class InMemoryDb implements DbPool {
   private tenants: Tenant[] = [];
   private users: User[] = [];
@@ -90,6 +138,10 @@ export class InMemoryDb implements DbPool {
   private meetings: Meeting[] = [];
   private attendance: Attendance[] = [];
   private verifierSignatures: VerifierSignature[] = [];
+  private exclusionZones: ExclusionZone[] = [];
+  private userZoneRules: UserZoneRule[] = [];
+  private incidents: Incident[] = [];
+  private notificationEvents: NotificationEvent[] = [];
   private supervisorAssignmentId = 1;
   private tenantConfigId = 1;
   private auditId = 1;
@@ -129,6 +181,20 @@ export class InMemoryDb implements DbPool {
 
   getAttendanceById(attendanceId: string): Attendance | null {
     return this.attendance.find((entry) => entry.id === attendanceId) ?? null;
+  }
+
+  getIncidentsForTenant(tenantId: string): Incident[] {
+    return this.incidents
+      .filter((entry) => entry.tenant_id === tenantId)
+      .sort((left, right) => right.occurred_at.localeCompare(left.occurred_at))
+      .map((entry) => ({ ...entry }));
+  }
+
+  getNotificationEventsForTenant(tenantId: string): NotificationEvent[] {
+    return this.notificationEvents
+      .filter((entry) => entry.tenant_id === tenantId)
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))
+      .map((entry) => ({ ...entry }));
   }
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -223,6 +289,21 @@ export class InMemoryDb implements DbPool {
         updated_at: new Date().toISOString(),
       });
       return { rowCount: 1, rows: [] };
+    }
+
+    if (
+      normalized.includes("select value_json from tenant_config") &&
+      normalized.includes("tenant_id = $1") &&
+      normalized.includes("config_key = $2")
+    ) {
+      const [tenantId, configKey] = params as [string, string];
+      const row = this.tenantConfigs.find(
+        (entry) => entry.tenant_id === tenantId && entry.config_key === configKey,
+      );
+      return {
+        rowCount: row ? 1 : 0,
+        rows: row ? ([{ value_json: row.value_json }] as Row[]) : [],
+      };
     }
 
     if (normalized.includes("insert into audit_log")) {
@@ -491,6 +572,191 @@ export class InMemoryDb implements DbPool {
           };
         })
         .sort((left, right) => right.check_in_at.localeCompare(left.check_in_at)) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (normalized.includes("insert into exclusion_zones")) {
+      const [
+        id,
+        tenantId,
+        label,
+        zoneType,
+        active,
+        centerLat,
+        centerLng,
+        radiusM,
+        polygonGeoJson,
+        createdByUserId,
+      ] = params as [
+        string,
+        string,
+        string,
+        "CIRCLE" | "POLYGON",
+        boolean,
+        number | null,
+        number | null,
+        number | null,
+        string,
+        string,
+      ];
+      const row: ExclusionZone = {
+        id,
+        tenant_id: tenantId,
+        label,
+        zone_type: zoneType,
+        active,
+        center_lat: centerLat,
+        center_lng: centerLng,
+        radius_m: radiusM,
+        polygon_geojson: JSON.parse(polygonGeoJson) as unknown,
+        created_at: new Date().toISOString(),
+        created_by_user_id: createdByUserId,
+      };
+      this.exclusionZones.push(row);
+      return {
+        rowCount: 1,
+        rows: [row as Row],
+      };
+    }
+
+    if (normalized.includes("from exclusion_zones where tenant_id = $1 order by created_at desc")) {
+      const [tenantId] = params as [string];
+      const rows = this.exclusionZones
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("select id from exclusion_zones") &&
+      normalized.includes("tenant_id = $1 and id = $2")
+    ) {
+      const [tenantId, zoneId] = params as [string, string];
+      const zone = this.exclusionZones.find(
+        (entry) => entry.tenant_id === tenantId && entry.id === zoneId,
+      );
+      return {
+        rowCount: zone ? 1 : 0,
+        rows: zone ? ([{ id: zone.id }] as Row[]) : [],
+      };
+    }
+
+    if (normalized.includes("insert into user_zone_rules")) {
+      const [id, tenantId, userId, zoneId, bufferM, active] = params as [
+        string,
+        string,
+        string,
+        string,
+        number,
+        boolean,
+      ];
+      const existing = this.userZoneRules.find(
+        (entry) =>
+          entry.tenant_id === tenantId && entry.user_id === userId && entry.zone_id === zoneId,
+      );
+      if (existing) {
+        existing.buffer_m = bufferM;
+        existing.active = active;
+        return {
+          rowCount: 1,
+          rows: [{ ...existing } as Row],
+        };
+      }
+
+      const row: UserZoneRule = {
+        id,
+        tenant_id: tenantId,
+        user_id: userId,
+        zone_id: zoneId,
+        buffer_m: bufferM,
+        active,
+      };
+      this.userZoneRules.push(row);
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (normalized.includes("insert into incidents")) {
+      const [id, tenantId, userId, zoneId, incidentType, occurredAt, status, metadataJson] =
+        params as [string, string, string, string, IncidentType, string, IncidentStatus, string];
+      const row: Incident = {
+        id,
+        tenant_id: tenantId,
+        user_id: userId,
+        zone_id: zoneId,
+        incident_type: incidentType,
+        occurred_at: occurredAt,
+        status,
+        metadata_json: JSON.parse(metadataJson) as unknown,
+        created_at: new Date().toISOString(),
+      };
+      this.incidents.push(row);
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (normalized.includes("insert into notification_events")) {
+      const [id, tenantId, userId, channel, recipient, templateKey, payloadJson, status] =
+        params as [string, string, string, "EMAIL" | "SMS", string, string, string, string];
+      const row: NotificationEvent = {
+        id,
+        tenant_id: tenantId,
+        user_id: userId,
+        channel,
+        recipient,
+        template_key: templateKey,
+        payload_json: JSON.parse(payloadJson) as unknown,
+        status,
+        created_at: new Date().toISOString(),
+      };
+      this.notificationEvents.push(row);
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from incidents i") &&
+      normalized.includes("inner join exclusion_zones z") &&
+      normalized.includes("where i.tenant_id = $1") &&
+      normalized.includes("order by i.occurred_at desc")
+    ) {
+      const [tenantId, supervisorUserId] = params as [string, string | undefined];
+      const rows = this.incidents
+        .filter((entry) => entry.tenant_id === tenantId)
+        .filter((entry) => {
+          if (!normalized.includes("inner join supervisor_assignments sa")) {
+            return true;
+          }
+          return this.supervisorAssignments.some(
+            (assignment) =>
+              assignment.tenant_id === entry.tenant_id &&
+              assignment.supervisor_user_id === supervisorUserId &&
+              assignment.assigned_user_id === entry.user_id,
+          );
+        })
+        .map((entry) => {
+          const zone = this.exclusionZones.find(
+            (item) => item.tenant_id === entry.tenant_id && item.id === entry.zone_id,
+          );
+          return {
+            ...entry,
+            zone_label: zone?.label ?? "Unknown zone",
+          };
+        })
+        .sort((left, right) => right.occurred_at.localeCompare(left.occurred_at)) as Row[];
       return {
         rowCount: rows.length,
         rows,
