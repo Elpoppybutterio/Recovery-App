@@ -1,4 +1,5 @@
 import type { JSX } from "react";
+import { LiveSupervisionPanel } from "./components/LiveSupervisionPanel";
 
 type SupervisorAttendanceItem = {
   id: string;
@@ -107,12 +108,13 @@ async function getSupervisorLiveLocations(): Promise<{
 export default async function HomePage(): Promise<JSX.Element> {
   const health = await getHealth();
   const attendance = await getSupervisorAttendance();
-  const liveLocations = await getSupervisorLiveLocations();
+  const devUserId = process.env.DASHBOARD_DEV_USER_ID ?? "supervisor-a";
 
   return (
     <main style={{ fontFamily: "sans-serif", padding: "2rem" }}>
       <h1>Recovery Accountability Dashboard (Scaffold)</h1>
       <p>API health: {health}</p>
+      <LiveSupervisionPanel devUserId={devUserId} />
       <h2>Supervisor Attendance</h2>
       {attendance.error ? <p>{attendance.error}</p> : null}
       {!attendance.error && attendance.data.length === 0 ? (
