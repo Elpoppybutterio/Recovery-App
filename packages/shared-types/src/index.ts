@@ -26,6 +26,12 @@ export enum IncidentStatus {
   RESOLVED = "RESOLVED",
 }
 
+export enum ComplianceEventType {
+  APP_REMOVED = "APP_REMOVED",
+  PERMISSION_REVOKED = "PERMISSION_REVOKED",
+  LOCATION_STALE = "LOCATION_STALE",
+}
+
 export const attendanceRecordSchema = z.object({
   userId: z.string().min(1),
   meetingId: z.string().min(1),
@@ -94,8 +100,37 @@ export const notificationEventSchema = z.object({
   createdAt: z.string().datetime(),
 });
 
+export const locationPingSchema = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  accuracyM: z.number().int().nonnegative().optional(),
+  recordedAt: z.string().datetime().optional(),
+});
+
+export const lastKnownLocationSchema = z.object({
+  tenantId: z.string().min(1),
+  userId: z.string().min(1),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  accuracyM: z.number().int().nonnegative().nullable().optional(),
+  recordedAt: z.string().datetime(),
+  source: z.string().min(1),
+});
+
+export const complianceEventSchema = z.object({
+  id: z.string().min(1),
+  tenantId: z.string().min(1),
+  userId: z.string().min(1),
+  eventType: z.nativeEnum(ComplianceEventType),
+  occurredAt: z.string().datetime(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
 export type AttendanceRecord = z.infer<typeof attendanceRecordSchema>;
 export type ExclusionZone = z.infer<typeof exclusionZoneSchema>;
 export type UserZoneRule = z.infer<typeof userZoneRuleSchema>;
 export type Incident = z.infer<typeof incidentSchema>;
 export type NotificationEvent = z.infer<typeof notificationEventSchema>;
+export type LocationPing = z.infer<typeof locationPingSchema>;
+export type LastKnownLocation = z.infer<typeof lastKnownLocationSchema>;
+export type ComplianceEvent = z.infer<typeof complianceEventSchema>;
