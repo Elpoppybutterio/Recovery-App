@@ -11,6 +11,7 @@
     "test": "echo \"No mobile tests yet\""
   },
   "dependencies": {
+    "@babel/runtime": "^7.28.6",
     "expo": "~52.0.31",
     "expo-status-bar": "~2.0.1",
     "react": "18.3.1",

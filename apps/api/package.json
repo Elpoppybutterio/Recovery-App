@@ -17,6 +17,7 @@
     "@recovery/shared-types": "workspace:*",
     "@recovery/shared-utils": "workspace:*",
     "fastify": "^5.2.1",
+    "pg": "^8.18.0",
     "zod": "^3.24.1"
   }
 }
