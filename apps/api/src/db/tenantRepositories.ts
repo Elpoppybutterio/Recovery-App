@@ -1,9 +1,10 @@
-import { IncidentType, Role } from "@recovery/shared-types";
+import { ComplianceEventType, IncidentType, Role } from "@recovery/shared-types";
 import type { ActorContext } from "../domain/actor";
 import type {
   ExclusionZoneType,
   Repositories,
   SupervisorAttendanceFilters,
+  SupervisorLiveLocationFilters,
   SupervisorIncidentFilters,
 } from "./repositories";
 
@@ -32,6 +33,36 @@ export function createTenantRepositories(repositories: Repositories) {
     supervisor: {
       isAssigned(actor: ActorContext, targetUserId: string) {
         return repositories.isSupervisorAssignedToUser(actor.tenantId, actor.userId, targetUserId);
+      },
+    },
+    users: {
+      async updateSupervision(
+        actor: ActorContext,
+        targetUserId: string,
+        payload: { enabled: boolean; supervisionEndDate: Date | null },
+      ) {
+        const isAdmin = actor.roles.includes(Role.ADMIN);
+        if (!isAdmin) {
+          if (!actor.roles.includes(Role.SUPERVISOR)) {
+            throw new AccessDeniedError(`Requires role: ${Role.SUPERVISOR}`);
+          }
+
+          const assigned = await repositories.isSupervisorAssignedToUser(
+            actor.tenantId,
+            actor.userId,
+            targetUserId,
+          );
+          if (!assigned) {
+            throw new AccessDeniedError("Supervisor can only access assigned users");
+          }
+        }
+
+        return repositories.updateUserSupervision(
+          actor.tenantId,
+          targetUserId,
+          payload.enabled,
+          payload.supervisionEndDate,
+        );
       },
     },
     meetings: {
@@ -137,8 +168,23 @@ export function createTenantRepositories(repositories: Repositories) {
           payload.active,
         );
       },
+      listForUser(actor: ActorContext, userId: string) {
+        return repositories.zoneRules.listForUser(actor.tenantId, userId);
+      },
     },
     incidents: {
+      findRecent(
+        actor: ActorContext,
+        payload: { userId: string; zoneId: string; type: IncidentType; since: Date },
+      ) {
+        return repositories.incidents.findRecent(
+          actor.tenantId,
+          payload.userId,
+          payload.zoneId,
+          payload.type,
+          payload.since,
+        );
+      },
       report(
         actor: ActorContext,
         payload: {
@@ -159,6 +205,64 @@ export function createTenantRepositories(repositories: Repositories) {
           payload.type,
           payload.occurredAt,
           payload.metadata,
+        );
+      },
+    },
+    locations: {
+      upsert(
+        actor: ActorContext,
+        payload: {
+          lat: number;
+          lng: number;
+          accuracyM?: number;
+          recordedAt: Date;
+          source?: string;
+        },
+      ) {
+        return repositories.upsertLastKnownLocation(actor.tenantId, actor.userId, payload);
+      },
+      get(actor: ActorContext, userId: string) {
+        return repositories.getLastKnownLocation(actor.tenantId, userId);
+      },
+      async listSupervisorLive(actor: ActorContext, filters: SupervisorLiveLocationFilters = {}) {
+        const isAdmin = actor.roles.includes(Role.ADMIN);
+        if (!isAdmin && !actor.roles.includes(Role.SUPERVISOR)) {
+          throw new AccessDeniedError(`Requires role: ${Role.SUPERVISOR}`);
+        }
+
+        if (!isAdmin && filters.userId) {
+          const assigned = await repositories.isSupervisorAssignedToUser(
+            actor.tenantId,
+            actor.userId,
+            filters.userId,
+          );
+          if (!assigned) {
+            throw new AccessDeniedError("Supervisor can only access assigned users");
+          }
+        }
+
+        return repositories.listSupervisorLiveLocations(
+          actor.tenantId,
+          actor.userId,
+          isAdmin,
+          filters,
+        );
+      },
+    },
+    complianceEvents: {
+      create(
+        actor: ActorContext,
+        userId: string,
+        type: ComplianceEventType,
+        metadata: Record<string, unknown> | undefined,
+        occurredAt: Date,
+      ) {
+        return repositories.createComplianceEvent(
+          actor.tenantId,
+          userId,
+          type,
+          metadata,
+          occurredAt,
         );
       },
     },
