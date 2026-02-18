@@ -32,6 +32,14 @@ export enum ComplianceEventType {
   LOCATION_STALE = "LOCATION_STALE",
 }
 
+export enum SponsorRepeatRule {
+  DAILY = "DAILY",
+  WEEKDAYS = "WEEKDAYS",
+  WEEKLY = "WEEKLY",
+  BIWEEKLY = "BIWEEKLY",
+  MONTHLY = "MONTHLY",
+}
+
 export const attendanceRecordSchema = z.object({
   userId: z.string().min(1),
   meetingId: z.string().min(1),
@@ -126,6 +134,29 @@ export const complianceEventSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
+export const sponsorConfigSchema = z.object({
+  sponsorName: z.string().min(1),
+  sponsorPhoneE164: z.string().regex(/^\+[1-9]\d{1,14}$/),
+  callTimeLocalHhmm: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .refine((value) => {
+      const [hoursText, minutesText] = value.split(":");
+      const hours = Number(hoursText);
+      const minutes = Number(minutesText);
+      return (
+        Number.isInteger(hours) &&
+        Number.isInteger(minutes) &&
+        hours >= 0 &&
+        hours <= 23 &&
+        minutes >= 0 &&
+        minutes <= 59
+      );
+    }, "callTimeLocalHhmm must be a valid HH:mm value"),
+  repeatRule: z.nativeEnum(SponsorRepeatRule),
+  active: z.boolean().default(true),
+});
+
 export type AttendanceRecord = z.infer<typeof attendanceRecordSchema>;
 export type ExclusionZone = z.infer<typeof exclusionZoneSchema>;
 export type UserZoneRule = z.infer<typeof userZoneRuleSchema>;
@@ -134,3 +165,4 @@ export type NotificationEvent = z.infer<typeof notificationEventSchema>;
 export type LocationPing = z.infer<typeof locationPingSchema>;
 export type LastKnownLocation = z.infer<typeof lastKnownLocationSchema>;
 export type ComplianceEvent = z.infer<typeof complianceEventSchema>;
+export type SponsorConfig = z.infer<typeof sponsorConfigSchema>;

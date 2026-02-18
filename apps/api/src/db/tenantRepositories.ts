@@ -1,4 +1,4 @@
-import { ComplianceEventType, IncidentType, Role } from "@recovery/shared-types";
+import { ComplianceEventType, IncidentType, Role, SponsorRepeatRule } from "@recovery/shared-types";
 import type { ActorContext } from "../domain/actor";
 import type {
   ExclusionZoneType,
@@ -28,6 +28,28 @@ export function createTenantRepositories(repositories: Repositories) {
       },
       getValue(actor: ActorContext, key: string) {
         return repositories.getTenantConfigValue(actor.tenantId, key);
+      },
+    },
+    sponsorConfig: {
+      get(actor: ActorContext) {
+        return repositories.getSponsorConfig(actor.tenantId, actor.userId);
+      },
+      upsert(
+        actor: ActorContext,
+        payload: {
+          sponsorName: string;
+          sponsorPhoneE164: string;
+          callTimeLocalHhmm: string;
+          repeatRule: SponsorRepeatRule;
+          active: boolean;
+        },
+      ) {
+        return repositories.upsertSponsorConfig(
+          actor.tenantId,
+          actor.userId,
+          payload,
+          actor.userId,
+        );
       },
     },
     supervisor: {

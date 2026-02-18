@@ -5,6 +5,7 @@ import {
   Permission,
   Role,
   locationPingSchema,
+  sponsorConfigSchema,
 } from "@recovery/shared-types";
 import Fastify from "fastify";
 import { z } from "zod";
@@ -191,6 +192,111 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     },
     async (request) => {
       return { actor: request.actor };
+    },
+  );
+
+  app.get(
+    "/v1/me/sponsor",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const config = await tenantRepositories.sponsorConfig.get(actor);
+
+      await app.auditLogger.log({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "sponsor_config.viewed",
+        subjectType: "sponsor_config",
+        subjectId: actor.userId,
+        metadata: {
+          userId: actor.userId,
+          configured: Boolean(config),
+        },
+      });
+
+      if (!config) {
+        return { sponsorConfig: null };
+      }
+
+      return {
+        sponsorConfig: {
+          id: config.id,
+          userId: config.user_id,
+          sponsorName: config.sponsor_name,
+          sponsorPhoneE164: config.sponsor_phone_e164,
+          callTimeLocalHhmm: config.call_time_local_hhmm,
+          repeatRule: config.repeat_rule,
+          active: config.active,
+          createdAt: config.created_at,
+          updatedAt: config.updated_at,
+          updatedByUserId: config.updated_by_user_id,
+        },
+      };
+    },
+  );
+
+  app.put(
+    "/v1/me/sponsor",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsed = sponsorConfigSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid sponsor config payload",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const config = await tenantRepositories.sponsorConfig.upsert(actor, parsed.data);
+      if (!config) {
+        reply.code(404).send({ error: "not_found", message: "User not found" });
+        return;
+      }
+
+      await app.auditLogger.log({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "sponsor_config.updated",
+        subjectType: "sponsor_config",
+        subjectId: actor.userId,
+        metadata: {
+          userId: actor.userId,
+          repeatRule: config.repeat_rule,
+          active: config.active,
+        },
+      });
+
+      return {
+        sponsorConfig: {
+          id: config.id,
+          userId: config.user_id,
+          sponsorName: config.sponsor_name,
+          sponsorPhoneE164: config.sponsor_phone_e164,
+          callTimeLocalHhmm: config.call_time_local_hhmm,
+          repeatRule: config.repeat_rule,
+          active: config.active,
+          createdAt: config.created_at,
+          updatedAt: config.updated_at,
+          updatedByUserId: config.updated_by_user_id,
+        },
+      };
     },
   );
 
