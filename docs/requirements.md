@@ -1,187 +1,151 @@
-# Recovery Accountability App Requirements Specification
+# Recovery Accountability App Requirements
 
-## 1. Scope
+## Scope
 
-This document defines Day-1 implementation requirements for the Recovery Accountability App platform (mobile app + supervisor dashboard), aligned to `AGENTS.md`.
+This document defines product and platform requirements for MVP delivery across API, dashboard, and mobile surfaces.
 
-## 2. Beta Pilot Target
+## Roles
 
-- Pilot size: up to 50 end users in a controlled beta.
-- Surfaces in pilot: mobile app for end users and web dashboard for supervisors/admin.
-- Success baseline: onboarding, attendance logging, exclusion-zone alerts, reminders, and compliance visibility are operational for pilot participants.
+- `END_USER`
+- `SPONSOR`
+- `MEETING_VERIFIER`
+- `SUPERVISOR`
+- `ADMIN`
 
-## 3. Roles and Access Boundaries
+Role guardrails:
 
-1. End User
-
-- Can record attendance events and receive reminders/geo alerts.
-
-2. Sponsor
-
-- Can receive approved reminder context and may verify attendance when enabled by policy.
-
-3. Meeting Verifier
-
-- Can attest attendance via allowed verification flow.
-
-4. Supervisor
-
-- Can view assigned users only; receives configured compliance alerts.
-
-5. Admin/Owner
-
-- Can manage tenant/org configuration, RBAC policy, retention, and exports.
-
-Role constraints:
-
-- Multi-tenant separation is mandatory.
-- Supervisor access must be constrained to assigned users.
+- All role actions are tenant-scoped.
+- Supervisors are restricted to assigned users.
 - Sensitive actions must be audit-logged.
 
-## 4. Configuration Model (Tenant-Scoped)
+## Configurability
 
-1. Verification policy
+Tenant-scoped configuration must support:
 
-- Dwell threshold minutes (default 60).
-- Verification mode: signature-required vs dwell-only-allowed.
+- Offender flags and related supervision markers.
+- Exclusion zones (radius/polygon), warning buffers, and violation rules.
+- Sponsor call reminders.
+- Appointment reminders (probation/parole/court or tenant-defined).
+- Meeting verification policy (signature-required and future dwell-only policy controls).
 
-2. Geofence/exclusion policy
+## Functional Requirements
 
-- Meeting geofence radius/polygon and confidence thresholds.
-- Exclusion-zone definitions, warning buffer distance, violation rules.
+### FR-001 Meetings
 
-3. Notification policy
+The system shall support a tenant-scoped meeting directory.
 
-- Recipient routing for supervisor alerts.
-- Channel toggles (email/SMS) per tenant/user assignment.
+Acceptance criteria:
 
-4. Reminder policy
+- Authorized roles can create meetings with `name`, `address`, `lat`, `lng`, `radius`.
+- Allowed roles can list meetings in their tenant only.
+- Cross-tenant meeting reads/writes are blocked.
 
-- Recurrence rules: daily/weekly/biweekly/monthly.
-- Reminder types: sponsor call, probation/parole appointment, sponsee check-in (when enabled).
+### FR-002 Attendance
 
-5. Data governance policy
+The system shall record check-in/check-out attendance events.
 
-- Location/history retention windows.
-- Export permissions and access controls.
+Acceptance criteria:
 
-## 5. Functional Requirements
+- Check-in creates an attendance record with `INCOMPLETE` status.
+- Check-out computes `dwell_seconds` from server time.
+- Status transitions:
+  - `< 3600` seconds => `INCOMPLETE`
+  - `>= 3600` seconds => `PROVISIONAL`
+- End users can only check out their own attendance records.
 
-### FR-001 Authentication, RBAC, and Tenancy
+### FR-003 Signatures
 
-- The system shall authenticate users and enforce role-based access per tenant.
-  Acceptance criteria:
-- Requests without auth context are rejected with `401`.
-- Unauthorized role/permission access is rejected with `403`.
-- Supervisor access to end-user data is limited to assigned users.
+The system shall support meeting verifier signatures on attendance records.
 
-### FR-002 Attendance Recording and Verification
+Acceptance criteria:
 
-- The system shall support meeting check-in/check-out with dwell-time computation.
-  Acceptance criteria:
-- Attendance records include meeting id, user id, check-in/out timestamps, and status (`INCOMPLETE | PROVISIONAL | VERIFIED`).
-- Default dwell threshold is 60 minutes unless tenant config overrides it.
-- `VERIFIED` requires verifier signature or tenant-configured dwell-only policy.
+- `MEETING_VERIFIER` or `ADMIN` can sign attendance in-tenant.
+- Signing updates attendance status to `VERIFIED`.
+- Re-sign requests are safe (idempotent or duplicate-safe behavior).
+- Signing fails for missing or cross-tenant attendance records.
 
-### FR-003 Meeting Directory and Geofence Validation
+### FR-004 Supervisor Dashboard Data
 
-- The system shall manage meeting locations with geofence metadata and verify on-site presence.
-  Acceptance criteria:
-- Meeting entries include name, address, geofence coordinates/shape, and optional schedule.
-- Verification logic stores geofence confidence metadata.
-- Geofence checks support server-side validation path.
+The system shall provide attendance listing for supervisors/admin.
 
-### FR-004 Exclusion-Zone Compliance
+Acceptance criteria:
 
-- The system shall warn users near restricted zones and create violation events on entry.
-  Acceptance criteria:
-- Warning event is generated when entering configured buffer distance.
-- Violation event is generated when entering zone boundary.
-- Supervisors receive configured alert notifications.
+- Supervisor list view returns only assigned users' attendance.
+- Admin list view may return all tenant attendance.
+- Supervisor filter by unassigned user is denied.
+- Returned fields include status, meeting name, user id, check-in/out timestamps, dwell seconds.
 
-### FR-005 Digital Verification Flow
+### FR-005 Incidents and Alerts
 
-- The system shall support attendance attestation by a meeting verifier.
-  Acceptance criteria:
-- Verification path supports digital signature or secure-link/QR pattern.
-- Verification outcome is recorded with actor and timestamp.
+The system shall support exclusion-zone incident workflows and supervisor alerting.
 
-### FR-006 Supervisor Dashboard
+Acceptance criteria:
 
-- The system shall provide compliance and verification visibility for assigned users.
-  Acceptance criteria:
-- Supervisors can filter assigned-user records.
-- Verification details and incident timelines are visible for scoped users.
-- Cross-tenant data access is blocked.
+- Warning and violation events are representable as tenant-scoped records.
+- Supervisor alert routing supports tenant/user recipient configuration.
+- Incident resolution state is trackable and auditable.
 
-### FR-007 Reminders and Scheduling
+### FR-006 Notifications
 
-- The system shall schedule and deliver accountability reminders.
-  Acceptance criteria:
-- Reminders support daily/weekly/biweekly/monthly recurrences.
-- Sponsor call and probation/parole reminder types are available in MVP-1.
-- Delivery degrades gracefully under OS/background constraints.
+The system shall support notification delivery for compliance workflows.
 
-### FR-008 Audit Logging and Restricted Exports
+Acceptance criteria:
 
-- The system shall audit sensitive actions and restrict exports.
-  Acceptance criteria:
-- Sensitive reads/actions (location trace, photo view, export, config changes) create audit entries.
-- Export actions require explicit authorized roles.
-- Audit entries include actor, tenant, action, timestamp, and subject metadata.
+- Notification channels are configurable (email/SMS, provider-dependent).
+- Failures are observable and retry strategy is documented.
+- Notifications do not leak cross-tenant data.
 
-### FR-009 AA Tradition and Privacy Guardrails
+### FR-007 Reminders
 
-- The system shall preserve anonymity and avoid implied AA endorsement.
-  Acceptance criteria:
-- No feature exposes identities of other meeting attendees.
-- Optional photo proof flow enforces selfie-oriented guidance and discourages crowd capture.
-- Group phone lists are opt-in and group-managed only.
+The system shall support recurring reminders (sponsor calls, appointments, recovery tasks).
 
-## 6. Non-Functional Requirements
+Acceptance criteria:
 
-1. Security
+- Recurrence supports daily/weekly/biweekly/monthly.
+- Reminder schedule is tenant/user configurable.
+- Background delivery degrades gracefully under OS constraints.
 
-- Encrypt in transit and at rest.
-- Enforce least-privilege RBAC and prevent IDOR.
-- Require MFA for Admin/Supervisor accounts.
+## Non-Functional Requirements
 
-2. Privacy and governance
+### Security
 
-- Minimize and retain precise location history only as configured/necessary.
-- Enforce tenant isolation in storage and query paths.
-- Maintain complete audit trails for sensitive access.
+- Encrypt data in transit and at rest.
+- Enforce least-privilege RBAC and tenant boundaries on all sensitive operations.
+- Admin/supervisor MFA support is part of production auth hardening.
 
-3. Reliability
+### Privacy
 
-- Core flows must tolerate intermittent connectivity and retry safely.
-- Reminder and alert pipelines must degrade gracefully under background limitations.
+- Minimize personal and location data collection/retention.
+- Avoid disclosure patterns that could identify meeting participants.
+- Respect tenant privacy and least-necessary data exposure.
 
-4. Performance and scale (beta)
+### Auditability
 
-- Support a 50-user pilot with responsive dashboard queries and timely alert delivery.
+- Sensitive reads/writes generate audit records with actor, tenant, action, subject, and timestamp.
+- Audit logs are exportable only with explicit authorized permissions.
 
-5. Observability
+### Availability
 
-- Emit structured logs with trace/correlation context.
-- Capture basic metrics for request outcomes and critical workflows.
+- Core attendance workflows must remain resilient under transient network failures.
+- API and job execution should degrade gracefully when dependencies are unavailable.
 
-6. Maintainability
+### Scalability
 
-- Type-safe APIs, validation on all external input paths, and documented config defaults.
+- Architecture should support pilot scale immediately and expansion by tenant without redesign.
+- Query patterns must remain tenant-index-friendly.
 
-## 7. Definition of Done (Per Feature)
+### 12 Traditions Constraints
 
-A feature is complete only when all conditions are met:
+- No public member-list disclosure.
+- No workflows that imply AA organizational endorsement.
+- Optional photo evidence must be self-only guidance and avoid bystander capture.
 
-1. Unit and integration tests cover acceptance criteria.
-2. Security review is completed for location/photo/notification/export changes.
-3. Manual QA includes background location, low battery, poor connectivity, and timezone edge cases.
-4. Documentation is updated in `/docs` and applicable admin/config guidance.
-5. Feature flags and role visibility are validated for relevant user types.
+## Definition of Done
 
-## 8. Out of Scope for MVP-1
+A feature is complete only when all are true:
 
-- Mandatory photo proof.
-- Auto-enrollment in group phone lists.
-- Any workflow implying AA organizational endorsement.
+- Unit/integration tests pass for acceptance criteria.
+- `pnpm lint` and `pnpm typecheck` pass.
+- Security checks are completed for auth, data access, and sensitive endpoints.
+- Required audit logging exists for sensitive reads/writes.
+- Tenant isolation is verified for repository and route boundaries.
