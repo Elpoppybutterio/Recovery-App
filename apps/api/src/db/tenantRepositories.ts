@@ -34,6 +34,36 @@ export function createTenantRepositories(repositories: Repositories) {
         return repositories.isSupervisorAssignedToUser(actor.tenantId, actor.userId, targetUserId);
       },
     },
+    users: {
+      async updateSupervision(
+        actor: ActorContext,
+        targetUserId: string,
+        payload: { enabled: boolean; supervisionEndDate: Date | null },
+      ) {
+        const isAdmin = actor.roles.includes(Role.ADMIN);
+        if (!isAdmin) {
+          if (!actor.roles.includes(Role.SUPERVISOR)) {
+            throw new AccessDeniedError(`Requires role: ${Role.SUPERVISOR}`);
+          }
+
+          const assigned = await repositories.isSupervisorAssignedToUser(
+            actor.tenantId,
+            actor.userId,
+            targetUserId,
+          );
+          if (!assigned) {
+            throw new AccessDeniedError("Supervisor can only access assigned users");
+          }
+        }
+
+        return repositories.updateUserSupervision(
+          actor.tenantId,
+          targetUserId,
+          payload.enabled,
+          payload.supervisionEndDate,
+        );
+      },
+    },
     meetings: {
       create(
         actor: ActorContext,

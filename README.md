@@ -90,6 +90,27 @@ Migrations live in `/apps/api/migrations`.
   - `expo.extra.apiUrl`
   - TODO: replace this DEV auth wiring with real auth.
 
+### MVP Slice C (iOS-first realtime supervision)
+
+- New API endpoints:
+  - `POST /v1/location/ping` (END_USER)
+  - `GET /v1/supervisor/live` (SUPERVISOR/ADMIN)
+  - `GET /v1/me/zones` (END_USER)
+  - `PUT /v1/users/:userId/supervision` (SUPERVISOR/ADMIN with assignment guardrails)
+- Live-view rule:
+  - Supervisors only see assigned users.
+  - Admins can view all users inside their tenant.
+- Ping behavior:
+  - Every ping upserts `last_known_locations`.
+  - Zone evaluation runs on ping with a default warning distance of 200ft.
+  - Warnings create `WARNING` incidents with no notification fanout.
+  - Violations create `VIOLATION` incidents and queue `notification_events` when a tenant recipient is configured (`default_supervisor_email`).
+- Mobile supervision wiring (`apps/mobile/app.json`):
+  - `expo.extra.supervisionEnabled`
+  - `expo.extra.fallbackLat`
+  - `expo.extra.fallbackLng`
+  - The app uses DEV auth and a minimal iOS permission flow stub; replace with real auth + true background location APIs before production.
+
 ## CI checks
 
 ```bash

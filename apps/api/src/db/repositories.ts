@@ -8,6 +8,13 @@ interface UserRow {
   tenant_id: string;
 }
 
+export interface UserSupervisionRow {
+  id: string;
+  tenant_id: string;
+  supervision_enabled: boolean;
+  supervision_end_date: string | null;
+}
+
 export interface TenantUserRow {
   id: string;
   tenant_id: string;
@@ -718,9 +725,76 @@ export function createRepositories(db: DbClient) {
 
         return result.rows[0] ?? null;
       },
+
+      async listForUser(tenantId: string, userId: string): Promise<UserZoneRuleWithZoneRow[]> {
+        const result = await db.query<UserZoneRuleWithZoneRow>(
+          `
+          SELECT
+            r.id,
+            r.tenant_id,
+            r.user_id,
+            r.zone_id,
+            r.buffer_m,
+            r.active,
+            z.label AS zone_label,
+            z.zone_type,
+            z.active AS zone_active,
+            z.center_lat,
+            z.center_lng,
+            z.radius_m,
+            z.polygon_geojson
+          FROM user_zone_rules r
+          INNER JOIN exclusion_zones z
+            ON z.tenant_id = r.tenant_id
+           AND z.id = r.zone_id
+          WHERE r.tenant_id = $1
+            AND r.user_id = $2
+            AND r.active = TRUE
+            AND z.active = TRUE
+          ORDER BY z.created_at DESC
+        `,
+          [tenantId, userId],
+        );
+
+        return result.rows;
+      },
     },
 
     incidents: {
+      async findRecent(
+        tenantId: string,
+        userId: string,
+        zoneId: string,
+        type: IncidentType,
+        since: Date,
+      ): Promise<IncidentRow | null> {
+        const result = await db.query<IncidentRow>(
+          `
+          SELECT
+            id,
+            tenant_id,
+            user_id,
+            zone_id,
+            incident_type,
+            occurred_at,
+            status,
+            metadata_json,
+            created_at
+          FROM incidents
+          WHERE tenant_id = $1
+            AND user_id = $2
+            AND zone_id = $3
+            AND incident_type = $4
+            AND occurred_at >= $5
+          ORDER BY occurred_at DESC
+          LIMIT 1
+        `,
+          [tenantId, userId, zoneId, type, since.toISOString()],
+        );
+
+        return result.rows[0] ?? null;
+      },
+
       async report(
         tenantId: string,
         userId: string,

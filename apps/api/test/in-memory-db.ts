@@ -1,4 +1,4 @@
-import type { IncidentStatus, IncidentType } from "@recovery/shared-types";
+import type { ComplianceEventType, IncidentStatus, IncidentType } from "@recovery/shared-types";
 import type { DbPool, DbQueryResult } from "../src/db/client";
 import type { AttendanceStatus } from "../src/db/repositories";
 
@@ -12,6 +12,8 @@ type User = {
   tenant_id: string;
   email: string;
   display_name: string;
+  supervision_enabled: boolean;
+  supervision_end_date: string | null;
 };
 
 type UserRole = {
@@ -128,6 +130,25 @@ type NotificationEvent = {
   created_at: string;
 };
 
+type LastKnownLocation = {
+  tenant_id: string;
+  user_id: string;
+  lat: number;
+  lng: number;
+  accuracy_m: number | null;
+  recorded_at: string;
+  source: string;
+};
+
+type ComplianceEvent = {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  event_type: ComplianceEventType;
+  occurred_at: string;
+  metadata_json: unknown;
+};
+
 export class InMemoryDb implements DbPool {
   private tenants: Tenant[] = [];
   private users: User[] = [];
@@ -142,6 +163,8 @@ export class InMemoryDb implements DbPool {
   private userZoneRules: UserZoneRule[] = [];
   private incidents: Incident[] = [];
   private notificationEvents: NotificationEvent[] = [];
+  private lastKnownLocations: LastKnownLocation[] = [];
+  private complianceEvents: ComplianceEvent[] = [];
   private supervisorAssignmentId = 1;
   private tenantConfigId = 1;
   private auditId = 1;
@@ -150,8 +173,17 @@ export class InMemoryDb implements DbPool {
     this.tenants.push(record);
   }
 
-  addUser(record: User) {
-    this.users.push(record);
+  addUser(
+    record: Omit<User, "supervision_enabled" | "supervision_end_date"> & {
+      supervision_enabled?: boolean;
+      supervision_end_date?: string | null;
+    },
+  ) {
+    this.users.push({
+      supervision_enabled: record.supervision_enabled ?? false,
+      supervision_end_date: record.supervision_end_date ?? null,
+      ...record,
+    });
   }
 
   addUserRole(record: UserRole) {
@@ -197,6 +229,13 @@ export class InMemoryDb implements DbPool {
       .map((entry) => ({ ...entry }));
   }
 
+  getLastKnownLocation(tenantId: string, userId: string): LastKnownLocation | null {
+    const row = this.lastKnownLocations.find(
+      (entry) => entry.tenant_id === tenantId && entry.user_id === userId,
+    );
+    return row ? { ...row } : null;
+  }
+
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
     text: string,
     params: unknown[] = [],
@@ -237,6 +276,33 @@ export class InMemoryDb implements DbPool {
             tenant_id: user.tenant_id,
             email: user.email,
             display_name: user.display_name,
+          } as Row,
+        ],
+      };
+    }
+
+    if (normalized.includes("update users set supervision_enabled = $1")) {
+      const [enabled, supervisionEndDate, tenantId, userId] = params as [
+        boolean,
+        string | null,
+        string,
+        string,
+      ];
+      const user = this.users.find((entry) => entry.tenant_id === tenantId && entry.id === userId);
+      if (!user) {
+        return { rowCount: 0, rows: [] };
+      }
+
+      user.supervision_enabled = enabled;
+      user.supervision_end_date = supervisionEndDate;
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: user.id,
+            tenant_id: user.tenant_id,
+            supervision_enabled: user.supervision_enabled,
+            supervision_end_date: user.supervision_end_date,
           } as Row,
         ],
       };
@@ -378,6 +444,88 @@ export class InMemoryDb implements DbPool {
       return {
         rowCount: meeting ? 1 : 0,
         rows: meeting ? ([{ id: meeting.id }] as Row[]) : [],
+      };
+    }
+
+    if (normalized.includes("insert into last_known_locations")) {
+      const [tenantId, userId, lat, lng, accuracyM, recordedAt, source] = params as [
+        string,
+        string,
+        number,
+        number,
+        number | null,
+        string,
+        string,
+      ];
+      const existing = this.lastKnownLocations.find(
+        (entry) => entry.tenant_id === tenantId && entry.user_id === userId,
+      );
+      if (existing) {
+        existing.lat = lat;
+        existing.lng = lng;
+        existing.accuracy_m = accuracyM;
+        existing.recorded_at = recordedAt;
+        existing.source = source;
+        return {
+          rowCount: 1,
+          rows: [{ ...existing } as Row],
+        };
+      }
+
+      const row: LastKnownLocation = {
+        tenant_id: tenantId,
+        user_id: userId,
+        lat,
+        lng,
+        accuracy_m: accuracyM,
+        recorded_at: recordedAt,
+        source,
+      };
+      this.lastKnownLocations.push(row);
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from last_known_locations where tenant_id = $1") &&
+      normalized.includes("user_id = $2")
+    ) {
+      const [tenantId, userId] = params as [string, string];
+      const row = this.lastKnownLocations.find(
+        (entry) => entry.tenant_id === tenantId && entry.user_id === userId,
+      );
+      return {
+        rowCount: row ? 1 : 0,
+        rows: row ? ([{ ...row }] as Row[]) : [],
+      };
+    }
+
+    if (
+      normalized.includes("from last_known_locations l") &&
+      normalized.includes("where l.tenant_id = $1") &&
+      normalized.includes("order by l.recorded_at desc")
+    ) {
+      const [tenantId, supervisorUserId] = params as [string, string | undefined];
+      const rows = this.lastKnownLocations
+        .filter((entry) => entry.tenant_id === tenantId)
+        .filter((entry) => {
+          if (!normalized.includes("inner join supervisor_assignments sa")) {
+            return true;
+          }
+          return this.supervisorAssignments.some(
+            (assignment) =>
+              assignment.tenant_id === entry.tenant_id &&
+              assignment.supervisor_user_id === supervisorUserId &&
+              assignment.assigned_user_id === entry.user_id,
+          );
+        })
+        .sort((left, right) => right.recorded_at.localeCompare(left.recorded_at))
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
       };
     }
 
@@ -700,6 +848,30 @@ export class InMemoryDb implements DbPool {
         created_at: new Date().toISOString(),
       };
       this.incidents.push(row);
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (normalized.includes("insert into compliance_events")) {
+      const [id, tenantId, userId, eventType, occurredAt, metadataJson] = params as [
+        string,
+        string,
+        string,
+        ComplianceEventType,
+        string,
+        string,
+      ];
+      const row: ComplianceEvent = {
+        id,
+        tenant_id: tenantId,
+        user_id: userId,
+        event_type: eventType,
+        occurred_at: occurredAt,
+        metadata_json: JSON.parse(metadataJson) as unknown,
+      };
+      this.complianceEvents.push(row);
       return {
         rowCount: 1,
         rows: [{ ...row } as Row],
