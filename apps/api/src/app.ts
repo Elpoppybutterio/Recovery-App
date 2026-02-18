@@ -1,5 +1,5 @@
 import { createLogger } from "@recovery/shared-utils";
-import { Permission, Role } from "@recovery/shared-types";
+import { IncidentStatus, IncidentType, Permission, Role } from "@recovery/shared-types";
 import Fastify from "fastify";
 import { z } from "zod";
 import { auditResponseIfNeeded, createAuditLogger } from "./audit";
@@ -44,6 +44,47 @@ const attendanceSignBodySchema = z.object({
 const supervisorAttendanceQuerySchema = z.object({
   userId: z.string().min(1).optional(),
   meetingId: z.string().min(1).optional(),
+});
+
+const zoneCreateBodySchema = z.discriminatedUnion("type", [
+  z.object({
+    label: z.string().min(1),
+    type: z.literal("CIRCLE"),
+    active: z.boolean().optional(),
+    centerLat: z.number(),
+    centerLng: z.number(),
+    radiusM: z.number().int().positive(),
+    polygonGeoJson: z.unknown().optional(),
+  }),
+  z.object({
+    label: z.string().min(1),
+    type: z.literal("POLYGON"),
+    active: z.boolean().optional(),
+    centerLat: z.number().optional(),
+    centerLng: z.number().optional(),
+    radiusM: z.number().int().positive().optional(),
+    polygonGeoJson: z.record(z.unknown()),
+  }),
+]);
+
+const userZoneRuleBodySchema = z.object({
+  zoneId: z.string().min(1),
+  bufferM: z.number().int().nonnegative().default(0),
+  active: z.boolean().default(true),
+});
+
+const incidentReportBodySchema = z.object({
+  zoneId: z.string().min(1),
+  type: z.nativeEnum(IncidentType),
+  occurredAt: z.string().datetime().optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+const supervisorIncidentsQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  zoneId: z.string().min(1).optional(),
+  status: z.nativeEnum(IncidentStatus).optional(),
+  type: z.nativeEnum(IncidentType).optional(),
 });
 
 export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date } = {}) {
@@ -201,6 +242,339 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           createdByUserId: meeting.created_by_user_id,
         })),
       };
+    },
+  );
+
+  app.post(
+    "/v1/zones",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.ADMIN, Role.SUPERVISOR)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsed = zoneCreateBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid zone payload",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const zone = await tenantRepositories.zones.create(actor, {
+        label: parsed.data.label,
+        type: parsed.data.type,
+        active: parsed.data.active ?? true,
+        centerLat: parsed.data.centerLat,
+        centerLng: parsed.data.centerLng,
+        radiusM: parsed.data.radiusM,
+        polygonGeoJson: parsed.data.polygonGeoJson,
+      });
+
+      await app.auditLogger.log({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "zones.created",
+        subjectType: "exclusion_zone",
+        subjectId: zone.id,
+        metadata: {
+          zoneType: zone.zone_type,
+          active: zone.active,
+        },
+      });
+
+      reply.code(201).send({
+        zone: {
+          id: zone.id,
+          tenantId: zone.tenant_id,
+          label: zone.label,
+          type: zone.zone_type,
+          active: zone.active,
+          centerLat: zone.center_lat,
+          centerLng: zone.center_lng,
+          radiusM: zone.radius_m,
+          polygonGeoJson: zone.polygon_geojson,
+          createdAt: zone.created_at,
+          createdByUserId: zone.created_by_user_id,
+        },
+      });
+    },
+  );
+
+  app.get(
+    "/v1/zones",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.ADMIN, Role.SUPERVISOR)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const zones = await tenantRepositories.zones.list(actor);
+      return {
+        zones: zones.map((zone) => ({
+          id: zone.id,
+          tenantId: zone.tenant_id,
+          label: zone.label,
+          type: zone.zone_type,
+          active: zone.active,
+          centerLat: zone.center_lat,
+          centerLng: zone.center_lng,
+          radiusM: zone.radius_m,
+          polygonGeoJson: zone.polygon_geojson,
+          createdAt: zone.created_at,
+          createdByUserId: zone.created_by_user_id,
+        })),
+      };
+    },
+  );
+
+  app.post(
+    "/v1/users/:userId/zones",
+    {
+      preHandler: [
+        authenticateRequest,
+        requireRole(Role.ADMIN, Role.SUPERVISOR),
+        requireSupervisorAssignment(tenantRepositories),
+      ],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const params = z.object({ userId: z.string().min(1) }).safeParse(request.params);
+      const parsed = userZoneRuleBodySchema.safeParse(request.body);
+      if (!params.success || !parsed.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid user-zone rule payload",
+          details: {
+            params: params.success ? undefined : params.error.flatten(),
+            body: parsed.success ? undefined : parsed.error.flatten(),
+          },
+        });
+        return;
+      }
+
+      try {
+        const rule = await tenantRepositories.zoneRules.assign(
+          actor,
+          params.data.userId,
+          parsed.data,
+        );
+        if (!rule) {
+          reply.code(404).send({ error: "not_found", message: "Exclusion zone not found" });
+          return;
+        }
+
+        await app.auditLogger.log({
+          tenantId: actor.tenantId,
+          actorUserId: actor.userId,
+          action: "zone_rules.assigned",
+          subjectType: "user_zone_rule",
+          subjectId: rule.id,
+          metadata: {
+            userId: rule.user_id,
+            zoneId: rule.zone_id,
+            bufferM: rule.buffer_m,
+            active: rule.active,
+          },
+        });
+
+        reply.code(201).send({
+          rule: {
+            id: rule.id,
+            tenantId: rule.tenant_id,
+            userId: rule.user_id,
+            zoneId: rule.zone_id,
+            bufferM: rule.buffer_m,
+            active: rule.active,
+          },
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/v1/incidents/report",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsed = incidentReportBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid incident payload",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      try {
+        const occurredAt = parsed.data.occurredAt ? new Date(parsed.data.occurredAt) : now();
+        const incident = await tenantRepositories.incidents.report(actor, {
+          zoneId: parsed.data.zoneId,
+          type: parsed.data.type,
+          occurredAt,
+          metadata: parsed.data.metadata,
+        });
+        if (!incident) {
+          reply.code(404).send({ error: "not_found", message: "Exclusion zone not found" });
+          return;
+        }
+
+        const configValue = await tenantRepositories.tenantConfig.getValue(
+          actor,
+          "default_supervisor_email",
+        );
+        let notificationsQueued = 0;
+        if (typeof configValue === "string" && configValue.trim().length > 0) {
+          await tenantRepositories.notificationEvents.create(actor, {
+            userId: actor.userId,
+            channel: "EMAIL",
+            recipient: configValue,
+            templateKey:
+              parsed.data.type === IncidentType.VIOLATION
+                ? "incident_violation"
+                : "incident_warning",
+            payload: {
+              userId: actor.userId,
+              zoneId: incident.zone_id,
+              type: incident.incident_type,
+              occurredAt: incident.occurred_at,
+            },
+          });
+          notificationsQueued = 1;
+        } else {
+          // TODO(notifications): support tenant-level recipient fanout and delivery workers.
+        }
+
+        await app.auditLogger.log({
+          tenantId: actor.tenantId,
+          actorUserId: actor.userId,
+          action: "incident.reported",
+          subjectType: "incident",
+          subjectId: incident.id,
+          metadata: {
+            zoneId: incident.zone_id,
+            type: incident.incident_type,
+            notificationsQueued,
+          },
+        });
+
+        reply.code(201).send({
+          incident: {
+            id: incident.id,
+            tenantId: incident.tenant_id,
+            userId: incident.user_id,
+            zoneId: incident.zone_id,
+            type: incident.incident_type,
+            occurredAt: incident.occurred_at,
+            status: incident.status,
+            metadata: incident.metadata_json,
+            createdAt: incident.created_at,
+          },
+          notificationsQueued,
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get(
+    "/v1/supervisor/incidents",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.SUPERVISOR, Role.ADMIN)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = supervisorIncidentsQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid incident filters",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      try {
+        const incidents = await tenantRepositories.supervisorIncidents.list(
+          actor,
+          parsedQuery.data,
+        );
+
+        await app.auditLogger.log({
+          tenantId: actor.tenantId,
+          actorUserId: actor.userId,
+          action: "supervisor.incidents.list_view",
+          subjectType: "incident_list",
+          subjectId: parsedQuery.data.userId ?? null,
+          metadata: {
+            userId: parsedQuery.data.userId ?? null,
+            zoneId: parsedQuery.data.zoneId ?? null,
+            status: parsedQuery.data.status ?? null,
+            type: parsedQuery.data.type ?? null,
+            count: incidents.length,
+          },
+        });
+
+        return {
+          incidents: incidents.map((incident) => ({
+            id: incident.id,
+            tenantId: incident.tenant_id,
+            userId: incident.user_id,
+            zoneId: incident.zone_id,
+            zoneLabel: incident.zone_label,
+            type: incident.incident_type,
+            occurredAt: incident.occurred_at,
+            status: incident.status,
+            metadata: incident.metadata_json,
+            createdAt: incident.created_at,
+          })),
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
     },
   );
 
