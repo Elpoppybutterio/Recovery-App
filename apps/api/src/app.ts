@@ -1,5 +1,11 @@
 import { createLogger } from "@recovery/shared-utils";
-import { IncidentStatus, IncidentType, Permission, Role } from "@recovery/shared-types";
+import {
+  IncidentStatus,
+  IncidentType,
+  Permission,
+  Role,
+  locationPingSchema,
+} from "@recovery/shared-types";
 import Fastify from "fastify";
 import { z } from "zod";
 import { auditResponseIfNeeded, createAuditLogger } from "./audit";
@@ -87,6 +93,50 @@ const supervisorIncidentsQuerySchema = z.object({
   type: z.nativeEnum(IncidentType).optional(),
 });
 
+const supervisorLiveQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+});
+
+const supervisionUpdateParamsSchema = z.object({
+  userId: z.string().min(1),
+});
+
+const supervisionUpdateBodySchema = z.object({
+  enabled: z.boolean(),
+  supervisionEndDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+});
+
+const WARNING_DISTANCE_FEET = 200;
+const FEET_TO_METERS = 0.3048;
+const WARNING_DISTANCE_METERS = WARNING_DISTANCE_FEET * FEET_TO_METERS;
+const INCIDENT_DEDUPE_WINDOW_MINUTES = 10;
+const EARTH_RADIUS_METERS = 6371000;
+
+function toRadians(value: number): number {
+  return (value * Math.PI) / 180;
+}
+
+function distanceMetersBetween(
+  leftLat: number,
+  leftLng: number,
+  rightLat: number,
+  rightLng: number,
+): number {
+  const latDelta = toRadians(rightLat - leftLat);
+  const lngDelta = toRadians(rightLng - leftLng);
+  const leftLatRad = toRadians(leftLat);
+  const rightLatRad = toRadians(rightLat);
+
+  const value =
+    Math.sin(latDelta / 2) * Math.sin(latDelta / 2) +
+    Math.cos(leftLatRad) * Math.cos(rightLatRad) * Math.sin(lngDelta / 2) * Math.sin(lngDelta / 2);
+  const arc = 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+  return EARTH_RADIUS_METERS * arc;
+}
+
 export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date } = {}) {
   const env = options.env ?? loadApiEnv();
   const app = Fastify();
@@ -145,6 +195,266 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   );
 
   app.get(
+    "/v1/me/zones",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const rules = await tenantRepositories.zoneRules.listForUser(actor, actor.userId);
+      return {
+        zones: rules.map((rule) => ({
+          ruleId: rule.id,
+          userId: rule.user_id,
+          zoneId: rule.zone_id,
+          bufferM: rule.buffer_m,
+          active: rule.active,
+          zone: {
+            id: rule.zone_id,
+            label: rule.zone_label,
+            type: rule.zone_type,
+            active: rule.zone_active,
+            centerLat: rule.center_lat,
+            centerLng: rule.center_lng,
+            radiusM: rule.radius_m,
+            polygonGeoJson: rule.polygon_geojson,
+          },
+        })),
+      };
+    },
+  );
+
+  app.post(
+    "/v1/location/ping",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsed = locationPingSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid location ping payload",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const recordedAt = parsed.data.recordedAt ? new Date(parsed.data.recordedAt) : now();
+      const location = await tenantRepositories.locations.upsert(actor, {
+        lat: parsed.data.lat,
+        lng: parsed.data.lng,
+        accuracyM: parsed.data.accuracyM,
+        recordedAt,
+        source: "MOBILE",
+      });
+      if (!location) {
+        reply.code(404).send({ error: "not_found", message: "User not found" });
+        return;
+      }
+
+      const rules = await tenantRepositories.zoneRules.listForUser(actor, actor.userId);
+      const incidentsCreated: Array<{
+        id: string;
+        zoneId: string;
+        type: IncidentType;
+        occurredAt: string;
+      }> = [];
+      const dedupeSince = new Date(recordedAt.getTime() - INCIDENT_DEDUPE_WINDOW_MINUTES * 60_000);
+      const configValue = await tenantRepositories.tenantConfig.getValue(
+        actor,
+        "default_supervisor_email",
+      );
+      const supervisorRecipient =
+        typeof configValue === "string" && configValue.trim().length > 0
+          ? configValue.trim()
+          : null;
+      let notificationsQueued = 0;
+
+      for (const rule of rules) {
+        if (
+          rule.zone_type !== "CIRCLE" ||
+          rule.center_lat === null ||
+          rule.center_lng === null ||
+          rule.radius_m === null
+        ) {
+          continue;
+        }
+
+        const distanceM = distanceMetersBetween(
+          parsed.data.lat,
+          parsed.data.lng,
+          rule.center_lat,
+          rule.center_lng,
+        );
+        const boundaryM = rule.radius_m + rule.buffer_m;
+        let incidentType: IncidentType | null = null;
+        if (distanceM <= boundaryM) {
+          incidentType = IncidentType.VIOLATION;
+        } else if (distanceM <= boundaryM + WARNING_DISTANCE_METERS) {
+          incidentType = IncidentType.WARNING;
+        }
+
+        if (!incidentType) {
+          continue;
+        }
+
+        const existing = await tenantRepositories.incidents.findRecent(actor, {
+          userId: actor.userId,
+          zoneId: rule.zone_id,
+          type: incidentType,
+          since: dedupeSince,
+        });
+        if (existing) {
+          continue;
+        }
+
+        const incident = await tenantRepositories.incidents.report(actor, {
+          zoneId: rule.zone_id,
+          type: incidentType,
+          occurredAt: recordedAt,
+          metadata: {
+            source: "location_ping",
+            distanceM: Math.round(distanceM),
+            boundaryM,
+            warningDistanceM: Math.round(WARNING_DISTANCE_METERS),
+          },
+        });
+        if (!incident) {
+          continue;
+        }
+
+        incidentsCreated.push({
+          id: incident.id,
+          zoneId: incident.zone_id,
+          type: incident.incident_type,
+          occurredAt: incident.occurred_at,
+        });
+
+        if (incidentType === IncidentType.VIOLATION && supervisorRecipient) {
+          await tenantRepositories.notificationEvents.create(actor, {
+            userId: actor.userId,
+            channel: "EMAIL",
+            recipient: supervisorRecipient,
+            templateKey: "incident_violation",
+            payload: {
+              userId: actor.userId,
+              zoneId: incident.zone_id,
+              type: incident.incident_type,
+              occurredAt: incident.occurred_at,
+            },
+          });
+          notificationsQueued += 1;
+        }
+      }
+
+      await app.auditLogger.log({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "location.ping",
+        subjectType: "location",
+        subjectId: actor.userId,
+        metadata: {
+          recordedAt: location.recorded_at,
+          incidentsCreated: incidentsCreated.length,
+          notificationsQueued,
+        },
+      });
+
+      return {
+        location: {
+          userId: location.user_id,
+          lat: location.lat,
+          lng: location.lng,
+          accuracyM: location.accuracy_m,
+          recordedAt: location.recorded_at,
+          source: location.source,
+        },
+        incidentsCreated,
+        notificationsQueued,
+      };
+    },
+  );
+
+  app.get(
+    "/v1/supervisor/live",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.SUPERVISOR, Role.ADMIN)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = supervisorLiveQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid live location filters",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      try {
+        const records = await tenantRepositories.locations.listSupervisorLive(
+          actor,
+          parsedQuery.data,
+        );
+        const evaluatedAt = now();
+        const locations = records.map((record) => {
+          const freshnessSeconds = Math.max(
+            0,
+            Math.floor((evaluatedAt.getTime() - new Date(record.recorded_at).getTime()) / 1000),
+          );
+          return {
+            userId: record.user_id,
+            lat: record.lat,
+            lng: record.lng,
+            accuracyM: record.accuracy_m,
+            recordedAt: record.recorded_at,
+            freshnessSeconds,
+            source: record.source,
+          };
+        });
+
+        await app.auditLogger.log({
+          tenantId: actor.tenantId,
+          actorUserId: actor.userId,
+          action: "supervisor.live.view",
+          subjectType: "live_location_list",
+          subjectId: parsedQuery.data.userId ?? null,
+          metadata: {
+            userId: parsedQuery.data.userId ?? null,
+            count: locations.length,
+          },
+        });
+
+        return { locations };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get(
     "/v1/users/:userId",
     {
       preHandler: [
@@ -173,6 +483,82 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         email: user.email,
         displayName: user.display_name,
       };
+    },
+  );
+
+  app.put(
+    "/v1/users/:userId/supervision",
+    {
+      preHandler: [
+        authenticateRequest,
+        requireRole(Role.ADMIN, Role.SUPERVISOR),
+        requireSupervisorAssignment(tenantRepositories),
+      ],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedParams = supervisionUpdateParamsSchema.safeParse(request.params);
+      const parsedBody = supervisionUpdateBodySchema.safeParse(request.body);
+      if (!parsedParams.success || !parsedBody.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid supervision update payload",
+          details: {
+            params: parsedParams.success ? undefined : parsedParams.error.flatten(),
+            body: parsedBody.success ? undefined : parsedBody.error.flatten(),
+          },
+        });
+        return;
+      }
+
+      const supervisionEndDate =
+        parsedBody.data.enabled && parsedBody.data.supervisionEndDate
+          ? new Date(`${parsedBody.data.supervisionEndDate}T23:59:59.999Z`)
+          : null;
+
+      try {
+        const updated = await tenantRepositories.users.updateSupervision(
+          actor,
+          parsedParams.data.userId,
+          {
+            enabled: parsedBody.data.enabled,
+            supervisionEndDate,
+          },
+        );
+        if (!updated) {
+          reply.code(404).send({ error: "not_found", message: "User not found" });
+          return;
+        }
+
+        await app.auditLogger.log({
+          tenantId: actor.tenantId,
+          actorUserId: actor.userId,
+          action: "user.supervision.updated",
+          subjectType: "user",
+          subjectId: updated.id,
+          metadata: {
+            enabled: updated.supervision_enabled,
+            supervisionEndDate: updated.supervision_end_date,
+          },
+        });
+
+        return {
+          userId: updated.id,
+          supervisionEnabled: updated.supervision_enabled,
+          supervisionEndDate: updated.supervision_end_date,
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
     },
   );
 

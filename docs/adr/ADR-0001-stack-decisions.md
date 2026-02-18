@@ -1,4 +1,4 @@
-# ADR-0001: Day-1 Stack Decisions for Monorepo Scaffold
+# ADR-0001: Stack Decisions for Current Repository
 
 ## Status
 
@@ -6,75 +6,74 @@ Accepted
 
 ## Context
 
-The project requires a fast, secure MVP scaffold for a multi-surface platform (API, dashboard, mobile, worker) with shared policy/types logic and CI quality gates. The repository currently contains a TypeScript monorepo scaffold and basic platform primitives.
+The project needs an MVP-capable multi-app codebase with shared types/policies, strong quality gates, and a practical path from local testing to production infrastructure.
 
 ## Decision
 
-Adopt the following stack and tooling (as currently implemented):
+Adopt and continue with the stack already implemented in this repository:
 
-1. Monorepo orchestration
+1. Monorepo and package management
 
 - `pnpm` workspaces (`apps/*`, `packages/*`)
-- Turborepo task orchestration via `turbo.json`
+- Turborepo orchestration (`turbo.json`)
 
-2. Applications
+2. Application framework choices
 
-- API: Node.js + TypeScript + Fastify (`apps/api`)
+- API: Fastify + TypeScript (`apps/api`)
 - Dashboard: Next.js + TypeScript (`apps/dashboard`)
-- Mobile: Expo + React Native + TypeScript (`apps/mobile`)
-- Worker: Node.js + TypeScript background process (`apps/worker`)
+- Mobile: Expo/React Native + TypeScript (`apps/mobile`)
+- Worker: Node.js + TypeScript (`apps/worker`)
 
-3. Shared packages
+3. Shared internal packages
 
 - `@recovery/shared-types`
 - `@recovery/shared-utils`
 - `@recovery/policy-rbac`
 - `@recovery/geo`
 
-4. Quality/tooling
+4. Testing and quality tooling
 
-- TypeScript base config in `configs/tsconfig/base.json`
-- ESLint (flat config, `@typescript-eslint`) at repo root
-- Prettier config at repo root
-- Vitest for unit tests
-- Husky + lint-staged pre-commit formatting
+- TypeScript project references and base config (`configs/tsconfig/base.json`)
+- ESLint (flat config) + Prettier
+- Vitest for test execution
+- Husky + lint-staged for pre-commit hygiene
 
-5. CI
+5. Data and migrations
 
-- GitHub Actions workflow at `.github/workflows/ci.yml`
-- Runs on push to `main` and pull requests
-- Executes `pnpm install` then `pnpm ci` (`lint`, `typecheck`, `test`)
+- SQL migrations in `apps/api/migrations`
+- Migration runner in API scripts
+- In-memory database adapter used for API integration tests
+- Postgres adapter shape retained in runtime for production DB integration
 
-6. Database status and direction
+6. CI workflow
 
-- Current state: database is partially scaffolded in API with migration runner, SQL migration file(s), and a Postgres pool adapter.
-- Explicit status: database integration is not fully wired end-to-end for production operations yet.
-- Intended direction: continue toward Postgres with PostGIS for geospatial accuracy, consistent with project guardrails.
+- GitHub Actions in `.github/workflows/ci.yml`
+- CI gates run lint, typecheck, and test tasks
 
 ## Rationale
 
-- `pnpm` + Turbo gives fast workspace installs and targeted task execution.
-- Fastify/Next.js/Expo provides a pragmatic cross-surface TypeScript stack for rapid iteration.
-- Shared packages centralize RBAC, type contracts, and geo primitives to reduce duplication and security drift.
-- Root-level lint/typecheck/test gates enforce baseline quality early.
+- Keeps a cohesive TypeScript developer experience across API, web, mobile, and worker.
+- Aligns to MVP speed while preserving guardrails (RBAC, tenant scoping, auditability).
+- Uses simple SQL migration files and repository boundaries to keep data changes explicit.
+- In-memory test DB keeps integration tests fast and deterministic in local/CI development.
 
 ## Consequences
 
 Positive:
 
-- Fast incremental development across API, web, mobile, and worker.
-- Consistent TypeScript, lint, and test experience across packages.
-- CI catches integration regressions early.
+- Fast incremental development across all surfaces.
+- Low-friction testing and CI signal for day-to-day changes.
+- Clear migration history and tenant-safe repository patterns.
 
 Tradeoffs:
 
-- Some app tests are placeholders and need deeper coverage.
-- Database layer exists but requires further hardening, provisioning, and operationalization.
-- Monorepo tooling adds initial setup complexity for contributors unfamiliar with Turbo/pnpm.
+- In-memory testing is not a replacement for production Postgres/PostGIS behavior.
+- DEV auth is intentionally temporary and not production-safe.
+- Some UI surfaces still use minimal scaffolding and limited automation coverage.
 
 ## Follow-ups
 
-1. Finalize production-grade database wiring (connection management, migration workflow hardening, deployment path).
-2. Implement PostGIS-backed geospatial queries for attendance/exclusion features.
-3. Expand integration/e2e coverage for dashboard/mobile/API workflows.
-4. Add explicit security controls roadmap items (MFA enforcement paths, retention automation, export controls).
+1. Move production runtime fully to managed Postgres + PostGIS, including operational migration workflow.
+2. Replace DEV header auth with production auth (OIDC/JWT), session hardening, and MFA requirements for privileged roles.
+3. Add production-grade DB integration tests in addition to in-memory tests.
+4. Expand end-to-end coverage for dashboard/mobile attendance workflows.

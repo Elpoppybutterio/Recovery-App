@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  ComplianceEventType,
   IncidentStatus,
   IncidentType,
   attendanceRecordSchema,
+  complianceEventSchema,
   exclusionZoneSchema,
   incidentSchema,
+  lastKnownLocationSchema,
+  locationPingSchema,
   notificationEventSchema,
   userZoneRuleSchema,
 } from "../src";
@@ -85,6 +89,50 @@ describe("notificationEventSchema", () => {
       },
       status: "PENDING",
       createdAt: new Date().toISOString(),
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("locationPingSchema", () => {
+  it("accepts a valid location ping payload", () => {
+    const result = locationPingSchema.safeParse({
+      lat: 33.755,
+      lng: -84.39,
+      accuracyM: 12,
+      recordedAt: new Date().toISOString(),
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("lastKnownLocationSchema", () => {
+  it("accepts a valid last-known-location payload", () => {
+    const result = lastKnownLocationSchema.safeParse({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      lat: 33.755,
+      lng: -84.39,
+      accuracyM: 25,
+      recordedAt: new Date().toISOString(),
+      source: "MOBILE",
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("complianceEventSchema", () => {
+  it("accepts a valid compliance event payload", () => {
+    const result = complianceEventSchema.safeParse({
+      id: "event-1",
+      tenantId: "tenant-1",
+      userId: "user-1",
+      eventType: ComplianceEventType.LOCATION_STALE,
+      occurredAt: new Date().toISOString(),
+      metadata: { staleBySeconds: 300 },
     });
 
     expect(result.success).toBe(true);

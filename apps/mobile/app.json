@@ -8,7 +8,10 @@
     "assetBundlePatterns": ["**/*"],
     "extra": {
       "apiUrl": "http://localhost:3001",
-      "devAuthUserId": "enduser-a1"
+      "devAuthUserId": "enduser-a1",
+      "supervisionEnabled": false,
+      "fallbackLat": 33.755,
+      "fallbackLng": -84.39
     }
   }
 }
