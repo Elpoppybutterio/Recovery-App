@@ -1,4 +1,10 @@
-import { ComplianceEventType, IncidentStatus, IncidentType, Role } from "@recovery/shared-types";
+import {
+  ComplianceEventType,
+  IncidentStatus,
+  IncidentType,
+  Role,
+  SponsorRepeatRule,
+} from "@recovery/shared-types";
 import { randomUUID } from "node:crypto";
 import type { ActorContext } from "../domain/actor";
 import type { DbClient } from "./client";
@@ -151,6 +157,20 @@ export interface ComplianceEventRow {
   metadata_json: unknown;
 }
 
+export interface SponsorConfigRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  sponsor_name: string;
+  sponsor_phone_e164: string;
+  call_time_local_hhmm: string;
+  repeat_rule: SponsorRepeatRule;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  updated_by_user_id: string;
+}
+
 export interface UserZoneRuleWithZoneRow {
   id: string;
   tenant_id: string;
@@ -280,6 +300,110 @@ export function createRepositories(db: DbClient) {
       );
 
       return result.rows[0]?.value_json ?? null;
+    },
+
+    async getSponsorConfig(tenantId: string, userId: string): Promise<SponsorConfigRow | null> {
+      const result = await db.query<SponsorConfigRow>(
+        `
+        SELECT
+          id,
+          tenant_id,
+          user_id,
+          sponsor_name,
+          sponsor_phone_e164,
+          call_time_local_hhmm,
+          repeat_rule,
+          active,
+          created_at,
+          updated_at,
+          updated_by_user_id
+        FROM sponsor_config
+        WHERE tenant_id = $1
+          AND user_id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async upsertSponsorConfig(
+      tenantId: string,
+      userId: string,
+      payload: {
+        sponsorName: string;
+        sponsorPhoneE164: string;
+        callTimeLocalHhmm: string;
+        repeatRule: SponsorRepeatRule;
+        active: boolean;
+      },
+      updatedByUserId: string,
+    ): Promise<SponsorConfigRow | null> {
+      const user = await db.query<{ id: string }>(
+        `
+        SELECT id
+        FROM users
+        WHERE tenant_id = $1
+          AND id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+      if (!user.rows[0]) {
+        return null;
+      }
+
+      const result = await db.query<SponsorConfigRow>(
+        `
+        INSERT INTO sponsor_config (
+          id,
+          tenant_id,
+          user_id,
+          sponsor_name,
+          sponsor_phone_e164,
+          call_time_local_hhmm,
+          repeat_rule,
+          active,
+          updated_by_user_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (tenant_id, user_id)
+        DO UPDATE SET
+          sponsor_name = EXCLUDED.sponsor_name,
+          sponsor_phone_e164 = EXCLUDED.sponsor_phone_e164,
+          call_time_local_hhmm = EXCLUDED.call_time_local_hhmm,
+          repeat_rule = EXCLUDED.repeat_rule,
+          active = EXCLUDED.active,
+          updated_by_user_id = EXCLUDED.updated_by_user_id,
+          updated_at = NOW()
+        RETURNING
+          id,
+          tenant_id,
+          user_id,
+          sponsor_name,
+          sponsor_phone_e164,
+          call_time_local_hhmm,
+          repeat_rule,
+          active,
+          created_at,
+          updated_at,
+          updated_by_user_id
+      `,
+        [
+          randomUUID(),
+          tenantId,
+          userId,
+          payload.sponsorName,
+          payload.sponsorPhoneE164,
+          payload.callTimeLocalHhmm,
+          payload.repeatRule,
+          payload.active,
+          updatedByUserId,
+        ],
+      );
+
+      return result.rows[0] ?? null;
     },
 
     async updateUserSupervision(

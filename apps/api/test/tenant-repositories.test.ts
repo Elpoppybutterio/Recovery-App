@@ -1,4 +1,4 @@
-import { ComplianceEventType, Role } from "@recovery/shared-types";
+import { ComplianceEventType, Role, SponsorRepeatRule } from "@recovery/shared-types";
 import { describe, expect, it, vi } from "vitest";
 import type { ActorContext } from "../src/domain/actor";
 import { createTenantRepositories } from "../src/db/tenantRepositories";
@@ -8,6 +8,8 @@ describe("tenantRepositories facade", () => {
     const repositories = {
       findTenantUser: vi.fn(),
       upsertTenantConfig: vi.fn(),
+      getSponsorConfig: vi.fn(),
+      upsertSponsorConfig: vi.fn(),
       isSupervisorAssignedToUser: vi.fn().mockResolvedValue(true),
       updateUserSupervision: vi.fn(),
       createMeeting: vi.fn(),
@@ -49,6 +51,14 @@ describe("tenantRepositories facade", () => {
 
     await tenantRepositories.tenantUser.get(actor, "target-user-1");
     await tenantRepositories.tenantConfig.upsert(actor, "geo.buffer", { meters: 50 });
+    await tenantRepositories.sponsorConfig.get(actor);
+    await tenantRepositories.sponsorConfig.upsert(actor, {
+      sponsorName: "Sponsor",
+      sponsorPhoneE164: "+15555550123",
+      callTimeLocalHhmm: "17:00",
+      repeatRule: SponsorRepeatRule.DAILY,
+      active: true,
+    });
     await tenantRepositories.supervisor.isAssigned(actor, "target-user-1");
     await tenantRepositories.meetings.create(actor, {
       name: "Downtown AA",
@@ -101,6 +111,19 @@ describe("tenantRepositories facade", () => {
       "tenant-xyz",
       "geo.buffer",
       { meters: 50 },
+      "supervisor-1",
+    );
+    expect(repositories.getSponsorConfig).toHaveBeenCalledWith("tenant-xyz", "supervisor-1");
+    expect(repositories.upsertSponsorConfig).toHaveBeenCalledWith(
+      "tenant-xyz",
+      "supervisor-1",
+      {
+        sponsorName: "Sponsor",
+        sponsorPhoneE164: "+15555550123",
+        callTimeLocalHhmm: "17:00",
+        repeatRule: SponsorRepeatRule.DAILY,
+        active: true,
+      },
       "supervisor-1",
     );
     expect(repositories.isSupervisorAssignedToUser).toHaveBeenCalledWith(

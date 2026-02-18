@@ -3,6 +3,7 @@ import {
   ComplianceEventType,
   IncidentStatus,
   IncidentType,
+  SponsorRepeatRule,
   attendanceRecordSchema,
   complianceEventSchema,
   exclusionZoneSchema,
@@ -10,6 +11,7 @@ import {
   lastKnownLocationSchema,
   locationPingSchema,
   notificationEventSchema,
+  sponsorConfigSchema,
   userZoneRuleSchema,
 } from "../src";
 
@@ -136,5 +138,31 @@ describe("complianceEventSchema", () => {
     });
 
     expect(result.success).toBe(true);
+  });
+});
+
+describe("sponsorConfigSchema", () => {
+  it("accepts a valid sponsor config payload", () => {
+    const result = sponsorConfigSchema.safeParse({
+      sponsorName: "Test Sponsor",
+      sponsorPhoneE164: "+15555550123",
+      callTimeLocalHhmm: "17:00",
+      repeatRule: SponsorRepeatRule.WEEKDAYS,
+      active: true,
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an invalid call-time payload", () => {
+    const result = sponsorConfigSchema.safeParse({
+      sponsorName: "Test Sponsor",
+      sponsorPhoneE164: "+15555550123",
+      callTimeLocalHhmm: "25:99",
+      repeatRule: SponsorRepeatRule.DAILY,
+      active: true,
+    });
+
+    expect(result.success).toBe(false);
   });
 });

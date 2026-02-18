@@ -149,6 +149,20 @@ type ComplianceEvent = {
   metadata_json: unknown;
 };
 
+type SponsorConfig = {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  sponsor_name: string;
+  sponsor_phone_e164: string;
+  call_time_local_hhmm: string;
+  repeat_rule: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  updated_by_user_id: string;
+};
+
 export class InMemoryDb implements DbPool {
   private tenants: Tenant[] = [];
   private users: User[] = [];
@@ -165,6 +179,7 @@ export class InMemoryDb implements DbPool {
   private notificationEvents: NotificationEvent[] = [];
   private lastKnownLocations: LastKnownLocation[] = [];
   private complianceEvents: ComplianceEvent[] = [];
+  private sponsorConfigs: SponsorConfig[] = [];
   private supervisorAssignmentId = 1;
   private tenantConfigId = 1;
   private auditId = 1;
@@ -231,6 +246,13 @@ export class InMemoryDb implements DbPool {
 
   getLastKnownLocation(tenantId: string, userId: string): LastKnownLocation | null {
     const row = this.lastKnownLocations.find(
+      (entry) => entry.tenant_id === tenantId && entry.user_id === userId,
+    );
+    return row ? { ...row } : null;
+  }
+
+  getSponsorConfig(tenantId: string, userId: string): SponsorConfig | null {
+    const row = this.sponsorConfigs.find(
       (entry) => entry.tenant_id === tenantId && entry.user_id === userId,
     );
     return row ? { ...row } : null;
@@ -369,6 +391,72 @@ export class InMemoryDb implements DbPool {
       return {
         rowCount: row ? 1 : 0,
         rows: row ? ([{ value_json: row.value_json }] as Row[]) : [],
+      };
+    }
+
+    if (
+      normalized.includes("from sponsor_config") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("and user_id = $2")
+    ) {
+      const [tenantId, userId] = params as [string, string];
+      const row = this.sponsorConfigs.find(
+        (entry) => entry.tenant_id === tenantId && entry.user_id === userId,
+      );
+      return {
+        rowCount: row ? 1 : 0,
+        rows: row ? ([{ ...row }] as Row[]) : [],
+      };
+    }
+
+    if (normalized.includes("insert into sponsor_config")) {
+      const [
+        id,
+        tenantId,
+        userId,
+        sponsorName,
+        sponsorPhoneE164,
+        callTimeLocalHhmm,
+        repeatRule,
+        active,
+        updatedByUserId,
+      ] = params as [string, string, string, string, string, string, string, boolean, string];
+
+      const nowIso = new Date().toISOString();
+      const existing = this.sponsorConfigs.find(
+        (entry) => entry.tenant_id === tenantId && entry.user_id === userId,
+      );
+      if (existing) {
+        existing.sponsor_name = sponsorName;
+        existing.sponsor_phone_e164 = sponsorPhoneE164;
+        existing.call_time_local_hhmm = callTimeLocalHhmm;
+        existing.repeat_rule = repeatRule;
+        existing.active = active;
+        existing.updated_by_user_id = updatedByUserId;
+        existing.updated_at = nowIso;
+        return {
+          rowCount: 1,
+          rows: [{ ...existing } as Row],
+        };
+      }
+
+      const row: SponsorConfig = {
+        id,
+        tenant_id: tenantId,
+        user_id: userId,
+        sponsor_name: sponsorName,
+        sponsor_phone_e164: sponsorPhoneE164,
+        call_time_local_hhmm: callTimeLocalHhmm,
+        repeat_rule: repeatRule,
+        active,
+        created_at: nowIso,
+        updated_at: nowIso,
+        updated_by_user_id: updatedByUserId,
+      };
+      this.sponsorConfigs.push(row);
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
       };
     }
 
