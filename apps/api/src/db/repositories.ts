@@ -1,4 +1,4 @@
-import { IncidentStatus, IncidentType, Role } from "@recovery/shared-types";
+import { ComplianceEventType, IncidentStatus, IncidentType, Role } from "@recovery/shared-types";
 import { randomUUID } from "node:crypto";
 import type { ActorContext } from "../domain/actor";
 import type { DbClient } from "./client";
@@ -6,6 +6,13 @@ import type { DbClient } from "./client";
 interface UserRow {
   id: string;
   tenant_id: string;
+}
+
+export interface UserSupervisionRow {
+  id: string;
+  tenant_id: string;
+  supervision_enabled: boolean;
+  supervision_end_date: string | null;
 }
 
 export interface TenantUserRow {
@@ -121,6 +128,45 @@ export interface NotificationEventRow {
   created_at: string;
 }
 
+export interface LastKnownLocationRow {
+  tenant_id: string;
+  user_id: string;
+  lat: number;
+  lng: number;
+  accuracy_m: number | null;
+  recorded_at: string;
+  source: string;
+}
+
+export interface SupervisorLiveLocationFilters {
+  userId?: string;
+}
+
+export interface ComplianceEventRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  event_type: ComplianceEventType;
+  occurred_at: string;
+  metadata_json: unknown;
+}
+
+export interface UserZoneRuleWithZoneRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  zone_id: string;
+  buffer_m: number;
+  active: boolean;
+  zone_label: string;
+  zone_type: ExclusionZoneType;
+  zone_active: boolean;
+  center_lat: number | null;
+  center_lng: number | null;
+  radius_m: number | null;
+  polygon_geojson: unknown | null;
+}
+
 export interface SupervisorIncidentRow extends IncidentRow {
   zone_label: string;
 }
@@ -234,6 +280,226 @@ export function createRepositories(db: DbClient) {
       );
 
       return result.rows[0]?.value_json ?? null;
+    },
+
+    async updateUserSupervision(
+      tenantId: string,
+      userId: string,
+      enabled: boolean,
+      endDate: Date | null,
+    ): Promise<UserSupervisionRow | null> {
+      const result = await db.query<UserSupervisionRow>(
+        `
+        UPDATE users
+        SET supervision_enabled = $1,
+            supervision_end_date = $2
+        WHERE tenant_id = $3
+          AND id = $4
+        RETURNING
+          id,
+          tenant_id,
+          supervision_enabled,
+          supervision_end_date
+      `,
+        [enabled, endDate?.toISOString() ?? null, tenantId, userId],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async upsertLastKnownLocation(
+      tenantId: string,
+      userId: string,
+      payload: {
+        lat: number;
+        lng: number;
+        accuracyM?: number;
+        recordedAt: Date;
+        source?: string;
+      },
+    ): Promise<LastKnownLocationRow | null> {
+      const user = await db.query<{ id: string }>(
+        `
+        SELECT id
+        FROM users
+        WHERE tenant_id = $1 AND id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+      if (!user.rows[0]) {
+        return null;
+      }
+
+      const result = await db.query<LastKnownLocationRow>(
+        `
+        INSERT INTO last_known_locations (
+          tenant_id,
+          user_id,
+          lat,
+          lng,
+          accuracy_m,
+          recorded_at,
+          source
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (tenant_id, user_id)
+        DO UPDATE SET
+          lat = EXCLUDED.lat,
+          lng = EXCLUDED.lng,
+          accuracy_m = EXCLUDED.accuracy_m,
+          recorded_at = EXCLUDED.recorded_at,
+          source = EXCLUDED.source
+        RETURNING
+          tenant_id,
+          user_id,
+          lat,
+          lng,
+          accuracy_m,
+          recorded_at,
+          source
+      `,
+        [
+          tenantId,
+          userId,
+          payload.lat,
+          payload.lng,
+          payload.accuracyM ?? null,
+          payload.recordedAt.toISOString(),
+          payload.source ?? "MOBILE",
+        ],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async getLastKnownLocation(
+      tenantId: string,
+      userId: string,
+    ): Promise<LastKnownLocationRow | null> {
+      const result = await db.query<LastKnownLocationRow>(
+        `
+        SELECT
+          tenant_id,
+          user_id,
+          lat,
+          lng,
+          accuracy_m,
+          recorded_at,
+          source
+        FROM last_known_locations
+        WHERE tenant_id = $1
+          AND user_id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async listSupervisorLiveLocations(
+      tenantId: string,
+      supervisorUserId: string,
+      includeAllUsers: boolean,
+      filters: SupervisorLiveLocationFilters = {},
+    ): Promise<LastKnownLocationRow[]> {
+      const rows = includeAllUsers
+        ? await db.query<LastKnownLocationRow>(
+            `
+            SELECT
+              l.tenant_id,
+              l.user_id,
+              l.lat,
+              l.lng,
+              l.accuracy_m,
+              l.recorded_at,
+              l.source
+            FROM last_known_locations l
+            WHERE l.tenant_id = $1
+            ORDER BY l.recorded_at DESC
+          `,
+            [tenantId],
+          )
+        : await db.query<LastKnownLocationRow>(
+            `
+            SELECT
+              l.tenant_id,
+              l.user_id,
+              l.lat,
+              l.lng,
+              l.accuracy_m,
+              l.recorded_at,
+              l.source
+            FROM last_known_locations l
+            INNER JOIN supervisor_assignments sa
+              ON sa.tenant_id = l.tenant_id
+             AND sa.supervisor_user_id = $2
+             AND sa.assigned_user_id = l.user_id
+            WHERE l.tenant_id = $1
+            ORDER BY l.recorded_at DESC
+          `,
+            [tenantId, supervisorUserId],
+          );
+
+      return rows.rows.filter((row) => {
+        if (filters.userId && row.user_id !== filters.userId) {
+          return false;
+        }
+        return true;
+      });
+    },
+
+    async createComplianceEvent(
+      tenantId: string,
+      userId: string,
+      eventType: ComplianceEventType,
+      metadata: Record<string, unknown> | undefined,
+      occurredAt: Date,
+    ): Promise<ComplianceEventRow | null> {
+      const user = await db.query<{ id: string }>(
+        `
+        SELECT id
+        FROM users
+        WHERE tenant_id = $1 AND id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+      if (!user.rows[0]) {
+        return null;
+      }
+
+      const result = await db.query<ComplianceEventRow>(
+        `
+        INSERT INTO compliance_events (
+          id,
+          tenant_id,
+          user_id,
+          event_type,
+          occurred_at,
+          metadata_json
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+        RETURNING
+          id,
+          tenant_id,
+          user_id,
+          event_type,
+          occurred_at,
+          metadata_json
+      `,
+        [
+          randomUUID(),
+          tenantId,
+          userId,
+          eventType,
+          occurredAt.toISOString(),
+          toJsonParam(metadata),
+        ],
+      );
+
+      return result.rows[0] ?? null;
     },
 
     async createMeeting(
@@ -718,9 +984,76 @@ export function createRepositories(db: DbClient) {
 
         return result.rows[0] ?? null;
       },
+
+      async listForUser(tenantId: string, userId: string): Promise<UserZoneRuleWithZoneRow[]> {
+        const result = await db.query<UserZoneRuleWithZoneRow>(
+          `
+          SELECT
+            r.id,
+            r.tenant_id,
+            r.user_id,
+            r.zone_id,
+            r.buffer_m,
+            r.active,
+            z.label AS zone_label,
+            z.zone_type,
+            z.active AS zone_active,
+            z.center_lat,
+            z.center_lng,
+            z.radius_m,
+            z.polygon_geojson
+          FROM user_zone_rules r
+          INNER JOIN exclusion_zones z
+            ON z.tenant_id = r.tenant_id
+           AND z.id = r.zone_id
+          WHERE r.tenant_id = $1
+            AND r.user_id = $2
+            AND r.active = TRUE
+            AND z.active = TRUE
+          ORDER BY z.created_at DESC
+        `,
+          [tenantId, userId],
+        );
+
+        return result.rows;
+      },
     },
 
     incidents: {
+      async findRecent(
+        tenantId: string,
+        userId: string,
+        zoneId: string,
+        type: IncidentType,
+        since: Date,
+      ): Promise<IncidentRow | null> {
+        const result = await db.query<IncidentRow>(
+          `
+          SELECT
+            id,
+            tenant_id,
+            user_id,
+            zone_id,
+            incident_type,
+            occurred_at,
+            status,
+            metadata_json,
+            created_at
+          FROM incidents
+          WHERE tenant_id = $1
+            AND user_id = $2
+            AND zone_id = $3
+            AND incident_type = $4
+            AND occurred_at >= $5
+          ORDER BY occurred_at DESC
+          LIMIT 1
+        `,
+          [tenantId, userId, zoneId, type, since.toISOString()],
+        );
+
+        return result.rows[0] ?? null;
+      },
+
       async report(
         tenantId: string,
         userId: string,
