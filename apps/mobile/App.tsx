@@ -601,6 +601,7 @@ export default function App() {
   const [sponsorRepeatDays, setSponsorRepeatDays] = useState<WeekdayCode[]>([
     getCurrentWeekdayCode(new Date()),
   ]);
+  const [sponsorEnabled, setSponsorEnabled] = useState(true);
   const [sponsorActive, setSponsorActive] = useState(true);
   const [sponsorLeadMinutes, setSponsorLeadMinutes] = useState<SponsorLeadMinutes>(5);
   const [sponsorSaving, setSponsorSaving] = useState(false);
@@ -667,6 +668,10 @@ export default function App() {
   }, [meetings, selectedDay.dayOfWeek, currentLocation]);
 
   const sponsorScheduleSummary = useMemo(() => {
+    if (!sponsorEnabled) {
+      return "Sponsor disabled.";
+    }
+
     if (!sponsorActive) {
       return "Sponsor reminders disabled.";
     }
@@ -686,6 +691,7 @@ export default function App() {
       next.dueToday ? "Yes" : "No"
     } • ${repeatSummary}`;
   }, [
+    sponsorEnabled,
     sponsorActive,
     sponsorHour12,
     sponsorMinute,
@@ -1164,6 +1170,11 @@ export default function App() {
     async (reason: string) => {
       await cancelNotificationBucket("sponsor");
 
+      if (!sponsorEnabled) {
+        setNotificationStatus("Sponsor disabled.");
+        return;
+      }
+
       if (!sponsorActive) {
         setNotificationStatus("Sponsor reminders disabled.");
         return;
@@ -1247,6 +1258,7 @@ export default function App() {
     },
     [
       cancelNotificationBucket,
+      sponsorEnabled,
       sponsorActive,
       normalizedSponsorName,
       sponsorPhoneE164,
@@ -1386,6 +1398,11 @@ export default function App() {
   );
 
   const saveSponsorConfig = useCallback(async () => {
+    if (!sponsorEnabled) {
+      setSponsorStatus("Sponsor is disabled.");
+      return;
+    }
+
     if (!normalizedSponsorName) {
       setSponsorStatus("Sponsor name is required.");
       return;
@@ -1412,7 +1429,7 @@ export default function App() {
       repeatUnit,
       repeatInterval,
       repeatDays,
-      active: sponsorActive,
+      active: sponsorEnabled && sponsorActive,
     };
 
     setSponsorSaving(true);
@@ -1440,6 +1457,7 @@ export default function App() {
       setSponsorSaving(false);
     }
   }, [
+    sponsorEnabled,
     normalizedSponsorName,
     sponsorPhoneE164,
     sponsorRepeatPreset,
@@ -1913,18 +1931,34 @@ export default function App() {
   }, [selectedDay.dayOfWeek, refreshMeetings]);
 
   useEffect(() => {
+    if (!sponsorEnabled) {
+      void cancelNotificationBucket("sponsor");
+      setNotificationStatus("Sponsor disabled.");
+    }
+  }, [sponsorEnabled, cancelNotificationBucket]);
+
+  useEffect(() => {
+    if (!sponsorEnabled) {
+      return;
+    }
     if (!sponsorActive) {
       void cancelNotificationBucket("sponsor");
       setNotificationStatus("Sponsor reminders disabled.");
     }
-  }, [sponsorActive, cancelNotificationBucket]);
+  }, [sponsorEnabled, sponsorActive, cancelNotificationBucket]);
 
   useEffect(() => {
-    if (!bootstrapped || !sponsorActive) {
+    if (!bootstrapped || !sponsorEnabled || !sponsorActive) {
       return;
     }
     void rescheduleSponsorNotifications("lead-change");
-  }, [bootstrapped, sponsorLeadMinutes, sponsorActive, rescheduleSponsorNotifications]);
+  }, [
+    bootstrapped,
+    sponsorEnabled,
+    sponsorLeadMinutes,
+    sponsorActive,
+    rescheduleSponsorNotifications,
+  ]);
 
   useEffect(() => {
     void rescheduleDriveNotifications("plan-change");
@@ -2129,162 +2163,204 @@ export default function App() {
           <>
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Sponsor</Text>
-              <TextInput
-                style={styles.input}
-                value={sponsorName}
-                onChangeText={setSponsorName}
-                placeholder="Sponsor name"
-              />
-              <TextInput
-                style={styles.input}
-                value={formatUsPhoneDisplay(sponsorPhoneDigits)}
-                onChangeText={(value) => setSponsorPhoneDigits(normalizePhoneDigits(value))}
-                keyboardType="phone-pad"
-                maxLength={14}
-                placeholder="(555) 555-1234"
-              />
-
-              <Text style={styles.label}>Call time</Text>
-              <View style={styles.timeRow}>
-                <Pressable style={styles.stepButton} onPress={() => incrementHour(-1)}>
-                  <Text style={styles.stepButtonText}>-</Text>
-                </Pressable>
-                <Text style={styles.timeValue}>{String(sponsorHour12).padStart(2, "0")}</Text>
-                <Pressable style={styles.stepButton} onPress={() => incrementHour(1)}>
-                  <Text style={styles.stepButtonText}>+</Text>
-                </Pressable>
-
-                <Text style={styles.timeDivider}>:</Text>
-
-                <Pressable style={styles.stepButton} onPress={() => incrementMinute(-1)}>
-                  <Text style={styles.stepButtonText}>-</Text>
-                </Pressable>
-                <Text style={styles.timeValue}>{String(sponsorMinute).padStart(2, "0")}</Text>
-                <Pressable style={styles.stepButton} onPress={() => incrementMinute(1)}>
-                  <Text style={styles.stepButtonText}>+</Text>
-                </Pressable>
-
-                <Pressable
-                  style={styles.meridiemButton}
-                  onPress={() => setSponsorMeridiem((current) => (current === "AM" ? "PM" : "AM"))}
-                >
-                  <Text style={styles.meridiemText}>{sponsorMeridiem}</Text>
-                </Pressable>
-              </View>
-
-              <Text style={styles.label}>Repeat</Text>
-              <View style={styles.chipRow}>
-                {SPONSOR_REPEAT_OPTIONS.map((option) => (
-                  <Pressable
-                    key={option.value}
-                    style={[
-                      styles.chip,
-                      sponsorRepeatPreset === option.value ? styles.chipSelected : null,
-                    ]}
-                    onPress={() => setSponsorRepeatPreset(option.value)}
-                  >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        sponsorRepeatPreset === option.value ? styles.chipTextSelected : null,
-                      ]}
-                    >
-                      {option.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-
-              {sponsorRepeatPreset !== "MONTHLY" ? (
-                <>
-                  <Text style={styles.label}>Days</Text>
-                  <View style={styles.chipRow}>
-                    {WEEKDAY_OPTIONS.map((day) => (
-                      <Pressable
-                        key={day.code}
-                        style={[
-                          styles.chip,
-                          sponsorRepeatDays.includes(day.code) ? styles.chipSelected : null,
-                        ]}
-                        onPress={() => toggleRepeatDay(day.code)}
-                      >
-                        <Text
-                          style={[
-                            styles.chipText,
-                            sponsorRepeatDays.includes(day.code) ? styles.chipTextSelected : null,
-                          ]}
-                        >
-                          {day.label}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </>
-              ) : null}
-
-              {sponsorActive ? (
-                <>
-                  <Text style={styles.label}>Alert lead time</Text>
-                  <View style={styles.chipRow}>
-                    {SPONSOR_LEAD_OPTIONS.map((option) => (
-                      <Pressable
-                        key={option.value}
-                        style={[
-                          styles.chip,
-                          sponsorLeadMinutes === option.value ? styles.chipSelected : null,
-                        ]}
-                        onPress={() => setSponsorLeadMinutes(option.value)}
-                      >
-                        <Text
-                          style={[
-                            styles.chipText,
-                            sponsorLeadMinutes === option.value ? styles.chipTextSelected : null,
-                          ]}
-                        >
-                          {option.label}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </>
-              ) : (
-                <Text style={styles.sectionMeta}>Enable Active reminders to configure alerts.</Text>
-              )}
-
               <View style={styles.inlineRow}>
-                <Text style={styles.label}>Active reminders</Text>
+                <Text style={styles.label}>Enable sponsor</Text>
                 <Switch
-                  value={sponsorActive}
+                  value={sponsorEnabled}
                   onValueChange={(value) => {
-                    setSponsorActive(value);
-                    if (value) {
-                      void rescheduleSponsorNotifications("toggle-on");
+                    setSponsorEnabled(value);
+
+                    if (!value) {
+                      setSponsorActive(false);
+                      void cancelNotificationBucket("sponsor");
+                      setNotificationStatus("Sponsor disabled.");
+                      setCalendarStatus("Sponsor disabled.");
                     }
                   }}
                 />
               </View>
 
-              {notificationOpenPhone ? (
-                <View style={styles.callNowBox}>
-                  <Text style={styles.sectionMeta}>
-                    Opened from notification: {notificationOpenPhone}
-                  </Text>
-                  <Button
-                    title="Call now"
-                    onPress={() => void openPhoneCall(notificationOpenPhone)}
+              {!sponsorEnabled ? (
+                <Text style={styles.sectionMeta}>Sponsor is disabled. Turn on to configure.</Text>
+              ) : (
+                <>
+                  <TextInput
+                    style={styles.input}
+                    value={sponsorName}
+                    onChangeText={setSponsorName}
+                    placeholder="Sponsor name"
                   />
-                </View>
-              ) : null}
+                  <TextInput
+                    style={styles.input}
+                    value={formatUsPhoneDisplay(sponsorPhoneDigits)}
+                    onChangeText={(value) => setSponsorPhoneDigits(normalizePhoneDigits(value))}
+                    keyboardType="phone-pad"
+                    maxLength={14}
+                    placeholder="(555) 555-1234"
+                  />
 
-              <Text style={styles.sectionMeta}>{sponsorScheduleSummary}</Text>
-              <Text style={styles.sectionMeta}>{sponsorStatus}</Text>
-              <Text style={styles.sectionMeta}>{calendarStatus}</Text>
-              <Text style={styles.sectionMeta}>{notificationStatus}</Text>
-              <Button
-                title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
-                onPress={() => void saveSponsorConfig()}
-                disabled={sponsorSaving}
-              />
+                  <View style={styles.inlineRow}>
+                    <Text style={styles.label}>Reminders</Text>
+                    <Switch
+                      value={sponsorActive}
+                      onValueChange={(value) => {
+                        setSponsorActive(value);
+
+                        if (!value) {
+                          void cancelNotificationBucket("sponsor");
+                          setNotificationStatus("Sponsor reminders disabled.");
+                          return;
+                        }
+
+                        void rescheduleSponsorNotifications("toggle-on");
+                      }}
+                    />
+                  </View>
+
+                  {sponsorActive ? (
+                    <>
+                      <Text style={styles.label}>Call time</Text>
+                      <View style={styles.timeRow}>
+                        <Pressable style={styles.stepButton} onPress={() => incrementHour(-1)}>
+                          <Text style={styles.stepButtonText}>-</Text>
+                        </Pressable>
+                        <Text style={styles.timeValue}>
+                          {String(sponsorHour12).padStart(2, "0")}
+                        </Text>
+                        <Pressable style={styles.stepButton} onPress={() => incrementHour(1)}>
+                          <Text style={styles.stepButtonText}>+</Text>
+                        </Pressable>
+
+                        <Text style={styles.timeDivider}>:</Text>
+
+                        <Pressable style={styles.stepButton} onPress={() => incrementMinute(-1)}>
+                          <Text style={styles.stepButtonText}>-</Text>
+                        </Pressable>
+                        <Text style={styles.timeValue}>
+                          {String(sponsorMinute).padStart(2, "0")}
+                        </Text>
+                        <Pressable style={styles.stepButton} onPress={() => incrementMinute(1)}>
+                          <Text style={styles.stepButtonText}>+</Text>
+                        </Pressable>
+
+                        <Pressable
+                          style={styles.meridiemButton}
+                          onPress={() =>
+                            setSponsorMeridiem((current) => (current === "AM" ? "PM" : "AM"))
+                          }
+                        >
+                          <Text style={styles.meridiemText}>{sponsorMeridiem}</Text>
+                        </Pressable>
+                      </View>
+
+                      <Text style={styles.label}>Repeat</Text>
+                      <View style={styles.chipRow}>
+                        {SPONSOR_REPEAT_OPTIONS.map((option) => (
+                          <Pressable
+                            key={option.value}
+                            style={[
+                              styles.chip,
+                              sponsorRepeatPreset === option.value ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setSponsorRepeatPreset(option.value)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                sponsorRepeatPreset === option.value
+                                  ? styles.chipTextSelected
+                                  : null,
+                              ]}
+                            >
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+
+                      {sponsorRepeatPreset !== "MONTHLY" ? (
+                        <>
+                          <Text style={styles.label}>Days</Text>
+                          <View style={styles.chipRow}>
+                            {WEEKDAY_OPTIONS.map((day) => (
+                              <Pressable
+                                key={day.code}
+                                style={[
+                                  styles.chip,
+                                  sponsorRepeatDays.includes(day.code) ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => toggleRepeatDay(day.code)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    sponsorRepeatDays.includes(day.code)
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  {day.label}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
+                        </>
+                      ) : null}
+
+                      <Text style={styles.label}>Alert lead time</Text>
+                      <View style={styles.chipRow}>
+                        {SPONSOR_LEAD_OPTIONS.map((option) => (
+                          <Pressable
+                            key={option.value}
+                            style={[
+                              styles.chip,
+                              sponsorLeadMinutes === option.value ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setSponsorLeadMinutes(option.value)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                sponsorLeadMinutes === option.value
+                                  ? styles.chipTextSelected
+                                  : null,
+                              ]}
+                            >
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </>
+                  ) : (
+                    <Text style={styles.sectionMeta}>
+                      Turn reminders on to configure schedule + alerts.
+                    </Text>
+                  )}
+
+                  {notificationOpenPhone ? (
+                    <View style={styles.callNowBox}>
+                      <Text style={styles.sectionMeta}>
+                        Opened from notification: {notificationOpenPhone}
+                      </Text>
+                      <Button
+                        title="Call now"
+                        onPress={() => void openPhoneCall(notificationOpenPhone)}
+                      />
+                    </View>
+                  ) : null}
+
+                  <Text style={styles.sectionMeta}>{sponsorScheduleSummary}</Text>
+                  <Text style={styles.sectionMeta}>{sponsorStatus}</Text>
+                  <Text style={styles.sectionMeta}>{calendarStatus}</Text>
+                  <Text style={styles.sectionMeta}>{notificationStatus}</Text>
+                  <Button
+                    title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
+                    onPress={() => void saveSponsorConfig()}
+                    disabled={sponsorSaving}
+                  />
+                </>
+              )}
             </View>
 
             {__DEV__ ? (
