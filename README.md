@@ -34,6 +34,47 @@ pnpm --filter @recovery/mobile dev
 pnpm --filter @recovery/worker dev
 ```
 
+## Local Dev
+
+### Required stack (API + Mobile)
+
+```bash
+pnpm dev:stack
+```
+
+### Full stack (API + Mobile + Dashboard + Worker)
+
+```bash
+pnpm dev:all
+```
+
+### Mobile cache clear (after native module changes)
+
+```bash
+pnpm dev:mobile:clear
+```
+
+### Port collision helper
+
+```bash
+pnpm dev:ports:kill
+```
+
+### AA aliases (run from any directory)
+
+Add to `~/.zshrc`:
+
+```bash
+alias AA='cd "$HOME/Documents/Recovery app/Recovery-App" && pnpm dev:stack'
+alias AAA='cd "$HOME/Documents/Recovery app/Recovery-App" && pnpm dev:all'
+```
+
+Reload:
+
+```bash
+source ~/.zshrc
+```
+
 ## API development
 
 ```bash
