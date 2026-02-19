@@ -3,7 +3,8 @@ import {
   ComplianceEventType,
   IncidentStatus,
   IncidentType,
-  SponsorRepeatRule,
+  SponsorRepeatDay,
+  SponsorRepeatUnit,
   attendanceRecordSchema,
   complianceEventSchema,
   exclusionZoneSchema,
@@ -147,19 +148,23 @@ describe("sponsorConfigSchema", () => {
       sponsorName: "Test Sponsor",
       sponsorPhoneE164: "+15555550123",
       callTimeLocalHhmm: "17:00",
-      repeatRule: SponsorRepeatRule.WEEKDAYS,
+      repeatUnit: SponsorRepeatUnit.WEEKLY,
+      repeatInterval: 1,
+      repeatDays: [SponsorRepeatDay.TUE],
       active: true,
     });
 
     expect(result.success).toBe(true);
   });
 
-  it("rejects an invalid call-time payload", () => {
+  it("rejects weekly payloads without any repeat day", () => {
     const result = sponsorConfigSchema.safeParse({
       sponsorName: "Test Sponsor",
       sponsorPhoneE164: "+15555550123",
-      callTimeLocalHhmm: "25:99",
-      repeatRule: SponsorRepeatRule.DAILY,
+      callTimeLocalHhmm: "17:00",
+      repeatUnit: SponsorRepeatUnit.WEEKLY,
+      repeatInterval: 1,
+      repeatDays: [],
       active: true,
     });
 
