@@ -1,4 +1,4 @@
-import { SponsorRepeatRule } from "@recovery/shared-types";
+import { SponsorRepeatDay, SponsorRepeatUnit } from "@recovery/shared-types";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { InMemoryDb } from "./in-memory-db";
 import { createTestApp, createTestDb, seedCoreFixtures } from "./test-helpers";
@@ -11,7 +11,7 @@ describe("MVP Slice D: sponsor config + reminders", () => {
     await seedCoreFixtures(db);
   });
 
-  it("allows END_USER to PUT then GET /v1/me/sponsor", async () => {
+  it("allows END_USER to PUT then GET /v1/me/sponsor with weekly Tuesday-only recurrence", async () => {
     const app = createTestApp(db);
 
     const putResponse = await app.inject({
@@ -22,7 +22,9 @@ describe("MVP Slice D: sponsor config + reminders", () => {
         sponsorName: "Case Sponsor",
         sponsorPhoneE164: "+15555550123",
         callTimeLocalHhmm: "17:00",
-        repeatRule: SponsorRepeatRule.WEEKDAYS,
+        repeatUnit: SponsorRepeatUnit.WEEKLY,
+        repeatInterval: 1,
+        repeatDays: [SponsorRepeatDay.TUE],
         active: true,
       },
     });
@@ -35,6 +37,9 @@ describe("MVP Slice D: sponsor config + reminders", () => {
         sponsorPhoneE164: string;
         callTimeLocalHhmm: string;
         repeatRule: string;
+        repeatUnit: string;
+        repeatInterval: number;
+        repeatDays: string[];
         active: boolean;
       };
     };
@@ -43,7 +48,10 @@ describe("MVP Slice D: sponsor config + reminders", () => {
       sponsorName: "Case Sponsor",
       sponsorPhoneE164: "+15555550123",
       callTimeLocalHhmm: "17:00",
-      repeatRule: SponsorRepeatRule.WEEKDAYS,
+      repeatRule: "WEEKLY",
+      repeatUnit: SponsorRepeatUnit.WEEKLY,
+      repeatInterval: 1,
+      repeatDays: [SponsorRepeatDay.TUE],
       active: true,
     });
 
@@ -69,7 +77,10 @@ describe("MVP Slice D: sponsor config + reminders", () => {
       sponsorName: "Case Sponsor",
       sponsorPhoneE164: "+15555550123",
       callTimeLocalHhmm: "17:00",
-      repeatRule: SponsorRepeatRule.WEEKDAYS,
+      repeatRule: "WEEKLY",
+      repeatUnit: SponsorRepeatUnit.WEEKLY,
+      repeatInterval: 1,
+      repeatDays: [SponsorRepeatDay.TUE],
       active: true,
     });
 
@@ -78,6 +89,59 @@ describe("MVP Slice D: sponsor config + reminders", () => {
       action: "sponsor_config.viewed",
       subject_type: "sponsor_config",
       subject_id: "enduser-a1",
+    });
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("supports bi-weekly Tuesday-only recurrence", async () => {
+    const app = createTestApp(db);
+
+    const putResponse = await app.inject({
+      method: "PUT",
+      url: "/v1/me/sponsor",
+      headers: { authorization: "Bearer DEV_enduser-a1" },
+      payload: {
+        sponsorName: "Case Sponsor",
+        sponsorPhoneE164: "+15555550123",
+        callTimeLocalHhmm: "17:00",
+        repeatUnit: SponsorRepeatUnit.WEEKLY,
+        repeatInterval: 2,
+        repeatDays: [SponsorRepeatDay.TUE],
+        active: true,
+      },
+    });
+
+    expect(putResponse.statusCode).toBe(200);
+    const putPayload = putResponse.json() as {
+      sponsorConfig: {
+        repeatRule: string;
+        repeatUnit: string;
+        repeatInterval: number;
+        repeatDays: string[];
+      };
+    };
+    expect(putPayload.sponsorConfig).toMatchObject({
+      repeatRule: "BIWEEKLY",
+      repeatUnit: SponsorRepeatUnit.WEEKLY,
+      repeatInterval: 2,
+      repeatDays: [SponsorRepeatDay.TUE],
+    });
+
+    const getResponse = await app.inject({
+      method: "GET",
+      url: "/v1/me/sponsor",
+      headers: { authorization: "Bearer DEV_enduser-a1" },
+    });
+
+    expect(getResponse.statusCode).toBe(200);
+    const getPayload = getResponse.json() as { sponsorConfig: typeof putPayload.sponsorConfig };
+    expect(getPayload.sponsorConfig).toMatchObject({
+      repeatRule: "BIWEEKLY",
+      repeatUnit: SponsorRepeatUnit.WEEKLY,
+      repeatInterval: 2,
+      repeatDays: [SponsorRepeatDay.TUE],
     });
 
     await app.close();
@@ -95,7 +159,9 @@ describe("MVP Slice D: sponsor config + reminders", () => {
         sponsorName: "Tenant A Sponsor",
         sponsorPhoneE164: "+15555550199",
         callTimeLocalHhmm: "09:30",
-        repeatRule: SponsorRepeatRule.DAILY,
+        repeatUnit: SponsorRepeatUnit.MONTHLY,
+        repeatInterval: 1,
+        repeatDays: [],
         active: true,
       },
     });
