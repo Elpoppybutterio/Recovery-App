@@ -42,22 +42,35 @@ type MeZone = {
   };
 };
 
-type SponsorRepeatRule = "DAILY" | "WEEKDAYS" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+type SponsorRepeatUnit = "WEEKLY" | "MONTHLY";
+type SponsorRepeatPreset = "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+type SponsorRepeatDay = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
 
 type SponsorConfigPayload = {
   sponsorName: string;
   sponsorPhoneE164: string;
   callTimeLocalHhmm: string;
-  repeatRule: SponsorRepeatRule;
+  repeatRule?: string;
+  repeatUnit: SponsorRepeatUnit;
+  repeatInterval: number;
+  repeatDays: SponsorRepeatDay[];
   active: boolean;
 };
 
-const SPONSOR_REPEAT_OPTIONS: Array<{ value: SponsorRepeatRule; label: string }> = [
-  { value: "DAILY", label: "Daily" },
-  { value: "WEEKDAYS", label: "M-F" },
+const SPONSOR_REPEAT_OPTIONS: Array<{ value: SponsorRepeatPreset; label: string }> = [
   { value: "WEEKLY", label: "Weekly" },
   { value: "BIWEEKLY", label: "Bi-weekly" },
   { value: "MONTHLY", label: "Monthly" },
+];
+
+const SPONSOR_REPEAT_DAY_OPTIONS: Array<{ value: SponsorRepeatDay; label: string }> = [
+  { value: "MON", label: "Mon" },
+  { value: "TUE", label: "Tue" },
+  { value: "WED", label: "Wed" },
+  { value: "THU", label: "Thu" },
+  { value: "FRI", label: "Fri" },
+  { value: "SAT", label: "Sat" },
+  { value: "SUN", label: "Sun" },
 ];
 
 type GeolocationApi = {
@@ -101,12 +114,15 @@ type CalendarRecord = {
   source?: { name?: string };
 };
 
-type CalendarWeekdayMap = {
+type CalendarWeekdayMap = Record<SponsorRepeatDay, number>;
+type CalendarExpoWeekdayMap = {
   MONDAY: number;
   TUESDAY: number;
   WEDNESDAY: number;
   THURSDAY: number;
   FRIDAY: number;
+  SATURDAY: number;
+  SUNDAY: number;
 };
 
 type CalendarRecurrenceRuleInput = {
@@ -132,7 +148,7 @@ type CalendarModule = {
     WEEKLY: string;
     MONTHLY: string;
   };
-  Weekday?: Partial<CalendarWeekdayMap>;
+  Weekday?: Partial<CalendarExpoWeekdayMap>;
   requestCalendarPermissionsAsync(): Promise<{ granted?: boolean; status?: string }>;
   getDefaultCalendarAsync?(): Promise<CalendarRecord | null>;
   getCalendarsAsync(entityType: string): Promise<CalendarRecord[]>;
@@ -220,62 +236,193 @@ function formatCallTime12Hour(time24: string): string {
   return `${String(hour12).padStart(2, "0")}:${String(minute).padStart(2, "0")} ${meridiem}`;
 }
 
-function isDueOnDate(date: Date, repeatRule: SponsorRepeatRule): boolean {
-  const day = date.getDay();
-  switch (repeatRule) {
-    case "DAILY":
-      return true;
-    case "WEEKDAYS":
-      return day >= 1 && day <= 5;
-    case "WEEKLY":
-    case "BIWEEKLY":
-    case "MONTHLY":
-      return true;
-    default:
-      return false;
+const JS_DAY_TO_SPONSOR_REPEAT_DAY: Record<number, SponsorRepeatDay> = {
+  0: "SUN",
+  1: "MON",
+  2: "TUE",
+  3: "WED",
+  4: "THU",
+  5: "FRI",
+  6: "SAT",
+};
+
+const DEFAULT_WEEKLY_REPEAT_DAYS: SponsorRepeatDay[] = ["TUE"];
+
+function normalizeRepeatDays(days: SponsorRepeatDay[]): SponsorRepeatDay[] {
+  const unique = new Set(days);
+  return SPONSOR_REPEAT_DAY_OPTIONS.filter((option) => unique.has(option.value)).map(
+    (option) => option.value,
+  );
+}
+
+function getRepeatPresetFromConfig(
+  repeatUnit: SponsorRepeatUnit,
+  repeatInterval: number,
+): SponsorRepeatPreset {
+  if (repeatUnit === "MONTHLY") {
+    return "MONTHLY";
   }
+  return repeatInterval === 2 ? "BIWEEKLY" : "WEEKLY";
+}
+
+function toRepeatConfig(
+  repeatPreset: SponsorRepeatPreset,
+  repeatDays: SponsorRepeatDay[],
+): { repeatUnit: SponsorRepeatUnit; repeatInterval: number; repeatDays: SponsorRepeatDay[] } {
+  if (repeatPreset === "MONTHLY") {
+    return {
+      repeatUnit: "MONTHLY",
+      repeatInterval: 1,
+      repeatDays: [],
+    };
+  }
+
+  return {
+    repeatUnit: "WEEKLY",
+    repeatInterval: repeatPreset === "BIWEEKLY" ? 2 : 1,
+    repeatDays: normalizeRepeatDays(repeatDays),
+  };
+}
+
+function isRepeatSelectionValid(
+  repeatPreset: SponsorRepeatPreset,
+  repeatDays: SponsorRepeatDay[],
+): boolean {
+  if (repeatPreset === "MONTHLY") {
+    return true;
+  }
+  return normalizeRepeatDays(repeatDays).length > 0;
+}
+
+function repeatDaysFromUnknown(value: unknown): SponsorRepeatDay[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const parsed = value.filter((entry): entry is SponsorRepeatDay =>
+    SPONSOR_REPEAT_DAY_OPTIONS.some((option) => option.value === entry),
+  );
+  return normalizeRepeatDays(parsed);
+}
+
+function fallbackRepeatPresetFromRule(repeatRule: string | undefined): SponsorRepeatPreset {
+  if (repeatRule === "MONTHLY") {
+    return "MONTHLY";
+  }
+  if (repeatRule === "BIWEEKLY") {
+    return "BIWEEKLY";
+  }
+  return "WEEKLY";
+}
+
+function fallbackRepeatDaysFromRule(repeatRule: string | undefined): SponsorRepeatDay[] {
+  if (repeatRule === "WEEKDAYS") {
+    return ["MON", "TUE", "WED", "THU", "FRI"];
+  }
+  if (repeatRule === "DAILY") {
+    return ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+  }
+  return [...DEFAULT_WEEKLY_REPEAT_DAYS];
+}
+
+function startOfIsoWeek(date: Date): Date {
+  const result = new Date(date);
+  const dayOffsetFromMonday = (result.getDay() + 6) % 7;
+  result.setDate(result.getDate() - dayOffsetFromMonday);
+  result.setHours(0, 0, 0, 0);
+  return result;
 }
 
 function computeNextCall(
   now: Date,
   callTimeLocalHhmm: string,
-  repeatRule: SponsorRepeatRule,
-): { nextAt: Date; dueToday: boolean } {
+  repeatUnit: SponsorRepeatUnit,
+  repeatInterval: number,
+  repeatDays: SponsorRepeatDay[],
+): { nextAt: Date; dueToday: boolean } | null {
   const [hoursText, minutesText] = callTimeLocalHhmm.split(":");
   const hours = Number(hoursText);
   const minutes = Number(minutesText);
-
-  const todayAtCallTime = new Date(now);
-  todayAtCallTime.setHours(hours, minutes, 0, 0);
-  const dueToday = isDueOnDate(now, repeatRule);
-
-  if (dueToday && todayAtCallTime.getTime() >= now.getTime()) {
-    return { nextAt: todayAtCallTime, dueToday: true };
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) {
+    return null;
   }
 
-  const next = new Date(todayAtCallTime);
-  switch (repeatRule) {
-    case "DAILY":
-      next.setDate(next.getDate() + 1);
-      break;
-    case "WEEKDAYS": {
-      do {
-        next.setDate(next.getDate() + 1);
-      } while (!isDueOnDate(next, "WEEKDAYS"));
-      break;
+  if (repeatUnit === "MONTHLY") {
+    const currentMonthCandidate = new Date(now);
+    currentMonthCandidate.setHours(hours, minutes, 0, 0);
+    if (currentMonthCandidate.getTime() >= now.getTime()) {
+      return {
+        nextAt: currentMonthCandidate,
+        dueToday: true,
+      };
     }
-    case "WEEKLY":
-      next.setDate(next.getDate() + 7);
-      break;
-    case "BIWEEKLY":
-      next.setDate(next.getDate() + 14);
-      break;
-    case "MONTHLY":
-      next.setMonth(next.getMonth() + 1);
-      break;
+
+    const nextMonthCandidate = new Date(currentMonthCandidate);
+    nextMonthCandidate.setMonth(nextMonthCandidate.getMonth() + 1);
+    return {
+      nextAt: nextMonthCandidate,
+      dueToday: false,
+    };
   }
 
-  return { nextAt: next, dueToday };
+  const normalizedRepeatDays = normalizeRepeatDays(repeatDays);
+  if (normalizedRepeatDays.length === 0) {
+    return null;
+  }
+  const repeatDaySet = new Set(normalizedRepeatDays);
+  const weekStartNow = startOfIsoWeek(now);
+  const millisecondsPerWeek = 7 * 24 * 60 * 60 * 1000;
+
+  for (let offsetDays = 0; offsetDays <= 56; offsetDays += 1) {
+    const candidate = new Date(now);
+    candidate.setDate(now.getDate() + offsetDays);
+    candidate.setHours(hours, minutes, 0, 0);
+    if (candidate.getTime() < now.getTime()) {
+      continue;
+    }
+
+    const repeatDay = JS_DAY_TO_SPONSOR_REPEAT_DAY[candidate.getDay()];
+    if (!repeatDaySet.has(repeatDay)) {
+      continue;
+    }
+
+    if (repeatInterval > 1) {
+      const candidateWeekStart = startOfIsoWeek(candidate);
+      const weekDelta = Math.floor(
+        (candidateWeekStart.getTime() - weekStartNow.getTime()) / millisecondsPerWeek,
+      );
+      if (weekDelta % repeatInterval !== 0) {
+        continue;
+      }
+    }
+
+    return {
+      nextAt: candidate,
+      dueToday: offsetDays === 0,
+    };
+  }
+
+  return null;
+}
+
+function formatRepeatDescription(
+  repeatPreset: SponsorRepeatPreset,
+  repeatDays: SponsorRepeatDay[],
+): string {
+  if (repeatPreset === "MONTHLY") {
+    return "Monthly";
+  }
+
+  const dayLabels = normalizeRepeatDays(repeatDays).map((day) => {
+    const option = SPONSOR_REPEAT_DAY_OPTIONS.find((candidate) => candidate.value === day);
+    return option?.label ?? day;
+  });
+  if (dayLabels.length === 0) {
+    return repeatPreset === "BIWEEKLY" ? "Bi-weekly" : "Weekly";
+  }
+
+  const prefix = repeatPreset === "BIWEEKLY" ? "Every 2 weeks" : "Weekly";
+  return `${prefix} on ${dayLabels.join(", ")}`;
 }
 
 function sponsorCalendarEventStorageKey(userId: string): string {
@@ -346,44 +493,33 @@ function loadCalendarModule(): CalendarModule | null {
 
 function resolveCalendarWeekdayMap(calendar: CalendarModule): CalendarWeekdayMap {
   return {
-    MONDAY: calendar.Weekday?.MONDAY ?? 2,
-    TUESDAY: calendar.Weekday?.TUESDAY ?? 3,
-    WEDNESDAY: calendar.Weekday?.WEDNESDAY ?? 4,
-    THURSDAY: calendar.Weekday?.THURSDAY ?? 5,
-    FRIDAY: calendar.Weekday?.FRIDAY ?? 6,
+    MON: calendar.Weekday?.MONDAY ?? 2,
+    TUE: calendar.Weekday?.TUESDAY ?? 3,
+    WED: calendar.Weekday?.WEDNESDAY ?? 4,
+    THU: calendar.Weekday?.THURSDAY ?? 5,
+    FRI: calendar.Weekday?.FRIDAY ?? 6,
+    SAT: calendar.Weekday?.SATURDAY ?? 7,
+    SUN: calendar.Weekday?.SUNDAY ?? 1,
   };
 }
 
 function buildCalendarRecurrenceRule(
-  repeatRule: SponsorRepeatRule,
+  repeatUnit: SponsorRepeatUnit,
+  repeatInterval: number,
+  repeatDays: SponsorRepeatDay[],
   calendar: CalendarModule,
 ): CalendarRecurrenceRuleInput {
-  switch (repeatRule) {
-    case "DAILY":
-      return { frequency: calendar.RecurrenceFrequency.DAILY };
-    case "WEEKDAYS": {
-      const weekdays = resolveCalendarWeekdayMap(calendar);
-      return {
-        frequency: calendar.RecurrenceFrequency.WEEKLY,
-        daysOfTheWeek: [
-          { dayOfTheWeek: weekdays.MONDAY },
-          { dayOfTheWeek: weekdays.TUESDAY },
-          { dayOfTheWeek: weekdays.WEDNESDAY },
-          { dayOfTheWeek: weekdays.THURSDAY },
-          { dayOfTheWeek: weekdays.FRIDAY },
-        ],
-      };
-    }
-    case "WEEKLY":
-      return { frequency: calendar.RecurrenceFrequency.WEEKLY };
-    case "BIWEEKLY":
-      return {
-        frequency: calendar.RecurrenceFrequency.WEEKLY,
-        interval: 2,
-      };
-    case "MONTHLY":
-      return { frequency: calendar.RecurrenceFrequency.MONTHLY };
+  if (repeatUnit === "MONTHLY") {
+    return { frequency: calendar.RecurrenceFrequency.MONTHLY };
   }
+
+  const weekdays = resolveCalendarWeekdayMap(calendar);
+  const normalizedDays = normalizeRepeatDays(repeatDays);
+  return {
+    frequency: calendar.RecurrenceFrequency.WEEKLY,
+    interval: repeatInterval,
+    daysOfTheWeek: normalizedDays.map((day) => ({ dayOfTheWeek: weekdays[day] })),
+  };
 }
 
 function pickWritableCalendar(calendars: CalendarRecord[]): CalendarRecord | null {
@@ -442,7 +578,10 @@ export default function App() {
   const [sponsorHour12, setSponsorHour12] = useState(5);
   const [sponsorMinute, setSponsorMinute] = useState(0);
   const [sponsorMeridiem, setSponsorMeridiem] = useState<"AM" | "PM">("PM");
-  const [sponsorRepeatRule, setSponsorRepeatRule] = useState<SponsorRepeatRule>("WEEKDAYS");
+  const [sponsorRepeatPreset, setSponsorRepeatPreset] = useState<SponsorRepeatPreset>("WEEKLY");
+  const [sponsorRepeatDays, setSponsorRepeatDays] = useState<SponsorRepeatDay[]>([
+    ...DEFAULT_WEEKLY_REPEAT_DAYS,
+  ]);
   const [sponsorActive, setSponsorActive] = useState(true);
   const [sponsorStatusMessage, setSponsorStatusMessage] = useState<string>(
     "Sponsor config not saved yet.",
@@ -476,24 +615,45 @@ export default function App() {
     () => to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem),
     [sponsorHour12, sponsorMinute, sponsorMeridiem],
   );
+  const sponsorRepeatConfig = useMemo(
+    () => toRepeatConfig(sponsorRepeatPreset, sponsorRepeatDays),
+    [sponsorRepeatDays, sponsorRepeatPreset],
+  );
+  const repeatDescription = useMemo(
+    () => formatRepeatDescription(sponsorRepeatPreset, sponsorRepeatConfig.repeatDays),
+    [sponsorRepeatConfig.repeatDays, sponsorRepeatPreset],
+  );
+  const repeatSelectionValid = useMemo(
+    () => isRepeatSelectionValid(sponsorRepeatPreset, sponsorRepeatDays),
+    [sponsorRepeatDays, sponsorRepeatPreset],
+  );
   const sponsorConfigCompleteForCalendar = useMemo(
     () =>
       normalizedSponsorName.length > 0 &&
       sponsorPhoneE164 !== null &&
       isValidCallTimeLocalHhmm(callTimeLocalHhmm) &&
-      Boolean(sponsorRepeatRule),
-    [callTimeLocalHhmm, normalizedSponsorName, sponsorPhoneE164, sponsorRepeatRule],
+      repeatSelectionValid,
+    [callTimeLocalHhmm, normalizedSponsorName, repeatSelectionValid, sponsorPhoneE164],
   );
   const sponsorScheduleSummary = useMemo(() => {
     if (!sponsorActive) {
       return "Sponsor reminders disabled.";
     }
 
-    const result = computeNextCall(new Date(), callTimeLocalHhmm, sponsorRepeatRule);
+    const result = computeNextCall(
+      new Date(),
+      callTimeLocalHhmm,
+      sponsorRepeatConfig.repeatUnit,
+      sponsorRepeatConfig.repeatInterval,
+      sponsorRepeatConfig.repeatDays,
+    );
+    if (!result) {
+      return "Select at least one day for weekly/bi-weekly reminders.";
+    }
     return `Next scheduled call: ${result.nextAt.toLocaleString()} • Due today: ${
       result.dueToday ? "Yes" : "No"
     }`;
-  }, [callTimeLocalHhmm, sponsorActive, sponsorRepeatRule]);
+  }, [callTimeLocalHhmm, sponsorActive, sponsorRepeatConfig]);
 
   useEffect(() => {
     zonesRef.current = zones;
@@ -666,10 +826,21 @@ export default function App() {
       setSponsorHour12(parsedTime.hour12);
       setSponsorMinute(parsedTime.minute);
       setSponsorMeridiem(parsedTime.meridiem);
-      setSponsorRepeatRule(config.repeatRule);
+      const fallbackPreset = fallbackRepeatPresetFromRule(config.repeatRule);
+      const repeatPreset = getRepeatPresetFromConfig(
+        config.repeatUnit ?? (fallbackPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY"),
+        config.repeatInterval ??
+          (fallbackPreset === "BIWEEKLY" ? 2 : fallbackPreset === "MONTHLY" ? 1 : 1),
+      );
+      const parsedDays = repeatDaysFromUnknown(config.repeatDays);
+      const fallbackDays = fallbackRepeatDaysFromRule(config.repeatRule);
+      const resolvedRepeatDays = parsedDays.length > 0 ? parsedDays : fallbackDays;
+      const loadedRepeatDescription = formatRepeatDescription(repeatPreset, resolvedRepeatDays);
+      setSponsorRepeatPreset(repeatPreset);
+      setSponsorRepeatDays(resolvedRepeatDays);
       setSponsorActive(config.active);
       setSponsorStatusMessage(
-        `Loaded sponsor config (${formatCallTime12Hour(config.callTimeLocalHhmm)}).`,
+        `Loaded sponsor config (${formatCallTime12Hour(config.callTimeLocalHhmm)} • ${loadedRepeatDescription}).`,
       );
     } catch {
       setSponsorStatusMessage("Sponsor config load failed: network.");
@@ -699,6 +870,15 @@ export default function App() {
         return 0;
       }
       return next;
+    });
+  }
+
+  function toggleSponsorRepeatDay(day: SponsorRepeatDay) {
+    setSponsorRepeatDays((previous) => {
+      if (previous.includes(day)) {
+        return normalizeRepeatDays(previous.filter((entry) => entry !== day));
+      }
+      return normalizeRepeatDays([...previous, day]);
     });
   }
 
@@ -744,7 +924,9 @@ export default function App() {
 
   async function handleAddToCalendar() {
     if (!sponsorConfigCompleteForCalendar || sponsorPhoneE164 === null) {
-      setCalendarStatusMessage("Complete sponsor name, phone, call time, and repeat rule first.");
+      setCalendarStatusMessage(
+        "Complete sponsor name, phone, call time, and repeat schedule first.",
+      );
       return;
     }
 
@@ -787,17 +969,33 @@ export default function App() {
         return;
       }
 
-      const nextCall = computeNextCall(new Date(), callTimeLocalHhmm, sponsorRepeatRule).nextAt;
+      const nextCallResult = computeNextCall(
+        new Date(),
+        callTimeLocalHhmm,
+        sponsorRepeatConfig.repeatUnit,
+        sponsorRepeatConfig.repeatInterval,
+        sponsorRepeatConfig.repeatDays,
+      );
+      if (!nextCallResult) {
+        setCalendarStatusMessage("Select at least one repeat day for weekly/bi-weekly reminders.");
+        return;
+      }
+      const nextCall = nextCallResult.nextAt;
       const eventDetails: CalendarEventInput = {
         title: "Call Sponsor",
         notes: [
           `Sponsor: ${normalizedSponsorName}`,
           `Phone: ${sponsorPhoneE164}`,
-          `Repeat: ${sponsorRepeatRule}`,
+          `Repeat: ${repeatDescription}`,
         ].join("\n"),
         startDate: nextCall,
         endDate: new Date(nextCall.getTime() + 15 * 60 * 1000),
-        recurrenceRule: buildCalendarRecurrenceRule(sponsorRepeatRule, calendarModule),
+        recurrenceRule: buildCalendarRecurrenceRule(
+          sponsorRepeatConfig.repeatUnit,
+          sponsorRepeatConfig.repeatInterval,
+          sponsorRepeatConfig.repeatDays,
+          calendarModule,
+        ),
         alarms: [{ relativeOffset: -normalizeAlertLeadMinutes(alertLeadMinutes) }],
       };
       const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -874,11 +1072,19 @@ export default function App() {
       return;
     }
 
+    if (!repeatSelectionValid) {
+      setSponsorStatusMessage("Select at least one weekday for weekly/bi-weekly repeats.");
+      return;
+    }
+
+    const repeatConfig = toRepeatConfig(sponsorRepeatPreset, sponsorRepeatDays);
     const payload: SponsorConfigPayload = {
       sponsorName: normalizedName,
       sponsorPhoneE164: phoneE164,
       callTimeLocalHhmm: to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem),
-      repeatRule: sponsorRepeatRule,
+      repeatUnit: repeatConfig.repeatUnit,
+      repeatInterval: repeatConfig.repeatInterval,
+      repeatDays: repeatConfig.repeatDays,
       active: sponsorActive,
     };
 
@@ -899,7 +1105,7 @@ export default function App() {
 
       // TODO(notifications): wire Expo local notifications for sponsor reminders.
       setSponsorStatusMessage(
-        `Sponsor config saved (${formatCallTime12Hour(payload.callTimeLocalHhmm)} ${payload.repeatRule}).`,
+        `Sponsor config saved (${formatCallTime12Hour(payload.callTimeLocalHhmm)} • ${formatRepeatDescription(sponsorRepeatPreset, repeatConfig.repeatDays)}).`,
       );
     } catch {
       setSponsorStatusMessage("Sponsor config save failed: network.");
@@ -1125,14 +1331,14 @@ export default function App() {
               key={option.value}
               style={[
                 styles.repeatChip,
-                sponsorRepeatRule === option.value ? styles.repeatChipSelected : null,
+                sponsorRepeatPreset === option.value ? styles.repeatChipSelected : null,
               ]}
-              onPress={() => setSponsorRepeatRule(option.value)}
+              onPress={() => setSponsorRepeatPreset(option.value)}
             >
               <Text
                 style={[
                   styles.repeatChipText,
-                  sponsorRepeatRule === option.value ? styles.repeatChipTextSelected : null,
+                  sponsorRepeatPreset === option.value ? styles.repeatChipTextSelected : null,
                 ]}
               >
                 {option.label}
@@ -1140,6 +1346,34 @@ export default function App() {
             </Pressable>
           ))}
         </View>
+        {sponsorRepeatPreset !== "MONTHLY" ? (
+          <>
+            <Text style={styles.sponsorLabel}>Repeat days</Text>
+            <View style={styles.repeatRow}>
+              {SPONSOR_REPEAT_DAY_OPTIONS.map((option) => (
+                <Pressable
+                  key={option.value}
+                  style={[
+                    styles.repeatChip,
+                    sponsorRepeatDays.includes(option.value) ? styles.repeatChipSelected : null,
+                  ]}
+                  onPress={() => toggleSponsorRepeatDay(option.value)}
+                >
+                  <Text
+                    style={[
+                      styles.repeatChipText,
+                      sponsorRepeatDays.includes(option.value)
+                        ? styles.repeatChipTextSelected
+                        : null,
+                    ]}
+                  >
+                    {option.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </>
+        ) : null}
 
         <Text style={styles.sponsorLabel}>Alert lead time (minutes)</Text>
         <View style={styles.repeatRow}>
@@ -1188,6 +1422,7 @@ export default function App() {
         </View>
 
         <Text style={styles.sponsorMeta}>{sponsorScheduleSummary}</Text>
+        <Text style={styles.sponsorMeta}>Repeat schedule: {repeatDescription}</Text>
         <Text style={styles.sponsorMeta}>Calendar alert: {alertLeadMinutes} minutes before</Text>
         <Text style={styles.sponsorMeta}>{sponsorStatusMessage}</Text>
         <Text style={styles.sponsorMeta}>{calendarStatusMessage}</Text>

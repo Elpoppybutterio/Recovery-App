@@ -157,6 +157,9 @@ type SponsorConfig = {
   sponsor_phone_e164: string;
   call_time_local_hhmm: string;
   repeat_rule: string;
+  repeat_unit: string;
+  repeat_interval: number;
+  repeat_days: string[];
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -418,9 +421,25 @@ export class InMemoryDb implements DbPool {
         sponsorPhoneE164,
         callTimeLocalHhmm,
         repeatRule,
+        repeatUnit,
+        repeatInterval,
+        repeatDays,
         active,
         updatedByUserId,
-      ] = params as [string, string, string, string, string, string, string, boolean, string];
+      ] = params as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        number,
+        string[],
+        boolean,
+        string,
+      ];
 
       const nowIso = new Date().toISOString();
       const existing = this.sponsorConfigs.find(
@@ -431,6 +450,9 @@ export class InMemoryDb implements DbPool {
         existing.sponsor_phone_e164 = sponsorPhoneE164;
         existing.call_time_local_hhmm = callTimeLocalHhmm;
         existing.repeat_rule = repeatRule;
+        existing.repeat_unit = repeatUnit;
+        existing.repeat_interval = repeatInterval;
+        existing.repeat_days = [...repeatDays];
         existing.active = active;
         existing.updated_by_user_id = updatedByUserId;
         existing.updated_at = nowIso;
@@ -448,6 +470,9 @@ export class InMemoryDb implements DbPool {
         sponsor_phone_e164: sponsorPhoneE164,
         call_time_local_hhmm: callTimeLocalHhmm,
         repeat_rule: repeatRule,
+        repeat_unit: repeatUnit,
+        repeat_interval: repeatInterval,
+        repeat_days: [...repeatDays],
         active,
         created_at: nowIso,
         updated_at: nowIso,

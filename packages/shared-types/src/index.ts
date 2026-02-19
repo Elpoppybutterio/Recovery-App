@@ -40,6 +40,21 @@ export enum SponsorRepeatRule {
   MONTHLY = "MONTHLY",
 }
 
+export enum SponsorRepeatUnit {
+  WEEKLY = "WEEKLY",
+  MONTHLY = "MONTHLY",
+}
+
+export enum SponsorRepeatDay {
+  MON = "MON",
+  TUE = "TUE",
+  WED = "WED",
+  THU = "THU",
+  FRI = "FRI",
+  SAT = "SAT",
+  SUN = "SUN",
+}
+
 export const attendanceRecordSchema = z.object({
   userId: z.string().min(1),
   meetingId: z.string().min(1),
@@ -134,28 +149,74 @@ export const complianceEventSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
-export const sponsorConfigSchema = z.object({
-  sponsorName: z.string().min(1),
-  sponsorPhoneE164: z.string().regex(/^\+[1-9]\d{1,14}$/),
-  callTimeLocalHhmm: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/)
-    .refine((value) => {
-      const [hoursText, minutesText] = value.split(":");
-      const hours = Number(hoursText);
-      const minutes = Number(minutesText);
-      return (
-        Number.isInteger(hours) &&
-        Number.isInteger(minutes) &&
-        hours >= 0 &&
-        hours <= 23 &&
-        minutes >= 0 &&
-        minutes <= 59
-      );
-    }, "callTimeLocalHhmm must be a valid HH:mm value"),
-  repeatRule: z.nativeEnum(SponsorRepeatRule),
-  active: z.boolean().default(true),
-});
+export const sponsorConfigSchema = z
+  .object({
+    sponsorName: z.string().min(1),
+    sponsorPhoneE164: z.string().regex(/^\+[1-9]\d{1,14}$/),
+    callTimeLocalHhmm: z
+      .string()
+      .regex(/^\d{2}:\d{2}$/)
+      .refine((value) => {
+        const [hoursText, minutesText] = value.split(":");
+        const hours = Number(hoursText);
+        const minutes = Number(minutesText);
+        return (
+          Number.isInteger(hours) &&
+          Number.isInteger(minutes) &&
+          hours >= 0 &&
+          hours <= 23 &&
+          minutes >= 0 &&
+          minutes <= 59
+        );
+      }, "callTimeLocalHhmm must be a valid HH:mm value"),
+    repeatUnit: z.nativeEnum(SponsorRepeatUnit),
+    repeatInterval: z.number().int().positive(),
+    repeatDays: z.array(z.nativeEnum(SponsorRepeatDay)),
+    active: z.boolean().default(true),
+  })
+  .superRefine((value, context) => {
+    if (value.repeatUnit === SponsorRepeatUnit.MONTHLY) {
+      if (value.repeatInterval !== 1) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "repeatInterval must be 1 for MONTHLY repeats",
+          path: ["repeatInterval"],
+        });
+      }
+      if (value.repeatDays.length !== 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "repeatDays must be empty for MONTHLY repeats",
+          path: ["repeatDays"],
+        });
+      }
+      return;
+    }
+
+    if (value.repeatInterval !== 1 && value.repeatInterval !== 2) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "repeatInterval must be 1 or 2 for WEEKLY repeats",
+        path: ["repeatInterval"],
+      });
+    }
+
+    if (value.repeatDays.length === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "repeatDays must include at least one day for WEEKLY repeats",
+        path: ["repeatDays"],
+      });
+    }
+
+    if (new Set(value.repeatDays).size !== value.repeatDays.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "repeatDays must not contain duplicates",
+        path: ["repeatDays"],
+      });
+    }
+  });
 
 export type AttendanceRecord = z.infer<typeof attendanceRecordSchema>;
 export type ExclusionZone = z.infer<typeof exclusionZoneSchema>;

@@ -3,7 +3,9 @@ import {
   IncidentStatus,
   IncidentType,
   Role,
+  SponsorRepeatDay,
   SponsorRepeatRule,
+  SponsorRepeatUnit,
 } from "@recovery/shared-types";
 import { randomUUID } from "node:crypto";
 import type { ActorContext } from "../domain/actor";
@@ -165,6 +167,9 @@ export interface SponsorConfigRow {
   sponsor_phone_e164: string;
   call_time_local_hhmm: string;
   repeat_rule: SponsorRepeatRule;
+  repeat_unit: SponsorRepeatUnit;
+  repeat_interval: number;
+  repeat_days: SponsorRepeatDay[];
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -313,6 +318,9 @@ export function createRepositories(db: DbClient) {
           sponsor_phone_e164,
           call_time_local_hhmm,
           repeat_rule,
+          repeat_unit,
+          repeat_interval,
+          repeat_days,
           active,
           created_at,
           updated_at,
@@ -335,7 +343,9 @@ export function createRepositories(db: DbClient) {
         sponsorName: string;
         sponsorPhoneE164: string;
         callTimeLocalHhmm: string;
-        repeatRule: SponsorRepeatRule;
+        repeatUnit: SponsorRepeatUnit;
+        repeatInterval: number;
+        repeatDays: SponsorRepeatDay[];
         active: boolean;
       },
       updatedByUserId: string,
@@ -364,16 +374,22 @@ export function createRepositories(db: DbClient) {
           sponsor_phone_e164,
           call_time_local_hhmm,
           repeat_rule,
+          repeat_unit,
+          repeat_interval,
+          repeat_days,
           active,
           updated_by_user_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (tenant_id, user_id)
         DO UPDATE SET
           sponsor_name = EXCLUDED.sponsor_name,
           sponsor_phone_e164 = EXCLUDED.sponsor_phone_e164,
           call_time_local_hhmm = EXCLUDED.call_time_local_hhmm,
           repeat_rule = EXCLUDED.repeat_rule,
+          repeat_unit = EXCLUDED.repeat_unit,
+          repeat_interval = EXCLUDED.repeat_interval,
+          repeat_days = EXCLUDED.repeat_days,
           active = EXCLUDED.active,
           updated_by_user_id = EXCLUDED.updated_by_user_id,
           updated_at = NOW()
@@ -385,6 +401,9 @@ export function createRepositories(db: DbClient) {
           sponsor_phone_e164,
           call_time_local_hhmm,
           repeat_rule,
+          repeat_unit,
+          repeat_interval,
+          repeat_days,
           active,
           created_at,
           updated_at,
@@ -397,7 +416,14 @@ export function createRepositories(db: DbClient) {
           payload.sponsorName,
           payload.sponsorPhoneE164,
           payload.callTimeLocalHhmm,
-          payload.repeatRule,
+          payload.repeatInterval === 2
+            ? SponsorRepeatRule.BIWEEKLY
+            : payload.repeatUnit === SponsorRepeatUnit.MONTHLY
+              ? SponsorRepeatRule.MONTHLY
+              : SponsorRepeatRule.WEEKLY,
+          payload.repeatUnit,
+          payload.repeatInterval,
+          payload.repeatDays,
           payload.active,
           updatedByUserId,
         ],

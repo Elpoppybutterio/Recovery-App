@@ -1,4 +1,9 @@
-import { ComplianceEventType, Role, SponsorRepeatRule } from "@recovery/shared-types";
+import {
+  ComplianceEventType,
+  Role,
+  SponsorRepeatDay,
+  SponsorRepeatUnit,
+} from "@recovery/shared-types";
 import { describe, expect, it, vi } from "vitest";
 import type { ActorContext } from "../src/domain/actor";
 import { createTenantRepositories } from "../src/db/tenantRepositories";
@@ -56,7 +61,9 @@ describe("tenantRepositories facade", () => {
       sponsorName: "Sponsor",
       sponsorPhoneE164: "+15555550123",
       callTimeLocalHhmm: "17:00",
-      repeatRule: SponsorRepeatRule.DAILY,
+      repeatUnit: SponsorRepeatUnit.WEEKLY,
+      repeatInterval: 1,
+      repeatDays: [SponsorRepeatDay.TUE],
       active: true,
     });
     await tenantRepositories.supervisor.isAssigned(actor, "target-user-1");
@@ -121,7 +128,9 @@ describe("tenantRepositories facade", () => {
         sponsorName: "Sponsor",
         sponsorPhoneE164: "+15555550123",
         callTimeLocalHhmm: "17:00",
-        repeatRule: SponsorRepeatRule.DAILY,
+        repeatUnit: SponsorRepeatUnit.WEEKLY,
+        repeatInterval: 1,
+        repeatDays: [SponsorRepeatDay.TUE],
         active: true,
       },
       "supervisor-1",
