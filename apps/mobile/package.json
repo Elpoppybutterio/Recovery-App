@@ -4,6 +4,9 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
+    "start": "expo start",
+    "ios": "expo start --ios",
+    "android": "expo start --android",
     "dev": "expo start",
     "build": "expo export --platform web",
     "lint": "eslint . --ext .ts,.tsx",
