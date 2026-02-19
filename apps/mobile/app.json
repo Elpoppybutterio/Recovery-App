@@ -9,6 +9,8 @@
     "extra": {
       "apiUrl": "http://192.168.0.73:3001",
       "devAuthUserId": "enduser-a1",
+      "devUserDisplayName": "DEV User",
+      "meetingFeedUrl": "",
       "supervisionEnabled": false,
       "fallbackLat": 33.755,
       "fallbackLng": -84.39
