@@ -1,4 +1,10 @@
-import { ComplianceEventType, IncidentType, Role, SponsorRepeatRule } from "@recovery/shared-types";
+import {
+  ComplianceEventType,
+  IncidentType,
+  Role,
+  SponsorRepeatDay,
+  SponsorRepeatUnit,
+} from "@recovery/shared-types";
 import type { ActorContext } from "../domain/actor";
 import type {
   ExclusionZoneType,
@@ -40,7 +46,9 @@ export function createTenantRepositories(repositories: Repositories) {
           sponsorName: string;
           sponsorPhoneE164: string;
           callTimeLocalHhmm: string;
-          repeatRule: SponsorRepeatRule;
+          repeatUnit: SponsorRepeatUnit;
+          repeatInterval: number;
+          repeatDays: SponsorRepeatDay[];
           active: boolean;
         },
       ) {
