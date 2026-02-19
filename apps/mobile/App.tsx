@@ -80,6 +80,66 @@ type GeolocationApi = {
 
 const WARNING_DISTANCE_METERS = 200 * 0.3048;
 const EARTH_RADIUS_METERS = 6371000;
+const SPONSOR_ALERT_LEAD_DEFAULT_MINUTES = 15;
+const SPONSOR_ALERT_LEAD_PRESETS_MINUTES = [0, 5, 10, 15, 30, 60];
+const SPONSOR_ALERT_LEAD_MAX_MINUTES = 24 * 60;
+const SPONSOR_CALENDAR_EVENT_KEY_PREFIX = "recovery:sponsorCalendarEventId:";
+const SPONSOR_ALERT_LEAD_KEY_PREFIX = "recovery:sponsorAlertLeadMinutes:";
+
+type AsyncStorageModule = {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<void>;
+  removeItem(key: string): Promise<void>;
+};
+
+type CalendarRecord = {
+  id: string;
+  allowsModifications: boolean;
+  isPrimary?: boolean;
+  isDefault?: boolean;
+  title?: string;
+  source?: { name?: string };
+};
+
+type CalendarWeekdayMap = {
+  MONDAY: number;
+  TUESDAY: number;
+  WEDNESDAY: number;
+  THURSDAY: number;
+  FRIDAY: number;
+};
+
+type CalendarRecurrenceRuleInput = {
+  frequency: string;
+  interval?: number;
+  daysOfTheWeek?: Array<{ dayOfTheWeek: number }>;
+};
+
+type CalendarEventInput = {
+  title: string;
+  notes: string;
+  startDate: Date;
+  endDate: Date;
+  recurrenceRule: CalendarRecurrenceRuleInput;
+  alarms: Array<{ relativeOffset: number }>;
+  timeZone?: string;
+};
+
+type CalendarModule = {
+  EntityTypes: { EVENT: string };
+  RecurrenceFrequency: {
+    DAILY: string;
+    WEEKLY: string;
+    MONTHLY: string;
+  };
+  Weekday?: Partial<CalendarWeekdayMap>;
+  requestCalendarPermissionsAsync(): Promise<{ granted?: boolean; status?: string }>;
+  getDefaultCalendarAsync?(): Promise<CalendarRecord | null>;
+  getCalendarsAsync(entityType: string): Promise<CalendarRecord[]>;
+  getEventAsync(eventId: string): Promise<unknown | null>;
+  updateEventAsync(eventId: string, eventDetails: CalendarEventInput): Promise<string>;
+  createEventAsync(calendarId: string, eventDetails: CalendarEventInput): Promise<string>;
+};
 
 function toRadians(value: number): number {
   return (value * Math.PI) / 180;
@@ -218,6 +278,149 @@ function computeNextCall(
   return { nextAt: next, dueToday };
 }
 
+function sponsorCalendarEventStorageKey(userId: string): string {
+  return `${SPONSOR_CALENDAR_EVENT_KEY_PREFIX}${userId}`;
+}
+
+function sponsorAlertLeadStorageKey(userId: string): string {
+  return `${SPONSOR_ALERT_LEAD_KEY_PREFIX}${userId}`;
+}
+
+function normalizeAlertLeadMinutes(value: number): number {
+  const safeInteger = Number.isFinite(value)
+    ? Math.round(value)
+    : SPONSOR_ALERT_LEAD_DEFAULT_MINUTES;
+  return Math.min(SPONSOR_ALERT_LEAD_MAX_MINUTES, Math.max(0, safeInteger));
+}
+
+function isValidCallTimeLocalHhmm(value: string): boolean {
+  const [hoursText, minutesText] = value.split(":");
+  const hours = Number(hoursText);
+  const minutes = Number(minutesText);
+
+  return (
+    Number.isInteger(hours) &&
+    Number.isInteger(minutes) &&
+    hours >= 0 &&
+    hours <= 23 &&
+    minutes >= 0 &&
+    minutes <= 59
+  );
+}
+
+function tryRequireModule<T>(moduleName: string): T | null {
+  try {
+    const dynamicRequire: (name: string) => unknown = require;
+    return dynamicRequire(moduleName) as T;
+  } catch {
+    return null;
+  }
+}
+
+function loadAsyncStorageModule(): AsyncStorageModule | null {
+  const moduleValue = tryRequireModule<{
+    default?: AsyncStorageModule;
+    getItem?: AsyncStorageModule["getItem"];
+    setItem?: AsyncStorageModule["setItem"];
+    removeItem?: AsyncStorageModule["removeItem"];
+  }>("@react-native-async-storage/async-storage");
+
+  if (!moduleValue) {
+    return null;
+  }
+
+  if (moduleValue.default) {
+    return moduleValue.default;
+  }
+
+  if (moduleValue.getItem && moduleValue.setItem && moduleValue.removeItem) {
+    return moduleValue as AsyncStorageModule;
+  }
+
+  return null;
+}
+
+function loadCalendarModule(): CalendarModule | null {
+  return tryRequireModule<CalendarModule>("expo-calendar");
+}
+
+function resolveCalendarWeekdayMap(calendar: CalendarModule): CalendarWeekdayMap {
+  return {
+    MONDAY: calendar.Weekday?.MONDAY ?? 2,
+    TUESDAY: calendar.Weekday?.TUESDAY ?? 3,
+    WEDNESDAY: calendar.Weekday?.WEDNESDAY ?? 4,
+    THURSDAY: calendar.Weekday?.THURSDAY ?? 5,
+    FRIDAY: calendar.Weekday?.FRIDAY ?? 6,
+  };
+}
+
+function buildCalendarRecurrenceRule(
+  repeatRule: SponsorRepeatRule,
+  calendar: CalendarModule,
+): CalendarRecurrenceRuleInput {
+  switch (repeatRule) {
+    case "DAILY":
+      return { frequency: calendar.RecurrenceFrequency.DAILY };
+    case "WEEKDAYS": {
+      const weekdays = resolveCalendarWeekdayMap(calendar);
+      return {
+        frequency: calendar.RecurrenceFrequency.WEEKLY,
+        daysOfTheWeek: [
+          { dayOfTheWeek: weekdays.MONDAY },
+          { dayOfTheWeek: weekdays.TUESDAY },
+          { dayOfTheWeek: weekdays.WEDNESDAY },
+          { dayOfTheWeek: weekdays.THURSDAY },
+          { dayOfTheWeek: weekdays.FRIDAY },
+        ],
+      };
+    }
+    case "WEEKLY":
+      return { frequency: calendar.RecurrenceFrequency.WEEKLY };
+    case "BIWEEKLY":
+      return {
+        frequency: calendar.RecurrenceFrequency.WEEKLY,
+        interval: 2,
+      };
+    case "MONTHLY":
+      return { frequency: calendar.RecurrenceFrequency.MONTHLY };
+  }
+}
+
+function pickWritableCalendar(calendars: CalendarRecord[]): CalendarRecord | null {
+  const writableCalendars = calendars.filter((calendar) => calendar.allowsModifications);
+  if (writableCalendars.length === 0) {
+    return null;
+  }
+
+  const defaultWritable =
+    writableCalendars.find((calendar) => calendar.isPrimary || calendar.isDefault) ??
+    writableCalendars.find((calendar) =>
+      calendar.source?.name ? calendar.source.name.toLowerCase().includes("default") : false,
+    );
+  return defaultWritable ?? writableCalendars[0];
+}
+
+function parseLeadMinutesInput(value: string): number | null {
+  if (!/^\d+$/.test(value.trim())) {
+    return null;
+  }
+  const parsedValue = Number(value);
+  if (!Number.isInteger(parsedValue)) {
+    return null;
+  }
+  if (parsedValue < 0 || parsedValue > SPONSOR_ALERT_LEAD_MAX_MINUTES) {
+    return null;
+  }
+  return parsedValue;
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+  return "Unknown error";
+}
+
 export default function App() {
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
   const apiUrl = typeof extra.apiUrl === "string" ? extra.apiUrl : "http://localhost:3001";
@@ -245,6 +448,15 @@ export default function App() {
     "Sponsor config not saved yet.",
   );
   const [savingSponsor, setSavingSponsor] = useState(false);
+  const [alertLeadMinutes, setAlertLeadMinutes] = useState(SPONSOR_ALERT_LEAD_DEFAULT_MINUTES);
+  const [customAlertLeadMinutes, setCustomAlertLeadMinutes] = useState(
+    String(SPONSOR_ALERT_LEAD_DEFAULT_MINUTES),
+  );
+  const [calendarStatusMessage, setCalendarStatusMessage] = useState(
+    "Calendar event not created yet.",
+  );
+  const [calendarEventId, setCalendarEventId] = useState<string | null>(null);
+  const [savingCalendar, setSavingCalendar] = useState(false);
 
   const [supervisionEnabled, setSupervisionEnabled] = useState(defaultSupervisionEnabled);
   const [supervisionMessage, setSupervisionMessage] = useState<string>("Supervision mode is off.");
@@ -255,21 +467,79 @@ export default function App() {
   const supervisionActiveRef = useRef(false);
   const lastPingLocationRef = useRef<{ lat: number; lng: number } | null>(null);
 
+  const normalizedSponsorName = useMemo(() => sponsorName.trim(), [sponsorName]);
+  const sponsorPhoneE164 = useMemo(
+    () => toE164FromUsTenDigit(sponsorPhoneDigits),
+    [sponsorPhoneDigits],
+  );
+  const callTimeLocalHhmm = useMemo(
+    () => to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem),
+    [sponsorHour12, sponsorMinute, sponsorMeridiem],
+  );
+  const sponsorConfigCompleteForCalendar = useMemo(
+    () =>
+      normalizedSponsorName.length > 0 &&
+      sponsorPhoneE164 !== null &&
+      isValidCallTimeLocalHhmm(callTimeLocalHhmm) &&
+      Boolean(sponsorRepeatRule),
+    [callTimeLocalHhmm, normalizedSponsorName, sponsorPhoneE164, sponsorRepeatRule],
+  );
   const sponsorScheduleSummary = useMemo(() => {
     if (!sponsorActive) {
       return "Sponsor reminders disabled.";
     }
 
-    const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
-    const result = computeNextCall(new Date(), callTime, sponsorRepeatRule);
+    const result = computeNextCall(new Date(), callTimeLocalHhmm, sponsorRepeatRule);
     return `Next scheduled call: ${result.nextAt.toLocaleString()} • Due today: ${
       result.dueToday ? "Yes" : "No"
     }`;
-  }, [sponsorActive, sponsorHour12, sponsorMinute, sponsorMeridiem, sponsorRepeatRule]);
+  }, [callTimeLocalHhmm, sponsorActive, sponsorRepeatRule]);
 
   useEffect(() => {
     zonesRef.current = zones;
   }, [zones]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const asyncStorage = loadAsyncStorageModule();
+    if (!asyncStorage) {
+      return undefined;
+    }
+
+    void (async () => {
+      try {
+        const [storedAlertLeadText, storedEventId] = await Promise.all([
+          asyncStorage.getItem(sponsorAlertLeadStorageKey(devAuthUserId)),
+          asyncStorage.getItem(sponsorCalendarEventStorageKey(devAuthUserId)),
+        ]);
+        if (!isMounted) {
+          return;
+        }
+
+        if (storedAlertLeadText !== null) {
+          const parsedAlertLead = parseLeadMinutesInput(storedAlertLeadText);
+          if (parsedAlertLead !== null) {
+            const normalizedAlertLead = normalizeAlertLeadMinutes(parsedAlertLead);
+            setAlertLeadMinutes(normalizedAlertLead);
+            setCustomAlertLeadMinutes(String(normalizedAlertLead));
+          }
+        }
+
+        if (storedEventId) {
+          setCalendarEventId(storedEventId);
+          setCalendarStatusMessage("Loaded existing sponsor calendar event.");
+        }
+      } catch {
+        if (isMounted) {
+          setCalendarStatusMessage("Unable to load saved calendar settings.");
+        }
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [devAuthUserId]);
 
   function getGeolocation(): GeolocationApi | undefined {
     const navigatorValue = (
@@ -430,6 +700,165 @@ export default function App() {
       }
       return next;
     });
+  }
+
+  async function persistAlertLeadMinutes(nextMinutes: number) {
+    const asyncStorage = loadAsyncStorageModule();
+    if (!asyncStorage) {
+      return;
+    }
+
+    try {
+      await asyncStorage.setItem(sponsorAlertLeadStorageKey(devAuthUserId), String(nextMinutes));
+    } catch {
+      setCalendarStatusMessage("Failed to save reminder lead time locally.");
+    }
+  }
+
+  function applyAlertLeadMinutes(nextMinutes: number) {
+    const normalized = normalizeAlertLeadMinutes(nextMinutes);
+    setAlertLeadMinutes(normalized);
+    setCustomAlertLeadMinutes(String(normalized));
+    void persistAlertLeadMinutes(normalized);
+  }
+
+  function handleApplyCustomAlertLeadMinutes() {
+    const parsedMinutes = parseLeadMinutesInput(customAlertLeadMinutes);
+    if (parsedMinutes === null) {
+      setCalendarStatusMessage(
+        `Lead time must be between 0 and ${SPONSOR_ALERT_LEAD_MAX_MINUTES} minutes.`,
+      );
+      return;
+    }
+
+    applyAlertLeadMinutes(parsedMinutes);
+    setCalendarStatusMessage(`Reminder lead time set to ${parsedMinutes} minutes.`);
+  }
+
+  function handleResetAlertLeadMinutes() {
+    applyAlertLeadMinutes(SPONSOR_ALERT_LEAD_DEFAULT_MINUTES);
+    setCalendarStatusMessage(
+      `Reminder lead time reset to ${SPONSOR_ALERT_LEAD_DEFAULT_MINUTES} minutes.`,
+    );
+  }
+
+  async function handleAddToCalendar() {
+    if (!sponsorConfigCompleteForCalendar || sponsorPhoneE164 === null) {
+      setCalendarStatusMessage("Complete sponsor name, phone, call time, and repeat rule first.");
+      return;
+    }
+
+    if (Platform.OS !== "ios") {
+      setCalendarStatusMessage("Add to Calendar is currently available on iOS.");
+      return;
+    }
+
+    const calendarModule = loadCalendarModule();
+    if (!calendarModule) {
+      setCalendarStatusMessage("Calendar module unavailable. Install expo-calendar.");
+      return;
+    }
+
+    setSavingCalendar(true);
+    try {
+      const permission = await calendarModule.requestCalendarPermissionsAsync();
+      const isGranted = permission.granted ?? permission.status === "granted";
+      if (!isGranted) {
+        setCalendarStatusMessage("Calendar permission denied. Enable in Settings.");
+        return;
+      }
+
+      let defaultCalendar: CalendarRecord | null = null;
+      if (calendarModule.getDefaultCalendarAsync) {
+        try {
+          defaultCalendar = await calendarModule.getDefaultCalendarAsync();
+        } catch {
+          defaultCalendar = null;
+        }
+      }
+
+      const calendars = await calendarModule.getCalendarsAsync(calendarModule.EntityTypes.EVENT);
+      const writableCalendar =
+        defaultCalendar && defaultCalendar.allowsModifications
+          ? defaultCalendar
+          : pickWritableCalendar(calendars);
+      if (!writableCalendar) {
+        setCalendarStatusMessage("No writable calendar found.");
+        return;
+      }
+
+      const nextCall = computeNextCall(new Date(), callTimeLocalHhmm, sponsorRepeatRule).nextAt;
+      const eventDetails: CalendarEventInput = {
+        title: "Call Sponsor",
+        notes: [
+          `Sponsor: ${normalizedSponsorName}`,
+          `Phone: ${sponsorPhoneE164}`,
+          `Repeat: ${sponsorRepeatRule}`,
+        ].join("\n"),
+        startDate: nextCall,
+        endDate: new Date(nextCall.getTime() + 15 * 60 * 1000),
+        recurrenceRule: buildCalendarRecurrenceRule(sponsorRepeatRule, calendarModule),
+        alarms: [{ relativeOffset: -normalizeAlertLeadMinutes(alertLeadMinutes) }],
+      };
+      const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (localTimezone) {
+        eventDetails.timeZone = localTimezone;
+      }
+
+      const asyncStorage = loadAsyncStorageModule();
+      const eventStorageKey = sponsorCalendarEventStorageKey(devAuthUserId);
+      const storedEventId =
+        calendarEventId ??
+        (asyncStorage ? await asyncStorage.getItem(eventStorageKey) : null) ??
+        null;
+
+      let resultingEventId: string;
+      let updatedExistingEvent = false;
+
+      if (storedEventId) {
+        try {
+          const existingEvent = await calendarModule.getEventAsync(storedEventId);
+          if (!existingEvent) {
+            throw new Error("Stored event deleted");
+          }
+          const updatedId = await calendarModule.updateEventAsync(storedEventId, eventDetails);
+          resultingEventId = updatedId || storedEventId;
+          updatedExistingEvent = true;
+        } catch (error) {
+          const message = describeError(error).toLowerCase();
+          const shouldRecreate =
+            message.includes("not found") ||
+            message.includes("does not exist") ||
+            message.includes("deleted") ||
+            message.includes("no event");
+
+          if (!shouldRecreate) {
+            throw error;
+          }
+
+          resultingEventId = await calendarModule.createEventAsync(
+            writableCalendar.id,
+            eventDetails,
+          );
+        }
+      } else {
+        resultingEventId = await calendarModule.createEventAsync(writableCalendar.id, eventDetails);
+      }
+
+      setCalendarEventId(resultingEventId);
+      if (asyncStorage) {
+        await asyncStorage.setItem(eventStorageKey, resultingEventId);
+      }
+      setCalendarStatusMessage(
+        updatedExistingEvent
+          ? "Sponsor calendar event updated."
+          : "Sponsor calendar event created.",
+      );
+    } catch (error) {
+      setCalendarStatusMessage(`Calendar update failed: ${describeError(error)}`);
+    } finally {
+      setSavingCalendar(false);
+    }
   }
 
   async function handleSaveSponsorConfig() {
@@ -712,17 +1141,65 @@ export default function App() {
           ))}
         </View>
 
+        <Text style={styles.sponsorLabel}>Alert lead time (minutes)</Text>
+        <View style={styles.repeatRow}>
+          {SPONSOR_ALERT_LEAD_PRESETS_MINUTES.map((minutes) => (
+            <Pressable
+              key={minutes}
+              style={[
+                styles.repeatChip,
+                alertLeadMinutes === minutes ? styles.repeatChipSelected : null,
+              ]}
+              onPress={() => applyAlertLeadMinutes(minutes)}
+            >
+              <Text
+                style={[
+                  styles.repeatChipText,
+                  alertLeadMinutes === minutes ? styles.repeatChipTextSelected : null,
+                ]}
+              >
+                {minutes}m
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={styles.customLeadRow}>
+          <TextInput
+            style={styles.customLeadInput}
+            value={customAlertLeadMinutes}
+            onChangeText={setCustomAlertLeadMinutes}
+            placeholder="Custom minutes"
+            keyboardType="number-pad"
+            maxLength={4}
+          />
+          <Pressable style={styles.customLeadButton} onPress={handleApplyCustomAlertLeadMinutes}>
+            <Text style={styles.customLeadButtonText}>Apply</Text>
+          </Pressable>
+        </View>
+        <Pressable style={styles.resetLeadButton} onPress={handleResetAlertLeadMinutes}>
+          <Text style={styles.resetLeadButtonText}>
+            Reset to default ({SPONSOR_ALERT_LEAD_DEFAULT_MINUTES}m)
+          </Text>
+        </Pressable>
+
         <View style={styles.supervisionRow}>
           <Text style={styles.sponsorLabel}>Active reminders</Text>
           <Switch value={sponsorActive} onValueChange={setSponsorActive} />
         </View>
 
         <Text style={styles.sponsorMeta}>{sponsorScheduleSummary}</Text>
+        <Text style={styles.sponsorMeta}>Calendar alert: {alertLeadMinutes} minutes before</Text>
         <Text style={styles.sponsorMeta}>{sponsorStatusMessage}</Text>
+        <Text style={styles.sponsorMeta}>{calendarStatusMessage}</Text>
         <Button
           title={savingSponsor ? "Saving..." : "Save Sponsor Config"}
           onPress={() => void handleSaveSponsorConfig()}
           disabled={savingSponsor}
+        />
+        <Button
+          title={savingCalendar ? "Adding..." : "Add to Calendar"}
+          onPress={() => void handleAddToCalendar()}
+          disabled={savingCalendar || !sponsorConfigCompleteForCalendar}
         />
       </View>
 
@@ -819,6 +1296,46 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
     backgroundColor: "#fff",
+  },
+  customLeadRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  customLeadInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "#d0d5dd",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: "#fff",
+  },
+  customLeadButton: {
+    borderWidth: 1,
+    borderColor: "#155eef",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: "#155eef",
+  },
+  customLeadButtonText: {
+    color: "#fff",
+    fontWeight: "600",
+  },
+  resetLeadButton: {
+    alignSelf: "flex-start",
+    borderWidth: 1,
+    borderColor: "#d0d5dd",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "#f8fafc",
+  },
+  resetLeadButtonText: {
+    color: "#344054",
+    fontSize: 12,
+    fontWeight: "600",
   },
   pickerRow: {
     flexDirection: "row",
