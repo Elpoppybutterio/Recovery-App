@@ -127,6 +127,8 @@ type DriveSchedulePreview = {
   usesServiceCommitment: boolean;
 };
 
+type LocationIssue = "permission_denied" | "position_unavailable" | "unavailable" | null;
+
 const ARRIVAL_RADIUS_METERS = 61;
 const EARTH_RADIUS_METERS = 6371000;
 const ATTENDANCE_STORAGE_KEY_PREFIX = "recovery:verifiedAttendance:";
@@ -143,6 +145,7 @@ const DRIVE_ACTION_ID = "DRIVE_NOW";
 
 const DEFAULT_MEETING_EARLY_MINUTES = 10;
 const DEFAULT_SERVICE_COMMITMENT_MINUTES = 45;
+const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for simulator/device.";
 
 const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }> = [
   { code: "MON", label: "Mon", jsDay: 1 },
@@ -605,7 +608,7 @@ export default function App() {
   const [sponsorActive, setSponsorActive] = useState(true);
   const [sponsorLeadMinutes, setSponsorLeadMinutes] = useState<SponsorLeadMinutes>(5);
   const [sponsorSaving, setSponsorSaving] = useState(false);
-  const [sponsorStatus, setSponsorStatus] = useState("Sponsor config not saved yet.");
+  const [sponsorStatus, setSponsorStatus] = useState<string | null>(null);
   const [calendarStatus, setCalendarStatus] = useState("Sponsor calendar not synced yet.");
 
   const [notificationStatus, setNotificationStatus] = useState("Notifications not scheduled yet.");
@@ -618,6 +621,7 @@ export default function App() {
   const arrivalPromptedMeetingRef = useRef<string | null>(null);
   const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
   const meetingsShapeLoggedRef = useRef(false);
+  const locationIssueRef = useRef<LocationIssue>(null);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
 
@@ -626,6 +630,14 @@ export default function App() {
     () => toE164FromUsTenDigit(sponsorPhoneDigits),
     [sponsorPhoneDigits],
   );
+  const isLocalhostApiUrl = useMemo(() => {
+    try {
+      const parsed = new URL(apiUrl);
+      return ["localhost", "127.0.0.1", "0.0.0.0"].includes(parsed.hostname);
+    } catch {
+      return /localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(apiUrl);
+    }
+  }, [apiUrl]);
 
   const selectedDayPlan = useMemo(
     () => meetingPlansByDate[selectedDay.dateKey] ?? EMPTY_DAY_PLAN,
@@ -668,14 +680,6 @@ export default function App() {
   }, [meetings, selectedDay.dayOfWeek, currentLocation]);
 
   const sponsorScheduleSummary = useMemo(() => {
-    if (!sponsorEnabled) {
-      return "Sponsor disabled.";
-    }
-
-    if (!sponsorActive) {
-      return "Sponsor reminders disabled.";
-    }
-
     const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
     const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
     const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
@@ -690,14 +694,29 @@ export default function App() {
     return `Next scheduled call: ${next.nextAt.toLocaleString()} • Due today: ${
       next.dueToday ? "Yes" : "No"
     } • ${repeatSummary}`;
+  }, [sponsorHour12, sponsorMinute, sponsorMeridiem, sponsorRepeatPreset, sponsorRepeatDays]);
+
+  const sponsorStatusLine = useMemo(() => {
+    if (!sponsorEnabled) {
+      return "Sponsor is disabled.";
+    }
+    if (!sponsorActive) {
+      return "Sponsor reminders are disabled.";
+    }
+    if (!normalizedSponsorName || !sponsorPhoneE164) {
+      return "Enter sponsor name and phone to enable reminders.";
+    }
+    if (sponsorStatus) {
+      return sponsorStatus;
+    }
+    return sponsorScheduleSummary;
   }, [
     sponsorEnabled,
     sponsorActive,
-    sponsorHour12,
-    sponsorMinute,
-    sponsorMeridiem,
-    sponsorRepeatPreset,
-    sponsorRepeatDays,
+    normalizedSponsorName,
+    sponsorPhoneE164,
+    sponsorStatus,
+    sponsorScheduleSummary,
   ]);
 
   const openSessionDurationSeconds = useMemo(() => {
@@ -714,6 +733,7 @@ export default function App() {
     const geolocation = getGeolocationApi();
     if (!geolocation) {
       setLocationPermission("unavailable");
+      locationIssueRef.current = "unavailable";
       return null;
     }
 
@@ -726,17 +746,42 @@ export default function App() {
             accuracyM: position.coords.accuracy ?? null,
           };
           setLocationPermission("granted");
+          locationIssueRef.current = null;
           setCurrentLocation(next);
           resolve(next);
         },
-        () => {
-          setLocationPermission("denied");
+        (error) => {
+          const code =
+            typeof error === "object" && error && "code" in error
+              ? Number((error as { code?: number }).code)
+              : 0;
+
+          if (code === 1) {
+            setLocationPermission("denied");
+            locationIssueRef.current = "permission_denied";
+          } else if (code === 2 || code === 3) {
+            setLocationPermission("granted");
+            locationIssueRef.current = "position_unavailable";
+          } else {
+            setLocationPermission("unavailable");
+            locationIssueRef.current = "unavailable";
+          }
           resolve(null);
         },
         { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 },
       );
     });
   }, []);
+
+  const formatApiErrorWithHint = useCallback(
+    (baseMessage: string): string => {
+      if (!isLocalhostApiUrl) {
+        return baseMessage;
+      }
+      return `${baseMessage} ${LOCALHOST_API_HINT}`;
+    },
+    [isLocalhostApiUrl],
+  );
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
     const existing = await Notifications.getPermissionsAsync();
@@ -840,13 +885,22 @@ export default function App() {
     [],
   );
 
-  const requestLocationPermission = useCallback(async () => {
+  const requestLocationPermission = useCallback(async (): Promise<LocationStamp | null> => {
     const position = await readCurrentLocation();
     if (position) {
       setMeetingsStatus("Location enabled for distance and arrival detection.");
-    } else {
-      setMeetingsStatus("Location permission denied. Distance and arrival detection are disabled.");
+      return position;
     }
+    if (locationIssueRef.current === "position_unavailable") {
+      setMeetingsStatus("Location enabled, but no simulated location is set.");
+      return null;
+    }
+    if (locationIssueRef.current === "permission_denied") {
+      setMeetingsStatus("Location permission denied. Distance and arrival detection are disabled.");
+      return null;
+    }
+    setMeetingsStatus("Location is unavailable on this device.");
+    return null;
   }, [readCurrentLocation]);
 
   const persistAttendanceRecords = useCallback(
@@ -884,35 +938,47 @@ export default function App() {
     [persistAttendanceRecords],
   );
 
-  const refreshMeetings = useCallback(async () => {
-    setLoadingMeetings(true);
-    setMeetingsError(null);
+  const refreshMeetings = useCallback(
+    async (options?: { location?: LocationStamp | null }) => {
+      setLoadingMeetings(true);
+      setMeetingsError(null);
 
-    try {
-      const location = locationPermission === "granted" ? await readCurrentLocation() : null;
-      const result = await source.listMeetings({
-        dayOfWeek: selectedDay.dayOfWeek,
-        lat: location?.lat,
-        lng: location?.lng,
-      });
-      setMeetings(result.meetings);
+      try {
+        let location: LocationStamp | null = options?.location ?? null;
+        if (options?.location === undefined && locationPermission === "granted") {
+          location = await readCurrentLocation();
+        }
+        const result = await source.listMeetings({
+          dayOfWeek: selectedDay.dayOfWeek,
+          lat: location?.lat,
+          lng: location?.lng,
+        });
+        setMeetings(result.meetings);
 
-      if (!meetingsShapeLoggedRef.current && result.meetings.length > 0) {
-        meetingsShapeLoggedRef.current = true;
-        console.log("[meetings] normalized sample", result.meetings[0]);
+        if (!meetingsShapeLoggedRef.current && result.meetings.length > 0) {
+          meetingsShapeLoggedRef.current = true;
+          console.log("[meetings] normalized sample", result.meetings[0]);
+        }
+
+        const warningSuffix = result.warning ? ` (${result.warning})` : "";
+        setMeetingsStatus(
+          `Loaded ${result.meetings.length} meetings from ${result.source}${warningSuffix}.`,
+        );
+      } catch (error) {
+        setMeetingsError(formatApiErrorWithHint(formatError(error)));
+        setMeetingsStatus("Unable to load meetings.");
+      } finally {
+        setLoadingMeetings(false);
       }
-
-      const warningSuffix = result.warning ? ` (${result.warning})` : "";
-      setMeetingsStatus(
-        `Loaded ${result.meetings.length} meetings from ${result.source}${warningSuffix}.`,
-      );
-    } catch (error) {
-      setMeetingsError(formatError(error));
-      setMeetingsStatus("Unable to load meetings.");
-    } finally {
-      setLoadingMeetings(false);
-    }
-  }, [locationPermission, readCurrentLocation, selectedDay.dayOfWeek, source]);
+    },
+    [
+      locationPermission,
+      readCurrentLocation,
+      selectedDay.dayOfWeek,
+      source,
+      formatApiErrorWithHint,
+    ],
+  );
 
   const fetchSponsorConfig = useCallback(async () => {
     try {
@@ -922,13 +988,13 @@ export default function App() {
         },
       });
       if (!response.ok) {
-        setSponsorStatus(`Sponsor config load failed: ${response.status}`);
+        setSponsorStatus(formatApiErrorWithHint(`Sponsor config load failed: ${response.status}`));
         return;
       }
 
       const payload = (await response.json()) as { sponsorConfig?: SponsorConfigResponse | null };
       if (!payload.sponsorConfig) {
-        setSponsorStatus("Sponsor config not set.");
+        setSponsorStatus(null);
         return;
       }
 
@@ -958,24 +1024,34 @@ export default function App() {
             );
       setSponsorRepeatDays(nextDays.length > 0 ? nextDays : [getCurrentWeekdayCode(new Date())]);
       setSponsorActive(Boolean(config.active));
-      setSponsorStatus("Loaded sponsor config.");
+      setSponsorStatus(null);
     } catch {
-      setSponsorStatus("Sponsor config load failed: network.");
+      setSponsorStatus(formatApiErrorWithHint("Sponsor config load failed: network."));
     }
-  }, [apiUrl, authHeader]);
+  }, [apiUrl, authHeader, formatApiErrorWithHint]);
 
   const openPhoneCall = useCallback(async (phoneE164: string | null) => {
     if (!phoneE164) {
+      setSponsorStatus("Enter sponsor name and phone to enable reminders.");
       return;
     }
     const digits = normalizePhoneDigits(phoneE164);
     if (!digits) {
+      setSponsorStatus("Enter sponsor name and phone to enable reminders.");
       return;
     }
+    const telUrl = `tel:${digits}`;
     try {
-      await Linking.openURL(`tel:${digits}`);
+      const canOpen = await Linking.canOpenURL(telUrl);
+      if (!canOpen) {
+        setSponsorStatus("Calling is not supported on this device (simulator).");
+        return;
+      }
+
+      await Linking.openURL(telUrl);
+      setSponsorStatus(null);
     } catch {
-      setNotificationStatus("Unable to open dialer on this device.");
+      setSponsorStatus("Calling is not supported on this device (simulator).");
     }
   }, []);
 
@@ -1444,15 +1520,15 @@ export default function App() {
       });
 
       if (!response.ok) {
-        setSponsorStatus(`Sponsor config save failed: ${response.status}`);
+        setSponsorStatus(formatApiErrorWithHint(`Sponsor config save failed: ${response.status}`));
         return;
       }
 
-      setSponsorStatus("Sponsor config saved.");
+      setSponsorStatus(null);
       await syncSponsorCalendarEvent("save");
       await rescheduleSponsorNotifications("save");
     } catch {
-      setSponsorStatus("Sponsor config save failed: network.");
+      setSponsorStatus(formatApiErrorWithHint("Sponsor config save failed: network."));
     } finally {
       setSponsorSaving(false);
     }
@@ -1468,6 +1544,7 @@ export default function App() {
     sponsorActive,
     apiUrl,
     authHeader,
+    formatApiErrorWithHint,
     syncSponsorCalendarEvent,
     rescheduleSponsorNotifications,
   ]);
@@ -1851,8 +1928,8 @@ export default function App() {
 
   useEffect(() => {
     void (async () => {
-      await requestLocationPermission();
-      await Promise.all([refreshMeetings(), fetchSponsorConfig()]);
+      const position = await requestLocationPermission();
+      await Promise.all([refreshMeetings({ location: position }), fetchSponsorConfig()]);
 
       try {
         const [modeRaw, sponsorUiPrefsRaw, attendanceRaw, planRaw] = await Promise.all([
@@ -1934,6 +2011,8 @@ export default function App() {
     if (!sponsorEnabled) {
       void cancelNotificationBucket("sponsor");
       setNotificationStatus("Sponsor disabled.");
+      setNotificationOpenPhone(null);
+      setSponsorStatus(null);
     }
   }, [sponsorEnabled, cancelNotificationBucket]);
 
@@ -2169,19 +2248,21 @@ export default function App() {
                   value={sponsorEnabled}
                   onValueChange={(value) => {
                     setSponsorEnabled(value);
+                    setSponsorStatus(null);
 
                     if (!value) {
                       setSponsorActive(false);
                       void cancelNotificationBucket("sponsor");
                       setNotificationStatus("Sponsor disabled.");
                       setCalendarStatus("Sponsor disabled.");
+                      setNotificationOpenPhone(null);
                     }
                   }}
                 />
               </View>
 
               {!sponsorEnabled ? (
-                <Text style={styles.sectionMeta}>Sponsor is disabled. Turn on to configure.</Text>
+                <Text style={styles.sectionMeta}>Sponsor is disabled.</Text>
               ) : (
                 <>
                   <TextInput
@@ -2205,6 +2286,7 @@ export default function App() {
                       value={sponsorActive}
                       onValueChange={(value) => {
                         setSponsorActive(value);
+                        setSponsorStatus(null);
 
                         if (!value) {
                           void cancelNotificationBucket("sponsor");
@@ -2212,6 +2294,9 @@ export default function App() {
                           return;
                         }
 
+                        if (!normalizedSponsorName || !sponsorPhoneE164) {
+                          return;
+                        }
                         void rescheduleSponsorNotifications("toggle-on");
                       }}
                     />
@@ -2332,11 +2417,7 @@ export default function App() {
                         ))}
                       </View>
                     </>
-                  ) : (
-                    <Text style={styles.sectionMeta}>
-                      Turn reminders on to configure schedule + alerts.
-                    </Text>
-                  )}
+                  ) : null}
 
                   {notificationOpenPhone ? (
                     <View style={styles.callNowBox}>
@@ -2350,10 +2431,7 @@ export default function App() {
                     </View>
                   ) : null}
 
-                  <Text style={styles.sectionMeta}>{sponsorScheduleSummary}</Text>
-                  <Text style={styles.sectionMeta}>{sponsorStatus}</Text>
-                  <Text style={styles.sectionMeta}>{calendarStatus}</Text>
-                  <Text style={styles.sectionMeta}>{notificationStatus}</Text>
+                  <Text style={styles.sectionMeta}>{sponsorStatusLine}</Text>
                   <Button
                     title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
                     onPress={() => void saveSponsorConfig()}
@@ -2377,6 +2455,8 @@ export default function App() {
                   When enabled, scheduled notification delays are compressed for quick simulator
                   tests.
                 </Text>
+                <Text style={styles.sectionMeta}>Notification debug: {notificationStatus}</Text>
+                <Text style={styles.sectionMeta}>Calendar debug: {calendarStatus}</Text>
                 <View style={styles.buttonRow}>
                   <Button
                     title="Test sponsor alert in 10s"
@@ -2406,8 +2486,8 @@ export default function App() {
                   title="Enable location"
                   onPress={() => {
                     void (async () => {
-                      await requestLocationPermission();
-                      await refreshMeetings();
+                      const position = await requestLocationPermission();
+                      await refreshMeetings({ location: position });
                     })();
                   }}
                 />

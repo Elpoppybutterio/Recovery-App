@@ -31,6 +31,6 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 
 ## Slice D (IN PROGRESS)
 
-- User features: sponsor contact config, scheduled call reminder settings, mobile sponsor setup controls.
+- User features: sponsor contact config, sponsor enable toggle + reminder toggle restructuring, single-source sponsor status hygiene, simulator-safe call-now handling, reliable location enable messaging, and meeting drive reminder planning.
 - API endpoints: `GET /v1/me/sponsor`, `PUT /v1/me/sponsor`.
 - Data tables: `sponsor_config`.
