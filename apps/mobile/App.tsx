@@ -1,10 +1,12 @@
 import { StatusBar } from "expo-status-bar";
+import * as Calendar from "expo-calendar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
-  FlatList,
+  KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Switch,
   Text,
@@ -42,23 +44,51 @@ type MeZone = {
   };
 };
 
-type SponsorRepeatRule = "DAILY" | "WEEKDAYS" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+type WeekdayCode = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
+type RepeatUnit = "WEEKLY" | "MONTHLY";
+type RepeatPreset = "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+type LegacyRepeatRule = "DAILY" | "WEEKDAYS" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 
 type SponsorConfigPayload = {
   sponsorName: string;
   sponsorPhoneE164: string;
   callTimeLocalHhmm: string;
-  repeatRule: SponsorRepeatRule;
+  repeatUnit: RepeatUnit;
+  repeatInterval: number;
+  repeatDays: WeekdayCode[];
   active: boolean;
+  // TODO(api-compat): Remove legacy field once all environments use repeatUnit/repeatInterval/repeatDays.
+  repeatRule?: LegacyRepeatRule;
 };
 
-const SPONSOR_REPEAT_OPTIONS: Array<{ value: SponsorRepeatRule; label: string }> = [
-  { value: "DAILY", label: "Daily" },
-  { value: "WEEKDAYS", label: "M-F" },
+type SponsorConfigResponse = {
+  sponsorName: string;
+  sponsorPhoneE164: string;
+  callTimeLocalHhmm: string;
+  active: boolean;
+  repeatUnit?: RepeatUnit;
+  repeatInterval?: number;
+  repeatDays?: WeekdayCode[];
+  repeatRule?: LegacyRepeatRule;
+};
+
+const SPONSOR_REPEAT_OPTIONS: Array<{ value: RepeatPreset; label: string }> = [
   { value: "WEEKLY", label: "Weekly" },
   { value: "BIWEEKLY", label: "Bi-weekly" },
   { value: "MONTHLY", label: "Monthly" },
 ];
+
+const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }> = [
+  { code: "MON", label: "Mon", jsDay: 1 },
+  { code: "TUE", label: "Tue", jsDay: 2 },
+  { code: "WED", label: "Wed", jsDay: 3 },
+  { code: "THU", label: "Thu", jsDay: 4 },
+  { code: "FRI", label: "Fri", jsDay: 5 },
+  { code: "SAT", label: "Sat", jsDay: 6 },
+  { code: "SUN", label: "Sun", jsDay: 0 },
+];
+
+const WEEKDAY_CODES = WEEKDAY_OPTIONS.map((option) => option.code);
 
 type GeolocationApi = {
   getCurrentPosition(
@@ -183,6 +213,20 @@ function normalizePhoneDigits(value: string): string {
   return value.replace(/\D/g, "").slice(0, 10);
 }
 
+function formatUsPhoneDisplay(phoneDigits: string): string {
+  const digits = normalizePhoneDigits(phoneDigits);
+  if (digits.length === 0) {
+    return "";
+  }
+  if (digits.length <= 3) {
+    return `(${digits}`;
+  }
+  if (digits.length <= 6) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  }
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
+}
+
 function toE164FromUsTenDigit(phoneDigits: string): string | null {
   if (phoneDigits.length !== 10) {
     return null;
@@ -220,62 +264,153 @@ function formatCallTime12Hour(time24: string): string {
   return `${String(hour12).padStart(2, "0")}:${String(minute).padStart(2, "0")} ${meridiem}`;
 }
 
-function isDueOnDate(date: Date, repeatRule: SponsorRepeatRule): boolean {
-  const day = date.getDay();
-  switch (repeatRule) {
+function weekdayCodeFromJsDay(jsDay: number): WeekdayCode {
+  const option = WEEKDAY_OPTIONS.find((entry) => entry.jsDay === jsDay);
+  return option?.code ?? "MON";
+}
+
+function getCurrentWeekdayCode(date: Date): WeekdayCode {
+  return weekdayCodeFromJsDay(date.getDay());
+}
+
+function sortWeekdays(days: WeekdayCode[]): WeekdayCode[] {
+  const daySet = new Set(days);
+  return WEEKDAY_CODES.filter((code) => daySet.has(code));
+}
+
+function startOfWeekMonday(date: Date): Date {
+  const result = new Date(date);
+  const day = result.getDay();
+  const delta = day === 0 ? 6 : day - 1;
+  result.setDate(result.getDate() - delta);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function deriveLegacyRepeatRule(
+  repeatUnit: RepeatUnit,
+  repeatInterval: number,
+  repeatDays: WeekdayCode[],
+): LegacyRepeatRule {
+  if (repeatUnit === "MONTHLY") {
+    return "MONTHLY";
+  }
+  if (repeatInterval === 2) {
+    return "BIWEEKLY";
+  }
+  if (repeatDays.length === 7) {
+    return "DAILY";
+  }
+  const weekdays: WeekdayCode[] = ["MON", "TUE", "WED", "THU", "FRI"];
+  const isWeekdaysOnly =
+    repeatDays.length === weekdays.length && weekdays.every((day) => repeatDays.includes(day));
+  if (isWeekdaysOnly) {
+    return "WEEKDAYS";
+  }
+  return "WEEKLY";
+}
+
+function describeWeekdaySelection(days: WeekdayCode[]): string {
+  if (days.length === 0) {
+    return "No days selected";
+  }
+  return days
+    .map((day) => WEEKDAY_OPTIONS.find((entry) => entry.code === day)?.label ?? day)
+    .join(", ");
+}
+
+function resolveRepeatStateFromConfig(
+  config: SponsorConfigResponse,
+  fallbackDay: WeekdayCode,
+): {
+  preset: RepeatPreset;
+  days: WeekdayCode[];
+} {
+  if (config.repeatUnit) {
+    const interval = config.repeatInterval ?? 1;
+    const preset: RepeatPreset =
+      config.repeatUnit === "MONTHLY" ? "MONTHLY" : interval >= 2 ? "BIWEEKLY" : "WEEKLY";
+    const days =
+      config.repeatUnit === "MONTHLY"
+        ? []
+        : sortWeekdays(
+            (config.repeatDays ?? []).filter((day): day is WeekdayCode =>
+              WEEKDAY_CODES.includes(day as WeekdayCode),
+            ),
+          );
+    return { preset, days: days.length > 0 ? days : [fallbackDay] };
+  }
+
+  switch (config.repeatRule) {
     case "DAILY":
-      return true;
+      return { preset: "WEEKLY", days: [...WEEKDAY_CODES] };
     case "WEEKDAYS":
-      return day >= 1 && day <= 5;
-    case "WEEKLY":
+      return { preset: "WEEKLY", days: ["MON", "TUE", "WED", "THU", "FRI"] };
     case "BIWEEKLY":
+      return { preset: "BIWEEKLY", days: [fallbackDay] };
     case "MONTHLY":
-      return true;
+      return { preset: "MONTHLY", days: [] };
+    case "WEEKLY":
     default:
-      return false;
+      return { preset: "WEEKLY", days: [fallbackDay] };
   }
 }
 
 function computeNextCall(
   now: Date,
   callTimeLocalHhmm: string,
-  repeatRule: SponsorRepeatRule,
+  repeatUnit: RepeatUnit,
+  repeatInterval: number,
+  repeatDays: WeekdayCode[],
 ): { nextAt: Date; dueToday: boolean } {
   const [hoursText, minutesText] = callTimeLocalHhmm.split(":");
   const hours = Number(hoursText);
   const minutes = Number(minutesText);
 
-  const todayAtCallTime = new Date(now);
-  todayAtCallTime.setHours(hours, minutes, 0, 0);
-  const dueToday = isDueOnDate(now, repeatRule);
-
-  if (dueToday && todayAtCallTime.getTime() >= now.getTime()) {
-    return { nextAt: todayAtCallTime, dueToday: true };
-  }
-
-  const next = new Date(todayAtCallTime);
-  switch (repeatRule) {
-    case "DAILY":
-      next.setDate(next.getDate() + 1);
-      break;
-    case "WEEKDAYS": {
-      do {
-        next.setDate(next.getDate() + 1);
-      } while (!isDueOnDate(next, "WEEKDAYS"));
-      break;
+  if (repeatUnit === "MONTHLY") {
+    const candidate = new Date(now);
+    candidate.setHours(hours, minutes, 0, 0);
+    if (candidate.getTime() >= now.getTime()) {
+      return { nextAt: candidate, dueToday: true };
     }
-    case "WEEKLY":
-      next.setDate(next.getDate() + 7);
-      break;
-    case "BIWEEKLY":
-      next.setDate(next.getDate() + 14);
-      break;
-    case "MONTHLY":
-      next.setMonth(next.getMonth() + 1);
-      break;
+    candidate.setMonth(candidate.getMonth() + Math.max(1, repeatInterval));
+    return { nextAt: candidate, dueToday: false };
   }
 
-  return { nextAt: next, dueToday };
+  const activeDays =
+    repeatDays.length > 0 ? sortWeekdays(repeatDays) : [getCurrentWeekdayCode(now)];
+  const interval = Math.max(1, repeatInterval);
+  const anchorWeekStart = startOfWeekMonday(now);
+
+  for (let offsetDays = 0; offsetDays <= 90; offsetDays += 1) {
+    const candidate = new Date(now);
+    candidate.setDate(now.getDate() + offsetDays);
+    candidate.setHours(hours, minutes, 0, 0);
+
+    if (candidate.getTime() < now.getTime()) {
+      continue;
+    }
+
+    const candidateCode = weekdayCodeFromJsDay(candidate.getDay());
+    if (!activeDays.includes(candidateCode)) {
+      continue;
+    }
+
+    const candidateWeekStart = startOfWeekMonday(candidate);
+    const weekDelta = Math.floor(
+      (candidateWeekStart.getTime() - anchorWeekStart.getTime()) / (7 * 24 * 60 * 60 * 1000),
+    );
+    if (weekDelta % interval !== 0) {
+      continue;
+    }
+
+    return { nextAt: candidate, dueToday: offsetDays === 0 };
+  }
+
+  const fallback = new Date(now);
+  fallback.setDate(fallback.getDate() + 7);
+  fallback.setHours(hours, minutes, 0, 0);
+  return { nextAt: fallback, dueToday: false };
 }
 
 function sponsorCalendarEventStorageKey(userId: string): string {
@@ -442,7 +577,10 @@ export default function App() {
   const [sponsorHour12, setSponsorHour12] = useState(5);
   const [sponsorMinute, setSponsorMinute] = useState(0);
   const [sponsorMeridiem, setSponsorMeridiem] = useState<"AM" | "PM">("PM");
-  const [sponsorRepeatRule, setSponsorRepeatRule] = useState<SponsorRepeatRule>("WEEKDAYS");
+  const [sponsorRepeatPreset, setSponsorRepeatPreset] = useState<RepeatPreset>("WEEKLY");
+  const [sponsorRepeatDays, setSponsorRepeatDays] = useState<WeekdayCode[]>([
+    getCurrentWeekdayCode(new Date()),
+  ]);
   const [sponsorActive, setSponsorActive] = useState(true);
   const [sponsorStatusMessage, setSponsorStatusMessage] = useState<string>(
     "Sponsor config not saved yet.",
@@ -489,11 +627,26 @@ export default function App() {
       return "Sponsor reminders disabled.";
     }
 
-    const result = computeNextCall(new Date(), callTimeLocalHhmm, sponsorRepeatRule);
+    const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
+    const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
+    const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
+    const repeatDays = repeatUnit === "MONTHLY" ? [] : sponsorRepeatDays;
+    const result = computeNextCall(new Date(), callTime, repeatUnit, repeatInterval, repeatDays);
+    const repeatSummary =
+      sponsorRepeatPreset === "MONTHLY"
+        ? "Monthly"
+        : `${sponsorRepeatPreset === "BIWEEKLY" ? "Bi-weekly" : "Weekly"} on ${describeWeekdaySelection(repeatDays)}`;
     return `Next scheduled call: ${result.nextAt.toLocaleString()} • Due today: ${
       result.dueToday ? "Yes" : "No"
-    }`;
-  }, [callTimeLocalHhmm, sponsorActive, sponsorRepeatRule]);
+    } • ${repeatSummary}`;
+  }, [
+    sponsorActive,
+    sponsorHour12,
+    sponsorMinute,
+    sponsorMeridiem,
+    sponsorRepeatPreset,
+    sponsorRepeatDays,
+  ]);
 
   useEffect(() => {
     zonesRef.current = zones;
@@ -653,7 +806,7 @@ export default function App() {
         return;
       }
 
-      const payload = (await response.json()) as { sponsorConfig?: SponsorConfigPayload | null };
+      const payload = (await response.json()) as { sponsorConfig?: SponsorConfigResponse | null };
       if (!payload.sponsorConfig) {
         setSponsorStatusMessage("Sponsor config not set.");
         return;
@@ -666,10 +819,17 @@ export default function App() {
       setSponsorHour12(parsedTime.hour12);
       setSponsorMinute(parsedTime.minute);
       setSponsorMeridiem(parsedTime.meridiem);
-      setSponsorRepeatRule(config.repeatRule);
+      const fallbackDay = getCurrentWeekdayCode(new Date());
+      const resolvedRepeatState = resolveRepeatStateFromConfig(config, fallbackDay);
+      setSponsorRepeatPreset(resolvedRepeatState.preset);
+      setSponsorRepeatDays(resolvedRepeatState.days);
       setSponsorActive(config.active);
+      const repeatSummary =
+        resolvedRepeatState.preset === "MONTHLY"
+          ? "Monthly"
+          : `${resolvedRepeatState.preset === "BIWEEKLY" ? "Bi-weekly" : "Weekly"} on ${describeWeekdaySelection(resolvedRepeatState.days)}`;
       setSponsorStatusMessage(
-        `Loaded sponsor config (${formatCallTime12Hour(config.callTimeLocalHhmm)}).`,
+        `Loaded sponsor config (${formatCallTime12Hour(config.callTimeLocalHhmm)}, ${repeatSummary}).`,
       );
     } catch {
       setSponsorStatusMessage("Sponsor config load failed: network.");
@@ -702,6 +862,13 @@ export default function App() {
     });
   }
 
+  function toggleRepeatDay(day: WeekdayCode) {
+    setSponsorRepeatDays((previous) => {
+      const next = previous.includes(day)
+        ? previous.filter((value) => value !== day)
+        : [...previous, day];
+      return sortWeekdays(next);
+    });
   async function persistAlertLeadMinutes(nextMinutes: number) {
     const asyncStorage = loadAsyncStorageModule();
     if (!asyncStorage) {
@@ -874,12 +1041,26 @@ export default function App() {
       return;
     }
 
+    const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
+    const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
+    const repeatDays =
+      repeatUnit === "MONTHLY"
+        ? []
+        : sortWeekdays(sponsorRepeatDays.filter((day) => WEEKDAY_CODES.includes(day)));
+    if (repeatUnit === "WEEKLY" && repeatDays.length === 0) {
+      setSponsorStatusMessage("Select at least one weekday for weekly reminders.");
+      return;
+    }
+
     const payload: SponsorConfigPayload = {
       sponsorName: normalizedName,
       sponsorPhoneE164: phoneE164,
       callTimeLocalHhmm: to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem),
-      repeatRule: sponsorRepeatRule,
+      repeatUnit,
+      repeatInterval,
+      repeatDays,
       active: sponsorActive,
+      repeatRule: deriveLegacyRepeatRule(repeatUnit, repeatInterval, repeatDays),
     };
 
     setSavingSponsor(true);
@@ -898,13 +1079,92 @@ export default function App() {
       }
 
       // TODO(notifications): wire Expo local notifications for sponsor reminders.
+      const repeatSummary =
+        repeatUnit === "MONTHLY"
+          ? "Monthly"
+          : `${repeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdaySelection(repeatDays)}`;
       setSponsorStatusMessage(
-        `Sponsor config saved (${formatCallTime12Hour(payload.callTimeLocalHhmm)} ${payload.repeatRule}).`,
+        `Sponsor config saved (${formatCallTime12Hour(payload.callTimeLocalHhmm)}, ${repeatSummary}).`,
       );
     } catch {
       setSponsorStatusMessage("Sponsor config save failed: network.");
     } finally {
       setSavingSponsor(false);
+    }
+  }
+
+  async function handleAddToCalendar() {
+    if (
+      typeof Calendar?.requestCalendarPermissionsAsync !== "function" ||
+      typeof Calendar?.getCalendarsAsync !== "function"
+    ) {
+      setSponsorStatusMessage(
+        "Calendar module unavailable. Rebuild Metro after install (clear cache).",
+      );
+      return;
+    }
+
+    const normalizedName = sponsorName.trim();
+    if (!normalizedName) {
+      setSponsorStatusMessage("Add sponsor name before creating a calendar reminder.");
+      return;
+    }
+
+    const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
+    const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
+    const repeatDays =
+      repeatUnit === "MONTHLY"
+        ? []
+        : sortWeekdays(sponsorRepeatDays.filter((day) => WEEKDAY_CODES.includes(day)));
+    if (repeatUnit === "WEEKLY" && repeatDays.length === 0) {
+      setSponsorStatusMessage("Select at least one weekday before adding to calendar.");
+      return;
+    }
+
+    setAddingCalendarEvent(true);
+    try {
+      const permission = await Calendar.requestCalendarPermissionsAsync();
+      if (permission.status !== "granted") {
+        setSponsorStatusMessage("Calendar permission denied.");
+        return;
+      }
+
+      const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
+      const writableCalendar =
+        calendars.find((calendar) => calendar.allowsModifications) ?? calendars[0];
+      if (!writableCalendar) {
+        setSponsorStatusMessage("No writable calendar found on this device.");
+        return;
+      }
+
+      const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
+      const nextCall = computeNextCall(
+        new Date(),
+        callTime,
+        repeatUnit,
+        repeatInterval,
+        repeatDays,
+      );
+      const endDate = new Date(nextCall.nextAt.getTime() + 30 * 60 * 1000);
+
+      await Calendar.createEventAsync(writableCalendar.id, {
+        title: `Sponsor call: ${normalizedName}`,
+        startDate: nextCall.nextAt,
+        endDate,
+        notes:
+          repeatUnit === "MONTHLY"
+            ? "Monthly sponsor reminder from Recovery Accountability app."
+            : `${repeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdaySelection(repeatDays)} sponsor reminder from Recovery Accountability app.`,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      });
+
+      setSponsorStatusMessage(`Calendar event created for ${nextCall.nextAt.toLocaleString()}.`);
+    } catch {
+      setSponsorStatusMessage(
+        "Failed to add calendar event. If module install was recent, reset Metro: pnpm --filter @recovery/mobile dev -- --clear",
+      );
+    } finally {
+      setAddingCalendarEvent(false);
     }
   }
 
@@ -1057,90 +1317,164 @@ export default function App() {
   }, [supervisionEnabled]);
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Recovery Accountability (Scaffold)</Text>
-      <Text style={styles.meta}>DEV user: {devAuthUserId}</Text>
-      {loadingMeetings ? <Text>Loading meetings...</Text> : null}
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-      <Button title="Refresh Meetings" onPress={() => void fetchMeetings()} />
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={24}
+    >
+      <ScrollView
+        contentContainerStyle={styles.contentContainer}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Text style={styles.title}>Recovery Accountability (Scaffold)</Text>
+        <Text style={styles.meta}>DEV user: {devAuthUserId}</Text>
+        {loadingMeetings ? <Text>Loading meetings...</Text> : null}
+        {error ? <Text style={styles.error}>{error}</Text> : null}
+        <Button title="Refresh Meetings" onPress={() => void fetchMeetings()} />
 
-      <View style={styles.supervisionBox}>
-        <View style={styles.supervisionRow}>
-          <Text style={styles.supervisionTitle}>Supervision mode</Text>
-          <Switch value={supervisionEnabled} onValueChange={setSupervisionEnabled} />
-        </View>
-        <Text style={styles.supervisionMeta}>{supervisionMessage}</Text>
-        <Text style={styles.supervisionMeta}>Zone rules loaded: {zones.length}</Text>
-      </View>
-
-      <View style={styles.sponsorBox}>
-        <Text style={styles.sponsorTitle}>Sponsor</Text>
-        <TextInput
-          style={styles.input}
-          value={sponsorName}
-          onChangeText={setSponsorName}
-          placeholder="Sponsor name"
-        />
-        <TextInput
-          style={styles.input}
-          value={sponsorPhoneDigits}
-          onChangeText={(value) => setSponsorPhoneDigits(normalizePhoneDigits(value))}
-          placeholder="Sponsor phone (10 digits)"
-          keyboardType="phone-pad"
-          maxLength={10}
-        />
-
-        <Text style={styles.sponsorLabel}>Call time</Text>
-        <View style={styles.pickerRow}>
-          <Pressable style={styles.pickerButton} onPress={() => incrementHour(-1)}>
-            <Text style={styles.pickerButtonText}>-</Text>
-          </Pressable>
-          <Text style={styles.pickerValue}>{String(sponsorHour12).padStart(2, "0")}</Text>
-          <Pressable style={styles.pickerButton} onPress={() => incrementHour(1)}>
-            <Text style={styles.pickerButtonText}>+</Text>
-          </Pressable>
-
-          <Text style={styles.pickerDivider}>:</Text>
-
-          <Pressable style={styles.pickerButton} onPress={() => incrementMinute(-1)}>
-            <Text style={styles.pickerButtonText}>-</Text>
-          </Pressable>
-          <Text style={styles.pickerValue}>{String(sponsorMinute).padStart(2, "0")}</Text>
-          <Pressable style={styles.pickerButton} onPress={() => incrementMinute(1)}>
-            <Text style={styles.pickerButtonText}>+</Text>
-          </Pressable>
-
-          <Pressable
-            style={styles.pickerMeridiemButton}
-            onPress={() => setSponsorMeridiem((value) => (value === "AM" ? "PM" : "AM"))}
-          >
-            <Text style={styles.pickerMeridiemText}>{sponsorMeridiem}</Text>
-          </Pressable>
+        <View style={styles.supervisionBox}>
+          <View style={styles.supervisionRow}>
+            <Text style={styles.supervisionTitle}>Supervision mode</Text>
+            <Switch value={supervisionEnabled} onValueChange={setSupervisionEnabled} />
+          </View>
+          <Text style={styles.supervisionMeta}>{supervisionMessage}</Text>
+          <Text style={styles.supervisionMeta}>Zone rules loaded: {zones.length}</Text>
         </View>
 
-        <Text style={styles.sponsorLabel}>Repeat</Text>
-        <View style={styles.repeatRow}>
-          {SPONSOR_REPEAT_OPTIONS.map((option) => (
-            <Pressable
-              key={option.value}
-              style={[
-                styles.repeatChip,
-                sponsorRepeatRule === option.value ? styles.repeatChipSelected : null,
-              ]}
-              onPress={() => setSponsorRepeatRule(option.value)}
-            >
-              <Text
-                style={[
-                  styles.repeatChipText,
-                  sponsorRepeatRule === option.value ? styles.repeatChipTextSelected : null,
-                ]}
-              >
-                {option.label}
-              </Text>
+        <View style={styles.sponsorBox}>
+          <Text style={styles.sponsorTitle}>Sponsor</Text>
+          <TextInput
+            style={styles.input}
+            value={sponsorName}
+            onChangeText={setSponsorName}
+            placeholder="Sponsor name"
+          />
+          <TextInput
+            style={styles.input}
+            value={formatUsPhoneDisplay(sponsorPhoneDigits)}
+            onChangeText={(value) => setSponsorPhoneDigits(normalizePhoneDigits(value))}
+            placeholder="(555) 555-1234"
+            keyboardType="phone-pad"
+            maxLength={14}
+          />
+
+          <Text style={styles.sponsorLabel}>Call time</Text>
+          <View style={styles.pickerRow}>
+            <Pressable style={styles.pickerButton} onPress={() => incrementHour(-1)}>
+              <Text style={styles.pickerButtonText}>-</Text>
             </Pressable>
-          ))}
+            <Text style={styles.pickerValue}>{String(sponsorHour12).padStart(2, "0")}</Text>
+            <Pressable style={styles.pickerButton} onPress={() => incrementHour(1)}>
+              <Text style={styles.pickerButtonText}>+</Text>
+            </Pressable>
+
+            <Text style={styles.pickerDivider}>:</Text>
+
+            <Pressable style={styles.pickerButton} onPress={() => incrementMinute(-1)}>
+              <Text style={styles.pickerButtonText}>-</Text>
+            </Pressable>
+            <Text style={styles.pickerValue}>{String(sponsorMinute).padStart(2, "0")}</Text>
+            <Pressable style={styles.pickerButton} onPress={() => incrementMinute(1)}>
+              <Text style={styles.pickerButtonText}>+</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.pickerMeridiemButton}
+              onPress={() => setSponsorMeridiem((value) => (value === "AM" ? "PM" : "AM"))}
+            >
+              <Text style={styles.pickerMeridiemText}>{sponsorMeridiem}</Text>
+            </Pressable>
+          </View>
+
+          <Text style={styles.sponsorLabel}>Repeat</Text>
+          <View style={styles.repeatRow}>
+            {SPONSOR_REPEAT_OPTIONS.map((option) => (
+              <Pressable
+                key={option.value}
+                style={[
+                  styles.repeatChip,
+                  sponsorRepeatPreset === option.value ? styles.repeatChipSelected : null,
+                ]}
+                onPress={() => setSponsorRepeatPreset(option.value)}
+              >
+                <Text
+                  style={[
+                    styles.repeatChipText,
+                    sponsorRepeatPreset === option.value ? styles.repeatChipTextSelected : null,
+                  ]}
+                >
+                  {option.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {sponsorRepeatPreset !== "MONTHLY" ? (
+            <>
+              <Text style={styles.sponsorLabel}>Days</Text>
+              <View style={styles.repeatRow}>
+                {WEEKDAY_OPTIONS.map((day) => (
+                  <Pressable
+                    key={day.code}
+                    style={[
+                      styles.repeatChip,
+                      sponsorRepeatDays.includes(day.code) ? styles.repeatChipSelected : null,
+                    ]}
+                    onPress={() => toggleRepeatDay(day.code)}
+                  >
+                    <Text
+                      style={[
+                        styles.repeatChipText,
+                        sponsorRepeatDays.includes(day.code) ? styles.repeatChipTextSelected : null,
+                      ]}
+                    >
+                      {day.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </>
+          ) : null}
+
+          <View style={styles.supervisionRow}>
+            <Text style={styles.sponsorLabel}>Active reminders</Text>
+            <Switch value={sponsorActive} onValueChange={setSponsorActive} />
+          </View>
+
+          <Text style={styles.sponsorMeta}>{sponsorScheduleSummary}</Text>
+          <Text style={styles.sponsorMeta}>{sponsorStatusMessage}</Text>
+          <Button
+            title={savingSponsor ? "Saving..." : "Save Sponsor Config"}
+            onPress={() => void handleSaveSponsorConfig()}
+            disabled={savingSponsor}
+          />
+          <View style={styles.buttonSpacer} />
+          <Button
+            title={addingCalendarEvent ? "Adding..." : "Add to Calendar"}
+            onPress={() => void handleAddToCalendar()}
+            disabled={addingCalendarEvent}
+          />
+          <Text style={styles.sponsorMeta}>
+            If install changed recently, reset Metro: pnpm --filter @recovery/mobile dev -- --clear
+          </Text>
         </View>
 
+        <View style={styles.list}>
+          {meetings.map((item) => (
+            <View key={item.id} style={styles.item}>
+              <Text style={styles.itemTitle}>{item.name}</Text>
+              <Text style={styles.itemAddress}>{item.address}</Text>
+              <Button title="Check In" onPress={() => void handleCheckIn(item.id)} />
+            </View>
+          ))}
+          {!loadingMeetings && meetings.length === 0 ? <Text>No meetings found.</Text> : null}
+        </View>
+        <View style={styles.checkoutBox}>
+          <Text>Last attendance: {lastAttendanceId ?? "None"}</Text>
+          <Text>Last status: {lastAttendanceStatus ?? "N/A"}</Text>
+          <Button title="Check Out Last Attendance" onPress={() => void handleCheckOut()} />
+        </View>
+      </ScrollView>
         <Text style={styles.sponsorLabel}>Alert lead time (minutes)</Text>
         <View style={styles.repeatRow}>
           {SPONSOR_ALERT_LEAD_PRESETS_MINUTES.map((minutes) => (
@@ -1222,16 +1556,19 @@ export default function App() {
         <Button title="Check Out Last Attendance" onPress={() => void handleCheckOut()} />
       </View>
       <StatusBar style="auto" />
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: "#f4f7fb",
+  },
+  contentContainer: {
     paddingTop: 64,
     paddingHorizontal: 16,
-    backgroundColor: "#f4f7fb",
+    paddingBottom: 120,
   },
   title: {
     fontSize: 22,
@@ -1288,6 +1625,9 @@ const styles = StyleSheet.create({
   sponsorMeta: {
     color: "#475467",
     fontSize: 12,
+  },
+  buttonSpacer: {
+    height: 8,
   },
   input: {
     borderWidth: 1,
@@ -1421,5 +1761,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: "#ddd",
     paddingTop: 12,
+    marginBottom: 12,
   },
 });
