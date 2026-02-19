@@ -34,6 +34,12 @@ pnpm --filter @recovery/mobile dev
 pnpm --filter @recovery/worker dev
 ```
 
+If you add or change Expo native modules (for example `expo-calendar`), restart Metro with a cleared cache:
+
+```bash
+pnpm --filter @recovery/mobile dev --clear
+```
+
 ## API development
 
 ```bash

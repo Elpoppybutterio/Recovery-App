@@ -1,4 +1,5 @@
 import { StatusBar } from "expo-status-bar";
+import * as Calendar from "expo-calendar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
@@ -338,10 +339,6 @@ function loadAsyncStorageModule(): AsyncStorageModule | null {
   }
 
   return null;
-}
-
-function loadCalendarModule(): CalendarModule | null {
-  return tryRequireModule<CalendarModule>("expo-calendar");
 }
 
 function resolveCalendarWeekdayMap(calendar: CalendarModule): CalendarWeekdayMap {
@@ -753,11 +750,7 @@ export default function App() {
       return;
     }
 
-    const calendarModule = loadCalendarModule();
-    if (!calendarModule) {
-      setCalendarStatusMessage("Calendar module unavailable. Install expo-calendar.");
-      return;
-    }
+    const calendarModule = Calendar as unknown as CalendarModule;
 
     setSavingCalendar(true);
     try {
