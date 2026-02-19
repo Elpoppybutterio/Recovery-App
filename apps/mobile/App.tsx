@@ -1,3 +1,5 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -25,6 +27,7 @@ type WeekdayCode = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
 type RepeatUnit = "WEEKLY" | "MONTHLY";
 type RepeatPreset = "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 type LocationPermissionState = "unknown" | "granted" | "denied" | "unavailable";
+type SponsorLeadMinutes = 0 | 5 | 10 | 30;
 
 type SponsorConfigPayload = {
   sponsorName: string;
@@ -62,11 +65,6 @@ type GeolocationApi = {
   ): void;
 };
 
-type AsyncStorageModule = {
-  getItem(key: string): Promise<string | null>;
-  setItem(key: string, value: string): Promise<void>;
-};
-
 type AttendanceRecord = {
   id: string;
   meetingId: string;
@@ -89,15 +87,58 @@ type DayOption = {
   offset: number;
   label: string;
   dayOfWeek: number;
+  date: Date;
+  dateKey: string;
 };
 
 type MeetingListItem = MeetingRecord & {
   distanceMeters: number | null;
 };
 
+type PlannedMeeting = {
+  going: boolean;
+  earlyMinutes: number;
+  serviceCommitmentMinutes: number | null;
+};
+
+type DayPlanState = {
+  homeGroupMeetingId: string | null;
+  plans: Record<string, PlannedMeeting>;
+};
+
+type MeetingPlansState = Record<string, DayPlanState>;
+
+type NotificationBuckets = {
+  sponsor: string[];
+  drive: string[];
+};
+
+type TravelTimeProvider = {
+  estimateMinutes(distanceMeters: number | null): number;
+};
+
+type DriveSchedulePreview = {
+  meetingStartAt: Date;
+  arrivalBufferMinutes: number;
+  travelMinutes: number;
+  departAt: Date;
+  notifyAt: Date;
+  usesServiceCommitment: boolean;
+};
+
 const ARRIVAL_RADIUS_METERS = 61;
 const EARTH_RADIUS_METERS = 6371000;
 const ATTENDANCE_STORAGE_KEY_PREFIX = "recovery:verifiedAttendance:";
+const MEETING_PLAN_STORAGE_KEY_PREFIX = "recovery:meetingPlans:";
+const NOTIFICATION_STORAGE_KEY_PREFIX = "recovery:notificationIds:";
+
+const SPONSOR_NOTIFICATION_CATEGORY_ID = "SPONSOR_CALL";
+const DRIVE_NOTIFICATION_CATEGORY_ID = "DRIVE_LEAVE";
+const SPONSOR_CALL_ACTION_ID = "SPONSOR_CALL_NOW";
+const DRIVE_ACTION_ID = "DRIVE_NOW";
+
+const DEFAULT_MEETING_EARLY_MINUTES = 10;
+const DEFAULT_SERVICE_COMMITMENT_MINUTES = 45;
 
 const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }> = [
   { code: "MON", label: "Mon", jsDay: 1 },
@@ -116,11 +157,37 @@ const SPONSOR_REPEAT_OPTIONS: Array<{ value: RepeatPreset; label: string }> = [
   { value: "MONTHLY", label: "Monthly" },
 ];
 
-const RECOVERY_MODE_OPTIONS: Array<{ value: RecoveryMode; title: string; implemented: boolean }> = [
-  { value: "A", title: "Mode A", implemented: true },
-  { value: "B", title: "Mode B", implemented: false },
-  { value: "C", title: "Mode C", implemented: false },
+const SPONSOR_LEAD_OPTIONS: Array<{ value: SponsorLeadMinutes; label: string }> = [
+  { value: 0, label: "None" },
+  { value: 5, label: "5m" },
+  { value: 10, label: "10m" },
+  { value: 30, label: "30m" },
 ];
+
+const RECOVERY_MODE_OPTIONS: Array<{ value: RecoveryMode; title: string; implemented: boolean }> = [
+  { value: "A", title: "Recovery", implemented: true },
+  { value: "B", title: "Sober Housing", implemented: false },
+  { value: "C", title: "Probation/Parole", implemented: false },
+];
+
+const EMPTY_DAY_PLAN: DayPlanState = {
+  homeGroupMeetingId: null,
+  plans: {},
+};
+
+function createTravelTimeProvider(assumedSpeedMph = 25): TravelTimeProvider {
+  const speedMetersPerMinute = (assumedSpeedMph * 1609.344) / 60;
+
+  return {
+    estimateMinutes(distanceMeters: number | null): number {
+      if (distanceMeters === null) {
+        return 15;
+      }
+      const estimated = Math.ceil(distanceMeters / speedMetersPerMinute);
+      return Math.max(5, Math.min(180, estimated));
+    },
+  };
+}
 
 function toRadians(value: number): number {
   return (value * Math.PI) / 180;
@@ -158,7 +225,10 @@ function parseMinutesFromHhmm(value: string): number {
 }
 
 function normalizePhoneDigits(value: string): string {
-  return value.replace(/\D/g, "").slice(0, 10);
+  const stripped = value.replace(/\D/g, "");
+  const withoutCountryCode =
+    stripped.length === 11 && stripped.startsWith("1") ? stripped.slice(1) : stripped;
+  return withoutCountryCode.slice(0, 10);
 }
 
 function formatUsPhoneDisplay(phoneDigits: string): string {
@@ -182,6 +252,10 @@ function toE164FromUsTenDigit(phoneDigits: string): string | null {
   return `+1${phoneDigits}`;
 }
 
+function dateKeyForDate(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
 function createDayOptions(): DayOption[] {
   const result: DayOption[] = [];
   const today = new Date();
@@ -193,6 +267,8 @@ function createDayOptions(): DayOption[] {
       offset,
       label: offset === 0 ? "Today" : next.toLocaleDateString(undefined, { weekday: "short" }),
       dayOfWeek: next.getDay(),
+      date: next,
+      dateKey: dateKeyForDate(next),
     });
   }
 
@@ -321,23 +397,33 @@ function computeNextCall(
   return { nextAt: fallback, dueToday: false };
 }
 
+function combineDateWithHhmm(date: Date, hhmm: string): Date {
+  const result = new Date(date);
+  const [hoursText, minutesText] = hhmm.split(":");
+  const hours = Number(hoursText);
+  const minutes = Number(minutesText);
+  result.setHours(
+    Number.isFinite(hours) ? Math.max(0, Math.min(23, hours)) : 0,
+    Number.isFinite(minutes) ? Math.max(0, Math.min(59, minutes)) : 0,
+    0,
+    0,
+  );
+  return result;
+}
+
+function parsePositiveInt(value: string, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(0, Math.floor(parsed));
+}
+
 function getGeolocationApi(): GeolocationApi | undefined {
   const navigatorValue = (
     globalThis as typeof globalThis & { navigator?: { geolocation?: GeolocationApi } }
   ).navigator;
   return navigatorValue?.geolocation;
-}
-
-function loadAsyncStorageModule(): AsyncStorageModule | null {
-  try {
-    const dynamicRequire: (moduleName: string) => unknown = require;
-    const moduleValue = dynamicRequire("@react-native-async-storage/async-storage") as {
-      default?: AsyncStorageModule;
-    };
-    return moduleValue.default ?? null;
-  } catch {
-    return null;
-  }
 }
 
 function encodeBase64(value: string): string {
@@ -388,6 +474,14 @@ function attendanceStorageKey(userId: string): string {
   return `${ATTENDANCE_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+function meetingPlanStorageKey(userId: string): string {
+  return `${MEETING_PLAN_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function notificationStorageKey(userId: string): string {
+  return `${NOTIFICATION_STORAGE_KEY_PREFIX}${userId}`;
+}
+
 function formatError(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -398,6 +492,13 @@ function formatError(error: unknown): string {
 function createId(prefix: string): string {
   const random = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
   return `${prefix}-${random}`;
+}
+
+function emptyNotificationBuckets(): NotificationBuckets {
+  return {
+    sponsor: [],
+    drive: [],
+  };
 }
 
 export default function App() {
@@ -417,8 +518,12 @@ export default function App() {
     () => createMeetingsSource({ feedUrl: meetingFeedUrl, apiUrl, authHeader }),
     [apiUrl, authHeader, meetingFeedUrl],
   );
+  const travelTimeProvider = useMemo(() => createTravelTimeProvider(25), []);
 
   const dayOptions = useMemo(() => createDayOptions(), []);
+  const attendanceStorage = useMemo(() => attendanceStorageKey(devAuthUserId), [devAuthUserId]);
+  const meetingPlansStorage = useMemo(() => meetingPlanStorageKey(devAuthUserId), [devAuthUserId]);
+  const notificationStorage = useMemo(() => notificationStorageKey(devAuthUserId), [devAuthUserId]);
 
   const [mode, setMode] = useState<RecoveryMode>("A");
   const [screen, setScreen] = useState<AppScreen>("LIST");
@@ -452,13 +557,32 @@ export default function App() {
     getCurrentWeekdayCode(new Date()),
   ]);
   const [sponsorActive, setSponsorActive] = useState(true);
+  const [sponsorLeadMinutes, setSponsorLeadMinutes] = useState<SponsorLeadMinutes>(5);
   const [sponsorSaving, setSponsorSaving] = useState(false);
   const [sponsorStatus, setSponsorStatus] = useState("Sponsor config not saved yet.");
 
+  const [notificationStatus, setNotificationStatus] = useState("Notifications not scheduled yet.");
+  const [notificationOpenPhone, setNotificationOpenPhone] = useState<string | null>(null);
+
+  const [meetingPlansByDate, setMeetingPlansByDate] = useState<MeetingPlansState>({});
+  const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(__DEV__);
+
   const arrivalPromptedMeetingRef = useRef<string | null>(null);
-  const attendanceStorage = useMemo(() => attendanceStorageKey(devAuthUserId), [devAuthUserId]);
+  const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
+  const meetingsShapeLoggedRef = useRef(false);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
+
+  const normalizedSponsorName = useMemo(() => sponsorName.trim(), [sponsorName]);
+  const sponsorPhoneE164 = useMemo(
+    () => toE164FromUsTenDigit(sponsorPhoneDigits),
+    [sponsorPhoneDigits],
+  );
+
+  const selectedDayPlan = useMemo(
+    () => meetingPlansByDate[selectedDay.dateKey] ?? EMPTY_DAY_PLAN,
+    [meetingPlansByDate, selectedDay.dateKey],
+  );
 
   const meetingsForDay = useMemo<MeetingListItem[]>(() => {
     const list = meetings
@@ -561,12 +685,91 @@ export default function App() {
     });
   }, []);
 
-  const requestLocationPermission = useCallback(async () => {
-    if (Platform.OS !== "ios") {
-      setLocationPermission("granted");
-      return;
+  const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
+    const existing = await Notifications.getPermissionsAsync();
+    if (existing.granted || existing.status === Notifications.PermissionStatus.GRANTED) {
+      return true;
     }
 
+    const requested = await Notifications.requestPermissionsAsync();
+    return requested.granted || requested.status === Notifications.PermissionStatus.GRANTED;
+  }, []);
+
+  const applyScheduleTime = useCallback(
+    (target: Date): Date => {
+      const now = Date.now();
+      const diffMs = target.getTime() - now;
+      if (debugTimeCompressionEnabled) {
+        const compressedDelay = Math.max(5000, Math.floor(Math.max(diffMs, 0) / 12));
+        return new Date(now + compressedDelay);
+      }
+      if (diffMs <= 2000) {
+        return new Date(now + 5000);
+      }
+      return target;
+    },
+    [debugTimeCompressionEnabled],
+  );
+
+  const loadNotificationBuckets = useCallback(async (): Promise<NotificationBuckets> => {
+    try {
+      const raw = await AsyncStorage.getItem(notificationStorage);
+      if (!raw) {
+        return emptyNotificationBuckets();
+      }
+      const parsed = JSON.parse(raw) as NotificationBuckets;
+      return {
+        sponsor: Array.isArray(parsed.sponsor) ? parsed.sponsor : [],
+        drive: Array.isArray(parsed.drive) ? parsed.drive : [],
+      };
+    } catch {
+      return emptyNotificationBuckets();
+    }
+  }, [notificationStorage]);
+
+  const saveNotificationBuckets = useCallback(
+    async (buckets: NotificationBuckets) => {
+      await AsyncStorage.setItem(notificationStorage, JSON.stringify(buckets));
+    },
+    [notificationStorage],
+  );
+
+  const cancelNotificationBucket = useCallback(
+    async (bucket: keyof NotificationBuckets) => {
+      const buckets = await loadNotificationBuckets();
+      const ids = buckets[bucket];
+      await Promise.all(
+        ids.map(async (id) => {
+          try {
+            await Notifications.cancelScheduledNotificationAsync(id);
+          } catch {
+            // ignore stale ids
+          }
+        }),
+      );
+      buckets[bucket] = [];
+      await saveNotificationBuckets(buckets);
+      return buckets;
+    },
+    [loadNotificationBuckets, saveNotificationBuckets],
+  );
+
+  const scheduleAt = useCallback(
+    async (date: Date, content: Notifications.NotificationContentInput): Promise<string> => {
+      const trigger: Notifications.DateTriggerInput = {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date,
+      };
+
+      return Notifications.scheduleNotificationAsync({
+        content,
+        trigger,
+      });
+    },
+    [],
+  );
+
+  const requestLocationPermission = useCallback(async () => {
     const position = await readCurrentLocation();
     if (position) {
       setMeetingsStatus("Location enabled for distance and arrival detection.");
@@ -577,17 +780,24 @@ export default function App() {
 
   const persistAttendanceRecords = useCallback(
     async (nextRecords: AttendanceRecord[]) => {
-      const asyncStorage = loadAsyncStorageModule();
-      if (!asyncStorage) {
-        return;
-      }
       try {
-        await asyncStorage.setItem(attendanceStorage, JSON.stringify(nextRecords));
+        await AsyncStorage.setItem(attendanceStorage, JSON.stringify(nextRecords));
       } catch {
         setAttendanceStatus("Failed to persist attendance records locally.");
       }
     },
     [attendanceStorage],
+  );
+
+  const persistMeetingPlans = useCallback(
+    async (nextPlans: MeetingPlansState) => {
+      try {
+        await AsyncStorage.setItem(meetingPlansStorage, JSON.stringify(nextPlans));
+      } catch {
+        setMeetingsStatus("Failed to persist meeting planning settings locally.");
+      }
+    },
+    [meetingPlansStorage],
   );
 
   const upsertAttendanceRecord = useCallback(
@@ -615,6 +825,11 @@ export default function App() {
         lng: location?.lng,
       });
       setMeetings(result.meetings);
+
+      if (!meetingsShapeLoggedRef.current && result.meetings.length > 0) {
+        meetingsShapeLoggedRef.current = true;
+        console.log("[meetings] normalized sample", result.meetings[0]);
+      }
 
       const warningSuffix = result.warning ? ` (${result.warning})` : "";
       setMeetingsStatus(
@@ -678,15 +893,278 @@ export default function App() {
     }
   }, [apiUrl, authHeader]);
 
+  const openPhoneCall = useCallback(async (phoneE164: string | null) => {
+    if (!phoneE164) {
+      return;
+    }
+    const digits = normalizePhoneDigits(phoneE164);
+    if (!digits) {
+      return;
+    }
+    try {
+      await Linking.openURL(`tel:${digits}`);
+    } catch {
+      setNotificationStatus("Unable to open dialer on this device.");
+    }
+  }, []);
+
+  const openMeetingDestination = useCallback(async (meeting: MeetingRecord) => {
+    if (
+      meeting.format === "ONLINE" ||
+      (meeting.onlineUrl && meeting.lat === null && meeting.lng === null)
+    ) {
+      if (!meeting.onlineUrl) {
+        setAttendanceStatus("No online URL configured for this meeting.");
+        return;
+      }
+      await Linking.openURL(meeting.onlineUrl);
+      return;
+    }
+
+    const destination =
+      meeting.lat !== null && meeting.lng !== null
+        ? `${meeting.lat},${meeting.lng}`
+        : encodeURIComponent(meeting.address);
+
+    const url =
+      Platform.OS === "ios"
+        ? `http://maps.apple.com/?daddr=${destination}`
+        : `https://www.google.com/maps/search/?api=1&query=${destination}`;
+
+    await Linking.openURL(url);
+  }, []);
+
+  const buildDriveSchedulePreview = useCallback(
+    (meeting: MeetingListItem, dayPlan: DayPlanState): DriveSchedulePreview | null => {
+      const meetingPlan = dayPlan.plans[meeting.id];
+      if (!meetingPlan?.going) {
+        return null;
+      }
+
+      const meetingStartAt = combineDateWithHhmm(selectedDay.date, meeting.startsAtLocal);
+      const distance =
+        currentLocation && meeting.lat !== null && meeting.lng !== null
+          ? distanceMetersBetween(
+              currentLocation.lat,
+              currentLocation.lng,
+              meeting.lat,
+              meeting.lng,
+            )
+          : null;
+      const travelMinutes = travelTimeProvider.estimateMinutes(distance);
+
+      const usesServiceCommitment =
+        dayPlan.homeGroupMeetingId === meeting.id && meetingPlan.serviceCommitmentMinutes !== null;
+      const arrivalBufferMinutes = usesServiceCommitment
+        ? (meetingPlan.serviceCommitmentMinutes ?? DEFAULT_SERVICE_COMMITMENT_MINUTES)
+        : meetingPlan.earlyMinutes;
+
+      const departAt = new Date(
+        meetingStartAt.getTime() - (arrivalBufferMinutes + travelMinutes) * 60_000,
+      );
+      const notifyAt = new Date(departAt.getTime() - 10 * 60_000);
+
+      return {
+        meetingStartAt,
+        arrivalBufferMinutes,
+        travelMinutes,
+        departAt,
+        notifyAt,
+        usesServiceCommitment,
+      };
+    },
+    [selectedDay.date, currentLocation, travelTimeProvider],
+  );
+
+  const rescheduleSponsorNotifications = useCallback(
+    async (reason: string) => {
+      await cancelNotificationBucket("sponsor");
+
+      if (!sponsorActive) {
+        setNotificationStatus("Sponsor reminders disabled.");
+        return;
+      }
+
+      if (!normalizedSponsorName || sponsorPhoneE164 === null) {
+        setNotificationStatus("Sponsor notifications skipped: name/phone incomplete.");
+        return;
+      }
+
+      const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
+      const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
+      const repeatDays = repeatUnit === "MONTHLY" ? [] : sortWeekdays(sponsorRepeatDays);
+      if (repeatUnit === "WEEKLY" && repeatDays.length === 0) {
+        setNotificationStatus("Sponsor notifications skipped: choose at least one day.");
+        return;
+      }
+
+      const hasPermission = await ensureNotificationPermission();
+      if (!hasPermission) {
+        setNotificationStatus("Notification permission denied.");
+        return;
+      }
+
+      const now = new Date();
+      const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
+      const nextCall = computeNextCall(
+        now,
+        callTime,
+        repeatUnit,
+        repeatInterval,
+        repeatDays,
+      ).nextAt;
+
+      const nextBuckets = await loadNotificationBuckets();
+      const scheduledIds: string[] = [];
+
+      if (sponsorLeadMinutes > 0) {
+        const leadTimeTarget = new Date(nextCall.getTime() - sponsorLeadMinutes * 60_000);
+        const leadFireAt = applyScheduleTime(leadTimeTarget);
+        const leadId = await scheduleAt(leadFireAt, {
+          title: "Sponsor call time upcoming",
+          body: `Call now? ${sponsorPhoneE164}`,
+          categoryIdentifier: SPONSOR_NOTIFICATION_CATEGORY_ID,
+          data: {
+            type: "sponsor",
+            phoneE164: sponsorPhoneE164,
+            reason: "lead",
+          },
+        });
+        scheduledIds.push(leadId);
+      }
+
+      const callFireAt = applyScheduleTime(nextCall);
+      const atTimeId = await scheduleAt(callFireAt, {
+        title: `Call ${normalizedSponsorName} now`,
+        body: `${sponsorPhoneE164}`,
+        categoryIdentifier: SPONSOR_NOTIFICATION_CATEGORY_ID,
+        data: {
+          type: "sponsor",
+          phoneE164: sponsorPhoneE164,
+          reason: "at-time",
+        },
+      });
+      scheduledIds.push(atTimeId);
+
+      nextBuckets.sponsor = scheduledIds;
+      await saveNotificationBuckets(nextBuckets);
+
+      console.log("[notifications] sponsor schedule", {
+        reason,
+        nextCall: nextCall.toISOString(),
+        leadMinutes: sponsorLeadMinutes,
+        ids: scheduledIds,
+      });
+
+      setNotificationStatus(
+        `Scheduled sponsor notifications (${scheduledIds.length}) for ${nextCall.toLocaleString()}.`,
+      );
+    },
+    [
+      cancelNotificationBucket,
+      sponsorActive,
+      normalizedSponsorName,
+      sponsorPhoneE164,
+      sponsorRepeatPreset,
+      sponsorRepeatDays,
+      ensureNotificationPermission,
+      sponsorHour12,
+      sponsorMinute,
+      sponsorMeridiem,
+      sponsorLeadMinutes,
+      loadNotificationBuckets,
+      applyScheduleTime,
+      scheduleAt,
+      saveNotificationBuckets,
+    ],
+  );
+
+  const rescheduleDriveNotifications = useCallback(
+    async (reason: string) => {
+      await cancelNotificationBucket("drive");
+
+      const plannedMeetings = meetingsForDay.filter(
+        (meeting) => selectedDayPlan.plans[meeting.id]?.going,
+      );
+      if (plannedMeetings.length === 0) {
+        setMeetingsStatus(
+          (previous) => `${previous.split(" | ")[0]} | No planned meetings to notify.`,
+        );
+        return;
+      }
+
+      const hasPermission = await ensureNotificationPermission();
+      if (!hasPermission) {
+        setMeetingsStatus("Notification permission denied for drive alerts.");
+        return;
+      }
+
+      const nextBuckets = await loadNotificationBuckets();
+      const scheduledIds: string[] = [];
+
+      for (const meeting of plannedMeetings) {
+        const preview = buildDriveSchedulePreview(meeting, selectedDayPlan);
+        if (!preview) {
+          continue;
+        }
+
+        const fireAt = applyScheduleTime(preview.notifyAt);
+        const id = await scheduleAt(fireAt, {
+          title: `Leave in 10 minutes for ${meeting.name}`,
+          body: `${preview.travelMinutes}m travel • depart ${preview.departAt.toLocaleTimeString()}`,
+          categoryIdentifier: DRIVE_NOTIFICATION_CATEGORY_ID,
+          data: {
+            type: "drive",
+            meetingId: meeting.id,
+            reason: preview.usesServiceCommitment ? "service" : "planned",
+          },
+        });
+        scheduledIds.push(id);
+
+        console.log("[notifications] drive schedule", {
+          reason,
+          meetingId: meeting.id,
+          meetingName: meeting.name,
+          meetingStartAt: preview.meetingStartAt.toISOString(),
+          travelMinutes: preview.travelMinutes,
+          arrivalBufferMinutes: preview.arrivalBufferMinutes,
+          departAt: preview.departAt.toISOString(),
+          notifyAt: preview.notifyAt.toISOString(),
+          scheduledAt: fireAt.toISOString(),
+          notificationId: id,
+        });
+      }
+
+      nextBuckets.drive = scheduledIds;
+      await saveNotificationBuckets(nextBuckets);
+
+      if (scheduledIds.length > 0) {
+        setMeetingsStatus(
+          `Scheduled ${scheduledIds.length} drive reminder(s) for planned meetings on ${selectedDay.label}.`,
+        );
+      }
+    },
+    [
+      cancelNotificationBucket,
+      meetingsForDay,
+      selectedDayPlan,
+      ensureNotificationPermission,
+      loadNotificationBuckets,
+      buildDriveSchedulePreview,
+      applyScheduleTime,
+      scheduleAt,
+      saveNotificationBuckets,
+      selectedDay.label,
+    ],
+  );
+
   const saveSponsorConfig = useCallback(async () => {
-    const normalizedName = sponsorName.trim();
-    if (!normalizedName) {
+    if (!normalizedSponsorName) {
       setSponsorStatus("Sponsor name is required.");
       return;
     }
 
-    const phoneE164 = toE164FromUsTenDigit(sponsorPhoneDigits);
-    if (!phoneE164) {
+    if (!sponsorPhoneE164) {
       setSponsorStatus("Sponsor phone must be a valid 10-digit US number.");
       return;
     }
@@ -701,8 +1179,8 @@ export default function App() {
     }
 
     const payload: SponsorConfigPayload = {
-      sponsorName: normalizedName,
-      sponsorPhoneE164: phoneE164,
+      sponsorName: normalizedSponsorName,
+      sponsorPhoneE164,
       callTimeLocalHhmm: to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem),
       repeatUnit,
       repeatInterval,
@@ -727,14 +1205,15 @@ export default function App() {
       }
 
       setSponsorStatus("Sponsor config saved.");
+      await rescheduleSponsorNotifications("save");
     } catch {
       setSponsorStatus("Sponsor config save failed: network.");
     } finally {
       setSponsorSaving(false);
     }
   }, [
-    sponsorName,
-    sponsorPhoneDigits,
+    normalizedSponsorName,
+    sponsorPhoneE164,
     sponsorRepeatPreset,
     sponsorRepeatDays,
     sponsorHour12,
@@ -743,6 +1222,7 @@ export default function App() {
     sponsorActive,
     apiUrl,
     authHeader,
+    rescheduleSponsorNotifications,
   ]);
 
   const startAttendance = useCallback(
@@ -874,62 +1354,302 @@ export default function App() {
     }
   }, [activeAttendance, devUserDisplayName, upsertAttendanceRecord]);
 
-  const openMeetingDestination = useCallback(async (meeting: MeetingRecord) => {
-    if (
-      meeting.format === "ONLINE" ||
-      (meeting.onlineUrl && meeting.lat === null && meeting.lng === null)
-    ) {
-      if (!meeting.onlineUrl) {
-        setAttendanceStatus("No online URL configured for this meeting.");
-        return;
-      }
-      await Linking.openURL(meeting.onlineUrl);
+  const updateSelectedDayPlan = useCallback(
+    (updater: (current: DayPlanState) => DayPlanState, callback?: (next: DayPlanState) => void) => {
+      setMeetingPlansByDate((previous) => {
+        const current = previous[selectedDay.dateKey] ?? EMPTY_DAY_PLAN;
+        const nextForDay = updater(current);
+        const next = {
+          ...previous,
+          [selectedDay.dateKey]: nextForDay,
+        };
+        void persistMeetingPlans(next);
+        callback?.(nextForDay);
+        return next;
+      });
+    },
+    [persistMeetingPlans, selectedDay.dateKey],
+  );
+
+  const setMeetingGoing = useCallback(
+    (meetingId: string, going: boolean) => {
+      updateSelectedDayPlan((current) => {
+        const existing = current.plans[meetingId] ?? {
+          going: false,
+          earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
+          serviceCommitmentMinutes: null,
+        };
+
+        return {
+          ...current,
+          plans: {
+            ...current.plans,
+            [meetingId]: {
+              ...existing,
+              going,
+            },
+          },
+        };
+      });
+    },
+    [updateSelectedDayPlan],
+  );
+
+  const setMeetingEarlyMinutes = useCallback(
+    (meetingId: string, earlyMinutesText: string) => {
+      const nextEarlyMinutes = parsePositiveInt(earlyMinutesText, DEFAULT_MEETING_EARLY_MINUTES);
+      updateSelectedDayPlan((current) => {
+        const existing = current.plans[meetingId] ?? {
+          going: true,
+          earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
+          serviceCommitmentMinutes: null,
+        };
+
+        return {
+          ...current,
+          plans: {
+            ...current.plans,
+            [meetingId]: {
+              ...existing,
+              going: true,
+              earlyMinutes: nextEarlyMinutes,
+            },
+          },
+        };
+      });
+    },
+    [updateSelectedDayPlan],
+  );
+
+  const toggleHomeGroupMeeting = useCallback(
+    (meetingId: string) => {
+      updateSelectedDayPlan((current) => {
+        const nextHomeGroup = current.homeGroupMeetingId === meetingId ? null : meetingId;
+        const existing = current.plans[meetingId] ?? {
+          going: true,
+          earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
+          serviceCommitmentMinutes: null,
+        };
+
+        return {
+          ...current,
+          homeGroupMeetingId: nextHomeGroup,
+          plans: {
+            ...current.plans,
+            [meetingId]: {
+              ...existing,
+              going: true,
+              serviceCommitmentMinutes:
+                nextHomeGroup === meetingId
+                  ? (existing.serviceCommitmentMinutes ?? DEFAULT_SERVICE_COMMITMENT_MINUTES)
+                  : existing.serviceCommitmentMinutes,
+            },
+          },
+        };
+      });
+    },
+    [updateSelectedDayPlan],
+  );
+
+  const setServiceCommitmentMinutes = useCallback(
+    (meetingId: string, valueText: string) => {
+      const parsed = parsePositiveInt(valueText, DEFAULT_SERVICE_COMMITMENT_MINUTES);
+      updateSelectedDayPlan((current) => {
+        const existing = current.plans[meetingId] ?? {
+          going: true,
+          earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
+          serviceCommitmentMinutes: DEFAULT_SERVICE_COMMITMENT_MINUTES,
+        };
+
+        return {
+          ...current,
+          plans: {
+            ...current.plans,
+            [meetingId]: {
+              ...existing,
+              going: true,
+              serviceCommitmentMinutes: parsed,
+            },
+          },
+        };
+      });
+    },
+    [updateSelectedDayPlan],
+  );
+
+  const scheduleDebugSponsorNotification = useCallback(async () => {
+    const hasPermission = await ensureNotificationPermission();
+    if (!hasPermission) {
+      setNotificationStatus("Notification permission denied.");
       return;
     }
 
-    const destination =
-      meeting.lat !== null && meeting.lng !== null
-        ? `${meeting.lat},${meeting.lng}`
-        : encodeURIComponent(meeting.address);
+    const id = await scheduleAt(new Date(Date.now() + 10_000), {
+      title: "Sponsor call test",
+      body: `Call ${normalizedSponsorName || "Sponsor"} now (${sponsorPhoneE164 ?? "No number"})`,
+      categoryIdentifier: SPONSOR_NOTIFICATION_CATEGORY_ID,
+      data: {
+        type: "sponsor",
+        phoneE164: sponsorPhoneE164,
+        reason: "debug",
+      },
+    });
 
-    const url =
-      Platform.OS === "ios"
-        ? `http://maps.apple.com/?daddr=${destination}`
-        : `https://www.google.com/maps/search/?api=1&query=${destination}`;
+    const buckets = await loadNotificationBuckets();
+    buckets.sponsor = [...buckets.sponsor, id];
+    await saveNotificationBuckets(buckets);
 
-    await Linking.openURL(url);
-  }, []);
+    console.log("[notifications] debug sponsor scheduled", { id });
+    setNotificationStatus("Debug sponsor notification scheduled for ~10 seconds.");
+  }, [
+    ensureNotificationPermission,
+    scheduleAt,
+    normalizedSponsorName,
+    sponsorPhoneE164,
+    loadNotificationBuckets,
+    saveNotificationBuckets,
+  ]);
+
+  const scheduleDebugDriveNotification = useCallback(async () => {
+    const hasPermission = await ensureNotificationPermission();
+    if (!hasPermission) {
+      setNotificationStatus("Notification permission denied.");
+      return;
+    }
+
+    const id = await scheduleAt(new Date(Date.now() + 10_000), {
+      title: "Leave in 10 minutes",
+      body: "Leave in 10 minutes for your planned meeting.",
+      categoryIdentifier: DRIVE_NOTIFICATION_CATEGORY_ID,
+      data: {
+        type: "drive",
+      },
+    });
+
+    const buckets = await loadNotificationBuckets();
+    buckets.drive = [...buckets.drive, id];
+    await saveNotificationBuckets(buckets);
+
+    console.log("[notifications] debug drive scheduled", { id });
+    setNotificationStatus("Debug drive notification scheduled for ~10 seconds.");
+  }, [ensureNotificationPermission, loadNotificationBuckets, saveNotificationBuckets, scheduleAt]);
+
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: false,
+        shouldSetBadge: false,
+      }),
+    });
+
+    void Notifications.setNotificationCategoryAsync(SPONSOR_NOTIFICATION_CATEGORY_ID, [
+      {
+        identifier: SPONSOR_CALL_ACTION_ID,
+        buttonTitle: "Call",
+        options: { opensAppToForeground: true },
+      },
+    ]);
+    void Notifications.setNotificationCategoryAsync(DRIVE_NOTIFICATION_CATEGORY_ID, [
+      {
+        identifier: DRIVE_ACTION_ID,
+        buttonTitle: "Drive",
+        options: { opensAppToForeground: true },
+      },
+    ]);
+
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const action = response.actionIdentifier;
+      const data = response.notification.request.content.data as {
+        type?: string;
+        phoneE164?: string | null;
+        meetingId?: string;
+      };
+
+      if (data.type === "sponsor") {
+        const phone = typeof data.phoneE164 === "string" ? data.phoneE164 : null;
+        if (phone) {
+          setNotificationOpenPhone(phone);
+        }
+        if (action === SPONSOR_CALL_ACTION_ID && phone) {
+          void openPhoneCall(phone);
+        }
+      }
+
+      if (data.type === "drive") {
+        const meetingId = typeof data.meetingId === "string" ? data.meetingId : null;
+        if (meetingId && meetingsByIdRef.current[meetingId]) {
+          if (action === DRIVE_ACTION_ID || action === Notifications.DEFAULT_ACTION_IDENTIFIER) {
+            void openMeetingDestination(meetingsByIdRef.current[meetingId]);
+          }
+        }
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [openMeetingDestination, openPhoneCall]);
+
+  useEffect(() => {
+    const mapping: Record<string, MeetingRecord> = {};
+    for (const meeting of meetings) {
+      mapping[meeting.id] = meeting;
+    }
+    meetingsByIdRef.current = mapping;
+  }, [meetings]);
 
   useEffect(() => {
     void (async () => {
       await requestLocationPermission();
       await Promise.all([refreshMeetings(), fetchSponsorConfig()]);
 
-      const asyncStorage = loadAsyncStorageModule();
-      if (!asyncStorage) {
-        return;
-      }
-
       try {
-        const stored = await asyncStorage.getItem(attendanceStorage);
-        if (!stored) {
-          return;
+        const [attendanceRaw, planRaw] = await Promise.all([
+          AsyncStorage.getItem(attendanceStorage),
+          AsyncStorage.getItem(meetingPlansStorage),
+        ]);
+
+        if (attendanceRaw) {
+          const parsedAttendance = JSON.parse(attendanceRaw) as AttendanceRecord[];
+          if (Array.isArray(parsedAttendance)) {
+            setAttendanceRecords(parsedAttendance);
+          }
         }
 
-        const parsed = JSON.parse(stored) as AttendanceRecord[];
-        if (Array.isArray(parsed)) {
-          setAttendanceRecords(parsed);
+        if (planRaw) {
+          const parsedPlans = JSON.parse(planRaw) as MeetingPlansState;
+          if (parsedPlans && typeof parsedPlans === "object") {
+            setMeetingPlansByDate(parsedPlans);
+          }
         }
       } catch {
         setAttendanceStatus("Unable to load local attendance history.");
       }
     })();
     // TODO(auth): replace DEV auth headers with real session auth tokens.
-  }, [attendanceStorage, fetchSponsorConfig, refreshMeetings, requestLocationPermission]);
+  }, [
+    attendanceStorage,
+    meetingPlansStorage,
+    fetchSponsorConfig,
+    refreshMeetings,
+    requestLocationPermission,
+  ]);
 
   useEffect(() => {
     void refreshMeetings();
   }, [selectedDay.dayOfWeek, refreshMeetings]);
+
+  useEffect(() => {
+    if (!sponsorActive) {
+      void cancelNotificationBucket("sponsor");
+      setNotificationStatus("Sponsor reminders disabled.");
+    }
+  }, [sponsorActive, cancelNotificationBucket]);
+
+  useEffect(() => {
+    void rescheduleDriveNotifications("plan-change");
+  }, [rescheduleDriveNotifications]);
 
   useEffect(() => {
     if (!activeAttendance || activeAttendance.endAt) {
@@ -1117,7 +1837,9 @@ export default function App() {
 
         {mode !== "A" ? (
           <View style={styles.card}>
-            <Text style={styles.sectionTitle}>Mode {mode}</Text>
+            <Text style={styles.sectionTitle}>
+              {RECOVERY_MODE_OPTIONS.find((item) => item.value === mode)?.title}
+            </Text>
             <Text style={styles.sectionMeta}>
               This mode is visible for planning and will be implemented in a future slice.
             </Text>
@@ -1221,19 +1943,91 @@ export default function App() {
                 </>
               ) : null}
 
+              <Text style={styles.label}>Alert lead time</Text>
+              <View style={styles.chipRow}>
+                {SPONSOR_LEAD_OPTIONS.map((option) => (
+                  <Pressable
+                    key={option.value}
+                    style={[
+                      styles.chip,
+                      sponsorLeadMinutes === option.value ? styles.chipSelected : null,
+                    ]}
+                    onPress={() => setSponsorLeadMinutes(option.value)}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        sponsorLeadMinutes === option.value ? styles.chipTextSelected : null,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
               <View style={styles.inlineRow}>
                 <Text style={styles.label}>Active reminders</Text>
-                <Switch value={sponsorActive} onValueChange={setSponsorActive} />
+                <Switch
+                  value={sponsorActive}
+                  onValueChange={(value) => {
+                    setSponsorActive(value);
+                    if (value) {
+                      void rescheduleSponsorNotifications("toggle-on");
+                    }
+                  }}
+                />
               </View>
+
+              {notificationOpenPhone ? (
+                <View style={styles.callNowBox}>
+                  <Text style={styles.sectionMeta}>
+                    Opened from notification: {notificationOpenPhone}
+                  </Text>
+                  <Button
+                    title="Call now"
+                    onPress={() => void openPhoneCall(notificationOpenPhone)}
+                  />
+                </View>
+              ) : null}
 
               <Text style={styles.sectionMeta}>{sponsorScheduleSummary}</Text>
               <Text style={styles.sectionMeta}>{sponsorStatus}</Text>
+              <Text style={styles.sectionMeta}>{notificationStatus}</Text>
               <Button
                 title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
                 onPress={() => void saveSponsorConfig()}
                 disabled={sponsorSaving}
               />
             </View>
+
+            {__DEV__ ? (
+              <View style={styles.card}>
+                <Text style={styles.sectionTitle}>Debug Notification Tools</Text>
+                <View style={styles.inlineRow}>
+                  <Text style={styles.label}>Time compression</Text>
+                  <Switch
+                    value={debugTimeCompressionEnabled}
+                    onValueChange={setDebugTimeCompressionEnabled}
+                  />
+                </View>
+                <Text style={styles.sectionMeta}>
+                  When enabled, scheduled notification delays are compressed for quick simulator
+                  tests.
+                </Text>
+                <View style={styles.buttonRow}>
+                  <Button
+                    title="Test sponsor alert in 10s"
+                    onPress={() => void scheduleDebugSponsorNotification()}
+                  />
+                  <View style={styles.buttonSpacer} />
+                  <Button
+                    title="Test leave alert in 10s"
+                    onPress={() => void scheduleDebugDriveNotification()}
+                  />
+                </View>
+              </View>
+            ) : null}
 
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Meetings</Text>
@@ -1246,7 +2040,15 @@ export default function App() {
               <View style={styles.buttonRow}>
                 <Button title="Refresh meetings" onPress={() => void refreshMeetings()} />
                 <View style={styles.buttonSpacer} />
-                <Button title="Enable location" onPress={() => void requestLocationPermission()} />
+                <Button
+                  title="Enable location"
+                  onPress={() => {
+                    void (async () => {
+                      await requestLocationPermission();
+                      await refreshMeetings();
+                    })();
+                  }}
+                />
               </View>
 
               <View style={styles.chipRow}>
@@ -1275,27 +2077,102 @@ export default function App() {
 
               {screen === "LIST" ? (
                 <>
-                  {meetingsForDay.map((meeting) => (
-                    <View key={meeting.id} style={styles.meetingCard}>
-                      <Text style={styles.meetingName}>{meeting.name}</Text>
-                      <Text style={styles.sectionMeta}>
-                        {meeting.format === "ONLINE" ? "Online" : meeting.address}
-                      </Text>
-                      <Text style={styles.sectionMeta}>
-                        {meeting.startsAtLocal} • {meeting.openness} • {meeting.format} •{" "}
-                        {formatDistance(meeting.distanceMeters)}
-                      </Text>
-                      <Pressable
-                        style={styles.detailButton}
-                        onPress={() => {
-                          setSelectedMeeting(meeting);
-                          setScreen("DETAIL");
-                        }}
-                      >
-                        <Text style={styles.detailButtonText}>View details</Text>
-                      </Pressable>
-                    </View>
-                  ))}
+                  {meetingsForDay.map((meeting) => {
+                    const plan = selectedDayPlan.plans[meeting.id] ?? {
+                      going: false,
+                      earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
+                      serviceCommitmentMinutes: null,
+                    };
+                    const isHomeGroup = selectedDayPlan.homeGroupMeetingId === meeting.id;
+                    const preview = buildDriveSchedulePreview(meeting, selectedDayPlan);
+
+                    return (
+                      <View key={meeting.id} style={styles.meetingCard}>
+                        <Text style={styles.meetingName}>{meeting.name}</Text>
+                        <Text style={styles.sectionMeta}>
+                          {meeting.startsAtLocal} • {meeting.openness} • {meeting.format}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          {meeting.format === "ONLINE" ? "Online" : meeting.address} •{" "}
+                          {formatDistance(meeting.distanceMeters)}
+                        </Text>
+
+                        <Pressable
+                          style={styles.checkboxRow}
+                          onPress={() => setMeetingGoing(meeting.id, !plan.going)}
+                        >
+                          <View
+                            style={[styles.checkbox, plan.going ? styles.checkboxChecked : null]}
+                          >
+                            {plan.going ? <Text style={styles.checkboxTick}>✓</Text> : null}
+                          </View>
+                          <Text style={styles.label}>Going</Text>
+                        </Pressable>
+
+                        {plan.going ? (
+                          <>
+                            <View style={styles.inlineRowGap}>
+                              <Text style={styles.sectionMeta}>Minutes early</Text>
+                              <TextInput
+                                style={styles.smallInput}
+                                value={String(plan.earlyMinutes)}
+                                keyboardType="number-pad"
+                                onChangeText={(value) => setMeetingEarlyMinutes(meeting.id, value)}
+                              />
+                            </View>
+
+                            <View style={styles.inlineRowGap}>
+                              <Button
+                                title={isHomeGroup ? "Unset home group" : "Set as home group"}
+                                onPress={() => toggleHomeGroupMeeting(meeting.id)}
+                              />
+                            </View>
+
+                            {isHomeGroup ? (
+                              <View style={styles.inlineRowGap}>
+                                <Text style={styles.sectionMeta}>
+                                  Service commitment (minutes early)
+                                </Text>
+                                <TextInput
+                                  style={styles.smallInput}
+                                  value={String(
+                                    plan.serviceCommitmentMinutes ??
+                                      DEFAULT_SERVICE_COMMITMENT_MINUTES,
+                                  )}
+                                  keyboardType="number-pad"
+                                  onChangeText={(value) =>
+                                    setServiceCommitmentMinutes(meeting.id, value)
+                                  }
+                                />
+                              </View>
+                            ) : null}
+
+                            {preview ? (
+                              <Text style={styles.sectionMeta}>
+                                {preview.usesServiceCommitment
+                                  ? "Service commitment override"
+                                  : "Standard early arrival"}
+                                : start {preview.meetingStartAt.toLocaleTimeString()}, travel{" "}
+                                {preview.travelMinutes}m, depart{" "}
+                                {preview.departAt.toLocaleTimeString()}, notify{" "}
+                                {preview.notifyAt.toLocaleTimeString()}
+                              </Text>
+                            ) : null}
+                          </>
+                        ) : null}
+
+                        <Pressable
+                          style={styles.detailButton}
+                          onPress={() => {
+                            setSelectedMeeting(meeting);
+                            setScreen("DETAIL");
+                          }}
+                        >
+                          <Text style={styles.detailButtonText}>View details</Text>
+                        </Pressable>
+                      </View>
+                    );
+                  })}
                   {!loadingMeetings && meetingsForDay.length === 0 ? (
                     <Text style={styles.sectionMeta}>No meetings for this day.</Text>
                   ) : null}
@@ -1330,10 +2207,19 @@ export default function App() {
                     <Button title="Back" onPress={() => setScreen("LIST")} />
                     <View style={styles.buttonSpacer} />
                     <Button
-                      title={selectedMeeting.format === "ONLINE" ? "Open meeting link" : "Navigate"}
+                      title="Drive now"
                       onPress={() => void openMeetingDestination(selectedMeeting)}
                     />
                   </View>
+
+                  {selectedMeeting.onlineUrl ? (
+                    <View style={styles.buttonRow}>
+                      <Button
+                        title="Open meeting link"
+                        onPress={() => void Linking.openURL(selectedMeeting.onlineUrl as string)}
+                      />
+                    </View>
+                  ) : null}
 
                   <View style={styles.buttonRow}>
                     <Button
@@ -1511,6 +2397,7 @@ const styles = StyleSheet.create({
   modeChipText: {
     color: "#344054",
     fontWeight: "600",
+    textAlign: "center",
   },
   modeChipTextSelected: {
     color: "#1d4ed8",
@@ -1547,6 +2434,16 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     paddingHorizontal: 10,
     paddingVertical: 8,
+  },
+  smallInput: {
+    minWidth: 64,
+    borderWidth: 1,
+    borderColor: "#d0d5dd",
+    borderRadius: 6,
+    backgroundColor: "#fff",
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    textAlign: "center",
   },
   label: {
     color: "#344054",
@@ -1618,6 +2515,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
+  inlineRowGap: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
   buttonRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1626,6 +2529,14 @@ const styles = StyleSheet.create({
   buttonSpacer: {
     width: 8,
     height: 8,
+  },
+  callNowBox: {
+    borderWidth: 1,
+    borderColor: "#c7d7fe",
+    borderRadius: 8,
+    padding: 8,
+    gap: 6,
+    backgroundColor: "#eef4ff",
   },
   meetingCard: {
     borderWidth: 1,
@@ -1638,6 +2549,31 @@ const styles = StyleSheet.create({
   meetingName: {
     fontWeight: "700",
     color: "#101828",
+  },
+  checkboxRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 4,
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: "#98a2b3",
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#fff",
+  },
+  checkboxChecked: {
+    borderColor: "#155eef",
+    backgroundColor: "#155eef",
+  },
+  checkboxTick: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "700",
   },
   detailButton: {
     alignSelf: "flex-start",
