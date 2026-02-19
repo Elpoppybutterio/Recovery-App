@@ -137,6 +137,9 @@ const NOTIFICATION_STORAGE_KEY_PREFIX = "recovery:notificationIds:";
 const MODE_STORAGE_KEY_PREFIX = "recovery:mode:";
 const SPONSOR_UI_PREFS_STORAGE_KEY_PREFIX = "recovery:sponsorUiPrefs:";
 const SPONSOR_CALENDAR_EVENT_STORAGE_KEY_PREFIX = "recovery:sponsorCalendarEvent:";
+const SPONSOR_CALENDAR_EVENT_FINGERPRINT_STORAGE_KEY_PREFIX =
+  "recovery:sponsorCalendarEventFingerprint:";
+const SPONSOR_ALERT_FINGERPRINT_STORAGE_KEY_PREFIX = "recovery:sponsorAlertFingerprint:";
 
 const SPONSOR_NOTIFICATION_CATEGORY_ID = "SPONSOR_CALL";
 const DRIVE_NOTIFICATION_CATEGORY_ID = "DRIVE_LEAVE";
@@ -501,6 +504,14 @@ function sponsorCalendarEventStorageKey(userId: string): string {
   return `${SPONSOR_CALENDAR_EVENT_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+function sponsorCalendarEventFingerprintStorageKey(userId: string): string {
+  return `${SPONSOR_CALENDAR_EVENT_FINGERPRINT_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function sponsorAlertFingerprintStorageKey(userId: string): string {
+  return `${SPONSOR_ALERT_FINGERPRINT_STORAGE_KEY_PREFIX}${userId}`;
+}
+
 function toCalendarDayOfWeek(code: WeekdayCode): Calendar.DayOfTheWeek {
   switch (code) {
     case "MON":
@@ -526,6 +537,31 @@ function formatError(error: unknown): string {
     return error.message;
   }
   return "Unknown error";
+}
+
+function buildSponsorEventFingerprint(input: {
+  sponsorName: string;
+  sponsorPhoneE164: string | null;
+  callTimeLocalHhmm: string;
+  repeatUnit: RepeatUnit;
+  repeatInterval: number;
+  repeatDays: WeekdayCode[];
+  active: boolean;
+}): string {
+  const sortedDays = sortWeekdays(input.repeatDays);
+  return [
+    input.sponsorName.trim().toLowerCase(),
+    input.sponsorPhoneE164 ?? "",
+    input.callTimeLocalHhmm,
+    input.repeatUnit,
+    String(input.repeatInterval),
+    sortedDays.join(","),
+    `active:${input.active ? "true" : "false"}`,
+  ].join("|");
+}
+
+function buildSponsorAlertFingerprint(eventFingerprint: string, leadMinutes: number): string {
+  return `${eventFingerprint}|lead:${leadMinutes}`;
 }
 
 function createId(prefix: string): string {
@@ -570,6 +606,14 @@ export default function App() {
   );
   const sponsorCalendarEventStorage = useMemo(
     () => sponsorCalendarEventStorageKey(devAuthUserId),
+    [devAuthUserId],
+  );
+  const sponsorCalendarEventFingerprintStorage = useMemo(
+    () => sponsorCalendarEventFingerprintStorageKey(devAuthUserId),
+    [devAuthUserId],
+  );
+  const sponsorAlertFingerprintStorage = useMemo(
+    () => sponsorAlertFingerprintStorageKey(devAuthUserId),
     [devAuthUserId],
   );
 
@@ -630,6 +674,51 @@ export default function App() {
     () => toE164FromUsTenDigit(sponsorPhoneDigits),
     [sponsorPhoneDigits],
   );
+  const sponsorCallTimeLocalHhmm = useMemo(
+    () => to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem),
+    [sponsorHour12, sponsorMinute, sponsorMeridiem],
+  );
+  const sponsorRepeatUnit = useMemo<RepeatUnit>(
+    () => (sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY"),
+    [sponsorRepeatPreset],
+  );
+  const sponsorRepeatInterval = useMemo(
+    () => (sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1),
+    [sponsorRepeatPreset],
+  );
+  const sponsorRepeatDaysSorted = useMemo(
+    () => (sponsorRepeatUnit === "MONTHLY" ? [] : sortWeekdays(sponsorRepeatDays)),
+    [sponsorRepeatUnit, sponsorRepeatDays],
+  );
+  const sponsorPayloadActive = useMemo(
+    () => sponsorEnabled && sponsorActive,
+    [sponsorEnabled, sponsorActive],
+  );
+  const sponsorEventFingerprint = useMemo(
+    () =>
+      buildSponsorEventFingerprint({
+        sponsorName: normalizedSponsorName,
+        sponsorPhoneE164,
+        callTimeLocalHhmm: sponsorCallTimeLocalHhmm,
+        repeatUnit: sponsorRepeatUnit,
+        repeatInterval: sponsorRepeatInterval,
+        repeatDays: sponsorRepeatDaysSorted,
+        active: sponsorPayloadActive,
+      }),
+    [
+      normalizedSponsorName,
+      sponsorPhoneE164,
+      sponsorCallTimeLocalHhmm,
+      sponsorRepeatUnit,
+      sponsorRepeatInterval,
+      sponsorRepeatDaysSorted,
+      sponsorPayloadActive,
+    ],
+  );
+  const sponsorAlertFingerprint = useMemo(
+    () => buildSponsorAlertFingerprint(sponsorEventFingerprint, sponsorLeadMinutes),
+    [sponsorEventFingerprint, sponsorLeadMinutes],
+  );
   const isLocalhostApiUrl = useMemo(() => {
     try {
       const parsed = new URL(apiUrl);
@@ -680,21 +769,23 @@ export default function App() {
   }, [meetings, selectedDay.dayOfWeek, currentLocation]);
 
   const sponsorScheduleSummary = useMemo(() => {
-    const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
-    const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
-    const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
-    const repeatDays = repeatUnit === "MONTHLY" ? [] : sponsorRepeatDays;
-    const next = computeNextCall(new Date(), callTime, repeatUnit, repeatInterval, repeatDays);
+    const next = computeNextCall(
+      new Date(),
+      sponsorCallTimeLocalHhmm,
+      sponsorRepeatUnit,
+      sponsorRepeatInterval,
+      sponsorRepeatDaysSorted,
+    );
 
     const repeatSummary =
-      repeatUnit === "MONTHLY"
+      sponsorRepeatUnit === "MONTHLY"
         ? "Monthly"
-        : `${repeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdays(repeatDays)}`;
+        : `${sponsorRepeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdays(sponsorRepeatDaysSorted)}`;
 
     return `Next scheduled call: ${next.nextAt.toLocaleString()} • Due today: ${
       next.dueToday ? "Yes" : "No"
     } • ${repeatSummary}`;
-  }, [sponsorHour12, sponsorMinute, sponsorMeridiem, sponsorRepeatPreset, sponsorRepeatDays]);
+  }, [sponsorCallTimeLocalHhmm, sponsorRepeatUnit, sponsorRepeatInterval, sponsorRepeatDaysSorted]);
 
   const sponsorStatusLine = useMemo(() => {
     if (!sponsorEnabled) {
@@ -1154,34 +1245,30 @@ export default function App() {
         return;
       }
 
-      const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
-      const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
-      const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
-      const repeatDays = repeatUnit === "MONTHLY" ? [] : sortWeekdays(sponsorRepeatDays);
       const nextStart = computeNextCall(
         new Date(),
-        callTime,
-        repeatUnit,
-        repeatInterval,
-        repeatDays,
+        sponsorCallTimeLocalHhmm,
+        sponsorRepeatUnit,
+        sponsorRepeatInterval,
+        sponsorRepeatDaysSorted,
       ).nextAt;
       const endDate = new Date(nextStart.getTime() + 15 * 60_000);
 
       const recurrenceSummary =
-        repeatUnit === "MONTHLY"
+        sponsorRepeatUnit === "MONTHLY"
           ? "Monthly"
-          : `${repeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdays(repeatDays)}`;
+          : `${sponsorRepeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdays(sponsorRepeatDaysSorted)}`;
 
       const recurrenceRule: Calendar.RecurrenceRule =
-        repeatUnit === "MONTHLY"
+        sponsorRepeatUnit === "MONTHLY"
           ? {
               frequency: Calendar.Frequency.MONTHLY,
               interval: 1,
             }
           : {
               frequency: Calendar.Frequency.WEEKLY,
-              interval: repeatInterval,
-              daysOfTheWeek: repeatDays.map((day) => ({
+              interval: sponsorRepeatInterval,
+              daysOfTheWeek: sponsorRepeatDaysSorted.map((day) => ({
                 dayOfTheWeek: toCalendarDayOfWeek(day),
               })),
             };
@@ -1189,7 +1276,7 @@ export default function App() {
       const notes = [
         `Sponsor: ${normalizedSponsorName}`,
         `Phone: ${sponsorPhoneE164}`,
-        `Schedule: ${callTime} ${recurrenceSummary}`,
+        `Schedule: ${sponsorCallTimeLocalHhmm} ${recurrenceSummary}`,
       ].join("\n");
 
       const eventDetails: Omit<Partial<Calendar.Event>, "id"> = {
@@ -1233,11 +1320,10 @@ export default function App() {
       sponsorPhoneE164,
       ensureCalendarPermission,
       findWritableCalendarId,
-      sponsorHour12,
-      sponsorMinute,
-      sponsorMeridiem,
-      sponsorRepeatPreset,
-      sponsorRepeatDays,
+      sponsorCallTimeLocalHhmm,
+      sponsorRepeatUnit,
+      sponsorRepeatInterval,
+      sponsorRepeatDaysSorted,
       sponsorCalendarEventStorage,
     ],
   );
@@ -1247,24 +1333,25 @@ export default function App() {
       await cancelNotificationBucket("sponsor");
 
       if (!sponsorEnabled) {
+        await AsyncStorage.setItem(sponsorAlertFingerprintStorage, sponsorAlertFingerprint);
         setNotificationStatus("Sponsor disabled.");
         return;
       }
 
       if (!sponsorActive) {
+        await AsyncStorage.setItem(sponsorAlertFingerprintStorage, sponsorAlertFingerprint);
         setNotificationStatus("Sponsor reminders disabled.");
         return;
       }
 
       if (!normalizedSponsorName || sponsorPhoneE164 === null) {
+        await AsyncStorage.setItem(sponsorAlertFingerprintStorage, sponsorAlertFingerprint);
         setNotificationStatus("Sponsor notifications skipped: name/phone incomplete.");
         return;
       }
 
-      const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
-      const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
-      const repeatDays = repeatUnit === "MONTHLY" ? [] : sortWeekdays(sponsorRepeatDays);
-      if (repeatUnit === "WEEKLY" && repeatDays.length === 0) {
+      if (sponsorRepeatUnit === "WEEKLY" && sponsorRepeatDaysSorted.length === 0) {
+        await AsyncStorage.setItem(sponsorAlertFingerprintStorage, sponsorAlertFingerprint);
         setNotificationStatus("Sponsor notifications skipped: choose at least one day.");
         return;
       }
@@ -1276,13 +1363,12 @@ export default function App() {
       }
 
       const now = new Date();
-      const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
       const nextCall = computeNextCall(
         now,
-        callTime,
-        repeatUnit,
-        repeatInterval,
-        repeatDays,
+        sponsorCallTimeLocalHhmm,
+        sponsorRepeatUnit,
+        sponsorRepeatInterval,
+        sponsorRepeatDaysSorted,
       ).nextAt;
 
       const nextBuckets = await loadNotificationBuckets();
@@ -1320,6 +1406,7 @@ export default function App() {
 
       nextBuckets.sponsor = scheduledIds;
       await saveNotificationBuckets(nextBuckets);
+      await AsyncStorage.setItem(sponsorAlertFingerprintStorage, sponsorAlertFingerprint);
 
       console.log("[notifications] sponsor schedule", {
         reason,
@@ -1338,13 +1425,14 @@ export default function App() {
       sponsorActive,
       normalizedSponsorName,
       sponsorPhoneE164,
-      sponsorRepeatPreset,
-      sponsorRepeatDays,
+      sponsorRepeatUnit,
+      sponsorRepeatInterval,
+      sponsorRepeatDaysSorted,
       ensureNotificationPermission,
-      sponsorHour12,
-      sponsorMinute,
-      sponsorMeridiem,
+      sponsorCallTimeLocalHhmm,
       sponsorLeadMinutes,
+      sponsorAlertFingerprint,
+      sponsorAlertFingerprintStorage,
       loadNotificationBuckets,
       applyScheduleTime,
       scheduleAt,
@@ -1489,11 +1577,7 @@ export default function App() {
       return;
     }
 
-    const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
-    const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
-    const repeatDays = repeatUnit === "MONTHLY" ? [] : sortWeekdays(sponsorRepeatDays);
-
-    if (repeatUnit === "WEEKLY" && repeatDays.length === 0) {
+    if (sponsorRepeatUnit === "WEEKLY" && sponsorRepeatDaysSorted.length === 0) {
       setSponsorStatus("Select at least one weekday for weekly reminders.");
       return;
     }
@@ -1501,11 +1585,11 @@ export default function App() {
     const payload: SponsorConfigPayload = {
       sponsorName: normalizedSponsorName,
       sponsorPhoneE164,
-      callTimeLocalHhmm: to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem),
-      repeatUnit,
-      repeatInterval,
-      repeatDays,
-      active: sponsorEnabled && sponsorActive,
+      callTimeLocalHhmm: sponsorCallTimeLocalHhmm,
+      repeatUnit: sponsorRepeatUnit,
+      repeatInterval: sponsorRepeatInterval,
+      repeatDays: sponsorRepeatDaysSorted,
+      active: sponsorPayloadActive,
     };
 
     setSponsorSaving(true);
@@ -1525,8 +1609,42 @@ export default function App() {
       }
 
       setSponsorStatus(null);
-      await syncSponsorCalendarEvent("save");
-      await rescheduleSponsorNotifications("save");
+
+      const [storedEventFingerprint, storedAlertFingerprint] = await Promise.all([
+        AsyncStorage.getItem(sponsorCalendarEventFingerprintStorage),
+        AsyncStorage.getItem(sponsorAlertFingerprintStorage),
+      ]);
+
+      if (storedEventFingerprint !== sponsorEventFingerprint) {
+        await syncSponsorCalendarEvent("save:event-changed");
+        await AsyncStorage.setItem(sponsorCalendarEventFingerprintStorage, sponsorEventFingerprint);
+      } else {
+        const storedEventId = await AsyncStorage.getItem(sponsorCalendarEventStorage);
+        let eventExists = Boolean(storedEventId);
+        if (eventExists && Platform.OS === "ios" && storedEventId) {
+          try {
+            await Calendar.getEventAsync(storedEventId);
+          } catch {
+            eventExists = false;
+          }
+        }
+
+        if (eventExists) {
+          setCalendarStatus("Calendar event unchanged.");
+        } else {
+          await syncSponsorCalendarEvent("save:event-recreate");
+          await AsyncStorage.setItem(
+            sponsorCalendarEventFingerprintStorage,
+            sponsorEventFingerprint,
+          );
+        }
+      }
+
+      if (storedAlertFingerprint !== sponsorAlertFingerprint) {
+        await rescheduleSponsorNotifications("save:alert-changed");
+      } else {
+        setNotificationStatus("Sponsor notifications unchanged.");
+      }
     } catch {
       setSponsorStatus(formatApiErrorWithHint("Sponsor config save failed: network."));
     } finally {
@@ -1536,15 +1654,19 @@ export default function App() {
     sponsorEnabled,
     normalizedSponsorName,
     sponsorPhoneE164,
-    sponsorRepeatPreset,
-    sponsorRepeatDays,
-    sponsorHour12,
-    sponsorMinute,
-    sponsorMeridiem,
-    sponsorActive,
+    sponsorRepeatUnit,
+    sponsorRepeatInterval,
+    sponsorRepeatDaysSorted,
+    sponsorCallTimeLocalHhmm,
+    sponsorPayloadActive,
     apiUrl,
     authHeader,
     formatApiErrorWithHint,
+    sponsorCalendarEventStorage,
+    sponsorCalendarEventFingerprintStorage,
+    sponsorAlertFingerprintStorage,
+    sponsorEventFingerprint,
+    sponsorAlertFingerprint,
     syncSponsorCalendarEvent,
     rescheduleSponsorNotifications,
   ]);
