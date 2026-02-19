@@ -2,16 +2,17 @@ import tseslint from "@typescript-eslint/eslint-plugin";
 import parser from "@typescript-eslint/parser";
 
 export default [
-  {
-    ignores: [
-      "**/node_modules/**",
-      "**/dist/**",
-      "**/.next/**",
-      "**/.turbo/**",
-      "**/coverage/**",
-      "apps/mobile/.expo/**",
-    ],
-  },
+{
+  ignores: [
+    "**/node_modules/**",
+    "**/.next/**",
+    "**/out/**",
+    "**/dist/**",
+    "**/next-env.d.ts",
+    "**/.turbo/**",
+    "**/coverage/**",
+  ],
+},
   {
     files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
