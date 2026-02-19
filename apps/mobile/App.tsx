@@ -1,5 +1,5 @@
 import { StatusBar } from "expo-status-bar";
-import * as Calendar from "expo-calendar";
+import * as Notifications from "expo-notifications";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
@@ -111,10 +111,17 @@ type GeolocationApi = {
 const WARNING_DISTANCE_METERS = 200 * 0.3048;
 const EARTH_RADIUS_METERS = 6371000;
 const SPONSOR_ALERT_LEAD_DEFAULT_MINUTES = 15;
-const SPONSOR_ALERT_LEAD_PRESETS_MINUTES = [0, 5, 10, 15, 30, 60];
+const SPONSOR_ALERT_LEAD_PRESETS_MINUTES = [0, 5, 10, 15, 30];
 const SPONSOR_ALERT_LEAD_MAX_MINUTES = 24 * 60;
 const SPONSOR_CALENDAR_EVENT_KEY_PREFIX = "recovery:sponsorCalendarEventId:";
 const SPONSOR_ALERT_LEAD_KEY_PREFIX = "recovery:sponsorAlertLeadMinutes:";
+const SPONSOR_LOCAL_NOTIFICATION_KEY_PREFIX = "recovery:sponsorReminderNotificationId:";
+const TIME_WHEEL_ITEM_HEIGHT = 40;
+const TIME_WHEEL_VISIBLE_ROWS = 5;
+const TIME_WHEEL_SIDE_PADDING = ((TIME_WHEEL_VISIBLE_ROWS - 1) / 2) * TIME_WHEEL_ITEM_HEIGHT;
+const HOUR_OPTIONS = Array.from({ length: 12 }, (_, index) => index + 1);
+const MINUTE_OPTIONS = Array.from({ length: 60 }, (_, index) => index);
+const MERIDIEM_OPTIONS = ["AM", "PM"] as const;
 
 type AsyncStorageModule = {
   getItem(key: string): Promise<string | null>;
@@ -132,11 +139,13 @@ type CalendarRecord = {
 };
 
 type CalendarWeekdayMap = {
+  SUNDAY: number;
   MONDAY: number;
   TUESDAY: number;
   WEDNESDAY: number;
   THURSDAY: number;
   FRIDAY: number;
+  SATURDAY: number;
 };
 
 type CalendarRecurrenceRuleInput = {
@@ -170,6 +179,76 @@ type CalendarModule = {
   updateEventAsync(eventId: string, eventDetails: CalendarEventInput): Promise<string>;
   createEventAsync(calendarId: string, eventDetails: CalendarEventInput): Promise<string>;
 };
+
+type TimeWheelPickerProps<T extends string | number> = {
+  items: readonly T[];
+  value: T;
+  onChange: (value: T) => void;
+  formatItem?: (value: T) => string;
+  width?: number;
+};
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+function TimeWheelPicker<T extends string | number>({
+  items,
+  value,
+  onChange,
+  formatItem,
+  width,
+}: TimeWheelPickerProps<T>) {
+  const scrollRef = useRef<ScrollView>(null);
+  const selectedIndex = Math.max(0, items.indexOf(value));
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({
+      y: selectedIndex * TIME_WHEEL_ITEM_HEIGHT,
+      animated: false,
+    });
+  }, [selectedIndex]);
+
+  function settleAtOffset(offsetY: number) {
+    const rawIndex = Math.round(offsetY / TIME_WHEEL_ITEM_HEIGHT);
+    const nextIndex = Math.max(0, Math.min(items.length - 1, rawIndex));
+    const nextValue = items[nextIndex];
+    onChange(nextValue);
+    scrollRef.current?.scrollTo({
+      y: nextIndex * TIME_WHEEL_ITEM_HEIGHT,
+      animated: true,
+    });
+  }
+
+  return (
+    <View style={[styles.timeWheelColumn, width ? { width } : null]}>
+      <ScrollView
+        ref={scrollRef}
+        nestedScrollEnabled
+        bounces={false}
+        showsVerticalScrollIndicator={false}
+        decelerationRate="fast"
+        snapToInterval={TIME_WHEEL_ITEM_HEIGHT}
+        contentContainerStyle={styles.timeWheelContent}
+        onMomentumScrollEnd={(event) => settleAtOffset(event.nativeEvent.contentOffset.y)}
+        onScrollEndDrag={(event) => settleAtOffset(event.nativeEvent.contentOffset.y)}
+      >
+        {items.map((item) => (
+          <View key={String(item)} style={styles.timeWheelItem}>
+            <Text style={styles.timeWheelItemText}>
+              {formatItem ? formatItem(item) : String(item)}
+            </Text>
+          </View>
+        ))}
+      </ScrollView>
+      <View pointerEvents="none" style={styles.timeWheelSelection} />
+    </View>
+  );
+}
 
 function toRadians(value: number): number {
   return (value * Math.PI) / 180;
@@ -210,7 +289,11 @@ function isNearAssignedZone(lat: number, lng: number, zones: MeZone[]): boolean 
 }
 
 function normalizePhoneDigits(value: string): string {
-  return value.replace(/\D/g, "").slice(0, 10);
+  const digits = value.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return digits.slice(1);
+  }
+  return digits.slice(0, 10);
 }
 
 function formatUsPhoneDisplay(phoneDigits: string): string {
@@ -421,6 +504,10 @@ function sponsorAlertLeadStorageKey(userId: string): string {
   return `${SPONSOR_ALERT_LEAD_KEY_PREFIX}${userId}`;
 }
 
+function sponsorLocalNotificationStorageKey(userId: string): string {
+  return `${SPONSOR_LOCAL_NOTIFICATION_KEY_PREFIX}${userId}`;
+}
+
 function normalizeAlertLeadMinutes(value: number): number {
   const safeInteger = Number.isFinite(value)
     ? Math.round(value)
@@ -481,44 +568,46 @@ function loadCalendarModule(): CalendarModule | null {
 
 function resolveCalendarWeekdayMap(calendar: CalendarModule): CalendarWeekdayMap {
   return {
+    SUNDAY: calendar.Weekday?.SUNDAY ?? 1,
     MONDAY: calendar.Weekday?.MONDAY ?? 2,
     TUESDAY: calendar.Weekday?.TUESDAY ?? 3,
     WEDNESDAY: calendar.Weekday?.WEDNESDAY ?? 4,
     THURSDAY: calendar.Weekday?.THURSDAY ?? 5,
     FRIDAY: calendar.Weekday?.FRIDAY ?? 6,
+    SATURDAY: calendar.Weekday?.SATURDAY ?? 7,
   };
 }
 
 function buildCalendarRecurrenceRule(
-  repeatRule: SponsorRepeatRule,
+  repeatUnit: RepeatUnit,
+  repeatInterval: number,
+  repeatDays: WeekdayCode[],
   calendar: CalendarModule,
 ): CalendarRecurrenceRuleInput {
-  switch (repeatRule) {
-    case "DAILY":
-      return { frequency: calendar.RecurrenceFrequency.DAILY };
-    case "WEEKDAYS": {
-      const weekdays = resolveCalendarWeekdayMap(calendar);
-      return {
-        frequency: calendar.RecurrenceFrequency.WEEKLY,
-        daysOfTheWeek: [
-          { dayOfTheWeek: weekdays.MONDAY },
-          { dayOfTheWeek: weekdays.TUESDAY },
-          { dayOfTheWeek: weekdays.WEDNESDAY },
-          { dayOfTheWeek: weekdays.THURSDAY },
-          { dayOfTheWeek: weekdays.FRIDAY },
-        ],
-      };
-    }
-    case "WEEKLY":
-      return { frequency: calendar.RecurrenceFrequency.WEEKLY };
-    case "BIWEEKLY":
-      return {
-        frequency: calendar.RecurrenceFrequency.WEEKLY,
-        interval: 2,
-      };
-    case "MONTHLY":
-      return { frequency: calendar.RecurrenceFrequency.MONTHLY };
+  if (repeatUnit === "MONTHLY") {
+    return {
+      frequency: calendar.RecurrenceFrequency.MONTHLY,
+      interval: Math.max(1, repeatInterval),
+    };
   }
+
+  const weekdays = resolveCalendarWeekdayMap(calendar);
+  const weekdayNumberByCode: Record<WeekdayCode, number> = {
+    MON: weekdays.MONDAY,
+    TUE: weekdays.TUESDAY,
+    WED: weekdays.WEDNESDAY,
+    THU: weekdays.THURSDAY,
+    FRI: weekdays.FRIDAY,
+    SAT: weekdays.SATURDAY,
+    SUN: weekdays.SUNDAY,
+  };
+  const normalizedDays =
+    repeatDays.length > 0 ? sortWeekdays(repeatDays) : [getCurrentWeekdayCode(new Date())];
+  return {
+    frequency: calendar.RecurrenceFrequency.WEEKLY,
+    interval: Math.max(1, repeatInterval),
+    daysOfTheWeek: normalizedDays.map((day) => ({ dayOfTheWeek: weekdayNumberByCode[day] })),
+  };
 }
 
 function pickWritableCalendar(calendars: CalendarRecord[]): CalendarRecord | null {
@@ -619,8 +708,14 @@ export default function App() {
       normalizedSponsorName.length > 0 &&
       sponsorPhoneE164 !== null &&
       isValidCallTimeLocalHhmm(callTimeLocalHhmm) &&
-      Boolean(sponsorRepeatRule),
-    [callTimeLocalHhmm, normalizedSponsorName, sponsorPhoneE164, sponsorRepeatRule],
+      (sponsorRepeatPreset === "MONTHLY" || sponsorRepeatDays.length > 0),
+    [
+      callTimeLocalHhmm,
+      normalizedSponsorName,
+      sponsorPhoneE164,
+      sponsorRepeatPreset,
+      sponsorRepeatDays,
+    ],
   );
   const sponsorScheduleSummary = useMemo(() => {
     if (!sponsorActive) {
@@ -836,32 +931,6 @@ export default function App() {
     }
   }
 
-  function incrementHour(delta: number) {
-    setSponsorHour12((previous) => {
-      const next = previous + delta;
-      if (next < 1) {
-        return 12;
-      }
-      if (next > 12) {
-        return 1;
-      }
-      return next;
-    });
-  }
-
-  function incrementMinute(delta: number) {
-    setSponsorMinute((previous) => {
-      const next = previous + delta;
-      if (next < 0) {
-        return 59;
-      }
-      if (next > 59) {
-        return 0;
-      }
-      return next;
-    });
-  }
-
   function toggleRepeatDay(day: WeekdayCode) {
     setSponsorRepeatDays((previous) => {
       const next = previous.includes(day)
@@ -869,6 +938,8 @@ export default function App() {
         : [...previous, day];
       return sortWeekdays(next);
     });
+  }
+
   async function persistAlertLeadMinutes(nextMinutes: number) {
     const asyncStorage = loadAsyncStorageModule();
     if (!asyncStorage) {
@@ -954,18 +1025,40 @@ export default function App() {
         return;
       }
 
-      const nextCall = computeNextCall(new Date(), callTimeLocalHhmm, sponsorRepeatRule).nextAt;
+      const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
+      const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
+      const repeatDays =
+        repeatUnit === "MONTHLY"
+          ? []
+          : sortWeekdays(sponsorRepeatDays.filter((day) => WEEKDAY_CODES.includes(day)));
+      const nextCall = computeNextCall(
+        new Date(),
+        callTimeLocalHhmm,
+        repeatUnit,
+        repeatInterval,
+        repeatDays,
+      ).nextAt;
+      const repeatSummary =
+        repeatUnit === "MONTHLY"
+          ? "Monthly"
+          : `${repeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdaySelection(repeatDays)}`;
+      const reminderLeadMinutes = normalizeAlertLeadMinutes(alertLeadMinutes);
       const eventDetails: CalendarEventInput = {
         title: "Call Sponsor",
         notes: [
           `Sponsor: ${normalizedSponsorName}`,
           `Phone: ${sponsorPhoneE164}`,
-          `Repeat: ${sponsorRepeatRule}`,
+          `Repeat: ${repeatSummary}`,
         ].join("\n"),
         startDate: nextCall,
         endDate: new Date(nextCall.getTime() + 15 * 60 * 1000),
-        recurrenceRule: buildCalendarRecurrenceRule(sponsorRepeatRule, calendarModule),
-        alarms: [{ relativeOffset: -normalizeAlertLeadMinutes(alertLeadMinutes) }],
+        recurrenceRule: buildCalendarRecurrenceRule(
+          repeatUnit,
+          repeatInterval,
+          repeatDays,
+          calendarModule,
+        ),
+        alarms: [{ relativeOffset: -reminderLeadMinutes }],
       };
       const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (localTimezone) {
@@ -974,10 +1067,14 @@ export default function App() {
 
       const asyncStorage = loadAsyncStorageModule();
       const eventStorageKey = sponsorCalendarEventStorageKey(devAuthUserId);
+      const notificationStorageKey = sponsorLocalNotificationStorageKey(devAuthUserId);
       const storedEventId =
         calendarEventId ??
         (asyncStorage ? await asyncStorage.getItem(eventStorageKey) : null) ??
         null;
+      const storedNotificationId = asyncStorage
+        ? await asyncStorage.getItem(notificationStorageKey)
+        : null;
 
       let resultingEventId: string;
       let updatedExistingEvent = false;
@@ -1016,10 +1113,49 @@ export default function App() {
       if (asyncStorage) {
         await asyncStorage.setItem(eventStorageKey, resultingEventId);
       }
+      let localReminderStatus = "Calendar saved.";
+      const notificationPermission = await Notifications.getPermissionsAsync();
+      let notificationsGranted = notificationPermission.granted;
+      if (!notificationsGranted) {
+        const requestedPermission = await Notifications.requestPermissionsAsync();
+        notificationsGranted = requestedPermission.granted;
+      }
+
+      if (notificationsGranted) {
+        if (storedNotificationId) {
+          try {
+            await Notifications.cancelScheduledNotificationAsync(storedNotificationId);
+          } catch {
+            // Ignore stale notification IDs.
+          }
+        }
+        const now = new Date();
+        const reminderAt = new Date(nextCall.getTime() - reminderLeadMinutes * 60 * 1000);
+        const triggerAt =
+          reminderAt.getTime() > now.getTime() ? reminderAt : new Date(now.getTime() + 5000);
+        const notificationId = await Notifications.scheduleNotificationAsync({
+          content: {
+            title: "Sponsor call reminder",
+            body: `Call ${normalizedSponsorName} at ${formatCallTime12Hour(callTimeLocalHhmm)}.`,
+            sound: "default",
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.DATE,
+            date: triggerAt,
+          },
+        });
+        if (asyncStorage) {
+          await asyncStorage.setItem(notificationStorageKey, notificationId);
+        }
+        localReminderStatus = `Alert scheduled for ${triggerAt.toLocaleString()} with sound.`;
+      } else {
+        localReminderStatus = "Calendar saved, but notification permission is denied.";
+      }
+
       setCalendarStatusMessage(
         updatedExistingEvent
-          ? "Sponsor calendar event updated."
-          : "Sponsor calendar event created.",
+          ? `Sponsor calendar event updated. ${localReminderStatus}`
+          : `Sponsor calendar event created. ${localReminderStatus}`,
       );
     } catch (error) {
       setCalendarStatusMessage(`Calendar update failed: ${describeError(error)}`);
@@ -1090,81 +1226,6 @@ export default function App() {
       setSponsorStatusMessage("Sponsor config save failed: network.");
     } finally {
       setSavingSponsor(false);
-    }
-  }
-
-  async function handleAddToCalendar() {
-    if (
-      typeof Calendar?.requestCalendarPermissionsAsync !== "function" ||
-      typeof Calendar?.getCalendarsAsync !== "function"
-    ) {
-      setSponsorStatusMessage(
-        "Calendar module unavailable. Rebuild Metro after install (clear cache).",
-      );
-      return;
-    }
-
-    const normalizedName = sponsorName.trim();
-    if (!normalizedName) {
-      setSponsorStatusMessage("Add sponsor name before creating a calendar reminder.");
-      return;
-    }
-
-    const repeatUnit: RepeatUnit = sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY";
-    const repeatInterval = sponsorRepeatPreset === "BIWEEKLY" ? 2 : 1;
-    const repeatDays =
-      repeatUnit === "MONTHLY"
-        ? []
-        : sortWeekdays(sponsorRepeatDays.filter((day) => WEEKDAY_CODES.includes(day)));
-    if (repeatUnit === "WEEKLY" && repeatDays.length === 0) {
-      setSponsorStatusMessage("Select at least one weekday before adding to calendar.");
-      return;
-    }
-
-    setAddingCalendarEvent(true);
-    try {
-      const permission = await Calendar.requestCalendarPermissionsAsync();
-      if (permission.status !== "granted") {
-        setSponsorStatusMessage("Calendar permission denied.");
-        return;
-      }
-
-      const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
-      const writableCalendar =
-        calendars.find((calendar) => calendar.allowsModifications) ?? calendars[0];
-      if (!writableCalendar) {
-        setSponsorStatusMessage("No writable calendar found on this device.");
-        return;
-      }
-
-      const callTime = to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem);
-      const nextCall = computeNextCall(
-        new Date(),
-        callTime,
-        repeatUnit,
-        repeatInterval,
-        repeatDays,
-      );
-      const endDate = new Date(nextCall.nextAt.getTime() + 30 * 60 * 1000);
-
-      await Calendar.createEventAsync(writableCalendar.id, {
-        title: `Sponsor call: ${normalizedName}`,
-        startDate: nextCall.nextAt,
-        endDate,
-        notes:
-          repeatUnit === "MONTHLY"
-            ? "Monthly sponsor reminder from Recovery Accountability app."
-            : `${repeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdaySelection(repeatDays)} sponsor reminder from Recovery Accountability app.`,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      });
-
-      setSponsorStatusMessage(`Calendar event created for ${nextCall.nextAt.toLocaleString()}.`);
-    } catch {
-      setSponsorStatusMessage(
-        "Failed to add calendar event. If module install was recent, reset Metro: pnpm --filter @recovery/mobile dev -- --clear",
-      );
-    } finally {
-      setAddingCalendarEvent(false);
     }
   }
 
@@ -1359,31 +1420,28 @@ export default function App() {
           />
 
           <Text style={styles.sponsorLabel}>Call time</Text>
-          <View style={styles.pickerRow}>
-            <Pressable style={styles.pickerButton} onPress={() => incrementHour(-1)}>
-              <Text style={styles.pickerButtonText}>-</Text>
-            </Pressable>
-            <Text style={styles.pickerValue}>{String(sponsorHour12).padStart(2, "0")}</Text>
-            <Pressable style={styles.pickerButton} onPress={() => incrementHour(1)}>
-              <Text style={styles.pickerButtonText}>+</Text>
-            </Pressable>
-
-            <Text style={styles.pickerDivider}>:</Text>
-
-            <Pressable style={styles.pickerButton} onPress={() => incrementMinute(-1)}>
-              <Text style={styles.pickerButtonText}>-</Text>
-            </Pressable>
-            <Text style={styles.pickerValue}>{String(sponsorMinute).padStart(2, "0")}</Text>
-            <Pressable style={styles.pickerButton} onPress={() => incrementMinute(1)}>
-              <Text style={styles.pickerButtonText}>+</Text>
-            </Pressable>
-
-            <Pressable
-              style={styles.pickerMeridiemButton}
-              onPress={() => setSponsorMeridiem((value) => (value === "AM" ? "PM" : "AM"))}
-            >
-              <Text style={styles.pickerMeridiemText}>{sponsorMeridiem}</Text>
-            </Pressable>
+          <View style={styles.timeWheelRow}>
+            <TimeWheelPicker
+              items={HOUR_OPTIONS}
+              value={sponsorHour12}
+              onChange={setSponsorHour12}
+              formatItem={(value) => String(value).padStart(2, "0")}
+              width={72}
+            />
+            <Text style={styles.timeWheelColon}>:</Text>
+            <TimeWheelPicker
+              items={MINUTE_OPTIONS}
+              value={sponsorMinute}
+              onChange={setSponsorMinute}
+              formatItem={(value) => String(value).padStart(2, "0")}
+              width={72}
+            />
+            <TimeWheelPicker
+              items={MERIDIEM_OPTIONS}
+              value={sponsorMeridiem}
+              onChange={setSponsorMeridiem}
+              width={88}
+            />
           </View>
 
           <Text style={styles.sponsorLabel}>Repeat</Text>
@@ -1436,23 +1494,65 @@ export default function App() {
             </>
           ) : null}
 
+          <Text style={styles.sponsorLabel}>Alert lead time (minutes)</Text>
+          <View style={styles.repeatRow}>
+            {SPONSOR_ALERT_LEAD_PRESETS_MINUTES.map((minutes) => (
+              <Pressable
+                key={minutes}
+                style={[
+                  styles.repeatChip,
+                  alertLeadMinutes === minutes ? styles.repeatChipSelected : null,
+                ]}
+                onPress={() => applyAlertLeadMinutes(minutes)}
+              >
+                <Text
+                  style={[
+                    styles.repeatChipText,
+                    alertLeadMinutes === minutes ? styles.repeatChipTextSelected : null,
+                  ]}
+                >
+                  {minutes === 0 ? "No lead time" : `${minutes}m`}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <View style={styles.customLeadRow}>
+            <TextInput
+              style={styles.customLeadInput}
+              value={customAlertLeadMinutes}
+              onChangeText={setCustomAlertLeadMinutes}
+              placeholder="Custom minutes"
+              keyboardType="number-pad"
+              maxLength={4}
+            />
+            <Pressable style={styles.customLeadButton} onPress={handleApplyCustomAlertLeadMinutes}>
+              <Text style={styles.customLeadButtonText}>Apply</Text>
+            </Pressable>
+          </View>
+          <Pressable style={styles.resetLeadButton} onPress={handleResetAlertLeadMinutes}>
+            <Text style={styles.resetLeadButtonText}>
+              Reset to default ({SPONSOR_ALERT_LEAD_DEFAULT_MINUTES}m)
+            </Text>
+          </Pressable>
+
           <View style={styles.supervisionRow}>
             <Text style={styles.sponsorLabel}>Active reminders</Text>
             <Switch value={sponsorActive} onValueChange={setSponsorActive} />
           </View>
 
           <Text style={styles.sponsorMeta}>{sponsorScheduleSummary}</Text>
+          <Text style={styles.sponsorMeta}>Calendar alert: {alertLeadMinutes} minutes before</Text>
           <Text style={styles.sponsorMeta}>{sponsorStatusMessage}</Text>
+          <Text style={styles.sponsorMeta}>{calendarStatusMessage}</Text>
           <Button
             title={savingSponsor ? "Saving..." : "Save Sponsor Config"}
             onPress={() => void handleSaveSponsorConfig()}
             disabled={savingSponsor}
           />
-          <View style={styles.buttonSpacer} />
           <Button
-            title={addingCalendarEvent ? "Adding..." : "Add to Calendar"}
+            title={savingCalendar ? "Adding..." : "Add to Calendar"}
             onPress={() => void handleAddToCalendar()}
-            disabled={addingCalendarEvent}
+            disabled={savingCalendar || !sponsorConfigCompleteForCalendar}
           />
           <Text style={styles.sponsorMeta}>
             If install changed recently, reset Metro: pnpm --filter @recovery/mobile dev -- --clear
@@ -1475,86 +1575,6 @@ export default function App() {
           <Button title="Check Out Last Attendance" onPress={() => void handleCheckOut()} />
         </View>
       </ScrollView>
-        <Text style={styles.sponsorLabel}>Alert lead time (minutes)</Text>
-        <View style={styles.repeatRow}>
-          {SPONSOR_ALERT_LEAD_PRESETS_MINUTES.map((minutes) => (
-            <Pressable
-              key={minutes}
-              style={[
-                styles.repeatChip,
-                alertLeadMinutes === minutes ? styles.repeatChipSelected : null,
-              ]}
-              onPress={() => applyAlertLeadMinutes(minutes)}
-            >
-              <Text
-                style={[
-                  styles.repeatChipText,
-                  alertLeadMinutes === minutes ? styles.repeatChipTextSelected : null,
-                ]}
-              >
-                {minutes}m
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-        <View style={styles.customLeadRow}>
-          <TextInput
-            style={styles.customLeadInput}
-            value={customAlertLeadMinutes}
-            onChangeText={setCustomAlertLeadMinutes}
-            placeholder="Custom minutes"
-            keyboardType="number-pad"
-            maxLength={4}
-          />
-          <Pressable style={styles.customLeadButton} onPress={handleApplyCustomAlertLeadMinutes}>
-            <Text style={styles.customLeadButtonText}>Apply</Text>
-          </Pressable>
-        </View>
-        <Pressable style={styles.resetLeadButton} onPress={handleResetAlertLeadMinutes}>
-          <Text style={styles.resetLeadButtonText}>
-            Reset to default ({SPONSOR_ALERT_LEAD_DEFAULT_MINUTES}m)
-          </Text>
-        </Pressable>
-
-        <View style={styles.supervisionRow}>
-          <Text style={styles.sponsorLabel}>Active reminders</Text>
-          <Switch value={sponsorActive} onValueChange={setSponsorActive} />
-        </View>
-
-        <Text style={styles.sponsorMeta}>{sponsorScheduleSummary}</Text>
-        <Text style={styles.sponsorMeta}>Calendar alert: {alertLeadMinutes} minutes before</Text>
-        <Text style={styles.sponsorMeta}>{sponsorStatusMessage}</Text>
-        <Text style={styles.sponsorMeta}>{calendarStatusMessage}</Text>
-        <Button
-          title={savingSponsor ? "Saving..." : "Save Sponsor Config"}
-          onPress={() => void handleSaveSponsorConfig()}
-          disabled={savingSponsor}
-        />
-        <Button
-          title={savingCalendar ? "Adding..." : "Add to Calendar"}
-          onPress={() => void handleAddToCalendar()}
-          disabled={savingCalendar || !sponsorConfigCompleteForCalendar}
-        />
-      </View>
-
-      <FlatList
-        style={styles.list}
-        data={meetings}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <View style={styles.item}>
-            <Text style={styles.itemTitle}>{item.name}</Text>
-            <Text style={styles.itemAddress}>{item.address}</Text>
-            <Button title="Check In" onPress={() => void handleCheckIn(item.id)} />
-          </View>
-        )}
-        ListEmptyComponent={!loadingMeetings ? <Text>No meetings found.</Text> : null}
-      />
-      <View style={styles.checkoutBox}>
-        <Text>Last attendance: {lastAttendanceId ?? "None"}</Text>
-        <Text>Last status: {lastAttendanceStatus ?? "N/A"}</Text>
-        <Button title="Check Out Last Attendance" onPress={() => void handleCheckOut()} />
-      </View>
       <StatusBar style="auto" />
     </KeyboardAvoidingView>
   );
@@ -1677,41 +1697,49 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
-  pickerRow: {
+  timeWheelRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    flexWrap: "wrap",
   },
-  pickerButton: {
+  timeWheelColumn: {
+    height: TIME_WHEEL_ITEM_HEIGHT * TIME_WHEEL_VISIBLE_ROWS,
     borderWidth: 1,
     borderColor: "#d0d5dd",
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    borderRadius: 10,
     backgroundColor: "#f8fafc",
+    overflow: "hidden",
   },
-  pickerButtonText: {
-    fontWeight: "700",
+  timeWheelContent: {
+    paddingVertical: TIME_WHEEL_SIDE_PADDING,
   },
-  pickerValue: {
-    minWidth: 24,
-    textAlign: "center",
+  timeWheelItem: {
+    height: TIME_WHEEL_ITEM_HEIGHT,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  timeWheelItemText: {
+    color: "#1d2939",
+    fontSize: 18,
     fontWeight: "600",
   },
-  pickerDivider: {
-    fontWeight: "700",
-  },
-  pickerMeridiemButton: {
+  timeWheelSelection: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: TIME_WHEEL_SIDE_PADDING,
+    height: TIME_WHEEL_ITEM_HEIGHT,
     borderWidth: 1,
-    borderColor: "#d0d5dd",
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    backgroundColor: "#f8fafc",
+    borderLeftWidth: 0,
+    borderRightWidth: 0,
+    borderColor: "#98a2b3",
+    backgroundColor: "rgba(255, 255, 255, 0.45)",
   },
-  pickerMeridiemText: {
-    fontWeight: "600",
+  timeWheelColon: {
+    color: "#344054",
+    fontSize: 22,
+    fontWeight: "700",
+    marginHorizontal: -2,
   },
   repeatRow: {
     flexDirection: "row",
