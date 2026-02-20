@@ -2531,7 +2531,7 @@ setNotificationOpenPhone(null);
 
     {notificationOpenPhone ? (
       <View style={styles.callNowBox}>
-        <Text style={styles.sectionMeta}>Opened from notification: {notificationOpenPhone}</Text>
+        <Text style={styles.sectionMeta}>{`Opened from notification: ${notificationOpenPhone}`}</Text>
         <Button title="Call now" onPress={() => void openPhoneCall(notificationOpenPhone)} />
       </View>
     ) : null}
