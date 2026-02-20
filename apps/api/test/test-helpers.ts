@@ -10,6 +10,13 @@ const testEnv: ApiEnv = {
   DATABASE_URL: "postgres://test:test@localhost:5432/test",
   ENABLE_DEV_AUTH: true,
   LOG_LEVEL: "info",
+  MEETING_FEEDS_AA: "",
+  MEETING_FEEDS_NA: "",
+  MEETING_IMPORT_RADIUS_MILES: 20,
+  MEETING_GUIDE_FEEDS_JSON: "[]",
+  MEETING_GUIDE_DEFAULT_TENANT_ID: undefined,
+  MEETING_GUIDE_REFRESH_INTERVAL_MS: 43_200_000,
+  MEETING_GUIDE_AUTO_INGEST: false,
 };
 
 export async function createTestDb(): Promise<InMemoryDb> {
