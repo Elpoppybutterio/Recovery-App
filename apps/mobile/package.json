@@ -9,7 +9,7 @@
     "android": "expo start --android",
     "dev": "expo start",
     "build": "expo export --platform web",
-    "lint": "eslint . --ext .ts,.tsx",
+    "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "echo \"No mobile tests yet\""
   },

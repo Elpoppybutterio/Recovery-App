@@ -16,6 +16,7 @@
     "dev:mobile:clear": "pnpm dev:ports:kill && pnpm --filter @recovery/mobile dev -- --clear",
     "build": "turbo run build",
     "lint": "turbo run lint",
+    "lint:all": "pnpm -r --workspace-concurrency=1 lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "format": "prettier --write .",
