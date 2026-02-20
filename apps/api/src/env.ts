@@ -28,6 +28,9 @@ const apiEnvSchema = z.object({
   DATABASE_URL: z.string().default("postgres://postgres:postgres@localhost:5432/recovery_app"),
   ENABLE_DEV_AUTH: z.preprocess(parseBooleanString, z.boolean().optional()),
   LOG_LEVEL: z.enum(["info", "warn", "error"]).default("info"),
+  MEETING_FEEDS_AA: z.string().default(""),
+  MEETING_FEEDS_NA: z.string().default(""),
+  MEETING_IMPORT_RADIUS_MILES: z.coerce.number().positive().default(20),
 });
 
 type ParsedApiEnv = z.infer<typeof apiEnvSchema>;

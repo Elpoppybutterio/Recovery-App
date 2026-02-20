@@ -58,6 +58,52 @@ describe("MVP Slice A: meetings + attendance + signature", () => {
     await db.end?.();
   });
 
+  it("filters meetings by location radius when lat/lng are provided", async () => {
+    const app = createTestApp(db);
+
+    const createMeeting = async (payload: {
+      name: string;
+      address: string;
+      lat: number;
+      lng: number;
+      radiusM: number;
+    }) =>
+      app.inject({
+        method: "POST",
+        url: "/v1/meetings",
+        headers: { authorization: "Bearer DEV_admin-a" },
+        payload,
+      });
+
+    await createMeeting({
+      name: "Nearby Meeting",
+      address: "101 Near St",
+      lat: 40.01,
+      lng: -105,
+      radiusM: 120,
+    });
+    await createMeeting({
+      name: "Far Meeting",
+      address: "999 Far St",
+      lat: 41,
+      lng: -105,
+      radiusM: 120,
+    });
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/v1/meetings?lat=40&lng=-105&radiusMiles=20",
+      headers: { authorization: "Bearer DEV_enduser-a1" },
+    });
+
+    expect(list.statusCode).toBe(200);
+    const payload = list.json() as { meetings: Array<{ name: string }> };
+    expect(payload.meetings.map((meeting) => meeting.name)).toEqual(["Nearby Meeting"]);
+
+    await app.close();
+    await db.end?.();
+  });
+
   it("supports check-in/check-out with dwell-based status transitions", async () => {
     const clock = buildClock("2026-01-02T10:00:00.000Z");
     const app = createTestApp(db, { now: clock.now });

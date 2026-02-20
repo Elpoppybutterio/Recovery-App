@@ -34,6 +34,7 @@ type SourceConfig = {
   feedUrl?: string;
   apiUrl: string;
   authHeader: string;
+  radiusMiles?: number;
 };
 
 const DAY_NAME_MAP: Record<string, number> = {
@@ -317,6 +318,9 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
       }
       if (typeof params.lng === "number") {
         query.set("lng", String(params.lng));
+      }
+      if (typeof params.lat === "number" && typeof params.lng === "number") {
+        query.set("radiusMiles", String(config.radiusMiles ?? 20));
       }
 
       const url = `${config.apiUrl}/v1/meetings${query.size > 0 ? `?${query.toString()}` : ""}`;
