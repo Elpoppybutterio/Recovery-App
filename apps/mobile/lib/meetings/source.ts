@@ -340,6 +340,9 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
         }
       }
+      if (typeof params.lat === "number" && typeof params.lng === "number") {
+        query.set("radiusMiles", String(config.radiusMiles ?? 20));
+      }
 
       if (meetings.length === 0) {
         const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;

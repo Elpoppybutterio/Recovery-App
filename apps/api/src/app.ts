@@ -55,6 +55,7 @@ const meetingsListQuerySchema = z
     },
   );
 
+
 const meetingsNearbyQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90),
   lng: z.coerce.number().min(-180).max(180),
@@ -62,17 +63,10 @@ const meetingsNearbyQuerySchema = z.object({
   format: z.enum(["in_person", "online", "any"]).default("any"),
   dayOfWeek: z.coerce.number().int().min(0).max(6).optional(),
   types: z.string().optional(),
-  timeFrom: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/)
-    .optional(),
-  timeTo: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/)
-    .optional(),
+  timeFrom: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  timeTo: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   limit: z.coerce.number().int().positive().max(500).optional(),
 });
-
 const attendanceCheckInBodySchema = z.object({
   meetingId: z.string().min(1),
 });
