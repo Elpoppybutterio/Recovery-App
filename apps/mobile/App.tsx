@@ -238,6 +238,10 @@ function formatDistance(distanceMeters: number | null): string {
   return `${miles.toFixed(1)} mi`;
 }
 
+function formatCoordinate(value: number): string {
+  return value.toFixed(5);
+}
+
 function parseMinutesFromHhmm(value: string): number {
   const [hoursText, minutesText] = value.split(":");
   const hours = Number(hoursText);
@@ -589,7 +593,7 @@ function locationGroupKeyForMeeting(meeting: MeetingListItem): string {
 
 export default function App() {
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
-  const apiUrl = typeof extra.apiUrl === "string" ? extra.apiUrl : "http://localhost:3001";
+  const apiUrl = typeof extra.apiUrl === "string" ? extra.apiUrl : "http://localhost:3031";
   const devAuthUserId =
     typeof extra.devAuthUserId === "string" ? extra.devAuthUserId : "enduser-a1";
   const devUserDisplayName =
@@ -698,6 +702,7 @@ export default function App() {
   const mapRef = useRef<any>(null);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
+  const meetingsSearchOrigin = mapBoundaryCenter ?? currentLocation;
 
   const normalizedSponsorName = useMemo(() => sponsorName.trim(), [sponsorName]);
   const sponsorPhoneE164 = useMemo(
@@ -2830,6 +2835,18 @@ export default function App() {
               <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
               <Text style={styles.sectionMeta}>
                 Location: {locationPermission === "granted" ? "Enabled" : "Not enabled"}
+              </Text>
+              <Text style={styles.sectionMeta}>
+                GPS:{" "}
+                {currentLocation
+                  ? `${formatCoordinate(currentLocation.lat)}, ${formatCoordinate(currentLocation.lng)} accuracy ${Math.round(currentLocation.accuracyM ?? 0)}m`
+                  : "Unavailable"}
+              </Text>
+              <Text style={styles.sectionMeta}>
+                Search origin:{" "}
+                {meetingsSearchOrigin
+                  ? `${formatCoordinate(meetingsSearchOrigin.lat)}, ${formatCoordinate(meetingsSearchOrigin.lng)} radius ${meetingRadiusMiles}mi`
+                  : `Unavailable radius ${meetingRadiusMiles}mi`}
               </Text>
               {meetingsError ? <Text style={styles.errorText}>{meetingsError}</Text> : null}
 

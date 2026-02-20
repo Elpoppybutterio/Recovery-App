@@ -24,7 +24,7 @@ function parseBooleanString(value: unknown) {
 const apiEnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   API_HOST: z.string().default("0.0.0.0"),
-  API_PORT: z.coerce.number().default(3001),
+  API_PORT: z.coerce.number().default(3031),
   DATABASE_URL: z.string().default("postgres://postgres:postgres@localhost:5432/recovery_app"),
   ENABLE_DEV_AUTH: z.preprocess(parseBooleanString, z.boolean().optional()),
   LOG_LEVEL: z.enum(["info", "warn", "error"]).default("info"),

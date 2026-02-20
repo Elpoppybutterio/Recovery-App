@@ -320,8 +320,10 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
 
       let meetings: MeetingRecord[] = [];
       let apiWarning: string | undefined;
+      const hasLocation = typeof params.lat === "number" && typeof params.lng === "number";
+      let shouldFallbackToTenantMeetings = !hasLocation;
 
-      if (typeof params.lat === "number" && typeof params.lng === "number") {
+      if (hasLocation) {
         const nearbyQuery = new URLSearchParams();
         nearbyQuery.set("lat", String(params.lat));
         nearbyQuery.set("lng", String(params.lng));
@@ -329,18 +331,45 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
 
         const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
-        const nearbyResponse = await fetch(nearbyUrl, { headers });
+        if (__DEV__) {
+          console.log("[meetings] nearby request", {
+            url: nearbyUrl,
+            lat: params.lat,
+            lng: params.lng,
+            radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
+          });
+        }
 
-        if (nearbyResponse.ok) {
-          const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
-          meetings = (nearbyPayload.meetings ?? [])
-            .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
-            .filter((entry): entry is MeetingRecord => entry !== null);
-        } else {
-          apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
+        try {
+          const nearbyResponse = await fetch(nearbyUrl, { headers });
+
+          if (nearbyResponse.ok) {
+            const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
+            meetings = (nearbyPayload.meetings ?? [])
+              .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+              .filter((entry): entry is MeetingRecord => entry !== null);
+            shouldFallbackToTenantMeetings = false;
+          } else {
+            apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
+            if (__DEV__) {
+              console.log("[meetings] nearby fallback", {
+                status: nearbyResponse.status,
+                reason: "non-ok response",
+              });
+            }
+          }
+        } catch (error) {
+          apiWarning = "Nearby meetings unavailable; falling back to tenant meetings";
+          if (__DEV__) {
+            console.log("[meetings] nearby fallback", {
+              reason: "request failed",
+              error: error instanceof Error ? error.message : "unknown",
+            });
+          }
         }
       }
-      if (meetings.length === 0) {
+
+      if (shouldFallbackToTenantMeetings) {
         const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
         const response = await fetch(url, { headers });
         if (!response.ok) {
