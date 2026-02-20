@@ -220,6 +220,16 @@ function distanceMetersBetween(latA: number, lngA: number, latB: number, lngB: n
   return EARTH_RADIUS_METERS * c;
 }
 
+function coordinatesEqual(
+  left: { lat: number; lng: number } | null,
+  right: { lat: number; lng: number },
+): boolean {
+  if (!left) {
+    return false;
+  }
+  return Math.abs(left.lat - right.lat) < 1e-6 && Math.abs(left.lng - right.lng) < 1e-6;
+}
+
 function formatDistance(distanceMeters: number | null): string {
   if (distanceMeters === null) {
     return "Distance unavailable";
@@ -1152,13 +1162,26 @@ export default function App() {
   );
 
   const updateMapCenter = useCallback((center: MapBoundaryCenter) => {
-    setMapCenter(center);
-    setMapRegion((previous: Region | null) => ({
-      latitude: center.lat,
-      longitude: center.lng,
-      latitudeDelta: previous?.latitudeDelta ?? DEFAULT_MAP_LATITUDE_DELTA,
-      longitudeDelta: previous?.longitudeDelta ?? DEFAULT_MAP_LONGITUDE_DELTA,
-    }));
+    setMapCenter((previous) => (coordinatesEqual(previous, center) ? previous : center));
+    setMapRegion((previous: Region | null) => {
+      const latitudeDelta = previous?.latitudeDelta ?? DEFAULT_MAP_LATITUDE_DELTA;
+      const longitudeDelta = previous?.longitudeDelta ?? DEFAULT_MAP_LONGITUDE_DELTA;
+      if (
+        previous &&
+        Math.abs(previous.latitude - center.lat) < 1e-6 &&
+        Math.abs(previous.longitude - center.lng) < 1e-6 &&
+        Math.abs(previous.latitudeDelta - latitudeDelta) < 1e-9 &&
+        Math.abs(previous.longitudeDelta - longitudeDelta) < 1e-9
+      ) {
+        return previous;
+      }
+      return {
+        latitude: center.lat,
+        longitude: center.lng,
+        latitudeDelta,
+        longitudeDelta,
+      };
+    });
   }, []);
 
   const onMapRegionChangeComplete = useCallback(
