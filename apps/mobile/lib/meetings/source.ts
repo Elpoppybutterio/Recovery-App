@@ -320,6 +320,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
 
       let meetings: MeetingRecord[] = [];
       let apiWarning: string | undefined;
+<<<<<<< HEAD
       const hasLocation = typeof params.lat === "number" && typeof params.lng === "number";
       let shouldFallbackToTenantMeetings = !hasLocation;
 
@@ -370,11 +371,34 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           }
         }
       }
+=======
+
+>>>>>>> 62b7d18 (feat(meetings): ingest meeting guide feeds and add nearby map flow)
       if (typeof params.lat === "number" && typeof params.lng === "number") {
-        query.set("radiusMiles", String(config.radiusMiles ?? 20));
+        const nearbyQuery = new URLSearchParams();
+        nearbyQuery.set("lat", String(params.lat));
+        nearbyQuery.set("lng", String(params.lng));
+        nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
+        nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
+
+        const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
+        const nearbyResponse = await fetch(nearbyUrl, { headers });
+
+        if (nearbyResponse.ok) {
+          const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
+          meetings = (nearbyPayload.meetings ?? [])
+            .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+            .filter((entry): entry is MeetingRecord => entry !== null);
+        } else {
+          apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
+        }
       }
 
+<<<<<<< HEAD
       if (shouldFallbackToTenantMeetings) {
+=======
+      if (meetings.length === 0) {
+>>>>>>> 62b7d18 (feat(meetings): ingest meeting guide feeds and add nearby map flow)
         const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
         const response = await fetch(url, { headers });
         if (!response.ok) {
