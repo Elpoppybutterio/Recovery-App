@@ -37,6 +37,41 @@ const meetingCreateBodySchema = z.object({
   radiusM: z.number().int().positive(),
 });
 
+const meetingsListQuerySchema = z
+  .object({
+    day: z.coerce.number().int().min(0).max(6).optional(),
+    dayOfWeek: z.coerce.number().int().min(0).max(6).optional(),
+    lat: z.coerce.number().min(-90).max(90).optional(),
+    lng: z.coerce.number().min(-180).max(180).optional(),
+    radiusMiles: z.coerce.number().positive().max(500).optional(),
+  })
+  .refine(
+    (value) =>
+      (typeof value.lat === "number" && typeof value.lng === "number") ||
+      (typeof value.lat !== "number" && typeof value.lng !== "number"),
+    {
+      message: "lat and lng must be provided together",
+      path: ["lat"],
+    },
+  );
+
+const meetingsNearbyQuerySchema = z.object({
+  lat: z.coerce.number().min(-90).max(90),
+  lng: z.coerce.number().min(-180).max(180),
+  radiusMiles: z.coerce.number().positive().max(200).default(20),
+  format: z.enum(["in_person", "online", "any"]).default("any"),
+  dayOfWeek: z.coerce.number().int().min(0).max(6).optional(),
+  types: z.string().optional(),
+  timeFrom: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .optional(),
+  timeTo: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+});
 
 const meetingsIngestStatusQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90).default(45.7833),
@@ -160,7 +195,6 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   const now = options.now ?? (() => new Date());
   let meetingGuideTimer: NodeJS.Timeout | undefined;
   let devMeetingRefreshLastRunAtMs = 0;
-  const devMeetingNearbyWarmupByTenantMs = new Map<string, number>();
 
   app.decorate("db", db);
   app.decorate("auditLogger", createAuditLogger(db));
@@ -1503,29 +1537,10 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     return result;
   };
 
-  const runMeetingGuideRefreshForActor = async (
-    actor: { tenantId: string; userId: string },
-    action: "meeting_guide.refresh" | "meeting_guide.refresh.dev",
-  ) => {
-    const result = await runMeetingGuideIngestForTenant(actor.tenantId);
-    await app.auditLogger.log({
-      tenantId: actor.tenantId,
-      actorUserId: actor.userId,
-      action,
-      subjectType: "meeting_feed",
-      subjectId: null,
-      metadata: { ...result },
-    });
-    return result;
-  };
-
-  const canBypassMeetingRefreshAdmin = (authorization: unknown): boolean =>
-    env.NODE_ENV !== "production" && isDevAuthHeader(authorization);
-
   app.post(
     "/v1/admin/meetings/refresh",
     {
-      preHandler: [authenticateRequest],
+      preHandler: [authenticateRequest, requireRole(Role.ADMIN)],
     },
     async (request, reply) => {
       const actor = request.actor;
@@ -1534,18 +1549,152 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         return;
       }
 
-      const result = await runMeetingGuideIngestForTenant(actor.tenantId);
-      await app.auditLogger.log({
-        tenantId: actor.tenantId,
-        actorUserId: actor.userId,
-        action: "meeting_guide.refresh",
-        subjectType: "meeting_feed",
-        subjectId: null,
-        metadata: { ...result },
-      });
+      const result = await runMeetingGuideRefreshForActor(actor, "meeting_guide.refresh");
       return { result };
     },
   );
+
+  if (env.ENABLE_DEV_AUTH) {
+    app.post(
+      "/v1/dev/meetings/refresh",
+      {
+        preHandler: [authenticateRequest],
+      },
+      async (request, reply) => {
+        const actor = request.actor;
+        if (!actor) {
+          reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+          return;
+        }
+
+        if (!isDevAuthHeader(request.headers.authorization)) {
+          reply.code(403).send({
+            error: "forbidden",
+            message: "Dev meetings refresh requires Authorization: Bearer DEV_<userId>.",
+          });
+          return;
+        }
+
+        const elapsedMs = now().getTime() - devMeetingRefreshLastRunAtMs;
+        const minIntervalMs = 30_000;
+        if (elapsedMs >= 0 && elapsedMs < minIntervalMs) {
+          const retryAfterSeconds = Math.ceil((minIntervalMs - elapsedMs) / 1000);
+          reply.code(429).send({
+            error: "too_many_requests",
+            message: `Dev meetings refresh cooldown active. Retry in ${retryAfterSeconds}s.`,
+          });
+          return;
+        }
+
+        devMeetingRefreshLastRunAtMs = now().getTime();
+        const result = await runMeetingGuideRefreshForActor(actor, "meeting_guide.refresh.dev");
+        const feeds = await repositories.meetingFeeds.listActive(actor.tenantId);
+        const errors = Array.from(
+          new Set(
+            feeds
+              .map((feed) => feed.last_error)
+              .filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
+          ),
+        );
+
+        return {
+          feedsProcessed: result.feedsAttempted,
+          meetingsImported: result.meetingsImported,
+          errors,
+        };
+      },
+    );
+
+    app.get(
+      "/v1/dev/meetings/status",
+      {
+        preHandler: [authenticateRequest],
+      },
+      async (request, reply) => {
+        const actor = request.actor;
+        if (!actor) {
+          reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+          return;
+        }
+
+        if (!isDevAuthHeader(request.headers.authorization)) {
+          reply.code(403).send({
+            error: "forbidden",
+            message: "Dev meetings status requires Authorization: Bearer DEV_<userId>.",
+          });
+          return;
+        }
+
+        const parsedQuery = meetingsIngestStatusQuerySchema.safeParse(request.query ?? {});
+        if (!parsedQuery.success) {
+          reply.code(400).send({
+            error: "bad_request",
+            message: "Invalid meetings status query",
+            details: parsedQuery.error.flatten(),
+          });
+          return;
+        }
+
+        const feeds = await repositories.meetingFeeds.listActive(actor.tenantId);
+        const counts = await db.query<{
+          total_meetings: number;
+          meetings_with_coordinates: number;
+          meetings_without_coordinates: number;
+        }>(
+          `
+            SELECT
+              COUNT(*)::int AS total_meetings,
+              COUNT(*) FILTER (WHERE lat IS NOT NULL AND lng IS NOT NULL)::int AS meetings_with_coordinates,
+              COUNT(*) FILTER (WHERE lat IS NULL OR lng IS NULL)::int AS meetings_without_coordinates
+            FROM meeting_guide_meetings
+            WHERE tenant_id = $1
+          `,
+          [actor.tenantId],
+        );
+
+        const nearbySample = await tenantRepositories.meetingGuide.nearby(
+          actor,
+          {
+            lat: parsedQuery.data.lat,
+            lng: parsedQuery.data.lng,
+            radiusMiles: parsedQuery.data.radiusMiles,
+          },
+          {
+            format: "in_person",
+            limit: 5,
+          },
+        );
+
+        return {
+          tenantId: actor.tenantId,
+          query: parsedQuery.data,
+          feedsCount: feeds.length,
+          feeds: feeds.map((feed) => ({
+            id: feed.id,
+            name: feed.name,
+            url: feed.url,
+            lastFetchedAt: feed.last_fetched_at,
+            lastError: feed.last_error,
+          })),
+          meetingStats: counts.rows[0] ?? {
+            total_meetings: 0,
+            meetings_with_coordinates: 0,
+            meetings_without_coordinates: 0,
+          },
+          nearbySample: nearbySample.map((meeting) => ({
+            id: meeting.id,
+            name: meeting.name,
+            lat: meeting.lat,
+            lng: meeting.lng,
+            time: meeting.time,
+            day: meeting.day,
+            distanceMeters: meeting.distance_meters,
+            format: meeting.inferred_format,
+          })),
+        };
+      },
+    );
+  }
 
   return app;
 }

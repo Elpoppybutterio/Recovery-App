@@ -382,7 +382,17 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
 
         const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
-        const nearbyResponse = await fetch(nearbyUrl, { headers });
+        if (__DEV__) {
+          console.log("[meetings] nearby request", {
+            url: nearbyUrl,
+            lat: params.lat,
+            lng: params.lng,
+            radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
+          });
+        }
+
+        try {
+          const nearbyResponse = await fetch(nearbyUrl, { headers });
 
         if (nearbyResponse.ok) {
           const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
