@@ -777,13 +777,13 @@ if (!sponsorActive) {
   return "Sponsor reminders disabled.";
 }
 
-const next = computeNextCall(
-  new Date(),
-  sponsorCallTimeLocalHhmm,
-  sponsorRepeatUnit,
-  sponsorRepeatInterval,
-  sponsorRepeatDaysSorted,
-);
+    const next = computeNextCall(
+      new Date(),
+      sponsorCallTimeLocalHhmm,
+      sponsorRepeatUnit,
+      sponsorRepeatInterval,
+      sponsorRepeatDaysSorted,
+    );
 
     const repeatSummary =
       sponsorRepeatUnit === "MONTHLY"
@@ -812,6 +812,28 @@ const next = computeNextCall(
   }, [
     sponsorEnabled,
     sponsorActive,
+const sponsorStatusLine = useMemo(() => {
+  if (!sponsorEnabled) {
+    return "Sponsor is disabled.";
+  }
+  if (!sponsorActive) {
+    return "Sponsor reminders are disabled.";
+  }
+  if (!normalizedSponsorName || !sponsorPhoneE164) {
+    return "Enter sponsor name and phone to enable reminders.";
+  }
+  if (sponsorStatus) {
+    return sponsorStatus;
+  }
+  return sponsorScheduleSummary;
+}, [
+  sponsorEnabled,
+  sponsorActive,
+  normalizedSponsorName,
+  sponsorPhoneE164,
+  sponsorStatus,
+  sponsorScheduleSummary,
+]);
     normalizedSponsorName,
     sponsorPhoneE164,
     sponsorStatus,
@@ -1593,11 +1615,16 @@ const next = computeNextCall(
     const payload: SponsorConfigPayload = {
       sponsorName: normalizedSponsorName,
       sponsorPhoneE164,
+      callTimeLocalHhmm: sponsorCallTimeLocalHhmm,
+      repeatUnit: sponsorRepeatUnit,
+      repeatInterval: sponsorRepeatInterval,
+      repeatDays: sponsorRepeatDaysSorted,
+      active: sponsorPayloadActive,
 callTimeLocalHhmm: sponsorCallTimeLocalHhmm,
 repeatUnit: sponsorRepeatUnit,
 repeatInterval: sponsorRepeatInterval,
 repeatDays: sponsorRepeatDaysSorted,
-active: sponsorEnabled && sponsorActive,
+active: sponsorPayloadActive,
     };
 
     setSponsorSaving(true);
@@ -2549,8 +2576,6 @@ setNotificationOpenPhone(null);
     />
   </>
 )}
-                </>
-              )}
             </View>
 
             {__DEV__ ? (
