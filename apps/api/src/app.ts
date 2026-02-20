@@ -16,6 +16,11 @@ import { createPostgresPool } from "./db/postgres";
 import { createRepositories } from "./db/repositories";
 import { AccessDeniedError, createTenantRepositories } from "./db/tenantRepositories";
 import { loadApiEnv, type ApiEnv } from "./env";
+import {
+  ingestMeetingGuideFeedsForTenant,
+  parseConfiguredMeetingGuideFeeds,
+} from "./meeting-guide-ingest";
+import { mapTypeCodesToLabels } from "./meeting-guide";
 import { requirePermission, requireRole, requireSupervisorAssignment } from "./rbac";
 
 const logger = createLogger("api");
@@ -49,6 +54,24 @@ const meetingsListQuerySchema = z
       path: ["lat"],
     },
   );
+
+const meetingsNearbyQuerySchema = z.object({
+  lat: z.coerce.number().min(-90).max(90),
+  lng: z.coerce.number().min(-180).max(180),
+  radiusMiles: z.coerce.number().positive().max(200).default(20),
+  format: z.enum(["in_person", "online", "any"]).default("any"),
+  dayOfWeek: z.coerce.number().int().min(0).max(6).optional(),
+  types: z.string().optional(),
+  timeFrom: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .optional(),
+  timeTo: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+});
 
 const attendanceCheckInBodySchema = z.object({
   meetingId: z.string().min(1),
@@ -165,6 +188,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   const tenantRepositories = createTenantRepositories(repositories);
   const isManagedDb = !options.db;
   const now = options.now ?? (() => new Date());
+  let meetingGuideTimer: NodeJS.Timeout | undefined;
 
   app.decorate("db", db);
   app.decorate("auditLogger", createAuditLogger(db));
@@ -180,6 +204,9 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
 
   if (isManagedDb) {
     app.addHook("onClose", async () => {
+      if (meetingGuideTimer) {
+        clearInterval(meetingGuideTimer);
+      }
       await db.end?.();
     });
   }
@@ -187,6 +214,73 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   const authenticateRequest = buildAuthenticateRequest(repositories, {
     enableDevAuth: env.ENABLE_DEV_AUTH,
   });
+
+  const configuredMeetingGuideFeeds = parseConfiguredMeetingGuideFeeds(
+    env.MEETING_GUIDE_FEEDS_JSON,
+  );
+
+  const resolveTenantFeedConfigs = (tenantId: string) => {
+    const scoped = configuredMeetingGuideFeeds.filter(
+      (feed) => !feed.tenantId || feed.tenantId === tenantId,
+    );
+
+    if (scoped.length > 0) {
+      return scoped;
+    }
+
+    const legacyUrls = Array.from(
+      new Set(
+        [...env.MEETING_FEEDS_AA.split(","), ...env.MEETING_FEEDS_NA.split(",")]
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+      ),
+    );
+    return legacyUrls.map((url) => ({
+      name: "Legacy Meeting Feed",
+      url,
+    }));
+  };
+
+  const runMeetingGuideIngestForTenant = async (tenantId: string) => {
+    const feeds = resolveTenantFeedConfigs(tenantId);
+    if (feeds.length === 0) {
+      return {
+        feedsAttempted: 0,
+        feedsFailed: 0,
+        meetingsFetched: 0,
+        meetingsImported: 0,
+        meetingsSkipped: 0,
+      };
+    }
+
+    return ingestMeetingGuideFeedsForTenant({
+      repositories,
+      tenantId,
+      configuredFeeds: feeds,
+      now,
+      logger,
+    });
+  };
+
+  if (env.MEETING_GUIDE_AUTO_INGEST && env.MEETING_GUIDE_DEFAULT_TENANT_ID) {
+    void runMeetingGuideIngestForTenant(env.MEETING_GUIDE_DEFAULT_TENANT_ID).catch((error) => {
+      logger.error("meeting_guide.ingest.startup_failed", {
+        tenantId: env.MEETING_GUIDE_DEFAULT_TENANT_ID,
+        reason: error instanceof Error ? error.message : "unknown",
+      });
+    });
+
+    meetingGuideTimer = setInterval(() => {
+      void runMeetingGuideIngestForTenant(env.MEETING_GUIDE_DEFAULT_TENANT_ID as string).catch(
+        (error) => {
+          logger.error("meeting_guide.ingest.interval_failed", {
+            tenantId: env.MEETING_GUIDE_DEFAULT_TENANT_ID,
+            reason: error instanceof Error ? error.message : "unknown",
+          });
+        },
+      );
+    }, env.MEETING_GUIDE_REFRESH_INTERVAL_MS);
+  }
 
   app.get("/health", async () => {
     return {
@@ -793,6 +887,75 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           radiusMiles: resolvedRadiusMiles,
           locationScoped: hasLocationFilter,
         },
+      };
+    },
+  );
+
+  app.get(
+    "/v1/meetings/nearby",
+    {
+      preHandler: [
+        authenticateRequest,
+        requireRole(Role.END_USER, Role.SUPERVISOR, Role.ADMIN, Role.MEETING_VERIFIER),
+      ],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = meetingsNearbyQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid nearby meetings query",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      const typeFilters = parsedQuery.data.types
+        ? parsedQuery.data.types
+            .split(",")
+            .map((entry) => entry.trim().toUpperCase())
+            .filter((entry) => entry.length > 0)
+        : [];
+
+      const meetings = await tenantRepositories.meetingGuide.nearby(
+        actor,
+        {
+          lat: parsedQuery.data.lat,
+          lng: parsedQuery.data.lng,
+          radiusMiles: parsedQuery.data.radiusMiles,
+        },
+        {
+          format: parsedQuery.data.format,
+          dayOfWeek: parsedQuery.data.dayOfWeek,
+          types: typeFilters,
+          timeFrom: parsedQuery.data.timeFrom,
+          timeTo: parsedQuery.data.timeTo,
+          limit: parsedQuery.data.limit,
+        },
+      );
+
+      return {
+        meetings: meetings.map((meeting) => ({
+          id: meeting.id,
+          name: meeting.name,
+          address: meeting.formatted_address ?? meeting.address ?? "Address unavailable",
+          format: meeting.inferred_format,
+          dayOfWeek: meeting.day,
+          startsAtLocal: meeting.time,
+          endsAtLocal: meeting.end_time,
+          lat: meeting.lat,
+          lng: meeting.lng,
+          onlineUrl: meeting.conference_url,
+          types: meeting.types,
+          typesDisplay: mapTypeCodesToLabels(meeting.types),
+          distanceMeters: meeting.distance_meters,
+        })),
       };
     },
   );
@@ -1410,6 +1573,31 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
 
       await tenantRepositories.tenantConfig.upsert(actor, params.key, parsed.data.value);
       return { key: params.key, value: parsed.data.value };
+    },
+  );
+
+  app.post(
+    "/v1/admin/meetings/refresh",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.ADMIN)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const result = await runMeetingGuideIngestForTenant(actor.tenantId);
+      await app.auditLogger.log({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "meeting_guide.refresh",
+        subjectType: "meeting_feed",
+        subjectId: null,
+        metadata: { ...result },
+      });
+      return { result };
     },
   );
 

@@ -8,11 +8,13 @@ import {
 import type { ActorContext } from "../domain/actor";
 import type {
   ExclusionZoneType,
+  MeetingGuideNearbyFilters,
   Repositories,
   SupervisorAttendanceFilters,
   SupervisorLiveLocationFilters,
   SupervisorIncidentFilters,
 } from "./repositories";
+import type { NormalizedMeetingGuideMeeting } from "../meeting-guide";
 
 export class AccessDeniedError extends Error {
   constructor(message: string) {
@@ -104,6 +106,57 @@ export function createTenantRepositories(repositories: Repositories) {
       },
       list(actor: ActorContext) {
         return repositories.listMeetings(actor.tenantId);
+      },
+    },
+    meetingGuide: {
+      nearby(
+        actor: ActorContext,
+        center: { lat: number; lng: number; radiusMiles: number },
+        filters: MeetingGuideNearbyFilters = {},
+      ) {
+        return repositories.meetingGuideMeetings.listNearby(actor.tenantId, center, filters);
+      },
+      upsertForFeed(
+        actor: ActorContext,
+        sourceFeedId: string,
+        meetings: NormalizedMeetingGuideMeeting[],
+        now: Date,
+      ) {
+        return repositories.meetingGuideMeetings.upsertForFeed(
+          actor.tenantId,
+          sourceFeedId,
+          meetings,
+          now,
+        );
+      },
+    },
+    meetingFeeds: {
+      upsert(
+        actor: ActorContext,
+        payload: {
+          name: string;
+          url: string;
+          entity?: string;
+          entityUrl?: string;
+          active?: boolean;
+        },
+      ) {
+        return repositories.meetingFeeds.upsert(actor.tenantId, payload);
+      },
+      listActive(actor: ActorContext) {
+        return repositories.meetingFeeds.listActive(actor.tenantId);
+      },
+      markFetchResult(
+        actor: ActorContext,
+        feedId: string,
+        payload: {
+          etag?: string | null;
+          lastModified?: string | null;
+          lastError?: string | null;
+          fetchedAt: Date;
+        },
+      ) {
+        return repositories.meetingFeeds.markFetchResult(actor.tenantId, feedId, payload);
       },
     },
     attendance: {

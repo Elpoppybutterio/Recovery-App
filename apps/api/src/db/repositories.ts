@@ -10,6 +10,12 @@ import {
 import { randomUUID } from "node:crypto";
 import type { ActorContext } from "../domain/actor";
 import type { DbClient } from "./client";
+import {
+  boundingBoxForRadius,
+  haversineDistanceMeters,
+  inferMeetingFormat,
+  type NormalizedMeetingGuideMeeting,
+} from "../meeting-guide";
 
 interface UserRow {
   id: string;
@@ -174,6 +180,63 @@ export interface SponsorConfigRow {
   created_at: string;
   updated_at: string;
   updated_by_user_id: string;
+}
+
+export interface MeetingFeedRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  url: string;
+  entity: string | null;
+  entity_url: string | null;
+  active: boolean;
+  last_fetched_at: string | null;
+  etag: string | null;
+  last_modified: string | null;
+  last_error: string | null;
+}
+
+export interface MeetingGuideMeetingRow {
+  id: string;
+  tenant_id: string;
+  source_feed_id: string;
+  slug: string;
+  name: string;
+  day: number | null;
+  time: string | null;
+  end_time: string | null;
+  timezone: string | null;
+  formatted_address: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  postal_code: string | null;
+  country: string | null;
+  region: string | null;
+  location: string | null;
+  notes: string | null;
+  types_json: unknown;
+  conference_url: string | null;
+  conference_phone: string | null;
+  lat: number | null;
+  lng: number | null;
+  updated_at_source: string | null;
+  last_ingested_at: string;
+}
+
+export interface MeetingGuideNearbyFilters {
+  format?: "in_person" | "online" | "any";
+  dayOfWeek?: number;
+  types?: string[];
+  timeFrom?: string;
+  timeTo?: string;
+  limit?: number;
+}
+
+export interface NearbyMeetingRow extends MeetingGuideMeetingRow {
+  distance_meters: number | null;
+  inferred_format: "IN_PERSON" | "ONLINE" | "HYBRID";
+  types: string[];
 }
 
 export interface UserZoneRuleWithZoneRow {
@@ -716,6 +779,355 @@ export function createRepositories(db: DbClient) {
         [tenantId],
       );
       return result.rows;
+    },
+
+    meetingFeeds: {
+      async upsert(
+        tenantId: string,
+        payload: {
+          name: string;
+          url: string;
+          entity?: string;
+          entityUrl?: string;
+          active?: boolean;
+        },
+      ): Promise<MeetingFeedRow> {
+        const result = await db.query<MeetingFeedRow>(
+          `
+          INSERT INTO meeting_feeds (
+            id,
+            tenant_id,
+            name,
+            url,
+            entity,
+            entity_url,
+            active
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (tenant_id, url)
+          DO UPDATE SET
+            name = EXCLUDED.name,
+            entity = EXCLUDED.entity,
+            entity_url = EXCLUDED.entity_url,
+            active = EXCLUDED.active,
+            updated_at = NOW()
+          RETURNING
+            id,
+            tenant_id,
+            name,
+            url,
+            entity,
+            entity_url,
+            active,
+            last_fetched_at,
+            etag,
+            last_modified,
+            last_error
+        `,
+          [
+            randomUUID(),
+            tenantId,
+            payload.name,
+            payload.url,
+            payload.entity ?? null,
+            payload.entityUrl ?? null,
+            payload.active ?? true,
+          ],
+        );
+
+        return result.rows[0];
+      },
+
+      async listActive(tenantId: string): Promise<MeetingFeedRow[]> {
+        const result = await db.query<MeetingFeedRow>(
+          `
+          SELECT
+            id,
+            tenant_id,
+            name,
+            url,
+            entity,
+            entity_url,
+            active,
+            last_fetched_at,
+            etag,
+            last_modified,
+            last_error
+          FROM meeting_feeds
+          WHERE tenant_id = $1
+            AND active = TRUE
+          ORDER BY name ASC
+        `,
+          [tenantId],
+        );
+        return result.rows;
+      },
+
+      async markFetchResult(
+        tenantId: string,
+        feedId: string,
+        payload: {
+          etag?: string | null;
+          lastModified?: string | null;
+          lastError?: string | null;
+          fetchedAt: Date;
+        },
+      ): Promise<void> {
+        await db.query(
+          `
+          UPDATE meeting_feeds
+          SET
+            last_fetched_at = $1,
+            etag = COALESCE($2, etag),
+            last_modified = COALESCE($3, last_modified),
+            last_error = $4,
+            updated_at = NOW()
+          WHERE tenant_id = $5
+            AND id = $6
+        `,
+          [
+            payload.fetchedAt.toISOString(),
+            payload.etag ?? null,
+            payload.lastModified ?? null,
+            payload.lastError ?? null,
+            tenantId,
+            feedId,
+          ],
+        );
+      },
+    },
+
+    meetingGuideMeetings: {
+      async upsertForFeed(
+        tenantId: string,
+        sourceFeedId: string,
+        meetings: NormalizedMeetingGuideMeeting[],
+        now: Date,
+      ): Promise<number> {
+        let upserted = 0;
+        for (const meeting of meetings) {
+          const stableId = `${tenantId}:${sourceFeedId}:${meeting.slug}`;
+          await db.query(
+            `
+            INSERT INTO meeting_guide_meetings (
+              id,
+              tenant_id,
+              source_feed_id,
+              slug,
+              name,
+              day,
+              time,
+              end_time,
+              timezone,
+              formatted_address,
+              address,
+              city,
+              state,
+              postal_code,
+              country,
+              region,
+              location,
+              notes,
+              types_json,
+              conference_url,
+              conference_phone,
+              lat,
+              lng,
+              updated_at_source,
+              last_ingested_at
+            )
+            VALUES (
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+              $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20,
+              $21, $22, $23, $24, $25
+            )
+            ON CONFLICT (tenant_id, source_feed_id, slug)
+            DO UPDATE SET
+              name = EXCLUDED.name,
+              day = EXCLUDED.day,
+              time = EXCLUDED.time,
+              end_time = EXCLUDED.end_time,
+              timezone = EXCLUDED.timezone,
+              formatted_address = EXCLUDED.formatted_address,
+              address = EXCLUDED.address,
+              city = EXCLUDED.city,
+              state = EXCLUDED.state,
+              postal_code = EXCLUDED.postal_code,
+              country = EXCLUDED.country,
+              region = EXCLUDED.region,
+              location = EXCLUDED.location,
+              notes = EXCLUDED.notes,
+              types_json = EXCLUDED.types_json,
+              conference_url = EXCLUDED.conference_url,
+              conference_phone = EXCLUDED.conference_phone,
+              lat = EXCLUDED.lat,
+              lng = EXCLUDED.lng,
+              updated_at_source = EXCLUDED.updated_at_source,
+              last_ingested_at = EXCLUDED.last_ingested_at,
+              updated_at = NOW()
+          `,
+            [
+              stableId,
+              tenantId,
+              sourceFeedId,
+              meeting.slug,
+              meeting.name,
+              meeting.day,
+              meeting.time,
+              meeting.endTime,
+              meeting.timezone,
+              meeting.formattedAddress,
+              meeting.address,
+              meeting.city,
+              meeting.state,
+              meeting.postalCode,
+              meeting.country,
+              meeting.region,
+              meeting.location,
+              meeting.notes,
+              toJsonParam(meeting.types),
+              meeting.conferenceUrl,
+              meeting.conferencePhone,
+              meeting.lat,
+              meeting.lng,
+              meeting.updatedAtSource,
+              now.toISOString(),
+            ],
+          );
+          upserted += 1;
+        }
+        return upserted;
+      },
+
+      async listNearby(
+        tenantId: string,
+        center: { lat: number; lng: number; radiusMiles: number },
+        filters: MeetingGuideNearbyFilters = {},
+      ): Promise<NearbyMeetingRow[]> {
+        const bounds = boundingBoxForRadius(center);
+        const limit = Math.max(1, Math.min(filters.limit ?? 500, 500));
+        const format = filters.format ?? "any";
+        const includeNoCoordinates = format === "any";
+
+        const candidates = await db.query<MeetingGuideMeetingRow>(
+          `
+          SELECT
+            id,
+            tenant_id,
+            source_feed_id,
+            slug,
+            name,
+            day,
+            time,
+            end_time,
+            timezone,
+            formatted_address,
+            address,
+            city,
+            state,
+            postal_code,
+            country,
+            region,
+            location,
+            notes,
+            types_json,
+            conference_url,
+            conference_phone,
+            lat,
+            lng,
+            updated_at_source,
+            last_ingested_at
+          FROM meeting_guide_meetings
+          WHERE tenant_id = $1
+            AND ($2::int IS NULL OR day = $2)
+            AND ($3::text IS NULL OR time >= $3)
+            AND ($4::text IS NULL OR time <= $4)
+            AND (
+              lat IS NULL OR lng IS NULL OR
+              (lat BETWEEN $5 AND $6 AND lng BETWEEN $7 AND $8)
+            )
+          ORDER BY updated_at DESC
+          LIMIT $9
+        `,
+          [
+            tenantId,
+            filters.dayOfWeek ?? null,
+            filters.timeFrom ?? null,
+            filters.timeTo ?? null,
+            bounds.latMin,
+            bounds.latMax,
+            bounds.lngMin,
+            bounds.lngMax,
+            limit * 2,
+          ],
+        );
+
+        const normalized = candidates.rows
+          .map((row) => {
+            const rawTypes = Array.isArray(row.types_json) ? row.types_json : [];
+            const types = rawTypes
+              .map((entry) => (typeof entry === "string" ? entry.toUpperCase() : null))
+              .filter((entry): entry is string => entry !== null);
+            const inferredFormat = inferMeetingFormat({
+              conferenceUrl: row.conference_url,
+              lat: row.lat,
+              lng: row.lng,
+              formattedAddress: row.formatted_address,
+            });
+
+            let distanceMeters: number | null = null;
+            if (row.lat !== null && row.lng !== null) {
+              distanceMeters = haversineDistanceMeters(center.lat, center.lng, row.lat, row.lng);
+              if (distanceMeters > center.radiusMiles * 1609.344) {
+                return null;
+              }
+            } else if (!includeNoCoordinates) {
+              return null;
+            }
+
+            if (filters.types && filters.types.length > 0) {
+              const target = new Set(filters.types.map((entry) => entry.toUpperCase()));
+              if (!types.some((code) => target.has(code))) {
+                return null;
+              }
+            }
+
+            if (format === "in_person" && inferredFormat === "ONLINE") {
+              return null;
+            }
+            if (format === "online" && inferredFormat === "IN_PERSON") {
+              return null;
+            }
+
+            return {
+              ...row,
+              distance_meters: distanceMeters,
+              inferred_format: inferredFormat,
+              types,
+            } satisfies NearbyMeetingRow;
+          })
+          .filter((row): row is NearbyMeetingRow => row !== null);
+
+        const sorted = normalized.sort((left, right) => {
+          if (filters.dayOfWeek !== undefined) {
+            const leftTime = left.time ?? "99:99";
+            const rightTime = right.time ?? "99:99";
+            if (leftTime !== rightTime) {
+              return leftTime.localeCompare(rightTime);
+            }
+          }
+
+          const leftDistance = left.distance_meters ?? Number.POSITIVE_INFINITY;
+          const rightDistance = right.distance_meters ?? Number.POSITIVE_INFINITY;
+          if (leftDistance !== rightDistance) {
+            return leftDistance - rightDistance;
+          }
+
+          return (left.time ?? "99:99").localeCompare(right.time ?? "99:99");
+        });
+
+        return sorted.slice(0, limit);
+      },
     },
 
     async checkInAttendance(

@@ -18,6 +18,7 @@ export type ListMeetingsParams = {
   dayOfWeek: number;
   lat?: number;
   lng?: number;
+  radiusMiles?: number;
 };
 
 export type ListMeetingsResult = {
@@ -311,37 +312,52 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         }
       }
 
-      const query = new URLSearchParams();
-      query.set("day", String(params.dayOfWeek));
-      if (typeof params.lat === "number") {
-        query.set("lat", String(params.lat));
-      }
-      if (typeof params.lng === "number") {
-        query.set("lng", String(params.lng));
-      }
+      const headers = {
+        Authorization: config.authHeader,
+      };
+      const meetingsQuery = new URLSearchParams();
+      meetingsQuery.set("day", String(params.dayOfWeek));
+
+      let meetings: MeetingRecord[] = [];
+      let apiWarning: string | undefined;
+
       if (typeof params.lat === "number" && typeof params.lng === "number") {
-        query.set("radiusMiles", String(config.radiusMiles ?? 20));
+        const nearbyQuery = new URLSearchParams();
+        nearbyQuery.set("lat", String(params.lat));
+        nearbyQuery.set("lng", String(params.lng));
+        nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
+        nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
+
+        const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
+        const nearbyResponse = await fetch(nearbyUrl, { headers });
+
+        if (nearbyResponse.ok) {
+          const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
+          meetings = (nearbyPayload.meetings ?? [])
+            .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+            .filter((entry): entry is MeetingRecord => entry !== null);
+        } else {
+          apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
+        }
       }
 
-      const url = `${config.apiUrl}/v1/meetings${query.size > 0 ? `?${query.toString()}` : ""}`;
-      const response = await fetch(url, {
-        headers: {
-          Authorization: config.authHeader,
-        },
-      });
-      if (!response.ok) {
-        throw new Error(`Meetings API failed (${response.status})`);
-      }
+      if (meetings.length === 0) {
+        const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
+        const response = await fetch(url, { headers });
+        if (!response.ok) {
+          throw new Error(`Meetings API failed (${response.status})`);
+        }
 
-      const payload = (await response.json()) as { meetings?: unknown[] };
-      const meetings = (payload.meetings ?? [])
-        .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
-        .filter((entry): entry is MeetingRecord => entry !== null);
+        const payload = (await response.json()) as { meetings?: unknown[] };
+        meetings = (payload.meetings ?? [])
+          .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+          .filter((entry): entry is MeetingRecord => entry !== null);
+      }
 
       return {
         meetings,
         source: "api",
-        warning,
+        warning: warning ?? apiWarning,
       };
     },
   };
