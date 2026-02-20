@@ -2530,12 +2530,17 @@ setNotificationOpenPhone(null);
     )}
 
     {notificationOpenPhone ? (
-      <View style={styles.callNowBox}>
-        <Text style={styles.sectionMeta}>{`Opened from notification: ${notificationOpenPhone}`}</Text>
-        <Button title="Call now" onPress={() => void openPhoneCall(notificationOpenPhone)} />
-      </View>
-    ) : null}
-
+  <View style={styles.callNowBox}>
+    <Text style={styles.sectionMeta}>
+      {"Opened from notification: "}
+      {notificationOpenPhone}
+    </Text>
+    <Button
+      title="Call now"
+      onPress={() => void openPhoneCall(notificationOpenPhone)}
+    />
+  </View>
+) : null}
     <Text style={styles.sectionMeta}>{sponsorStatusLine}</Text>
     <Button
       title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
