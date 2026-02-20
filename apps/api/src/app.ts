@@ -37,6 +37,12 @@ const meetingCreateBodySchema = z.object({
   radiusM: z.number().int().positive(),
 });
 
+
+const meetingsIngestStatusQuerySchema = z.object({
+  lat: z.coerce.number().min(-90).max(90).default(45.7833),
+  lng: z.coerce.number().min(-180).max(180).default(-108.5007),
+  radiusMiles: z.coerce.number().positive().max(200).default(20),
+});
 const attendanceCheckInBodySchema = z.object({
   meetingId: z.string().min(1),
 });
@@ -117,6 +123,7 @@ const supervisionUpdateBodySchema = z.object({
 
 const WARNING_DISTANCE_FEET = 200;
 const FEET_TO_METERS = 0.3048;
+const MILES_TO_METERS = 1609.344;
 const WARNING_DISTANCE_METERS = WARNING_DISTANCE_FEET * FEET_TO_METERS;
 const INCIDENT_DEDUPE_WINDOW_MINUTES = 10;
 const EARTH_RADIUS_METERS = 6371000;
@@ -183,36 +190,6 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   const configuredMeetingGuideFeeds = parseConfiguredMeetingGuideFeeds(
     env.MEETING_GUIDE_FEEDS_JSON,
   );
-  const legacyMeetingFeedUrls = Array.from(
-    new Set(
-      [...(env.MEETING_FEEDS_AA ?? "").split(","), ...(env.MEETING_FEEDS_NA ?? "").split(",")]
-        .map((entry) => entry.trim())
-        .filter((entry) => entry.length > 0),
-    ),
-  );
-  let warnedNoMeetingGuideFeeds = false;
-
-  logger.info("meeting_guide.config", {
-    autoIngest: env.MEETING_GUIDE_AUTO_INGEST,
-    defaultTenantId: env.MEETING_GUIDE_DEFAULT_TENANT_ID ?? null,
-    refreshIntervalMs: env.MEETING_GUIDE_REFRESH_INTERVAL_MS,
-    configuredFeedsCount: configuredMeetingGuideFeeds.length,
-    legacyFeedsCount: legacyMeetingFeedUrls.length,
-  });
-
-  if (configuredMeetingGuideFeeds.length === 0 && legacyMeetingFeedUrls.length === 0) {
-    logger.warn("meeting_guide.config.empty", {
-      message:
-        "No Meeting Guide feeds configured. Set MEETING_GUIDE_FEEDS_JSON or MEETING_FEEDS_AA/MEETING_FEEDS_NA.",
-      developmentFallback:
-        env.NODE_ENV !== "production"
-          ? [
-              "https://www.aa-montana.org/index.php?city=Billings",
-              "https://www.aa-montana.org/index.php?city=Laurel",
-            ]
-          : null,
-    });
-  }
 
   const resolveTenantFeedConfigs = (tenantId: string) => {
     const scoped = configuredMeetingGuideFeeds.filter(
@@ -223,43 +200,14 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       return scoped;
     }
 
-    if (legacyMeetingFeedUrls.length > 0) {
-      return legacyMeetingFeedUrls.map((url) => ({
-        name: "Legacy Meeting Feed",
-        url,
-      }));
-    }
-
-    if (env.NODE_ENV !== "production") {
-      if (!warnedNoMeetingGuideFeeds) {
-        warnedNoMeetingGuideFeeds = true;
-        logger.warn("meeting_guide.config.dev_fallback", {
-          tenantId,
-          fallbackFeeds: [
-            "https://www.aa-montana.org/index.php?city=Billings",
-            "https://www.aa-montana.org/index.php?city=Laurel",
-          ],
-          message:
-            "Using AA Montana city feeds because no external Meeting Guide feeds are configured.",
-        });
-      }
-      return [
-        {
-          name: "AA Montana - Billings",
-          url: "https://www.aa-montana.org/index.php?city=Billings",
-          entity: "AA Montana",
-          entityUrl: "https://www.aa-montana.org",
-        },
-        {
-          name: "AA Montana - Laurel",
-          url: "https://www.aa-montana.org/index.php?city=Laurel",
-          entity: "AA Montana",
-          entityUrl: "https://www.aa-montana.org",
-        },
-      ];
-    }
-
-    return legacyMeetingFeedUrls.map((url) => ({
+    const legacyUrls = Array.from(
+      new Set(
+        [...env.MEETING_FEEDS_AA.split(","), ...env.MEETING_FEEDS_NA.split(",")]
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+      ),
+    );
+    return legacyUrls.map((url) => ({
       name: "Legacy Meeting Feed",
       url,
     }));
@@ -1555,6 +1503,25 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     return result;
   };
 
+  const runMeetingGuideRefreshForActor = async (
+    actor: { tenantId: string; userId: string },
+    action: "meeting_guide.refresh" | "meeting_guide.refresh.dev",
+  ) => {
+    const result = await runMeetingGuideIngestForTenant(actor.tenantId);
+    await app.auditLogger.log({
+      tenantId: actor.tenantId,
+      actorUserId: actor.userId,
+      action,
+      subjectType: "meeting_feed",
+      subjectId: null,
+      metadata: { ...result },
+    });
+    return result;
+  };
+
+  const canBypassMeetingRefreshAdmin = (authorization: unknown): boolean =>
+    env.NODE_ENV !== "production" && isDevAuthHeader(authorization);
+
   app.post(
     "/v1/admin/meetings/refresh",
     {
@@ -1567,152 +1534,18 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         return;
       }
 
-      const result = await runMeetingGuideRefreshForActor(actor, "meeting_guide.refresh");
+      const result = await runMeetingGuideIngestForTenant(actor.tenantId);
+      await app.auditLogger.log({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "meeting_guide.refresh",
+        subjectType: "meeting_feed",
+        subjectId: null,
+        metadata: { ...result },
+      });
       return { result };
     },
   );
-
-  if (env.ENABLE_DEV_AUTH) {
-    app.post(
-      "/v1/dev/meetings/refresh",
-      {
-        preHandler: [authenticateRequest],
-      },
-      async (request, reply) => {
-        const actor = request.actor;
-        if (!actor) {
-          reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
-          return;
-        }
-
-        if (!isDevAuthHeader(request.headers.authorization)) {
-          reply.code(403).send({
-            error: "forbidden",
-            message: "Dev meetings refresh requires Authorization: Bearer DEV_<userId>.",
-          });
-          return;
-        }
-
-        const elapsedMs = now().getTime() - devMeetingRefreshLastRunAtMs;
-        const minIntervalMs = 30_000;
-        if (elapsedMs >= 0 && elapsedMs < minIntervalMs) {
-          const retryAfterSeconds = Math.ceil((minIntervalMs - elapsedMs) / 1000);
-          reply.code(429).send({
-            error: "too_many_requests",
-            message: `Dev meetings refresh cooldown active. Retry in ${retryAfterSeconds}s.`,
-          });
-          return;
-        }
-
-        devMeetingRefreshLastRunAtMs = now().getTime();
-        const result = await runMeetingGuideRefreshForActor(actor, "meeting_guide.refresh.dev");
-        const feeds = await repositories.meetingFeeds.listActive(actor.tenantId);
-        const errors = Array.from(
-          new Set(
-            feeds
-              .map((feed) => feed.last_error)
-              .filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
-          ),
-        );
-
-        return {
-          feedsProcessed: result.feedsAttempted,
-          meetingsImported: result.meetingsImported,
-          errors,
-        };
-      },
-    );
-
-    app.get(
-      "/v1/dev/meetings/status",
-      {
-        preHandler: [authenticateRequest],
-      },
-      async (request, reply) => {
-        const actor = request.actor;
-        if (!actor) {
-          reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
-          return;
-        }
-
-        if (!isDevAuthHeader(request.headers.authorization)) {
-          reply.code(403).send({
-            error: "forbidden",
-            message: "Dev meetings status requires Authorization: Bearer DEV_<userId>.",
-          });
-          return;
-        }
-
-        const parsedQuery = meetingsIngestStatusQuerySchema.safeParse(request.query ?? {});
-        if (!parsedQuery.success) {
-          reply.code(400).send({
-            error: "bad_request",
-            message: "Invalid meetings status query",
-            details: parsedQuery.error.flatten(),
-          });
-          return;
-        }
-
-        const feeds = await repositories.meetingFeeds.listActive(actor.tenantId);
-        const counts = await db.query<{
-          total_meetings: number;
-          meetings_with_coordinates: number;
-          meetings_without_coordinates: number;
-        }>(
-          `
-            SELECT
-              COUNT(*)::int AS total_meetings,
-              COUNT(*) FILTER (WHERE lat IS NOT NULL AND lng IS NOT NULL)::int AS meetings_with_coordinates,
-              COUNT(*) FILTER (WHERE lat IS NULL OR lng IS NULL)::int AS meetings_without_coordinates
-            FROM meeting_guide_meetings
-            WHERE tenant_id = $1
-          `,
-          [actor.tenantId],
-        );
-
-        const nearbySample = await tenantRepositories.meetingGuide.nearby(
-          actor,
-          {
-            lat: parsedQuery.data.lat,
-            lng: parsedQuery.data.lng,
-            radiusMiles: parsedQuery.data.radiusMiles,
-          },
-          {
-            format: "in_person",
-            limit: 5,
-          },
-        );
-
-        return {
-          tenantId: actor.tenantId,
-          query: parsedQuery.data,
-          feedsCount: feeds.length,
-          feeds: feeds.map((feed) => ({
-            id: feed.id,
-            name: feed.name,
-            url: feed.url,
-            lastFetchedAt: feed.last_fetched_at,
-            lastError: feed.last_error,
-          })),
-          meetingStats: counts.rows[0] ?? {
-            total_meetings: 0,
-            meetings_with_coordinates: 0,
-            meetings_without_coordinates: 0,
-          },
-          nearbySample: nearbySample.map((meeting) => ({
-            id: meeting.id,
-            name: meeting.name,
-            lat: meeting.lat,
-            lng: meeting.lng,
-            time: meeting.time,
-            day: meeting.day,
-            distanceMeters: meeting.distance_meters,
-            format: meeting.inferred_format,
-          })),
-        };
-      },
-    );
-  }
 
   return app;
 }
