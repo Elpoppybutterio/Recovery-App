@@ -15,6 +15,20 @@ CREATE TABLE IF NOT EXISTS meeting_feeds (
   UNIQUE (tenant_id, url)
 );
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'meeting_feeds_tenant_id_id_key'
+      AND conrelid = 'meeting_feeds'::regclass
+  ) THEN
+    ALTER TABLE meeting_feeds
+      ADD CONSTRAINT meeting_feeds_tenant_id_id_key UNIQUE (tenant_id, id);
+  END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS meeting_guide_meetings (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
