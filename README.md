@@ -152,6 +152,16 @@ Migrations live in `/apps/api/migrations`.
   - `expo.extra.fallbackLng`
   - The app uses DEV auth and a minimal iOS permission flow stub; replace with real auth + true background location APIs before production.
 
+### Meeting Guide ingest + nearby (20 miles)
+
+- Configure feeds with `MEETING_GUIDE_FEEDS_JSON` (see `/apps/api/.env.example` and `/docs/MEETING_GUIDE.md`).
+- Dev fallback feed available: `builtin://billings-test` (non-production).
+- Manual refresh:
+  - `POST /v1/admin/meetings/refresh`
+  - `POST /v1/dev/meetings/refresh` (DEV auth + non-production)
+- Nearby search:
+  - `GET /v1/meetings/nearby?lat=45.7833&lng=-108.5007&radiusMiles=20`
+
 ## CI checks
 
 ```bash

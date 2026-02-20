@@ -220,6 +220,7 @@ export interface MeetingGuideMeetingRow {
   conference_phone: string | null;
   lat: number | null;
   lng: number | null;
+  geo_status: "present" | "missing";
   updated_at_source: string | null;
   last_ingested_at: string;
 }
@@ -933,13 +934,14 @@ export function createRepositories(db: DbClient) {
               conference_phone,
               lat,
               lng,
+              geo_status,
               updated_at_source,
               last_ingested_at
             )
             VALUES (
               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
               $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20,
-              $21, $22, $23, $24, $25
+              $21, $22, $23, $24, $25, $26
             )
             ON CONFLICT (tenant_id, source_feed_id, slug)
             DO UPDATE SET
@@ -962,6 +964,7 @@ export function createRepositories(db: DbClient) {
               conference_phone = EXCLUDED.conference_phone,
               lat = EXCLUDED.lat,
               lng = EXCLUDED.lng,
+              geo_status = EXCLUDED.geo_status,
               updated_at_source = EXCLUDED.updated_at_source,
               last_ingested_at = EXCLUDED.last_ingested_at,
               updated_at = NOW()
@@ -990,6 +993,7 @@ export function createRepositories(db: DbClient) {
               meeting.conferencePhone,
               meeting.lat,
               meeting.lng,
+              meeting.lat !== null && meeting.lng !== null ? "present" : "missing",
               meeting.updatedAtSource,
               now.toISOString(),
             ],
@@ -1007,7 +1011,6 @@ export function createRepositories(db: DbClient) {
         const bounds = boundingBoxForRadius(center);
         const limit = Math.max(1, Math.min(filters.limit ?? 500, 500));
         const format = filters.format ?? "any";
-        const includeNoCoordinates = format === "any";
 
         const candidates = await db.query<MeetingGuideMeetingRow>(
           `
@@ -1035,16 +1038,17 @@ export function createRepositories(db: DbClient) {
             conference_phone,
             lat,
             lng,
+            geo_status,
             updated_at_source,
             last_ingested_at
           FROM meeting_guide_meetings
           WHERE tenant_id = $1
+            AND geo_status = 'present'
             AND ($2::int IS NULL OR day = $2)
             AND ($3::text IS NULL OR time >= $3)
             AND ($4::text IS NULL OR time <= $4)
             AND (
-              lat IS NULL OR lng IS NULL OR
-              (lat BETWEEN $5 AND $6 AND lng BETWEEN $7 AND $8)
+              lat BETWEEN $5 AND $6 AND lng BETWEEN $7 AND $8
             )
           ORDER BY updated_at DESC
           LIMIT $9
@@ -1063,7 +1067,7 @@ export function createRepositories(db: DbClient) {
         );
 
         const normalized = candidates.rows
-          .map((row) => {
+          .map((row): NearbyMeetingRow | null => {
             const rawTypes = Array.isArray(row.types_json) ? row.types_json : [];
             const types = rawTypes
               .map((entry) => (typeof entry === "string" ? entry.toUpperCase() : null))
@@ -1081,7 +1085,7 @@ export function createRepositories(db: DbClient) {
               if (distanceMeters > center.radiusMiles * 1609.344) {
                 return null;
               }
-            } else if (!includeNoCoordinates) {
+            } else {
               return null;
             }
 
@@ -1104,7 +1108,7 @@ export function createRepositories(db: DbClient) {
               distance_meters: distanceMeters,
               inferred_format: inferredFormat,
               types,
-            } satisfies NearbyMeetingRow;
+            };
           })
           .filter((row): row is NearbyMeetingRow => row !== null);
 

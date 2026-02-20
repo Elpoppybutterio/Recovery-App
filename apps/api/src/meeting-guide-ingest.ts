@@ -29,7 +29,72 @@ export interface IngestMeetingGuideResult {
   meetingsFetched: number;
   meetingsImported: number;
   meetingsSkipped: number;
+  meetingsWithCoordinates: number;
+  meetingsWithoutCoordinates: number;
 }
+
+const BUILTIN_MEETING_GUIDE_FEEDS: Record<string, unknown[]> = {
+  "builtin://billings-test": [
+    {
+      slug: "billings-noon-aa-mon",
+      name: "Billings Noon Recovery",
+      day: 1,
+      time: "12:00",
+      formatted_address: "2919 2nd Ave N, Billings, MT 59101",
+      address: "2919 2nd Ave N",
+      city: "Billings",
+      state: "MT",
+      postal_code: "59101",
+      country: "US",
+      latitude: 45.7836,
+      longitude: -108.5002,
+      types: ["O"],
+      updated: "2026-02-20T12:00:00Z",
+    },
+    {
+      slug: "billings-evening-aa-tue",
+      name: "Downtown Serenity Group",
+      day: 2,
+      time: "18:30",
+      formatted_address: "115 N 30th St, Billings, MT 59101",
+      address: "115 N 30th St",
+      city: "Billings",
+      state: "MT",
+      postal_code: "59101",
+      country: "US",
+      latitude: 45.7831,
+      longitude: -108.5095,
+      types: ["C"],
+      updated: "2026-02-20T12:00:00Z",
+    },
+    {
+      slug: "billings-early-na-wed",
+      name: "Southside NA Morning",
+      day: 3,
+      time: "07:00",
+      formatted_address: "3940 Rimrock Rd, Billings, MT 59102",
+      address: "3940 Rimrock Rd",
+      city: "Billings",
+      state: "MT",
+      postal_code: "59102",
+      country: "US",
+      latitude: 45.7555,
+      longitude: -108.6031,
+      types: ["O", "SP"],
+      updated: "2026-02-20T12:00:00Z",
+    },
+    {
+      slug: "billings-online-thu",
+      name: "Online Open Recovery",
+      day: 4,
+      time: "20:00",
+      formatted_address: "Online",
+      conference_url: "https://example.org/online-room",
+      types: ["O", "ONL"],
+      updated: "2026-02-20T12:00:00Z",
+    },
+  ],
+};
 
 function extractEntries(payload: unknown): unknown[] {
   if (Array.isArray(payload)) {
@@ -46,6 +111,10 @@ function extractEntries(payload: unknown): unknown[] {
 
 export function parseConfiguredMeetingGuideFeeds(rawJson: string): MeetingGuideFeedConfig[] {
   return parseMeetingGuideFeedsJson(rawJson);
+}
+
+function getBuiltInFeedEntries(url: string): unknown[] | null {
+  return BUILTIN_MEETING_GUIDE_FEEDS[url] ?? null;
 }
 
 export async function ingestMeetingGuideFeedsForTenant(options: {
@@ -75,6 +144,53 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
   let meetingsFetched = 0;
   let meetingsImported = 0;
   let meetingsSkipped = 0;
+  let meetingsWithCoordinates = 0;
+  let meetingsWithoutCoordinates = 0;
+
+  const ingestEntriesForFeed = async (feedId: string, entries: unknown[], feedUrl: string) => {
+    meetingsFetched += entries.length;
+
+    const normalized = entries
+      .map((entry) => normalizeMeetingGuideMeeting(entry))
+      .filter((entry): entry is NonNullable<ReturnType<typeof normalizeMeetingGuideMeeting>> =>
+        Boolean(entry),
+      );
+    meetingsImported += normalized.length;
+    meetingsSkipped += entries.length - normalized.length;
+
+    const withCoordinates = normalized.filter(
+      (meeting) => meeting.lat !== null && meeting.lng !== null,
+    ).length;
+    const withoutCoordinates = normalized.length - withCoordinates;
+    meetingsWithCoordinates += withCoordinates;
+    meetingsWithoutCoordinates += withoutCoordinates;
+
+    const ingestedCount = await options.repositories.meetingGuideMeetings.upsertForFeed(
+      options.tenantId,
+      feedId,
+      normalized,
+      now(),
+    );
+
+    logger?.info("meeting_guide.ingest.feed_complete", {
+      tenantId: options.tenantId,
+      feedId,
+      feedUrl,
+      ingestedCount,
+      withCoordinates,
+      withoutCoordinates,
+    });
+
+    if (withoutCoordinates > 0) {
+      logger?.warn?.("meeting_guide.ingest.feed_missing_coordinates", {
+        tenantId: options.tenantId,
+        feedId,
+        feedUrl,
+        withoutCoordinates,
+        note: "Meetings without coordinates are stored with geo_status=missing and excluded from /v1/meetings/nearby.",
+      });
+    }
+  };
 
   for (const feed of feeds) {
     const requestHeaders: Record<string, string> = {};
@@ -86,9 +202,17 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
     }
 
     try {
-      const response = await fetchImpl(feed.url, {
-        headers: requestHeaders,
-      });
+      const builtInEntries = getBuiltInFeedEntries(feed.url);
+      if (builtInEntries) {
+        await ingestEntriesForFeed(feed.id, builtInEntries, feed.url);
+        await options.repositories.meetingFeeds.markFetchResult(options.tenantId, feed.id, {
+          fetchedAt: now(),
+          lastError: null,
+        });
+        continue;
+      }
+
+      const response = await fetchImpl(feed.url, { headers: requestHeaders });
 
       if (response.status === 304) {
         await options.repositories.meetingFeeds.markFetchResult(options.tenantId, feed.id, {
@@ -109,35 +233,13 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
 
       const payload = await response.json();
       const entries = extractEntries(payload);
-      meetingsFetched += entries.length;
-
-      const normalized = entries
-        .map((entry) => normalizeMeetingGuideMeeting(entry))
-        .filter((entry): entry is NonNullable<ReturnType<typeof normalizeMeetingGuideMeeting>> =>
-          Boolean(entry),
-        );
-      meetingsImported += normalized.length;
-      meetingsSkipped += entries.length - normalized.length;
-
-      const ingestedCount = await options.repositories.meetingGuideMeetings.upsertForFeed(
-        options.tenantId,
-        feed.id,
-        normalized,
-        now(),
-      );
+      await ingestEntriesForFeed(feed.id, entries, feed.url);
 
       await options.repositories.meetingFeeds.markFetchResult(options.tenantId, feed.id, {
         fetchedAt: now(),
         etag: response.headers.get("etag"),
         lastModified: response.headers.get("last-modified"),
         lastError: null,
-      });
-
-      logger?.info("meeting_guide.ingest.feed_complete", {
-        tenantId: options.tenantId,
-        feedId: feed.id,
-        feedUrl: feed.url,
-        ingestedCount,
       });
     } catch (error) {
       feedsFailed += 1;
@@ -159,6 +261,8 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
     meetingsFetched,
     meetingsImported,
     meetingsSkipped,
+    meetingsWithCoordinates,
+    meetingsWithoutCoordinates,
   };
   logger?.info("meeting_guide.ingest.complete", result);
   return result;
