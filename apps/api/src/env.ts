@@ -31,12 +31,17 @@ const apiEnvSchema = z.object({
   MEETING_FEEDS_AA: z.string().default(""),
   MEETING_FEEDS_NA: z.string().default(""),
   MEETING_IMPORT_RADIUS_MILES: z.coerce.number().positive().default(20),
+  MEETING_GUIDE_FEEDS_JSON: z.string().default("[]"),
+  MEETING_GUIDE_DEFAULT_TENANT_ID: z.string().optional(),
+  MEETING_GUIDE_REFRESH_INTERVAL_MS: z.coerce.number().positive().default(43_200_000),
+  MEETING_GUIDE_AUTO_INGEST: z.preprocess(parseBooleanString, z.boolean().optional()),
 });
 
 type ParsedApiEnv = z.infer<typeof apiEnvSchema>;
 
 export type ApiEnv = ParsedApiEnv & {
   ENABLE_DEV_AUTH: boolean;
+  MEETING_GUIDE_AUTO_INGEST: boolean;
 };
 
 export function loadApiEnv(env: Record<string, unknown> = process.env): ApiEnv {
@@ -44,5 +49,6 @@ export function loadApiEnv(env: Record<string, unknown> = process.env): ApiEnv {
   return {
     ...parsed,
     ENABLE_DEV_AUTH: parsed.ENABLE_DEV_AUTH ?? parsed.NODE_ENV !== "production",
+    MEETING_GUIDE_AUTO_INGEST: parsed.MEETING_GUIDE_AUTO_INGEST ?? parsed.NODE_ENV !== "test",
   };
 }

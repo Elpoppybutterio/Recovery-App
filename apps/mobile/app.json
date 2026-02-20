@@ -5,6 +5,11 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "ios": {
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Location is used to show nearby meetings and arrival prompts."
+      }
+    },
     "assetBundlePatterns": ["**/*"],
     "extra": {
       "apiUrl": "http://192.168.0.73:3001",

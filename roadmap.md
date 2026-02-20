@@ -39,3 +39,4 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 
 - [ ] Auto-request location permission on first launch; if denied, show Settings deep-link CTA.
 - [ ] Import AA/NA meetings feeds (Meeting Guide spec) and return meetings within 20-mile radius when location is available.
+- [ ] Meeting Guide distributed feed ingest + tenant-scoped `/v1/meetings/nearby` search (20-mile default) with map/list toggle UX.

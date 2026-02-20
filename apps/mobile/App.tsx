@@ -1,8 +1,10 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Calendar from "expo-calendar";
+import * as Location from "expo-location";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import MapView, { Marker, type Region } from "react-native-maps";
 import {
   Alert,
   Button,
@@ -21,6 +23,9 @@ import {
 import appJson from "./app.json";
 import { createMeetingsSource, MeetingRecord } from "./lib/meetings/source";
 import { ATTENDANCE_PDF_FILE_NAME, exportAttendancePdf } from "./lib/pdf/exportAttendancePdf";
+
+const MapViewCompat: any = MapView;
+const MarkerCompat: any = Marker;
 
 type RecoveryMode = "A" | "B" | "C";
 type AppScreen = "LIST" | "DETAIL" | "SESSION" | "SIGNATURE";
@@ -46,24 +51,6 @@ type LocationStamp = {
   lat: number;
   lng: number;
   accuracyM: number | null;
-};
-
-type GeolocationApi = {
-  getCurrentPosition(
-    success: (position: {
-      coords: {
-        latitude: number;
-        longitude: number;
-        accuracy?: number;
-      };
-    }) => void,
-    error?: (error: unknown) => void,
-    options?: {
-      enableHighAccuracy?: boolean;
-      timeout?: number;
-      maximumAge?: number;
-    },
-  ): void;
 };
 
 type AttendanceRecord = {
@@ -94,6 +81,21 @@ type DayOption = {
 
 type MeetingListItem = MeetingRecord & {
   distanceMeters: number | null;
+};
+
+type MeetingsViewMode = "LIST" | "MAP";
+
+type MapBoundaryCenter = {
+  lat: number;
+  lng: number;
+};
+
+type MeetingLocationGroup = {
+  key: string;
+  lat: number;
+  lng: number;
+  address: string;
+  meetings: MeetingListItem[];
 };
 
 type PlannedMeeting = {
@@ -149,6 +151,8 @@ const DRIVE_ACTION_ID = "DRIVE_NOW";
 const DEFAULT_MEETING_EARLY_MINUTES = 10;
 const DEFAULT_SERVICE_COMMITMENT_MINUTES = 45;
 const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for simulator/device.";
+const DEFAULT_MAP_LATITUDE_DELTA = 0.22;
+const DEFAULT_MAP_LONGITUDE_DELTA = 0.22;
 
 const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }> = [
   { code: "MON", label: "Mon", jsDay: 1 },
@@ -214,6 +218,16 @@ function distanceMetersBetween(latA: number, lngA: number, latB: number, lngB: n
     Math.cos(latAInRadians) * Math.cos(latBInRadians) * Math.sin(lngDelta / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return EARTH_RADIUS_METERS * c;
+}
+
+function coordinatesEqual(
+  left: { lat: number; lng: number } | null,
+  right: { lat: number; lng: number },
+): boolean {
+  if (!left) {
+    return false;
+  }
+  return Math.abs(left.lat - right.lat) < 1e-6 && Math.abs(left.lng - right.lng) < 1e-6;
 }
 
 function formatDistance(distanceMeters: number | null): string {
@@ -429,13 +443,6 @@ function parsePositiveInt(value: string, fallback: number): number {
   return Math.max(0, Math.floor(parsed));
 }
 
-function getGeolocationApi(): GeolocationApi | undefined {
-  const navigatorValue = (
-    globalThis as typeof globalThis & { navigator?: { geolocation?: GeolocationApi } }
-  ).navigator;
-  return navigatorValue?.geolocation;
-}
-
 function encodeBase64(value: string): string {
   const btoaFn = (globalThis as { btoa?: (data: string) => string }).btoa;
   if (typeof btoaFn === "function") {
@@ -576,6 +583,10 @@ function emptyNotificationBuckets(): NotificationBuckets {
   };
 }
 
+function locationGroupKeyForMeeting(meeting: MeetingListItem): string {
+  return `${meeting.lat?.toFixed(5)},${meeting.lng?.toFixed(5)}|${meeting.address.trim()}`;
+}
+
 export default function App() {
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
   const apiUrl = typeof extra.apiUrl === "string" ? extra.apiUrl : "http://localhost:3001";
@@ -629,9 +640,16 @@ export default function App() {
 
   const [mode, setMode] = useState<RecoveryMode>("A");
   const [screen, setScreen] = useState<AppScreen>("LIST");
+  const [meetingsViewMode, setMeetingsViewMode] = useState<MeetingsViewMode>("LIST");
 
   const [locationPermission, setLocationPermission] = useState<LocationPermissionState>("unknown");
   const [currentLocation, setCurrentLocation] = useState<LocationStamp | null>(null);
+  const [mapCenter, setMapCenter] = useState<MapBoundaryCenter | null>(null);
+  const [mapRegion, setMapRegion] = useState<Region | null>(null);
+  const [mapBoundaryCenter, setMapBoundaryCenter] = useState<MapBoundaryCenter | null>(null);
+  const [mapBoundaryRadiusMiles] = useState(20);
+  const [mapDraggedOutsideBoundary, setMapDraggedOutsideBoundary] = useState(false);
+  const [selectedLocationKey, setSelectedLocationKey] = useState<string | null>(null);
 
   const [selectedDayOffset, setSelectedDayOffset] = useState(0);
   const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
@@ -677,6 +695,7 @@ export default function App() {
   const meetingsShapeLoggedRef = useRef(false);
   const locationIssueRef = useRef<LocationIssue>(null);
   const locationPermissionAlertShownRef = useRef(false);
+  const mapRef = useRef<any>(null);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
 
@@ -779,6 +798,46 @@ export default function App() {
     return list;
   }, [meetings, selectedDay.dayOfWeek, currentLocation]);
 
+  const mapMeetingsForDay = useMemo(
+    () =>
+      meetingsForDay.filter(
+        (meeting) => meeting.format !== "ONLINE" && meeting.lat !== null && meeting.lng !== null,
+      ),
+    [meetingsForDay],
+  );
+
+  const meetingLocationGroups = useMemo<MeetingLocationGroup[]>(() => {
+    const byKey = new Map<string, MeetingLocationGroup>();
+    for (const meeting of mapMeetingsForDay) {
+      const key = locationGroupKeyForMeeting(meeting);
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.meetings.push(meeting);
+        continue;
+      }
+      byKey.set(key, {
+        key,
+        lat: meeting.lat as number,
+        lng: meeting.lng as number,
+        address: meeting.address,
+        meetings: [meeting],
+      });
+    }
+
+    return Array.from(byKey.values()).map((group) => ({
+      ...group,
+      meetings: [...group.meetings].sort(
+        (left, right) =>
+          parseMinutesFromHhmm(left.startsAtLocal) - parseMinutesFromHhmm(right.startsAtLocal),
+      ),
+    }));
+  }, [mapMeetingsForDay]);
+
+  const selectedLocationGroup = useMemo(
+    () => meetingLocationGroups.find((group) => group.key === selectedLocationKey) ?? null,
+    [meetingLocationGroups, selectedLocationKey],
+  );
+
   const sponsorScheduleSummary = useMemo(() => {
     if (!sponsorEnabled) {
       return "Sponsor disabled.";
@@ -846,49 +905,52 @@ export default function App() {
     );
   }, [activeAttendance, sessionNowMs]);
 
-  const readCurrentLocation = useCallback(async (): Promise<LocationStamp | null> => {
-    const geolocation = getGeolocationApi();
-    if (!geolocation) {
-      setLocationPermission("unavailable");
-      locationIssueRef.current = "unavailable";
-      return null;
-    }
+  const readCurrentLocation = useCallback(
+    async (requestPermission: boolean): Promise<LocationStamp | null> => {
+      try {
+        const currentPermission = await Location.getForegroundPermissionsAsync();
+        const permission = currentPermission.granted
+          ? currentPermission
+          : requestPermission
+            ? await Location.requestForegroundPermissionsAsync()
+            : currentPermission;
 
-    return new Promise((resolve) => {
-      geolocation.getCurrentPosition(
-        (position) => {
-          const next = {
-            lat: position.coords.latitude,
-            lng: position.coords.longitude,
-            accuracyM: position.coords.accuracy ?? null,
-          };
+        if (!permission.granted) {
+          setLocationPermission("denied");
+          locationIssueRef.current = "permission_denied";
+          return null;
+        }
+
+        setLocationPermission("granted");
+
+        const position = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        const next: LocationStamp = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracyM: position.coords.accuracy ?? null,
+        };
+        locationIssueRef.current = null;
+        setCurrentLocation(next);
+        return next;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          /location provider|unavailable|timeout/i.test(error.message)
+        ) {
           setLocationPermission("granted");
-          locationIssueRef.current = null;
-          setCurrentLocation(next);
-          resolve(next);
-        },
-        (error) => {
-          const code =
-            typeof error === "object" && error && "code" in error
-              ? Number((error as { code?: number }).code)
-              : 0;
+          locationIssueRef.current = "position_unavailable";
+          return null;
+        }
 
-          if (code === 1) {
-            setLocationPermission("denied");
-            locationIssueRef.current = "permission_denied";
-          } else if (code === 2 || code === 3) {
-            setLocationPermission("granted");
-            locationIssueRef.current = "position_unavailable";
-          } else {
-            setLocationPermission("unavailable");
-            locationIssueRef.current = "unavailable";
-          }
-          resolve(null);
-        },
-        { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 },
-      );
-    });
-  }, []);
+        setLocationPermission("unavailable");
+        locationIssueRef.current = "unavailable";
+        return null;
+      }
+    },
+    [],
+  );
 
   const formatApiErrorWithHint = useCallback(
     (baseMessage: string): string => {
@@ -1003,7 +1065,7 @@ export default function App() {
   );
 
   const requestLocationPermission = useCallback(async (): Promise<LocationStamp | null> => {
-    const position = await readCurrentLocation();
+    const position = await readCurrentLocation(true);
     if (position) {
       setMeetingsStatus("Location enabled for distance and arrival detection.");
       return position;
@@ -1063,12 +1125,13 @@ export default function App() {
       try {
         let location: LocationStamp | null = options?.location ?? null;
         if (options?.location === undefined && locationPermission === "granted") {
-          location = await readCurrentLocation();
+          location = await readCurrentLocation(false);
         }
         const result = await source.listMeetings({
           dayOfWeek: selectedDay.dayOfWeek,
           lat: location?.lat,
           lng: location?.lng,
+          radiusMiles: meetingRadiusMiles,
         });
         setMeetings(result.meetings);
 
@@ -1093,9 +1156,83 @@ export default function App() {
       readCurrentLocation,
       selectedDay.dayOfWeek,
       source,
+      meetingRadiusMiles,
       formatApiErrorWithHint,
     ],
   );
+
+  const updateMapCenter = useCallback((center: MapBoundaryCenter) => {
+    setMapCenter((previous) => (coordinatesEqual(previous, center) ? previous : center));
+    setMapRegion((previous: Region | null) => {
+      const latitudeDelta = previous?.latitudeDelta ?? DEFAULT_MAP_LATITUDE_DELTA;
+      const longitudeDelta = previous?.longitudeDelta ?? DEFAULT_MAP_LONGITUDE_DELTA;
+      if (
+        previous &&
+        Math.abs(previous.latitude - center.lat) < 1e-6 &&
+        Math.abs(previous.longitude - center.lng) < 1e-6 &&
+        Math.abs(previous.latitudeDelta - latitudeDelta) < 1e-9 &&
+        Math.abs(previous.longitudeDelta - longitudeDelta) < 1e-9
+      ) {
+        return previous;
+      }
+      return {
+        latitude: center.lat,
+        longitude: center.lng,
+        latitudeDelta,
+        longitudeDelta,
+      };
+    });
+  }, []);
+
+  const onMapRegionChangeComplete = useCallback(
+    (nextRegion: Region) => {
+      const center = { lat: nextRegion.latitude, lng: nextRegion.longitude };
+      setMapCenter(center);
+      setMapRegion(nextRegion);
+
+      if (!mapBoundaryCenter) {
+        return;
+      }
+
+      const boundaryDistanceMeters = distanceMetersBetween(
+        center.lat,
+        center.lng,
+        mapBoundaryCenter.lat,
+        mapBoundaryCenter.lng,
+      );
+      const boundaryMeters = mapBoundaryRadiusMiles * 1609.344;
+      setMapDraggedOutsideBoundary(boundaryDistanceMeters > boundaryMeters * 0.6);
+    },
+    [mapBoundaryCenter, mapBoundaryRadiusMiles],
+  );
+
+  const returnToBoundary = useCallback(() => {
+    if (!mapBoundaryCenter) {
+      return;
+    }
+
+    const targetRegion: Region = {
+      latitude: mapBoundaryCenter.lat,
+      longitude: mapBoundaryCenter.lng,
+      latitudeDelta: mapRegion?.latitudeDelta ?? DEFAULT_MAP_LATITUDE_DELTA,
+      longitudeDelta: mapRegion?.longitudeDelta ?? DEFAULT_MAP_LONGITUDE_DELTA,
+    };
+    setMapRegion(targetRegion);
+    setMapCenter({ lat: targetRegion.latitude, lng: targetRegion.longitude });
+    setMapDraggedOutsideBoundary(false);
+    mapRef.current?.animateToRegion?.(targetRegion, 250);
+  }, [mapBoundaryCenter, mapRegion]);
+
+  const searchThisArea = useCallback(async () => {
+    if (!mapCenter) {
+      return;
+    }
+
+    const location: LocationStamp = { lat: mapCenter.lat, lng: mapCenter.lng, accuracyM: null };
+    setMapBoundaryCenter(mapCenter);
+    await refreshMeetings({ location });
+    setMapDraggedOutsideBoundary(false);
+  }, [mapCenter, refreshMeetings]);
 
   const fetchSponsorConfig = useCallback(async () => {
     try {
@@ -1699,7 +1836,7 @@ export default function App() {
 
   const startAttendance = useCallback(
     async (meeting: MeetingRecord) => {
-      const location = await readCurrentLocation();
+      const location = await readCurrentLocation(false);
       const nowIso = new Date().toISOString();
       const next: AttendanceRecord = {
         id: createId("attendance"),
@@ -1732,7 +1869,7 @@ export default function App() {
       return;
     }
 
-    const location = await readCurrentLocation();
+    const location = await readCurrentLocation(false);
     const nowIso = new Date().toISOString();
     const durationSeconds = Math.max(
       0,
@@ -2103,6 +2240,32 @@ export default function App() {
   }, [meetings]);
 
   useEffect(() => {
+    setSelectedLocationKey(null);
+  }, [selectedDay.dayOfWeek, meetingsViewMode]);
+
+  useEffect(() => {
+    if (currentLocation) {
+      const center = { lat: currentLocation.lat, lng: currentLocation.lng };
+      if (!mapBoundaryCenter) {
+        setMapBoundaryCenter(center);
+      }
+      updateMapCenter(center);
+      return;
+    }
+
+    if (mapMeetingsForDay.length > 0 && !mapCenter) {
+      const fallback = {
+        lat: mapMeetingsForDay[0].lat as number,
+        lng: mapMeetingsForDay[0].lng as number,
+      };
+      if (!mapBoundaryCenter) {
+        setMapBoundaryCenter(fallback);
+      }
+      updateMapCenter(fallback);
+    }
+  }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter, updateMapCenter]);
+
+  useEffect(() => {
     void (async () => {
       const position = await requestLocationPermission();
       await Promise.all([refreshMeetings({ location: position }), fetchSponsorConfig()]);
@@ -2259,7 +2422,7 @@ export default function App() {
         return;
       }
 
-      const location = await readCurrentLocation();
+      const location = await readCurrentLocation(false);
       if (!location || cancelled) {
         return;
       }
@@ -2650,7 +2813,20 @@ export default function App() {
             ) : null}
 
             <View style={styles.card}>
-              <Text style={styles.sectionTitle}>Meetings</Text>
+              <View style={styles.inlineRow}>
+                <Text style={styles.sectionTitle}>Meetings</Text>
+                <Pressable
+                  style={styles.viewModeButton}
+                  onPress={() => {
+                    setMeetingsViewMode((current) => (current === "LIST" ? "MAP" : "LIST"));
+                    setSelectedLocationKey(null);
+                  }}
+                >
+                  <Text style={styles.viewModeButtonText}>
+                    {meetingsViewMode === "LIST" ? "🗺 Map" : "☰ List"}
+                  </Text>
+                </Pressable>
+              </View>
               <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
               <Text style={styles.sectionMeta}>
                 Location: {locationPermission === "granted" ? "Enabled" : "Not enabled"}
@@ -2695,7 +2871,94 @@ export default function App() {
 
               {loadingMeetings ? <Text style={styles.sectionMeta}>Loading meetings...</Text> : null}
 
-              {screen === "LIST" ? (
+              {screen === "LIST" && meetingsViewMode === "MAP" ? (
+                <>
+                  <Text style={styles.sectionMeta}>
+                    Map view shows in-person meetings with location coordinates for the selected
+                    day.
+                  </Text>
+                  {mapRegion ? (
+                    <View style={styles.mapContainer}>
+                      <MapViewCompat
+                        ref={mapRef}
+                        style={styles.map}
+                        initialRegion={mapRegion}
+                        region={mapRegion}
+                        onRegionChangeComplete={onMapRegionChangeComplete}
+                        showsUserLocation={locationPermission === "granted"}
+                      >
+                        {meetingLocationGroups.map((group) => (
+                          <MarkerCompat
+                            key={group.key}
+                            coordinate={{ latitude: group.lat, longitude: group.lng }}
+                            onPress={() => setSelectedLocationKey(group.key)}
+                            pinColor={group.meetings.length > 1 ? "#9c4221" : "#155eef"}
+                          />
+                        ))}
+                      </MapViewCompat>
+
+                      {mapDraggedOutsideBoundary ? (
+                        <View style={styles.mapBoundaryControls}>
+                          <Button title="Return to boundary" onPress={returnToBoundary} />
+                          <View style={styles.buttonSpacer} />
+                          <Button title="Search this area" onPress={() => void searchThisArea()} />
+                        </View>
+                      ) : null}
+                    </View>
+                  ) : (
+                    <Text style={styles.sectionMeta}>
+                      Enable location to initialize the map view.
+                    </Text>
+                  )}
+
+                  {selectedLocationGroup ? (
+                    selectedLocationGroup.meetings.length === 1 ? (
+                      <Pressable
+                        style={styles.mapMeetingCard}
+                        onPress={() => {
+                          setSelectedMeeting(selectedLocationGroup.meetings[0]);
+                          setScreen("DETAIL");
+                        }}
+                      >
+                        <Text style={styles.meetingName}>
+                          {selectedLocationGroup.meetings[0].name}
+                        </Text>
+                        <Text style={styles.sectionMeta}>{selectedLocationGroup.address}</Text>
+                        <Text style={styles.sectionMeta}>
+                          {selectedLocationGroup.meetings[0].startsAtLocal}
+                        </Text>
+                      </Pressable>
+                    ) : (
+                      <View style={styles.mapMeetingCard}>
+                        <Text style={styles.meetingName}>Meetings at this location</Text>
+                        <Text style={styles.sectionMeta}>{selectedLocationGroup.address}</Text>
+                        {selectedLocationGroup.meetings.map((meeting) => (
+                          <Pressable
+                            key={meeting.id}
+                            style={styles.mapMeetingRow}
+                            onPress={() => {
+                              setSelectedMeeting(meeting);
+                              setScreen("DETAIL");
+                            }}
+                          >
+                            <Text style={styles.detailButtonText}>
+                              {meeting.startsAtLocal} • {meeting.name}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    )
+                  ) : null}
+
+                  {!loadingMeetings && meetingLocationGroups.length === 0 ? (
+                    <Text style={styles.sectionMeta}>
+                      No in-person meetings with coordinates for this day.
+                    </Text>
+                  ) : null}
+                </>
+              ) : null}
+
+              {screen === "LIST" && meetingsViewMode === "LIST" ? (
                 <>
                   {meetingsForDay.map((meeting) => {
                     const plan = selectedDayPlan.plans[meeting.id] ?? {
@@ -3212,6 +3475,57 @@ const styles = StyleSheet.create({
   detailButtonText: {
     color: "#155eef",
     fontWeight: "600",
+  },
+  viewModeButton: {
+    borderWidth: 1,
+    borderColor: "#98a2b3",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "#fff",
+  },
+  viewModeButtonText: {
+    color: "#1d4ed8",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  mapContainer: {
+    borderWidth: 1,
+    borderColor: "#d0d5dd",
+    borderRadius: 10,
+    overflow: "hidden",
+    minHeight: 280,
+    backgroundColor: "#f8fafc",
+  },
+  map: {
+    width: "100%",
+    height: 280,
+  },
+  mapBoundaryControls: {
+    position: "absolute",
+    left: 8,
+    right: 8,
+    bottom: 8,
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.96)",
+    borderRadius: 8,
+    padding: 8,
+  },
+  mapMeetingCard: {
+    borderWidth: 1,
+    borderColor: "#c7d7fe",
+    borderRadius: 8,
+    padding: 10,
+    gap: 4,
+    backgroundColor: "#eef4ff",
+  },
+  mapMeetingRow: {
+    borderTopWidth: 1,
+    borderTopColor: "#dbe4ff",
+    paddingTop: 8,
+    marginTop: 4,
   },
   signatureCanvas: {
     borderWidth: 1,
