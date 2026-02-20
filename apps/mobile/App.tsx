@@ -769,21 +769,21 @@ export default function App() {
   }, [meetings, selectedDay.dayOfWeek, currentLocation]);
 
   const sponsorScheduleSummary = useMemo(() => {
-if (!sponsorEnabled) {
-  return "Sponsor disabled.";
-}
+    if (!sponsorEnabled) {
+      return "Sponsor disabled.";
+    }
 
-if (!sponsorActive) {
-  return "Sponsor reminders disabled.";
-}
+    if (!sponsorActive) {
+      return "Sponsor reminders disabled.";
+    }
 
-const next = computeNextCall(
-  new Date(),
-  sponsorCallTimeLocalHhmm,
-  sponsorRepeatUnit,
-  sponsorRepeatInterval,
-  sponsorRepeatDaysSorted,
-);
+    const next = computeNextCall(
+      new Date(),
+      sponsorCallTimeLocalHhmm,
+      sponsorRepeatUnit,
+      sponsorRepeatInterval,
+      sponsorRepeatDaysSorted,
+    );
 
     const repeatSummary =
       sponsorRepeatUnit === "MONTHLY"
@@ -793,7 +793,14 @@ const next = computeNextCall(
     return `Next scheduled call: ${next.nextAt.toLocaleString()} • Due today: ${
       next.dueToday ? "Yes" : "No"
     } • ${repeatSummary}`;
-  }, [sponsorCallTimeLocalHhmm, sponsorRepeatUnit, sponsorRepeatInterval, sponsorRepeatDaysSorted]);
+  }, [
+    sponsorEnabled,
+    sponsorActive,
+    sponsorCallTimeLocalHhmm,
+    sponsorRepeatUnit,
+    sponsorRepeatInterval,
+    sponsorRepeatDaysSorted,
+  ]);
 
   const sponsorStatusLine = useMemo(() => {
     if (!sponsorEnabled) {
@@ -1593,11 +1600,11 @@ const next = computeNextCall(
     const payload: SponsorConfigPayload = {
       sponsorName: normalizedSponsorName,
       sponsorPhoneE164,
-callTimeLocalHhmm: sponsorCallTimeLocalHhmm,
-repeatUnit: sponsorRepeatUnit,
-repeatInterval: sponsorRepeatInterval,
-repeatDays: sponsorRepeatDaysSorted,
-active: sponsorEnabled && sponsorActive,
+      callTimeLocalHhmm: sponsorCallTimeLocalHhmm,
+      repeatUnit: sponsorRepeatUnit,
+      repeatInterval: sponsorRepeatInterval,
+      repeatDays: sponsorRepeatDaysSorted,
+      active: sponsorPayloadActive,
     };
 
     setSponsorSaving(true);
@@ -2549,8 +2556,6 @@ setNotificationOpenPhone(null);
     />
   </>
 )}
-                </>
-              )}
             </View>
 
             {__DEV__ ? (
