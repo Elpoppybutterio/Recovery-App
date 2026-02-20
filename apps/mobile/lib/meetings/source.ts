@@ -370,6 +370,9 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           }
         }
       }
+      if (typeof params.lat === "number" && typeof params.lng === "number") {
+        query.set("radiusMiles", String(config.radiusMiles ?? 20));
+      }
 
       if (shouldFallbackToTenantMeetings) {
         const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
