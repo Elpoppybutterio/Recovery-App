@@ -769,13 +769,13 @@ export default function App() {
   }, [meetings, selectedDay.dayOfWeek, currentLocation]);
 
   const sponsorScheduleSummary = useMemo(() => {
-    if (!sponsorEnabled) {
-      return "Sponsor disabled.";
-    }
+if (!sponsorEnabled) {
+  return "Sponsor disabled.";
+}
 
-    if (!sponsorActive) {
-      return "Sponsor reminders disabled.";
-    }
+if (!sponsorActive) {
+  return "Sponsor reminders disabled.";
+}
 
     const next = computeNextCall(
       new Date(),
@@ -793,14 +793,7 @@ export default function App() {
     return `Next scheduled call: ${next.nextAt.toLocaleString()} • Due today: ${
       next.dueToday ? "Yes" : "No"
     } • ${repeatSummary}`;
-  }, [
-    sponsorEnabled,
-    sponsorActive,
-    sponsorCallTimeLocalHhmm,
-    sponsorRepeatUnit,
-    sponsorRepeatInterval,
-    sponsorRepeatDaysSorted,
-  ]);
+  }, [sponsorCallTimeLocalHhmm, sponsorRepeatUnit, sponsorRepeatInterval, sponsorRepeatDaysSorted]);
 
   const sponsorStatusLine = useMemo(() => {
     if (!sponsorEnabled) {
@@ -819,6 +812,28 @@ export default function App() {
   }, [
     sponsorEnabled,
     sponsorActive,
+const sponsorStatusLine = useMemo(() => {
+  if (!sponsorEnabled) {
+    return "Sponsor is disabled.";
+  }
+  if (!sponsorActive) {
+    return "Sponsor reminders are disabled.";
+  }
+  if (!normalizedSponsorName || !sponsorPhoneE164) {
+    return "Enter sponsor name and phone to enable reminders.";
+  }
+  if (sponsorStatus) {
+    return sponsorStatus;
+  }
+  return sponsorScheduleSummary;
+}, [
+  sponsorEnabled,
+  sponsorActive,
+  normalizedSponsorName,
+  sponsorPhoneE164,
+  sponsorStatus,
+  sponsorScheduleSummary,
+]);
     normalizedSponsorName,
     sponsorPhoneE164,
     sponsorStatus,
@@ -1605,6 +1620,11 @@ export default function App() {
       repeatInterval: sponsorRepeatInterval,
       repeatDays: sponsorRepeatDaysSorted,
       active: sponsorPayloadActive,
+callTimeLocalHhmm: sponsorCallTimeLocalHhmm,
+repeatUnit: sponsorRepeatUnit,
+repeatInterval: sponsorRepeatInterval,
+repeatDays: sponsorRepeatDaysSorted,
+active: sponsorPayloadActive,
     };
 
     setSponsorSaving(true);
