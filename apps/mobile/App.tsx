@@ -587,11 +587,21 @@ export default function App() {
     typeof extra.meetingFeedUrl === "string" && extra.meetingFeedUrl.trim().length > 0
       ? extra.meetingFeedUrl
       : undefined;
+  const meetingRadiusMiles =
+    typeof extra.meetingRadiusMiles === "number" && Number.isFinite(extra.meetingRadiusMiles)
+      ? extra.meetingRadiusMiles
+      : 20;
 
   const authHeader = useMemo(() => `Bearer DEV_${devAuthUserId}`, [devAuthUserId]);
   const source = useMemo(
-    () => createMeetingsSource({ feedUrl: meetingFeedUrl, apiUrl, authHeader }),
-    [apiUrl, authHeader, meetingFeedUrl],
+    () =>
+      createMeetingsSource({
+        feedUrl: meetingFeedUrl,
+        apiUrl,
+        authHeader,
+        radiusMiles: meetingRadiusMiles,
+      }),
+    [apiUrl, authHeader, meetingFeedUrl, meetingRadiusMiles],
   );
   const travelTimeProvider = useMemo(() => createTravelTimeProvider(25), []);
 
@@ -666,6 +676,7 @@ export default function App() {
   const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
   const meetingsShapeLoggedRef = useRef(false);
   const locationIssueRef = useRef<LocationIssue>(null);
+  const locationPermissionAlertShownRef = useRef(false);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
 
@@ -803,27 +814,27 @@ export default function App() {
   ]);
 
   const sponsorStatusLine = useMemo(() => {
-  if (!sponsorEnabled) {
-    return "Sponsor is disabled.";
-  }
-  if (!sponsorActive) {
-    return "Sponsor reminders are disabled.";
-  }
-  if (!normalizedSponsorName || !sponsorPhoneE164) {
-    return "Enter sponsor name and phone to enable reminders.";
-  }
-  if (sponsorStatus) {
-    return sponsorStatus;
-  }
-  return sponsorScheduleSummary;
-}, [
-  sponsorEnabled,
-  sponsorActive,
-  normalizedSponsorName,
-  sponsorPhoneE164,
-  sponsorStatus,
-  sponsorScheduleSummary,
-]);
+    if (!sponsorEnabled) {
+      return "Sponsor is disabled.";
+    }
+    if (!sponsorActive) {
+      return "Sponsor reminders are disabled.";
+    }
+    if (!normalizedSponsorName || !sponsorPhoneE164) {
+      return "Enter sponsor name and phone to enable reminders.";
+    }
+    if (sponsorStatus) {
+      return sponsorStatus;
+    }
+    return sponsorScheduleSummary;
+  }, [
+    sponsorEnabled,
+    sponsorActive,
+    normalizedSponsorName,
+    sponsorPhoneE164,
+    sponsorStatus,
+    sponsorScheduleSummary,
+  ]);
 
   const openSessionDurationSeconds = useMemo(() => {
     if (!activeAttendance || activeAttendance.endAt) {
@@ -2054,6 +2065,34 @@ export default function App() {
       subscription.remove();
     };
   }, [openMeetingDestination, openPhoneCall]);
+
+  useEffect(() => {
+    if (locationIssueRef.current !== "permission_denied") {
+      locationPermissionAlertShownRef.current = false;
+      return;
+    }
+
+    if (locationPermissionAlertShownRef.current) {
+      return;
+    }
+    locationPermissionAlertShownRef.current = true;
+
+    Alert.alert(
+      "Location Permission Needed",
+      "Distance and arrival detection need location access. You can enable it in Settings.",
+      [
+        { text: "Not now", style: "cancel" },
+        {
+          text: "Open Settings",
+          onPress: () => {
+            void Linking.openSettings().catch(() => {
+              setMeetingsStatus("Unable to open Settings. Please enable location manually.");
+            });
+          },
+        },
+      ],
+    );
+  }, [locationPermission]);
 
   useEffect(() => {
     const mapping: Record<string, MeetingRecord> = {};

@@ -32,6 +32,24 @@ const meetingCreateBodySchema = z.object({
   radiusM: z.number().int().positive(),
 });
 
+const meetingsListQuerySchema = z
+  .object({
+    day: z.coerce.number().int().min(0).max(6).optional(),
+    dayOfWeek: z.coerce.number().int().min(0).max(6).optional(),
+    lat: z.coerce.number().min(-90).max(90).optional(),
+    lng: z.coerce.number().min(-180).max(180).optional(),
+    radiusMiles: z.coerce.number().positive().max(500).optional(),
+  })
+  .refine(
+    (value) =>
+      (typeof value.lat === "number" && typeof value.lng === "number") ||
+      (typeof value.lat !== "number" && typeof value.lng !== "number"),
+    {
+      message: "lat and lng must be provided together",
+      path: ["lat"],
+    },
+  );
+
 const attendanceCheckInBodySchema = z.object({
   meetingId: z.string().min(1),
 });
@@ -112,6 +130,7 @@ const supervisionUpdateBodySchema = z.object({
 
 const WARNING_DISTANCE_FEET = 200;
 const FEET_TO_METERS = 0.3048;
+const MILES_TO_METERS = 1609.344;
 const WARNING_DISTANCE_METERS = WARNING_DISTANCE_FEET * FEET_TO_METERS;
 const INCIDENT_DEDUPE_WINDOW_MINUTES = 10;
 const EARTH_RADIUS_METERS = 6371000;
@@ -729,9 +748,36 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         return;
       }
 
+      const parsedQuery = meetingsListQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid meetings query",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      const query = parsedQuery.data;
       const meetings = await tenantRepositories.meetings.list(actor);
+      const resolvedRadiusMiles = query.radiusMiles ?? env.MEETING_IMPORT_RADIUS_MILES;
+      const resolvedRadiusMeters = resolvedRadiusMiles * MILES_TO_METERS;
+      const hasLocationFilter = typeof query.lat === "number" && typeof query.lng === "number";
+
+      const scopedMeetings = hasLocationFilter
+        ? meetings.filter((meeting) => {
+            const distanceM = distanceMetersBetween(
+              query.lat!,
+              query.lng!,
+              meeting.lat,
+              meeting.lng,
+            );
+            return distanceM <= resolvedRadiusMeters;
+          })
+        : meetings;
+
       return {
-        meetings: meetings.map((meeting) => ({
+        meetings: scopedMeetings.map((meeting) => ({
           id: meeting.id,
           tenantId: meeting.tenant_id,
           name: meeting.name,
@@ -742,6 +788,11 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           createdAt: meeting.created_at,
           createdByUserId: meeting.created_by_user_id,
         })),
+        filters: {
+          dayOfWeek: query.dayOfWeek ?? query.day ?? null,
+          radiusMiles: resolvedRadiusMiles,
+          locationScoped: hasLocationFilter,
+        },
       };
     },
   );

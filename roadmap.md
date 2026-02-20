@@ -34,3 +34,8 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - User features: sponsor contact config, sponsor enable toggle + reminder toggle restructuring, single-source sponsor status hygiene, simulator-safe call-now handling, reliable location enable messaging, and meeting drive reminder planning.
 - API endpoints: `GET /v1/me/sponsor`, `PUT /v1/me/sponsor`.
 - Data tables: `sponsor_config`.
+
+## Futures / Backlog
+
+- [ ] Auto-request location permission on first launch; if denied, show Settings deep-link CTA.
+- [ ] Import AA/NA meetings feeds (Meeting Guide spec) and return meetings within 20-mile radius when location is available.
