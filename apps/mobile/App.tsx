@@ -803,23 +803,6 @@ export default function App() {
   ]);
 
   const sponsorStatusLine = useMemo(() => {
-    if (!sponsorEnabled) {
-      return "Sponsor is disabled.";
-    }
-    if (!sponsorActive) {
-      return "Sponsor reminders are disabled.";
-    }
-    if (!normalizedSponsorName || !sponsorPhoneE164) {
-      return "Enter sponsor name and phone to enable reminders.";
-    }
-    if (sponsorStatus) {
-      return sponsorStatus;
-    }
-    return sponsorScheduleSummary;
-  }, [
-    sponsorEnabled,
-    sponsorActive,
-const sponsorStatusLine = useMemo(() => {
   if (!sponsorEnabled) {
     return "Sponsor is disabled.";
   }
@@ -841,11 +824,6 @@ const sponsorStatusLine = useMemo(() => {
   sponsorStatus,
   sponsorScheduleSummary,
 ]);
-    normalizedSponsorName,
-    sponsorPhoneE164,
-    sponsorStatus,
-    sponsorScheduleSummary,
-  ]);
 
   const openSessionDurationSeconds = useMemo(() => {
     if (!activeAttendance || activeAttendance.endAt) {
