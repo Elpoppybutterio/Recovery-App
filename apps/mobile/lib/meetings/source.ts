@@ -329,6 +329,8 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         nearbyQuery.set("lng", String(params.lng));
         nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
         nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
+        nearbyQuery.set("when", "upcoming");
+        nearbyQuery.set("now", new Date().toISOString());
 
         const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
         if (__DEV__) {

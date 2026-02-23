@@ -23,6 +23,8 @@ import {
 import appJson from "./app.json";
 import { createMeetingsSource, MeetingRecord } from "./lib/meetings/source";
 import { ATTENDANCE_PDF_FILE_NAME, exportAttendancePdf } from "./lib/pdf/exportAttendancePdf";
+import { getInsightForDay } from "./lib/recoveryInsights";
+import { Dashboard } from "./lib/dashboard/Dashboard";
 
 const MapViewCompat: any = MapView;
 const MarkerCompat: any = Marker;
@@ -84,6 +86,8 @@ type MeetingListItem = MeetingRecord & {
 };
 
 type MeetingsViewMode = "LIST" | "MAP";
+type HomeScreen = "SETUP" | "DASHBOARD" | "SETTINGS";
+type SetupStep = 1 | 2 | 3 | 4 | 5;
 
 type MapBoundaryCenter = {
   lat: number;
@@ -131,6 +135,21 @@ type DriveSchedulePreview = {
 
 type LocationIssue = "permission_denied" | "position_unavailable" | "unavailable" | null;
 
+type SponsorCallLog = {
+  id: string;
+  atIso: string;
+  sponsorPhoneE164: string | null;
+  source: "button" | "notification";
+  success: boolean;
+};
+
+type MeetingAttendanceLog = {
+  id: string;
+  meetingId: string;
+  atIso: string;
+  method: "manual" | "arrivalPrompt" | "verified";
+};
+
 const ARRIVAL_RADIUS_METERS = 61;
 const EARTH_RADIUS_METERS = 6371000;
 const ATTENDANCE_STORAGE_KEY_PREFIX = "recovery:verifiedAttendance:";
@@ -142,6 +161,12 @@ const SPONSOR_CALENDAR_EVENT_STORAGE_KEY_PREFIX = "recovery:sponsorCalendarEvent
 const SPONSOR_CALENDAR_EVENT_FINGERPRINT_STORAGE_KEY_PREFIX =
   "recovery:sponsorCalendarEventFingerprint:";
 const SPONSOR_ALERT_FINGERPRINT_STORAGE_KEY_PREFIX = "recovery:sponsorAlertFingerprint:";
+const SETUP_COMPLETE_STORAGE_KEY_PREFIX = "recovery:setupComplete:";
+const SOBRIETY_DATE_STORAGE_KEY_PREFIX = "recovery:sobrietyDate:";
+const PROFILE_STORAGE_KEY_PREFIX = "recovery:modePrefs:";
+const SPONSOR_CALL_LOG_STORAGE_KEY_PREFIX = "recovery:sponsorCalls:";
+const MEETING_ATTENDANCE_LOG_STORAGE_KEY_PREFIX = "recovery:meetingsCompleted:";
+const SPONSOR_ENABLED_AT_STORAGE_KEY_PREFIX = "recovery:sponsorEnabledAt:";
 
 const SPONSOR_NOTIFICATION_CATEGORY_ID = "SPONSOR_CALL";
 const DRIVE_NOTIFICATION_CATEGORY_ID = "DRIVE_LEAVE";
@@ -250,6 +275,24 @@ function parseMinutesFromHhmm(value: string): number {
     return 0;
   }
   return Math.max(0, Math.min(23, hours)) * 60 + Math.max(0, Math.min(59, minutes));
+}
+
+function formatHhmmForDisplay(value: string | null | undefined): string {
+  if (!value) {
+    return "Unknown";
+  }
+  const match = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return value;
+  }
+  const hour24 = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isFinite(hour24) || !Number.isFinite(minute)) {
+    return value;
+  }
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${hour12}:${String(minute).padStart(2, "0")} ${meridiem}`;
 }
 
 function normalizePhoneDigits(value: string): string {
@@ -523,6 +566,64 @@ function sponsorAlertFingerprintStorageKey(userId: string): string {
   return `${SPONSOR_ALERT_FINGERPRINT_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+function setupCompleteStorageKey(userId: string): string {
+  return `${SETUP_COMPLETE_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function sobrietyDateStorageKey(userId: string): string {
+  return `${SOBRIETY_DATE_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function profileStorageKey(userId: string): string {
+  return `${PROFILE_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function sponsorCallLogStorageKey(userId: string): string {
+  return `${SPONSOR_CALL_LOG_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function meetingAttendanceLogStorageKey(userId: string): string {
+  return `${MEETING_ATTENDANCE_LOG_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function sponsorEnabledAtStorageKey(userId: string): string {
+  return `${SPONSOR_ENABLED_AT_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function parseDdMmYyyyToIso(value: string): string | null {
+  const normalized = value.trim();
+  const match = normalized.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) {
+    return null;
+  }
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  if (day < 1 || day > 31 || month < 1 || month > 12) {
+    return null;
+  }
+  const candidate = new Date(year, month - 1, day);
+  if (
+    candidate.getFullYear() !== year ||
+    candidate.getMonth() !== month - 1 ||
+    candidate.getDate() !== day
+  ) {
+    return null;
+  }
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function formatIsoToDdMmYyyy(value: string | null): string {
+  if (!value) {
+    return "";
+  }
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) {
+    return "";
+  }
+  return `${match[3]}/${match[2]}/${match[1]}`;
+}
+
 function toCalendarDayOfWeek(code: WeekdayCode): Calendar.DayOfTheWeek {
   switch (code) {
     case "MON":
@@ -548,6 +649,21 @@ function formatError(error: unknown): string {
     return error.message;
   }
   return "Unknown error";
+}
+
+function getDaysSober(dateIso: string | null, nowMs: number): number {
+  if (!dateIso) {
+    return 0;
+  }
+  const start = new Date(dateIso);
+  if (Number.isNaN(start.getTime())) {
+    return 0;
+  }
+  const startMidnight = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+  const now = new Date(nowMs);
+  const nowMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const diffDays = Math.floor((nowMidnight - startMidnight) / 86_400_000);
+  return Math.max(0, diffDays);
 }
 
 function buildSponsorEventFingerprint(input: {
@@ -602,21 +718,22 @@ export default function App() {
     typeof extra.meetingFeedUrl === "string" && extra.meetingFeedUrl.trim().length > 0
       ? extra.meetingFeedUrl
       : undefined;
-  const meetingRadiusMiles =
+  const defaultMeetingRadiusMiles =
     typeof extra.meetingRadiusMiles === "number" && Number.isFinite(extra.meetingRadiusMiles)
       ? extra.meetingRadiusMiles
       : 20;
 
   const authHeader = useMemo(() => `Bearer DEV_${devAuthUserId}`, [devAuthUserId]);
+  const [meetingRadiusMiles, setMeetingRadiusMiles] = useState(defaultMeetingRadiusMiles);
   const source = useMemo(
     () =>
       createMeetingsSource({
         feedUrl: meetingFeedUrl,
         apiUrl,
         authHeader,
-        radiusMiles: meetingRadiusMiles,
+        radiusMiles: defaultMeetingRadiusMiles,
       }),
-    [apiUrl, authHeader, meetingFeedUrl, meetingRadiusMiles],
+    [apiUrl, authHeader, meetingFeedUrl, defaultMeetingRadiusMiles],
   );
   const travelTimeProvider = useMemo(() => createTravelTimeProvider(25), []);
 
@@ -641,8 +758,30 @@ export default function App() {
     () => sponsorAlertFingerprintStorageKey(devAuthUserId),
     [devAuthUserId],
   );
+  const setupCompleteStorage = useMemo(
+    () => setupCompleteStorageKey(devAuthUserId),
+    [devAuthUserId],
+  );
+  const sobrietyDateStorage = useMemo(() => sobrietyDateStorageKey(devAuthUserId), [devAuthUserId]);
+  const profileStorage = useMemo(() => profileStorageKey(devAuthUserId), [devAuthUserId]);
+  const sponsorCallLogStorage = useMemo(
+    () => sponsorCallLogStorageKey(devAuthUserId),
+    [devAuthUserId],
+  );
+  const sponsorEnabledAtStorage = useMemo(
+    () => sponsorEnabledAtStorageKey(devAuthUserId),
+    [devAuthUserId],
+  );
+  const meetingAttendanceLogStorage = useMemo(
+    () => meetingAttendanceLogStorageKey(devAuthUserId),
+    [devAuthUserId],
+  );
 
   const [mode, setMode] = useState<RecoveryMode>("A");
+  const [homeScreen, setHomeScreen] = useState<HomeScreen>("SETUP");
+  const [setupStep, setSetupStep] = useState<SetupStep>(1);
+  const [setupComplete, setSetupComplete] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
   const [screen, setScreen] = useState<AppScreen>("LIST");
   const [meetingsViewMode, setMeetingsViewMode] = useState<MeetingsViewMode>("LIST");
 
@@ -661,6 +800,7 @@ export default function App() {
   const [meetingsStatus, setMeetingsStatus] = useState("Meetings not loaded yet.");
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
   const [selectedMeeting, setSelectedMeeting] = useState<MeetingRecord | null>(null);
+  const [clockTickMs, setClockTickMs] = useState(Date.now());
 
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [activeAttendance, setActiveAttendance] = useState<AttendanceRecord | null>(null);
@@ -689,6 +829,15 @@ export default function App() {
 
   const [notificationStatus, setNotificationStatus] = useState("Notifications not scheduled yet.");
   const [notificationOpenPhone, setNotificationOpenPhone] = useState<string | null>(null);
+  const [sobrietyDateIso, setSobrietyDateIso] = useState<string | null>(null);
+  const [sobrietyDateInput, setSobrietyDateInput] = useState("");
+  const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
+  const [wizardWantsReminders, setWizardWantsReminders] = useState<boolean | null>(null);
+  const [wizardHasHomeGroup, setWizardHasHomeGroup] = useState<boolean | null>(null);
+  const [homeGroupMeetingIds, setHomeGroupMeetingIds] = useState<string[]>([]);
+  const [sponsorEnabledAtIso, setSponsorEnabledAtIso] = useState<string | null>(null);
+  const [sponsorCallLogs, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
+  const [meetingAttendanceLogs, setMeetingAttendanceLogs] = useState<MeetingAttendanceLog[]>([]);
 
   const [meetingPlansByDate, setMeetingPlansByDate] = useState<MeetingPlansState>({});
   const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(__DEV__);
@@ -767,10 +916,26 @@ export default function App() {
     () => meetingPlansByDate[selectedDay.dateKey] ?? EMPTY_DAY_PLAN,
     [meetingPlansByDate, selectedDay.dateKey],
   );
+  const todayDateKey = useMemo(() => dateKeyForDate(new Date(clockTickMs)), [clockTickMs]);
+  const selectedDayIsToday = selectedDay.dateKey === todayDateKey;
+  const selectedDayIsPast = selectedDay.date.getTime() < new Date(todayDateKey).getTime();
 
   const meetingsForDay = useMemo<MeetingListItem[]>(() => {
+    const nowLocal = new Date(clockTickMs);
+    const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+
+    if (selectedDayIsPast) {
+      return [];
+    }
+
     const list = meetings
       .filter((meeting) => meeting.dayOfWeek === selectedDay.dayOfWeek)
+      .filter((meeting) => {
+        if (!selectedDayIsToday) {
+          return true;
+        }
+        return parseMinutesFromHhmm(meeting.startsAtLocal) >= nowMinutes;
+      })
       .map((meeting) => {
         const distanceMeters =
           currentLocation && meeting.lat !== null && meeting.lng !== null
@@ -801,7 +966,59 @@ export default function App() {
     });
 
     return list;
-  }, [meetings, selectedDay.dayOfWeek, currentLocation]);
+  }, [
+    meetings,
+    selectedDay.dayOfWeek,
+    currentLocation,
+    clockTickMs,
+    selectedDayIsPast,
+    selectedDayIsToday,
+  ]);
+
+  const meetingsTodayUpcoming = useMemo<MeetingListItem[]>(() => {
+    const nowLocal = new Date(clockTickMs);
+    const todayDay = nowLocal.getDay();
+    const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+    const list = meetings
+      .filter((meeting) => meeting.dayOfWeek === todayDay)
+      .filter((meeting) => parseMinutesFromHhmm(meeting.startsAtLocal) >= nowMinutes)
+      .map((meeting) => {
+        const distanceMeters =
+          currentLocation && meeting.lat !== null && meeting.lng !== null
+            ? distanceMetersBetween(
+                currentLocation.lat,
+                currentLocation.lng,
+                meeting.lat,
+                meeting.lng,
+              )
+            : null;
+        return {
+          ...meeting,
+          distanceMeters,
+        };
+      });
+
+    list.sort((left, right) => {
+      const byTime =
+        parseMinutesFromHhmm(left.startsAtLocal) - parseMinutesFromHhmm(right.startsAtLocal);
+      if (byTime !== 0) {
+        return byTime;
+      }
+      const leftDistance = left.distanceMeters ?? Number.POSITIVE_INFINITY;
+      const rightDistance = right.distanceMeters ?? Number.POSITIVE_INFINITY;
+      if (leftDistance !== rightDistance) {
+        return leftDistance - rightDistance;
+      }
+      return left.name.localeCompare(right.name);
+    });
+
+    return list;
+  }, [meetings, currentLocation, clockTickMs]);
+
+  const dashboardNextThreeMeetings = useMemo(
+    () => meetingsTodayUpcoming.slice(0, 3),
+    [meetingsTodayUpcoming],
+  );
 
   const mapMeetingsForDay = useMemo(
     () =>
@@ -899,6 +1116,111 @@ export default function App() {
     sponsorStatus,
     sponsorScheduleSummary,
   ]);
+
+  const daysSober = useMemo(
+    () => getDaysSober(sobrietyDateIso, clockTickMs),
+    [sobrietyDateIso, clockTickMs],
+  );
+  const soberInsight = useMemo(() => getInsightForDay(daysSober), [daysSober]);
+
+  const homeGroupUpcoming = useMemo(() => {
+    if (homeGroupMeetingIds.length === 0) {
+      return null;
+    }
+
+    const nowLocal = new Date(clockTickMs);
+    const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+    const todayDay = nowLocal.getDay();
+
+    const candidates = meetings
+      .filter((meeting) => homeGroupMeetingIds.includes(meeting.id))
+      .map((meeting) => {
+        const dayDistance = (meeting.dayOfWeek - todayDay + 7) % 7;
+        const isToday = dayDistance === 0;
+        const meetingMinutes = parseMinutesFromHhmm(meeting.startsAtLocal);
+        const validToday = isToday ? meetingMinutes >= nowMinutes : true;
+        const effectiveDayDistance = isToday && !validToday ? 7 : dayDistance;
+        return {
+          meeting,
+          effectiveDayDistance,
+          meetingMinutes,
+        };
+      })
+      .sort((left, right) => {
+        if (left.effectiveDayDistance !== right.effectiveDayDistance) {
+          return left.effectiveDayDistance - right.effectiveDayDistance;
+        }
+        return left.meetingMinutes - right.meetingMinutes;
+      });
+
+    return candidates[0]?.meeting ?? null;
+  }, [homeGroupMeetingIds, meetings, clockTickMs]);
+
+  const meetingsAttendedInNinetyDays = useMemo(() => {
+    if (!sobrietyDateIso) {
+      return 0;
+    }
+    const sobrietyStart = new Date(sobrietyDateIso).getTime();
+    if (Number.isNaN(sobrietyStart)) {
+      return 0;
+    }
+    const windowEnd = sobrietyStart + 90 * 86_400_000;
+    return meetingAttendanceLogs.filter((entry) => {
+      const at = new Date(entry.atIso).getTime();
+      return at >= sobrietyStart && at <= windowEnd;
+    }).length;
+  }, [sobrietyDateIso, meetingAttendanceLogs]);
+
+  const ninetyDayGoalTarget = useMemo(() => Math.max(1, Math.min(90, daysSober || 1)), [daysSober]);
+  const ninetyDayProgressPct = useMemo(
+    () => Math.min(100, Math.round((meetingsAttendedInNinetyDays / ninetyDayGoalTarget) * 100)),
+    [meetingsAttendedInNinetyDays, ninetyDayGoalTarget],
+  );
+
+  const sponsorAdherence = useMemo(() => {
+    if (!sponsorEnabledAtIso) {
+      return { days: 0, completed: 0, percent: 0 };
+    }
+    const since = new Date(sponsorEnabledAtIso).getTime();
+    if (Number.isNaN(since)) {
+      return { days: 0, completed: 0, percent: 0 };
+    }
+    const days = Math.max(1, Math.floor((clockTickMs - since) / 86_400_000) + 1);
+    const completed = sponsorCallLogs.filter((entry) => entry.success).length;
+    const percent = Math.min(100, (completed / days) * 100);
+    return { days, completed, percent };
+  }, [sponsorEnabledAtIso, sponsorCallLogs, clockTickMs]);
+
+  const meetingsLast7Bars = useMemo(() => {
+    const byDate = new Map<string, number>();
+    for (const entry of meetingAttendanceLogs) {
+      const key = dateKeyForDate(new Date(entry.atIso));
+      byDate.set(key, (byDate.get(key) ?? 0) + 1);
+    }
+    const bars: number[] = [];
+    for (let offset = 6; offset >= 0; offset -= 1) {
+      const date = new Date(clockTickMs - offset * 86_400_000);
+      bars.push(byDate.get(dateKeyForDate(date)) ?? 0);
+    }
+    return bars;
+  }, [meetingAttendanceLogs, clockTickMs]);
+
+  const sponsorLast14Bars = useMemo(() => {
+    const successByDate = new Map<string, boolean>();
+    for (const entry of sponsorCallLogs) {
+      if (!entry.success) {
+        continue;
+      }
+      const key = dateKeyForDate(new Date(entry.atIso));
+      successByDate.set(key, true);
+    }
+    const bars: boolean[] = [];
+    for (let offset = 13; offset >= 0; offset -= 1) {
+      const date = new Date(clockTickMs - offset * 86_400_000);
+      bars.push(successByDate.get(dateKeyForDate(date)) === true);
+    }
+    return bars;
+  }, [sponsorCallLogs, clockTickMs]);
 
   const openSessionDurationSeconds = useMemo(() => {
     if (!activeAttendance || activeAttendance.endAt) {
@@ -1109,6 +1431,28 @@ export default function App() {
     [meetingPlansStorage],
   );
 
+  const persistSponsorCallLogs = useCallback(
+    async (nextLogs: SponsorCallLog[]) => {
+      try {
+        await AsyncStorage.setItem(sponsorCallLogStorage, JSON.stringify(nextLogs));
+      } catch {
+        setNotificationStatus("Failed to persist sponsor call activity.");
+      }
+    },
+    [sponsorCallLogStorage],
+  );
+
+  const persistMeetingAttendanceLogs = useCallback(
+    async (nextLogs: MeetingAttendanceLog[]) => {
+      try {
+        await AsyncStorage.setItem(meetingAttendanceLogStorage, JSON.stringify(nextLogs));
+      } catch {
+        setAttendanceStatus("Failed to persist meeting attendance activity.");
+      }
+    },
+    [meetingAttendanceLogStorage],
+  );
+
   const upsertAttendanceRecord = useCallback(
     (record: AttendanceRecord) => {
       setAttendanceRecords((previous) => {
@@ -1120,6 +1464,42 @@ export default function App() {
       });
     },
     [persistAttendanceRecords],
+  );
+
+  const appendSponsorCallLog = useCallback(
+    (entry: Omit<SponsorCallLog, "id" | "atIso">) => {
+      setSponsorCallLogs((previous) => {
+        const next = [
+          {
+            id: createId("sponsor-call"),
+            atIso: new Date().toISOString(),
+            ...entry,
+          },
+          ...previous,
+        ].slice(0, 500);
+        void persistSponsorCallLogs(next);
+        return next;
+      });
+    },
+    [persistSponsorCallLogs],
+  );
+
+  const appendMeetingAttendanceLog = useCallback(
+    (entry: Omit<MeetingAttendanceLog, "id" | "atIso">) => {
+      setMeetingAttendanceLogs((previous) => {
+        const next = [
+          {
+            id: createId("meeting-attendance"),
+            atIso: new Date().toISOString(),
+            ...entry,
+          },
+          ...previous,
+        ].slice(0, 1000);
+        void persistMeetingAttendanceLogs(next);
+        return next;
+      });
+    },
+    [persistMeetingAttendanceLogs],
   );
 
   const refreshMeetings = useCallback(
@@ -1165,6 +1545,124 @@ export default function App() {
       formatApiErrorWithHint,
     ],
   );
+
+  const handleModeSelect = useCallback(
+    (nextMode: RecoveryMode) => {
+      setMode(nextMode);
+      if (nextMode === "A") {
+        setHomeScreen(setupComplete ? "DASHBOARD" : "SETUP");
+        if (!setupComplete) {
+          setSetupStep(1);
+        } else {
+          setSelectedDayOffset(0);
+        }
+        setScreen("LIST");
+        setSelectedMeeting(null);
+        void refreshMeetings();
+      } else {
+        setHomeScreen("SETTINGS");
+      }
+    },
+    [refreshMeetings, setupComplete],
+  );
+
+  const openSettingsHub = useCallback(() => {
+    setHomeScreen("SETTINGS");
+    setScreen("LIST");
+    setSelectedMeeting(null);
+  }, []);
+
+  const openDashboard = useCallback(() => {
+    setHomeScreen("DASHBOARD");
+    setSelectedDayOffset(0);
+    setScreen("LIST");
+    setSelectedMeeting(null);
+    void refreshMeetings();
+  }, [refreshMeetings]);
+
+  const restartSetup = useCallback(() => {
+    setHomeScreen("SETUP");
+    setSetupStep(1);
+    setSetupError(null);
+    setScreen("LIST");
+    setSelectedMeeting(null);
+    setSelectedDayOffset(0);
+    void refreshMeetings();
+  }, [refreshMeetings]);
+
+  const nextSetupStep = useCallback(() => {
+    setSetupError(null);
+
+    if (setupStep === 1) {
+      const parsedDateIso = parseDdMmYyyyToIso(sobrietyDateInput);
+      if (!parsedDateIso) {
+        setSetupError("Enter sobriety date as DD/MM/YYYY.");
+        return;
+      }
+      setSobrietyDateIso(parsedDateIso);
+      setSetupStep(2);
+      return;
+    }
+
+    if (setupStep === 2) {
+      if (wizardHasSponsor === null) {
+        setSetupError("Choose whether you have a sponsor.");
+        return;
+      }
+      if (wizardHasSponsor) {
+        if (!normalizedSponsorName || !sponsorPhoneE164) {
+          setSetupError("Enter sponsor name and phone.");
+          return;
+        }
+        setSponsorEnabled(true);
+      } else {
+        setSponsorEnabled(false);
+        setSponsorActive(false);
+      }
+      setSetupStep(3);
+      return;
+    }
+
+    if (setupStep === 3) {
+      if (wizardHasSponsor) {
+        if (wizardWantsReminders === null) {
+          setSetupError("Choose whether sponsor call reminders are enabled.");
+          return;
+        }
+        setSponsorActive(wizardWantsReminders);
+      } else {
+        setWizardWantsReminders(false);
+      }
+      setSetupStep(4);
+      return;
+    }
+
+    if (setupStep === 4) {
+      if (wizardHasHomeGroup === null) {
+        setSetupError("Choose whether you have a home group.");
+        return;
+      }
+      if (wizardHasHomeGroup && homeGroupMeetingIds.length === 0) {
+        setSetupError("Select a home group meeting.");
+        return;
+      }
+      setSetupStep(5);
+    }
+  }, [
+    setupStep,
+    sobrietyDateInput,
+    wizardHasSponsor,
+    normalizedSponsorName,
+    sponsorPhoneE164,
+    wizardWantsReminders,
+    wizardHasHomeGroup,
+    homeGroupMeetingIds.length,
+  ]);
+
+  const previousSetupStep = useCallback(() => {
+    setSetupError(null);
+    setSetupStep((current) => (current <= 1 ? 1 : ((current - 1) as SetupStep)));
+  }, []);
 
   const updateMapCenter = useCallback((center: MapBoundaryCenter) => {
     setMapCenter((previous) => (coordinatesEqual(previous, center) ? previous : center));
@@ -1258,6 +1756,7 @@ export default function App() {
       }
 
       const config = payload.sponsorConfig;
+      setSponsorEnabled(true);
       setSponsorName(config.sponsorName);
       setSponsorPhoneDigits(normalizePhoneDigits(config.sponsorPhoneE164));
       const parsedTime = from24HourText(config.callTimeLocalHhmm);
@@ -1289,30 +1788,38 @@ export default function App() {
     }
   }, [apiUrl, authHeader, formatApiErrorWithHint]);
 
-  const openPhoneCall = useCallback(async (phoneE164: string | null) => {
-    if (!phoneE164) {
-      setSponsorStatus("Enter sponsor name and phone to enable reminders.");
-      return;
-    }
-    const digits = normalizePhoneDigits(phoneE164);
-    if (!digits) {
-      setSponsorStatus("Enter sponsor name and phone to enable reminders.");
-      return;
-    }
-    const telUrl = `tel:${digits}`;
-    try {
-      const canOpen = await Linking.canOpenURL(telUrl);
-      if (!canOpen) {
-        setSponsorStatus("Calling is not supported on this device (simulator).");
+  const openPhoneCall = useCallback(
+    async (phoneE164: string | null, source: "button" | "notification" = "button") => {
+      if (!phoneE164) {
+        setSponsorStatus("Enter sponsor name and phone to enable reminders.");
+        appendSponsorCallLog({ sponsorPhoneE164: null, source, success: false });
         return;
       }
+      const digits = normalizePhoneDigits(phoneE164);
+      if (!digits) {
+        setSponsorStatus("Enter sponsor name and phone to enable reminders.");
+        appendSponsorCallLog({ sponsorPhoneE164: phoneE164, source, success: false });
+        return;
+      }
+      const telUrl = `tel:${digits}`;
+      try {
+        const canOpen = await Linking.canOpenURL(telUrl);
+        if (!canOpen) {
+          setSponsorStatus("Calling is not supported on this device (simulator).");
+          appendSponsorCallLog({ sponsorPhoneE164: phoneE164, source, success: false });
+          return;
+        }
 
-      await Linking.openURL(telUrl);
-      setSponsorStatus(null);
-    } catch {
-      setSponsorStatus("Calling is not supported on this device (simulator).");
-    }
-  }, []);
+        await Linking.openURL(telUrl);
+        setSponsorStatus(null);
+        appendSponsorCallLog({ sponsorPhoneE164: phoneE164, source, success: true });
+      } catch {
+        setSponsorStatus("Calling is not supported on this device (simulator).");
+        appendSponsorCallLog({ sponsorPhoneE164: phoneE164, source, success: false });
+      }
+    },
+    [appendSponsorCallLog],
+  );
 
   const openMeetingDestination = useCallback(async (meeting: MeetingRecord) => {
     if (
@@ -1839,6 +2346,72 @@ export default function App() {
     rescheduleSponsorNotifications,
   ]);
 
+  const finishSetup = useCallback(async () => {
+    setSetupError(null);
+    const parsedDateIso = parseDdMmYyyyToIso(sobrietyDateInput);
+    if (!parsedDateIso) {
+      setSetupError("Enter sobriety date as DD/MM/YYYY.");
+      setSetupStep(1);
+      return;
+    }
+
+    const hasSponsor = wizardHasSponsor === true;
+    const wantsReminders = hasSponsor && wizardWantsReminders === true;
+    if (hasSponsor && (!normalizedSponsorName || !sponsorPhoneE164)) {
+      setSetupError("Enter sponsor name and phone.");
+      setSetupStep(2);
+      return;
+    }
+    if (wantsReminders && sponsorRepeatUnit === "WEEKLY" && sponsorRepeatDaysSorted.length === 0) {
+      setSetupError("Select at least one reminder day.");
+      setSetupStep(3);
+      return;
+    }
+    if (wizardHasHomeGroup === true && homeGroupMeetingIds.length === 0) {
+      setSetupError("Select a home group meeting.");
+      setSetupStep(4);
+      return;
+    }
+
+    setSobrietyDateIso(parsedDateIso);
+    setSponsorEnabled(hasSponsor);
+    setSponsorActive(wantsReminders);
+    if (!hasSponsor) {
+      setSponsorName("");
+      setSponsorPhoneDigits("");
+      setSponsorStatus(null);
+      await cancelNotificationBucket("sponsor");
+    } else {
+      setSponsorEnabledAtIso((current) => current ?? new Date().toISOString());
+      await saveSponsorConfig();
+    }
+
+    if (wizardHasHomeGroup !== true) {
+      setHomeGroupMeetingIds([]);
+    }
+
+    setSetupComplete(true);
+    setSetupStep(1);
+    setHomeScreen("DASHBOARD");
+    setSelectedDayOffset(0);
+    setScreen("LIST");
+    setSelectedMeeting(null);
+    void refreshMeetings();
+  }, [
+    sobrietyDateInput,
+    wizardHasSponsor,
+    wizardWantsReminders,
+    normalizedSponsorName,
+    sponsorPhoneE164,
+    sponsorRepeatUnit,
+    sponsorRepeatDaysSorted.length,
+    wizardHasHomeGroup,
+    homeGroupMeetingIds.length,
+    cancelNotificationBucket,
+    saveSponsorConfig,
+    refreshMeetings,
+  ]);
+
   const startAttendance = useCallback(
     async (meeting: MeetingRecord) => {
       const location = await readCurrentLocation(false);
@@ -1894,8 +2467,12 @@ export default function App() {
 
     setActiveAttendance(next);
     upsertAttendanceRecord(next);
+    appendMeetingAttendanceLog({
+      meetingId: activeAttendance.meetingId,
+      method: "verified",
+    });
     setAttendanceStatus("Attendance ended. Add signature, then export PDF.");
-  }, [activeAttendance, readCurrentLocation, upsertAttendanceRecord]);
+  }, [activeAttendance, readCurrentLocation, upsertAttendanceRecord, appendMeetingAttendanceLog]);
 
   const saveSignature = useCallback(() => {
     if (!activeAttendance || !activeAttendance.endAt) {
@@ -2091,6 +2668,25 @@ export default function App() {
     [updateSelectedDayPlan],
   );
 
+  const markMeetingAttended = useCallback(
+    (meeting: MeetingRecord) => {
+      appendMeetingAttendanceLog({
+        meetingId: meeting.id,
+        method: "manual",
+      });
+      setAttendanceStatus(`Marked ${meeting.name} as attended.`);
+    },
+    [appendMeetingAttendanceLog],
+  );
+
+  const logMeetingToday = useCallback(() => {
+    appendMeetingAttendanceLog({
+      meetingId: "manual-dashboard",
+      method: "manual",
+    });
+    setAttendanceStatus("Logged one meeting for today.");
+  }, [appendMeetingAttendanceLog]);
+
   const scheduleDebugSponsorNotification = useCallback(async () => {
     const hasPermission = await ensureNotificationPermission();
     if (!hasPermission) {
@@ -2189,7 +2785,7 @@ export default function App() {
           setNotificationOpenPhone(phone);
         }
         if (action === SPONSOR_CALL_ACTION_ID && phone) {
-          void openPhoneCall(phone);
+          void openPhoneCall(phone, "notification");
         }
       }
 
@@ -2249,6 +2845,15 @@ export default function App() {
   }, [selectedDay.dayOfWeek, meetingsViewMode]);
 
   useEffect(() => {
+    const timer = setInterval(() => {
+      setClockTickMs(Date.now());
+    }, 60_000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     if (currentLocation) {
       const center = { lat: currentLocation.lat, lng: currentLocation.lng };
       if (!mapBoundaryCenter) {
@@ -2276,13 +2881,32 @@ export default function App() {
       await Promise.all([refreshMeetings({ location: position }), fetchSponsorConfig()]);
 
       try {
-        const [modeRaw, sponsorUiPrefsRaw, attendanceRaw, planRaw] = await Promise.all([
+        const [
+          modeRaw,
+          sponsorUiPrefsRaw,
+          attendanceRaw,
+          planRaw,
+          setupCompleteRaw,
+          sobrietyDateRaw,
+          profileRaw,
+          sponsorCallLogRaw,
+          sponsorEnabledAtRaw,
+          meetingAttendanceLogRaw,
+        ] = await Promise.all([
           AsyncStorage.getItem(modeStorage),
           AsyncStorage.getItem(sponsorUiPrefsStorage),
           AsyncStorage.getItem(attendanceStorage),
           AsyncStorage.getItem(meetingPlansStorage),
+          AsyncStorage.getItem(setupCompleteStorage),
+          AsyncStorage.getItem(sobrietyDateStorage),
+          AsyncStorage.getItem(profileStorage),
+          AsyncStorage.getItem(sponsorCallLogStorage),
+          AsyncStorage.getItem(sponsorEnabledAtStorage),
+          AsyncStorage.getItem(meetingAttendanceLogStorage),
         ]);
 
+        const resolvedMode: RecoveryMode =
+          modeRaw === "A" || modeRaw === "B" || modeRaw === "C" ? modeRaw : "A";
         if (modeRaw === "A" || modeRaw === "B" || modeRaw === "C") {
           setMode(modeRaw);
         }
@@ -2311,6 +2935,64 @@ export default function App() {
             setMeetingPlansByDate(parsedPlans);
           }
         }
+
+        const parsedSetupComplete = setupCompleteRaw === "true";
+        const hasSobrietyDate = typeof sobrietyDateRaw === "string" && sobrietyDateRaw.length > 0;
+        const resolvedSetupComplete = parsedSetupComplete && hasSobrietyDate;
+        setSetupComplete(resolvedSetupComplete);
+
+        if (sobrietyDateRaw) {
+          setSobrietyDateIso(sobrietyDateRaw);
+          setSobrietyDateInput(formatIsoToDdMmYyyy(sobrietyDateRaw));
+        }
+
+        if (profileRaw) {
+          const parsedProfile = JSON.parse(profileRaw) as {
+            radiusMiles?: number;
+            homeGroupMeetingIds?: string[];
+            sponsorEnabledAtIso?: string | null;
+          };
+          if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
+            setMeetingRadiusMiles(parsedProfile.radiusMiles);
+          }
+          if (Array.isArray(parsedProfile.homeGroupMeetingIds)) {
+            setHomeGroupMeetingIds(
+              parsedProfile.homeGroupMeetingIds.filter(
+                (entry): entry is string => typeof entry === "string" && entry.length > 0,
+              ),
+            );
+          }
+          if (
+            typeof parsedProfile.sponsorEnabledAtIso === "string" ||
+            parsedProfile.sponsorEnabledAtIso === null
+          ) {
+            setSponsorEnabledAtIso(parsedProfile.sponsorEnabledAtIso ?? null);
+          }
+        }
+
+        if (typeof sponsorEnabledAtRaw === "string" && sponsorEnabledAtRaw.trim().length > 0) {
+          setSponsorEnabledAtIso(sponsorEnabledAtRaw);
+        }
+
+        if (sponsorCallLogRaw) {
+          const parsedLogs = JSON.parse(sponsorCallLogRaw) as SponsorCallLog[];
+          if (Array.isArray(parsedLogs)) {
+            setSponsorCallLogs(parsedLogs);
+          }
+        }
+
+        if (meetingAttendanceLogRaw) {
+          const parsedLogs = JSON.parse(meetingAttendanceLogRaw) as MeetingAttendanceLog[];
+          if (Array.isArray(parsedLogs)) {
+            setMeetingAttendanceLogs(parsedLogs);
+          }
+        }
+
+        if (resolvedMode === "A") {
+          setHomeScreen(resolvedSetupComplete ? "DASHBOARD" : "SETUP");
+        } else {
+          setHomeScreen("SETTINGS");
+        }
       } catch {
         setAttendanceStatus("Unable to load local attendance history.");
       } finally {
@@ -2323,6 +3005,12 @@ export default function App() {
     sponsorUiPrefsStorage,
     attendanceStorage,
     meetingPlansStorage,
+    setupCompleteStorage,
+    sobrietyDateStorage,
+    profileStorage,
+    sponsorCallLogStorage,
+    sponsorEnabledAtStorage,
+    meetingAttendanceLogStorage,
     fetchSponsorConfig,
     refreshMeetings,
     requestLocationPermission,
@@ -2336,6 +3024,55 @@ export default function App() {
   }, [mode, modeStorage, bootstrapped]);
 
   useEffect(() => {
+    if (mode !== "A") {
+      return;
+    }
+    if (setupComplete && homeScreen === "SETUP") {
+      setHomeScreen("DASHBOARD");
+    }
+    if (!setupComplete && homeScreen === "DASHBOARD") {
+      setHomeScreen("SETUP");
+    }
+  }, [mode, setupComplete, homeScreen]);
+
+  useEffect(() => {
+    if (mode !== "A" || !setupComplete) {
+      return;
+    }
+    const missingSobrietyDate = !sobrietyDateIso;
+    const sponsorProfileIncomplete =
+      sponsorEnabled && (!normalizedSponsorName || sponsorPhoneE164 === null);
+    if (missingSobrietyDate || sponsorProfileIncomplete) {
+      setSetupComplete(false);
+      setHomeScreen("SETUP");
+    }
+  }, [
+    mode,
+    setupComplete,
+    sobrietyDateIso,
+    sponsorEnabled,
+    normalizedSponsorName,
+    sponsorPhoneE164,
+  ]);
+
+  useEffect(() => {
+    if (mode === "A" && homeScreen === "DASHBOARD" && selectedDayOffset !== 0) {
+      setSelectedDayOffset(0);
+    }
+  }, [mode, homeScreen, selectedDayOffset]);
+
+  useEffect(() => {
+    if (!bootstrapped) {
+      return;
+    }
+    setWizardHasSponsor((current) => (current === null ? sponsorEnabled : current));
+    setWizardWantsReminders((current) => (current === null ? sponsorActive : current));
+    setWizardHasHomeGroup((current) =>
+      current === null ? homeGroupMeetingIds.length > 0 : current,
+    );
+  }, [bootstrapped, sponsorEnabled, sponsorActive, homeGroupMeetingIds.length]);
+
+  useEffect(() => {
     if (!bootstrapped) {
       return;
     }
@@ -2346,6 +3083,41 @@ export default function App() {
       }),
     );
   }, [sponsorLeadMinutes, sponsorUiPrefsStorage, bootstrapped]);
+
+  useEffect(() => {
+    if (!bootstrapped) {
+      return;
+    }
+    void AsyncStorage.setItem(setupCompleteStorage, setupComplete ? "true" : "false");
+  }, [setupComplete, setupCompleteStorage, bootstrapped]);
+
+  useEffect(() => {
+    if (!bootstrapped || !sobrietyDateIso) {
+      return;
+    }
+    void AsyncStorage.setItem(sobrietyDateStorage, sobrietyDateIso);
+  }, [sobrietyDateIso, sobrietyDateStorage, bootstrapped]);
+
+  useEffect(() => {
+    if (!bootstrapped || !sponsorEnabledAtIso) {
+      return;
+    }
+    void AsyncStorage.setItem(sponsorEnabledAtStorage, sponsorEnabledAtIso);
+  }, [bootstrapped, sponsorEnabledAtIso, sponsorEnabledAtStorage]);
+
+  useEffect(() => {
+    if (!bootstrapped) {
+      return;
+    }
+    void AsyncStorage.setItem(
+      profileStorage,
+      JSON.stringify({
+        radiusMiles: meetingRadiusMiles,
+        homeGroupMeetingIds,
+        sponsorEnabledAtIso,
+      }),
+    );
+  }, [meetingRadiusMiles, homeGroupMeetingIds, sponsorEnabledAtIso, profileStorage, bootstrapped]);
 
   useEffect(() => {
     void refreshMeetings();
@@ -2368,6 +3140,15 @@ export default function App() {
       setNotificationStatus("Sponsor reminders disabled.");
     }
   }, [sponsorEnabled, sponsorActive, cancelNotificationBucket]);
+
+  useEffect(() => {
+    if (!sponsorEnabled) {
+      return;
+    }
+    if (!sponsorEnabledAtIso) {
+      setSponsorEnabledAtIso(new Date().toISOString());
+    }
+  }, [sponsorEnabled, sponsorEnabledAtIso]);
 
   useEffect(() => {
     if (!bootstrapped || !sponsorEnabled || !sponsorActive) {
@@ -2550,7 +3331,7 @@ export default function App() {
           {RECOVERY_MODE_OPTIONS.map((option) => (
             <Pressable
               key={option.value}
-              onPress={() => setMode(option.value)}
+              onPress={() => handleModeSelect(option.value)}
               style={[
                 styles.modeChip,
                 mode === option.value ? styles.modeChipSelected : null,
@@ -2583,672 +3364,1186 @@ export default function App() {
 
         {mode === "A" ? (
           <>
-            <View style={styles.card}>
-              <Text style={styles.sectionTitle}>Sponsor</Text>
-              <View style={styles.inlineRow}>
-                <Text style={styles.label}>Enable sponsor</Text>
-                <Switch
-                  value={sponsorEnabled}
-                  onValueChange={(value) => {
-                    setSponsorEnabled(value);
-                    if (!value) {
-                      setSponsorActive(false);
-                      void cancelNotificationBucket("sponsor");
-                      setNotificationStatus("Sponsor disabled.");
-                      setCalendarStatus("Sponsor disabled.");
-
-                      setNotificationOpenPhone(null);
-                    }
-                  }}
-                />
-              </View>
-              {!sponsorEnabled ? (
-                <Text style={styles.sectionMeta}>Sponsor is disabled. Turn on to configure.</Text>
+            <View style={styles.homeNavRow}>
+              {!setupComplete ? (
+                <Pressable style={[styles.homeNavChip, styles.homeNavChipSelected]}>
+                  <Text style={[styles.homeNavChipText, styles.homeNavChipTextSelected]}>
+                    Setup
+                  </Text>
+                </Pressable>
               ) : (
                 <>
-                  <TextInput
-                    style={styles.input}
-                    value={sponsorName}
-                    onChangeText={setSponsorName}
-                    placeholder="Sponsor name"
-                  />
-                  <TextInput
-                    style={styles.input}
-                    value={formatUsPhoneDisplay(sponsorPhoneDigits)}
-                    onChangeText={(value) => setSponsorPhoneDigits(normalizePhoneDigits(value))}
-                    keyboardType="phone-pad"
-                    maxLength={14}
-                    placeholder="(555) 555-1234"
-                  />
+                  <Pressable
+                    style={[
+                      styles.homeNavChip,
+                      homeScreen === "DASHBOARD" ? styles.homeNavChipSelected : null,
+                    ]}
+                    onPress={openDashboard}
+                  >
+                    <Text
+                      style={[
+                        styles.homeNavChipText,
+                        homeScreen === "DASHBOARD" ? styles.homeNavChipTextSelected : null,
+                      ]}
+                    >
+                      Dashboard
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.homeNavChip,
+                      homeScreen === "SETTINGS" ? styles.homeNavChipSelected : null,
+                    ]}
+                    onPress={openSettingsHub}
+                  >
+                    <Text
+                      style={[
+                        styles.homeNavChipText,
+                        homeScreen === "SETTINGS" ? styles.homeNavChipTextSelected : null,
+                      ]}
+                    >
+                      Settings
+                    </Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
 
+            {homeScreen === "SETUP" ? (
+              <View style={styles.card}>
+                <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
+                <Text style={styles.sectionMeta}>Step {setupStep} of 5</Text>
+                {setupStep === 1 ? (
+                  <>
+                    <Text style={styles.label}>What is your sobriety date?</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={sobrietyDateInput}
+                      onChangeText={setSobrietyDateInput}
+                      placeholder="DD/MM/YYYY"
+                      keyboardType="number-pad"
+                      maxLength={10}
+                    />
+                  </>
+                ) : null}
+
+                {setupStep === 2 ? (
+                  <>
+                    <Text style={styles.label}>Do you have a sponsor?</Text>
+                    <View style={styles.chipRow}>
+                      <Pressable
+                        style={[
+                          styles.chip,
+                          wizardHasSponsor === true ? styles.chipSelected : null,
+                        ]}
+                        onPress={() => setWizardHasSponsor(true)}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            wizardHasSponsor === true ? styles.chipTextSelected : null,
+                          ]}
+                        >
+                          Yes
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.chip,
+                          wizardHasSponsor === false ? styles.chipSelected : null,
+                        ]}
+                        onPress={() => setWizardHasSponsor(false)}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            wizardHasSponsor === false ? styles.chipTextSelected : null,
+                          ]}
+                        >
+                          No
+                        </Text>
+                      </Pressable>
+                    </View>
+                    {wizardHasSponsor ? (
+                      <>
+                        <TextInput
+                          style={styles.input}
+                          value={sponsorName}
+                          onChangeText={setSponsorName}
+                          placeholder="Sponsor name"
+                        />
+                        <TextInput
+                          style={styles.input}
+                          value={formatUsPhoneDisplay(sponsorPhoneDigits)}
+                          onChangeText={(value) =>
+                            setSponsorPhoneDigits(normalizePhoneDigits(value))
+                          }
+                          keyboardType="phone-pad"
+                          maxLength={14}
+                          placeholder="(555) 555-1234"
+                        />
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+
+                {setupStep === 3 ? (
+                  <>
+                    <Text style={styles.label}>Do you want sponsor call reminders?</Text>
+                    <View style={styles.chipRow}>
+                      <Pressable
+                        style={[
+                          styles.chip,
+                          wizardWantsReminders === true ? styles.chipSelected : null,
+                        ]}
+                        onPress={() => setWizardWantsReminders(true)}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            wizardWantsReminders === true ? styles.chipTextSelected : null,
+                          ]}
+                        >
+                          Yes
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.chip,
+                          wizardWantsReminders === false ? styles.chipSelected : null,
+                        ]}
+                        onPress={() => setWizardWantsReminders(false)}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            wizardWantsReminders === false ? styles.chipTextSelected : null,
+                          ]}
+                        >
+                          No
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    {wizardWantsReminders ? (
+                      <>
+                        <Text style={styles.label}>Call time</Text>
+                        <View style={styles.timeRow}>
+                          <Pressable style={styles.stepButton} onPress={() => incrementHour(-1)}>
+                            <Text style={styles.stepButtonText}>-</Text>
+                          </Pressable>
+                          <Text style={styles.timeValue}>
+                            {String(sponsorHour12).padStart(2, "0")}
+                          </Text>
+                          <Pressable style={styles.stepButton} onPress={() => incrementHour(1)}>
+                            <Text style={styles.stepButtonText}>+</Text>
+                          </Pressable>
+                          <Text style={styles.timeDivider}>:</Text>
+                          <Pressable style={styles.stepButton} onPress={() => incrementMinute(-1)}>
+                            <Text style={styles.stepButtonText}>-</Text>
+                          </Pressable>
+                          <Text style={styles.timeValue}>
+                            {String(sponsorMinute).padStart(2, "0")}
+                          </Text>
+                          <Pressable style={styles.stepButton} onPress={() => incrementMinute(1)}>
+                            <Text style={styles.stepButtonText}>+</Text>
+                          </Pressable>
+                          <Pressable
+                            style={styles.meridiemButton}
+                            onPress={() =>
+                              setSponsorMeridiem((current) => (current === "AM" ? "PM" : "AM"))
+                            }
+                          >
+                            <Text style={styles.meridiemText}>{sponsorMeridiem}</Text>
+                          </Pressable>
+                        </View>
+                        <Text style={styles.label}>Repeat</Text>
+                        <View style={styles.chipRow}>
+                          {SPONSOR_REPEAT_OPTIONS.map((option) => (
+                            <Pressable
+                              key={option.value}
+                              style={[
+                                styles.chip,
+                                sponsorRepeatPreset === option.value ? styles.chipSelected : null,
+                              ]}
+                              onPress={() => setSponsorRepeatPreset(option.value)}
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  sponsorRepeatPreset === option.value
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                {option.label}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                        {sponsorRepeatPreset !== "MONTHLY" ? (
+                          <>
+                            <Text style={styles.label}>Days</Text>
+                            <View style={styles.chipRow}>
+                              {WEEKDAY_OPTIONS.map((day) => (
+                                <Pressable
+                                  key={day.code}
+                                  style={[
+                                    styles.chip,
+                                    sponsorRepeatDays.includes(day.code)
+                                      ? styles.chipSelected
+                                      : null,
+                                  ]}
+                                  onPress={() => toggleRepeatDay(day.code)}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.chipText,
+                                      sponsorRepeatDays.includes(day.code)
+                                        ? styles.chipTextSelected
+                                        : null,
+                                    ]}
+                                  >
+                                    {day.label}
+                                  </Text>
+                                </Pressable>
+                              ))}
+                            </View>
+                          </>
+                        ) : null}
+                        <Text style={styles.label}>Alert lead time</Text>
+                        <View style={styles.chipRow}>
+                          {SPONSOR_LEAD_OPTIONS.map((option) => (
+                            <Pressable
+                              key={option.value}
+                              style={[
+                                styles.chip,
+                                sponsorLeadMinutes === option.value ? styles.chipSelected : null,
+                              ]}
+                              onPress={() => setSponsorLeadMinutes(option.value)}
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  sponsorLeadMinutes === option.value
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                {option.label}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+
+                {setupStep === 4 ? (
+                  <>
+                    <Text style={styles.label}>Do you have a home group meeting?</Text>
+                    <View style={styles.chipRow}>
+                      <Pressable
+                        style={[
+                          styles.chip,
+                          wizardHasHomeGroup === true ? styles.chipSelected : null,
+                        ]}
+                        onPress={() => setWizardHasHomeGroup(true)}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            wizardHasHomeGroup === true ? styles.chipTextSelected : null,
+                          ]}
+                        >
+                          Yes
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.chip,
+                          wizardHasHomeGroup === false ? styles.chipSelected : null,
+                        ]}
+                        onPress={() => setWizardHasHomeGroup(false)}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            wizardHasHomeGroup === false ? styles.chipTextSelected : null,
+                          ]}
+                        >
+                          No
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    {wizardHasHomeGroup ? (
+                      <>
+                        <Text style={styles.sectionMeta}>
+                          Select a home group from upcoming meetings within {meetingRadiusMiles}{" "}
+                          miles.
+                        </Text>
+                        {dashboardNextThreeMeetings.length === 0 ? (
+                          <Text style={styles.sectionMeta}>
+                            No nearby upcoming meetings loaded yet.
+                          </Text>
+                        ) : (
+                          dashboardNextThreeMeetings.map((meeting) => {
+                            const selected = homeGroupMeetingIds.includes(meeting.id);
+                            return (
+                              <Pressable
+                                key={meeting.id}
+                                style={[
+                                  styles.meetingCard,
+                                  selected ? styles.homeGroupSelectedCard : null,
+                                ]}
+                                onPress={() =>
+                                  setHomeGroupMeetingIds((current) =>
+                                    current.includes(meeting.id) ? [] : [meeting.id],
+                                  )
+                                }
+                              >
+                                <Text style={styles.meetingName}>{meeting.name}</Text>
+                                <Text style={styles.sectionMeta}>
+                                  {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
+                                  {formatDistance(meeting.distanceMeters)}
+                                </Text>
+                                <Text style={styles.sectionMeta}>
+                                  {selected ? "Selected as home group" : "Tap to set as home group"}
+                                </Text>
+                              </Pressable>
+                            );
+                          })
+                        )}
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+
+                {setupStep === 5 ? (
+                  <>
+                    <Text style={styles.label}>Review</Text>
+                    <Text style={styles.sectionMeta}>
+                      Sobriety date: {sobrietyDateInput || "Not set"}
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      Sponsor: {wizardHasSponsor ? "Enabled" : "Not enabled"}
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      Sponsor reminders: {wizardWantsReminders ? "Enabled" : "Disabled"}
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      Home group:{" "}
+                      {homeGroupMeetingIds.length > 0
+                        ? (meetings.find((meeting) => meeting.id === homeGroupMeetingIds[0])
+                            ?.name ?? "Selected")
+                        : "Not selected"}
+                    </Text>
+                  </>
+                ) : null}
+
+                {setupError ? <Text style={styles.errorText}>{setupError}</Text> : null}
+
+                <View style={styles.buttonRow}>
+                  {setupStep > 1 ? (
+                    <>
+                      <Button title="Back" onPress={previousSetupStep} />
+                      <View style={styles.buttonSpacer} />
+                    </>
+                  ) : null}
+                  {setupStep < 5 ? (
+                    <Button title="Next" onPress={nextSetupStep} />
+                  ) : (
+                    <Button title="Save & Finish" onPress={() => void finishSetup()} />
+                  )}
+                </View>
+              </View>
+            ) : null}
+
+            {homeScreen === "DASHBOARD" ? (
+              <Dashboard
+                daysSober={daysSober}
+                sobrietyDateLabel={formatIsoToDdMmYyyy(sobrietyDateIso)}
+                insight={soberInsight}
+                locationEnabled={locationPermission === "granted"}
+                nextMeetings={dashboardNextThreeMeetings}
+                homeGroupMeeting={
+                  homeGroupUpcoming
+                    ? {
+                        ...homeGroupUpcoming,
+                        distanceMeters:
+                          currentLocation &&
+                          homeGroupUpcoming.lat !== null &&
+                          homeGroupUpcoming.lng !== null
+                            ? distanceMetersBetween(
+                                currentLocation.lat,
+                                currentLocation.lng,
+                                homeGroupUpcoming.lat,
+                                homeGroupUpcoming.lng,
+                              )
+                            : null,
+                      }
+                    : null
+                }
+                meetingsAttendedInNinetyDays={meetingsAttendedInNinetyDays}
+                ninetyDayGoalTarget={ninetyDayGoalTarget}
+                ninetyDayProgressPct={ninetyDayProgressPct}
+                meetingBarsLast7={meetingsLast7Bars}
+                sponsorAdherence={sponsorAdherence}
+                sponsorBarsLast14={sponsorLast14Bars}
+                onMeetingPress={(meetingId) => {
+                  const meeting = meetingsForDay.find((entry) => entry.id === meetingId);
+                  if (!meeting) {
+                    return;
+                  }
+                  setHomeScreen("SETTINGS");
+                  setSelectedMeeting(meeting);
+                  setScreen("DETAIL");
+                }}
+                onSearchArea={() => {
+                  if (mapCenter) {
+                    void searchThisArea();
+                    return;
+                  }
+                  void refreshMeetings({ location: currentLocation });
+                }}
+                onCallSponsor={() => {
+                  void openPhoneCall(sponsorPhoneE164);
+                }}
+                onOpenSettings={openSettingsHub}
+                onRefresh={() => {
+                  void (async () => {
+                    const location = await requestLocationPermission();
+                    await refreshMeetings({ location });
+                  })();
+                }}
+                onLogMeeting={logMeetingToday}
+                onLearnMore={openSettingsHub}
+              />
+            ) : null}
+
+            {homeScreen === "SETTINGS" ? (
+              <>
+                <View style={styles.card}>
+                  <Text style={styles.sectionTitle}>Recovery Settings</Text>
+                  <Text style={styles.sectionMeta}>
+                    Configure sponsor reminders, meeting planning, and attendance options.
+                  </Text>
+                  <View style={styles.buttonRow}>
+                    <Button title="Open dashboard" onPress={openDashboard} />
+                    <View style={styles.buttonSpacer} />
+                    <Button title="Run setup wizard" onPress={restartSetup} />
+                  </View>
+                </View>
+                <View style={styles.card}>
+                  <Text style={styles.sectionTitle}>Sponsor</Text>
                   <View style={styles.inlineRow}>
-                    <Text style={styles.label}>Reminders</Text>
+                    <Text style={styles.label}>Enable sponsor</Text>
                     <Switch
-                      value={sponsorActive}
+                      value={sponsorEnabled}
                       onValueChange={(value) => {
-                        setSponsorActive(value);
-                        setSponsorStatus(null);
-
+                        setSponsorEnabled(value);
                         if (!value) {
+                          setSponsorActive(false);
                           void cancelNotificationBucket("sponsor");
-                          setNotificationStatus("Sponsor reminders disabled.");
-                          return;
-                        }
+                          setNotificationStatus("Sponsor disabled.");
+                          setCalendarStatus("Sponsor disabled.");
 
-                        if (!normalizedSponsorName || !sponsorPhoneE164) {
-                          return;
+                          setNotificationOpenPhone(null);
                         }
-
-                        void rescheduleSponsorNotifications("toggle-on");
                       }}
                     />
                   </View>
-
-                  {sponsorActive ? (
+                  {!sponsorEnabled ? (
+                    <Text style={styles.sectionMeta}>
+                      Sponsor is disabled. Turn on to configure.
+                    </Text>
+                  ) : (
                     <>
-                      <Text style={styles.label}>Call time</Text>
-                      <View style={styles.timeRow}>
-                        <Pressable style={styles.stepButton} onPress={() => incrementHour(-1)}>
-                          <Text style={styles.stepButtonText}>-</Text>
-                        </Pressable>
-                        <Text style={styles.timeValue}>
-                          {String(sponsorHour12).padStart(2, "0")}
-                        </Text>
-                        <Pressable style={styles.stepButton} onPress={() => incrementHour(1)}>
-                          <Text style={styles.stepButtonText}>+</Text>
-                        </Pressable>
+                      <TextInput
+                        style={styles.input}
+                        value={sponsorName}
+                        onChangeText={setSponsorName}
+                        placeholder="Sponsor name"
+                      />
+                      <TextInput
+                        style={styles.input}
+                        value={formatUsPhoneDisplay(sponsorPhoneDigits)}
+                        onChangeText={(value) => setSponsorPhoneDigits(normalizePhoneDigits(value))}
+                        keyboardType="phone-pad"
+                        maxLength={14}
+                        placeholder="(555) 555-1234"
+                      />
 
-                        <Text style={styles.timeDivider}>:</Text>
+                      <View style={styles.inlineRow}>
+                        <Text style={styles.label}>Reminders</Text>
+                        <Switch
+                          value={sponsorActive}
+                          onValueChange={(value) => {
+                            setSponsorActive(value);
+                            setSponsorStatus(null);
 
-                        <Pressable style={styles.stepButton} onPress={() => incrementMinute(-1)}>
-                          <Text style={styles.stepButtonText}>-</Text>
-                        </Pressable>
-                        <Text style={styles.timeValue}>
-                          {String(sponsorMinute).padStart(2, "0")}
-                        </Text>
-                        <Pressable style={styles.stepButton} onPress={() => incrementMinute(1)}>
-                          <Text style={styles.stepButtonText}>+</Text>
-                        </Pressable>
+                            if (!value) {
+                              void cancelNotificationBucket("sponsor");
+                              setNotificationStatus("Sponsor reminders disabled.");
+                              return;
+                            }
 
-                        <Pressable
-                          style={styles.meridiemButton}
-                          onPress={() =>
-                            setSponsorMeridiem((current) => (current === "AM" ? "PM" : "AM"))
-                          }
-                        >
-                          <Text style={styles.meridiemText}>{sponsorMeridiem}</Text>
-                        </Pressable>
+                            if (!normalizedSponsorName || !sponsorPhoneE164) {
+                              return;
+                            }
+
+                            void rescheduleSponsorNotifications("toggle-on");
+                          }}
+                        />
                       </View>
 
-                      <Text style={styles.label}>Repeat</Text>
-                      <View style={styles.chipRow}>
-                        {SPONSOR_REPEAT_OPTIONS.map((option) => (
-                          <Pressable
-                            key={option.value}
-                            style={[
-                              styles.chip,
-                              sponsorRepeatPreset === option.value ? styles.chipSelected : null,
-                            ]}
-                            onPress={() => setSponsorRepeatPreset(option.value)}
-                          >
-                            <Text
-                              style={[
-                                styles.chipText,
-                                sponsorRepeatPreset === option.value
-                                  ? styles.chipTextSelected
-                                  : null,
-                              ]}
-                            >
-                              {option.label}
-                            </Text>
-                          </Pressable>
-                        ))}
-                      </View>
-
-                      {sponsorRepeatPreset !== "MONTHLY" ? (
+                      {sponsorActive ? (
                         <>
-                          <Text style={styles.label}>Days</Text>
+                          <Text style={styles.label}>Call time</Text>
+                          <View style={styles.timeRow}>
+                            <Pressable style={styles.stepButton} onPress={() => incrementHour(-1)}>
+                              <Text style={styles.stepButtonText}>-</Text>
+                            </Pressable>
+                            <Text style={styles.timeValue}>
+                              {String(sponsorHour12).padStart(2, "0")}
+                            </Text>
+                            <Pressable style={styles.stepButton} onPress={() => incrementHour(1)}>
+                              <Text style={styles.stepButtonText}>+</Text>
+                            </Pressable>
+
+                            <Text style={styles.timeDivider}>:</Text>
+
+                            <Pressable
+                              style={styles.stepButton}
+                              onPress={() => incrementMinute(-1)}
+                            >
+                              <Text style={styles.stepButtonText}>-</Text>
+                            </Pressable>
+                            <Text style={styles.timeValue}>
+                              {String(sponsorMinute).padStart(2, "0")}
+                            </Text>
+                            <Pressable style={styles.stepButton} onPress={() => incrementMinute(1)}>
+                              <Text style={styles.stepButtonText}>+</Text>
+                            </Pressable>
+
+                            <Pressable
+                              style={styles.meridiemButton}
+                              onPress={() =>
+                                setSponsorMeridiem((current) => (current === "AM" ? "PM" : "AM"))
+                              }
+                            >
+                              <Text style={styles.meridiemText}>{sponsorMeridiem}</Text>
+                            </Pressable>
+                          </View>
+
+                          <Text style={styles.label}>Repeat</Text>
                           <View style={styles.chipRow}>
-                            {WEEKDAY_OPTIONS.map((day) => (
+                            {SPONSOR_REPEAT_OPTIONS.map((option) => (
                               <Pressable
-                                key={day.code}
+                                key={option.value}
                                 style={[
                                   styles.chip,
-                                  sponsorRepeatDays.includes(day.code) ? styles.chipSelected : null,
+                                  sponsorRepeatPreset === option.value ? styles.chipSelected : null,
                                 ]}
-                                onPress={() => toggleRepeatDay(day.code)}
+                                onPress={() => setSponsorRepeatPreset(option.value)}
                               >
                                 <Text
                                   style={[
                                     styles.chipText,
-                                    sponsorRepeatDays.includes(day.code)
+                                    sponsorRepeatPreset === option.value
                                       ? styles.chipTextSelected
                                       : null,
                                   ]}
                                 >
-                                  {day.label}
+                                  {option.label}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
+
+                          {sponsorRepeatPreset !== "MONTHLY" ? (
+                            <>
+                              <Text style={styles.label}>Days</Text>
+                              <View style={styles.chipRow}>
+                                {WEEKDAY_OPTIONS.map((day) => (
+                                  <Pressable
+                                    key={day.code}
+                                    style={[
+                                      styles.chip,
+                                      sponsorRepeatDays.includes(day.code)
+                                        ? styles.chipSelected
+                                        : null,
+                                    ]}
+                                    onPress={() => toggleRepeatDay(day.code)}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.chipText,
+                                        sponsorRepeatDays.includes(day.code)
+                                          ? styles.chipTextSelected
+                                          : null,
+                                      ]}
+                                    >
+                                      {day.label}
+                                    </Text>
+                                  </Pressable>
+                                ))}
+                              </View>
+                            </>
+                          ) : null}
+
+                          <Text style={styles.label}>Alert lead time</Text>
+                          <View style={styles.chipRow}>
+                            {SPONSOR_LEAD_OPTIONS.map((option) => (
+                              <Pressable
+                                key={option.value}
+                                style={[
+                                  styles.chip,
+                                  sponsorLeadMinutes === option.value ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => setSponsorLeadMinutes(option.value)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    sponsorLeadMinutes === option.value
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  {option.label}
                                 </Text>
                               </Pressable>
                             ))}
                           </View>
                         </>
-                      ) : null}
+                      ) : (
+                        <Text style={styles.sectionMeta}>
+                          Turn reminders on to configure schedule + alerts.
+                        </Text>
+                      )}
 
-                      <Text style={styles.label}>Alert lead time</Text>
-                      <View style={styles.chipRow}>
-                        {SPONSOR_LEAD_OPTIONS.map((option) => (
-                          <Pressable
-                            key={option.value}
-                            style={[
-                              styles.chip,
-                              sponsorLeadMinutes === option.value ? styles.chipSelected : null,
-                            ]}
-                            onPress={() => setSponsorLeadMinutes(option.value)}
-                          >
-                            <Text
-                              style={[
-                                styles.chipText,
-                                sponsorLeadMinutes === option.value
-                                  ? styles.chipTextSelected
-                                  : null,
-                              ]}
-                            >
-                              {option.label}
-                            </Text>
-                          </Pressable>
-                        ))}
-                      </View>
-                    </>
-                  ) : (
-                    <Text style={styles.sectionMeta}>
-                      Turn reminders on to configure schedule + alerts.
-                    </Text>
-                  )}
-
-                  {notificationOpenPhone ? (
-                    <View style={styles.callNowBox}>
-                      <Text style={styles.sectionMeta}>
-                        {"Opened from notification: "}
-                        {notificationOpenPhone}
-                      </Text>
-                      <Button
-                        title="Call now"
-                        onPress={() => void openPhoneCall(notificationOpenPhone)}
-                      />
-                    </View>
-                  ) : null}
-                  <Text style={styles.sectionMeta}>{sponsorStatusLine}</Text>
-                  <Button
-                    title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
-                    onPress={() => void saveSponsorConfig()}
-                    disabled={sponsorSaving}
-                  />
-                </>
-              )}
-            </View>
-
-            {__DEV__ ? (
-              <View style={styles.card}>
-                <Text style={styles.sectionTitle}>Debug Notification Tools</Text>
-                <View style={styles.inlineRow}>
-                  <Text style={styles.label}>Time compression</Text>
-                  <Switch
-                    value={debugTimeCompressionEnabled}
-                    onValueChange={setDebugTimeCompressionEnabled}
-                  />
-                </View>
-                <Text style={styles.sectionMeta}>
-                  When enabled, scheduled notification delays are compressed for quick simulator
-                  tests.
-                </Text>
-                <Text style={styles.sectionMeta}>Notification debug: {notificationStatus}</Text>
-                <Text style={styles.sectionMeta}>Calendar debug: {calendarStatus}</Text>
-                <View style={styles.buttonRow}>
-                  <Button
-                    title="Test sponsor alert in 10s"
-                    onPress={() => void scheduleDebugSponsorNotification()}
-                  />
-                  <View style={styles.buttonSpacer} />
-                  <Button
-                    title="Test leave alert in 10s"
-                    onPress={() => void scheduleDebugDriveNotification()}
-                  />
-                </View>
-              </View>
-            ) : null}
-
-            <View style={styles.card}>
-              <View style={styles.inlineRow}>
-                <Text style={styles.sectionTitle}>Meetings</Text>
-                <Pressable
-                  style={styles.viewModeButton}
-                  onPress={() => {
-                    setMeetingsViewMode((current) => (current === "LIST" ? "MAP" : "LIST"));
-                    setSelectedLocationKey(null);
-                  }}
-                >
-                  <Text style={styles.viewModeButtonText}>
-                    {meetingsViewMode === "LIST" ? "🗺 Map" : "☰ List"}
-                  </Text>
-                </Pressable>
-              </View>
-              <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
-              <Text style={styles.sectionMeta}>
-                Location: {locationPermission === "granted" ? "Enabled" : "Not enabled"}
-              </Text>
-              <Text style={styles.sectionMeta}>
-                GPS:{" "}
-                {currentLocation
-                  ? `${formatCoordinate(currentLocation.lat)}, ${formatCoordinate(currentLocation.lng)} accuracy ${Math.round(currentLocation.accuracyM ?? 0)}m`
-                  : "Unavailable"}
-              </Text>
-              <Text style={styles.sectionMeta}>
-                Search origin:{" "}
-                {meetingsSearchOrigin
-                  ? `${formatCoordinate(meetingsSearchOrigin.lat)}, ${formatCoordinate(meetingsSearchOrigin.lng)} radius ${meetingRadiusMiles}mi`
-                  : `Unavailable radius ${meetingRadiusMiles}mi`}
-              </Text>
-              {meetingsError ? <Text style={styles.errorText}>{meetingsError}</Text> : null}
-
-              <View style={styles.buttonRow}>
-                <Button title="Refresh meetings" onPress={() => void refreshMeetings()} />
-                <View style={styles.buttonSpacer} />
-                <Button
-                  title="Enable location"
-                  onPress={() => {
-                    void (async () => {
-                      const position = await requestLocationPermission();
-                      await refreshMeetings({ location: position });
-                    })();
-                  }}
-                />
-              </View>
-
-              <View style={styles.chipRow}>
-                {dayOptions.map((option) => (
-                  <Pressable
-                    key={option.offset}
-                    style={[
-                      styles.chip,
-                      selectedDayOffset === option.offset ? styles.chipSelected : null,
-                    ]}
-                    onPress={() => onDayPress(option)}
-                  >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        selectedDayOffset === option.offset ? styles.chipTextSelected : null,
-                      ]}
-                    >
-                      {option.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-
-              {loadingMeetings ? <Text style={styles.sectionMeta}>Loading meetings...</Text> : null}
-
-              {screen === "LIST" && meetingsViewMode === "MAP" ? (
-                <>
-                  <Text style={styles.sectionMeta}>
-                    Map view shows in-person meetings with location coordinates for the selected
-                    day.
-                  </Text>
-                  {mapRegion ? (
-                    <View style={styles.mapContainer}>
-                      <MapViewCompat
-                        ref={mapRef}
-                        style={styles.map}
-                        initialRegion={mapRegion}
-                        region={mapRegion}
-                        onRegionChangeComplete={onMapRegionChangeComplete}
-                        showsUserLocation={locationPermission === "granted"}
-                      >
-                        {meetingLocationGroups.map((group) => (
-                          <MarkerCompat
-                            key={group.key}
-                            coordinate={{ latitude: group.lat, longitude: group.lng }}
-                            onPress={() => setSelectedLocationKey(group.key)}
-                            pinColor={group.meetings.length > 1 ? "#9c4221" : "#155eef"}
+                      {notificationOpenPhone ? (
+                        <View style={styles.callNowBox}>
+                          <Text style={styles.sectionMeta}>
+                            {"Opened from notification: "}
+                            {notificationOpenPhone}
+                          </Text>
+                          <Button
+                            title="Call now"
+                            onPress={() => void openPhoneCall(notificationOpenPhone)}
                           />
-                        ))}
-                      </MapViewCompat>
-
-                      {mapDraggedOutsideBoundary ? (
-                        <View style={styles.mapBoundaryControls}>
-                          <Button title="Return to boundary" onPress={returnToBoundary} />
-                          <View style={styles.buttonSpacer} />
-                          <Button title="Search this area" onPress={() => void searchThisArea()} />
                         </View>
                       ) : null}
-                    </View>
-                  ) : (
-                    <Text style={styles.sectionMeta}>
-                      Enable location to initialize the map view.
-                    </Text>
+                      <Text style={styles.sectionMeta}>{sponsorStatusLine}</Text>
+                      <Button
+                        title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
+                        onPress={() => void saveSponsorConfig()}
+                        disabled={sponsorSaving}
+                      />
+                    </>
                   )}
+                </View>
 
-                  {selectedLocationGroup ? (
-                    selectedLocationGroup.meetings.length === 1 ? (
+                {__DEV__ ? (
+                  <View style={styles.card}>
+                    <Text style={styles.sectionTitle}>Debug Notification Tools</Text>
+                    <View style={styles.inlineRow}>
+                      <Text style={styles.label}>Time compression</Text>
+                      <Switch
+                        value={debugTimeCompressionEnabled}
+                        onValueChange={setDebugTimeCompressionEnabled}
+                      />
+                    </View>
+                    <Text style={styles.sectionMeta}>
+                      When enabled, scheduled notification delays are compressed for quick simulator
+                      tests.
+                    </Text>
+                    <Text style={styles.sectionMeta}>Notification debug: {notificationStatus}</Text>
+                    <Text style={styles.sectionMeta}>Calendar debug: {calendarStatus}</Text>
+                    <View style={styles.buttonRow}>
+                      <Button
+                        title="Test sponsor alert in 10s"
+                        onPress={() => void scheduleDebugSponsorNotification()}
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <Button
+                        title="Test leave alert in 10s"
+                        onPress={() => void scheduleDebugDriveNotification()}
+                      />
+                    </View>
+                  </View>
+                ) : null}
+
+                <View style={styles.card}>
+                  <View style={styles.inlineRow}>
+                    <Text style={styles.sectionTitle}>Meetings</Text>
+                    <Pressable
+                      style={styles.viewModeButton}
+                      onPress={() => {
+                        setMeetingsViewMode((current) => (current === "LIST" ? "MAP" : "LIST"));
+                        setSelectedLocationKey(null);
+                      }}
+                    >
+                      <Text style={styles.viewModeButtonText}>
+                        {meetingsViewMode === "LIST" ? "🗺 Map" : "☰ List"}
+                      </Text>
+                    </Pressable>
+                  </View>
+                  <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
+                  <Text style={styles.sectionMeta}>
+                    Location: {locationPermission === "granted" ? "Enabled" : "Not enabled"}
+                  </Text>
+                  {locationPermission === "denied" ? (
+                    <Text style={styles.errorText}>
+                      Location disabled - enable to see meetings near you.
+                    </Text>
+                  ) : null}
+                  <Text style={styles.sectionMeta}>
+                    GPS:{" "}
+                    {currentLocation
+                      ? `${formatCoordinate(currentLocation.lat)}, ${formatCoordinate(currentLocation.lng)} accuracy ${Math.round(currentLocation.accuracyM ?? 0)}m`
+                      : "Unavailable"}
+                  </Text>
+                  <Text style={styles.sectionMeta}>
+                    Search origin:{" "}
+                    {meetingsSearchOrigin
+                      ? `${formatCoordinate(meetingsSearchOrigin.lat)}, ${formatCoordinate(meetingsSearchOrigin.lng)} radius ${meetingRadiusMiles}mi`
+                      : `Unavailable radius ${meetingRadiusMiles}mi`}
+                  </Text>
+                  {meetingsError ? <Text style={styles.errorText}>{meetingsError}</Text> : null}
+
+                  <View style={styles.buttonRow}>
+                    <Button title="Refresh meetings" onPress={() => void refreshMeetings()} />
+                    <View style={styles.buttonSpacer} />
+                    <Button
+                      title="Enable location"
+                      onPress={() => {
+                        void (async () => {
+                          const position = await requestLocationPermission();
+                          await refreshMeetings({ location: position });
+                        })();
+                      }}
+                    />
+                  </View>
+
+                  <View style={styles.chipRow}>
+                    {dayOptions.map((option) => (
                       <Pressable
-                        style={styles.mapMeetingCard}
-                        onPress={() => {
-                          setSelectedMeeting(selectedLocationGroup.meetings[0]);
-                          setScreen("DETAIL");
-                        }}
+                        key={option.offset}
+                        style={[
+                          styles.chip,
+                          selectedDayOffset === option.offset ? styles.chipSelected : null,
+                        ]}
+                        onPress={() => onDayPress(option)}
                       >
-                        <Text style={styles.meetingName}>
-                          {selectedLocationGroup.meetings[0].name}
-                        </Text>
-                        <Text style={styles.sectionMeta}>{selectedLocationGroup.address}</Text>
-                        <Text style={styles.sectionMeta}>
-                          {selectedLocationGroup.meetings[0].startsAtLocal}
+                        <Text
+                          style={[
+                            styles.chipText,
+                            selectedDayOffset === option.offset ? styles.chipTextSelected : null,
+                          ]}
+                        >
+                          {option.label}
                         </Text>
                       </Pressable>
-                    ) : (
-                      <View style={styles.mapMeetingCard}>
-                        <Text style={styles.meetingName}>Meetings at this location</Text>
-                        <Text style={styles.sectionMeta}>{selectedLocationGroup.address}</Text>
-                        {selectedLocationGroup.meetings.map((meeting) => (
+                    ))}
+                  </View>
+
+                  {loadingMeetings ? (
+                    <Text style={styles.sectionMeta}>Loading meetings...</Text>
+                  ) : null}
+
+                  {screen === "LIST" && meetingsViewMode === "MAP" ? (
+                    <>
+                      <Text style={styles.sectionMeta}>
+                        Map view shows in-person meetings with location coordinates for the selected
+                        day.
+                      </Text>
+                      {mapRegion ? (
+                        <View style={styles.mapContainer}>
+                          <MapViewCompat
+                            ref={mapRef}
+                            style={styles.map}
+                            initialRegion={mapRegion}
+                            region={mapRegion}
+                            onRegionChangeComplete={onMapRegionChangeComplete}
+                            showsUserLocation={locationPermission === "granted"}
+                          >
+                            {meetingLocationGroups.map((group) => (
+                              <MarkerCompat
+                                key={group.key}
+                                coordinate={{ latitude: group.lat, longitude: group.lng }}
+                                onPress={() => setSelectedLocationKey(group.key)}
+                                pinColor={group.meetings.length > 1 ? "#9c4221" : "#155eef"}
+                              />
+                            ))}
+                          </MapViewCompat>
+
+                          {mapDraggedOutsideBoundary ? (
+                            <View style={styles.mapBoundaryControls}>
+                              <Button title="Return to boundary" onPress={returnToBoundary} />
+                              <View style={styles.buttonSpacer} />
+                              <Button
+                                title="Search this area"
+                                onPress={() => void searchThisArea()}
+                              />
+                            </View>
+                          ) : null}
+                        </View>
+                      ) : (
+                        <Text style={styles.sectionMeta}>
+                          Enable location to initialize the map view.
+                        </Text>
+                      )}
+
+                      {selectedLocationGroup ? (
+                        selectedLocationGroup.meetings.length === 1 ? (
                           <Pressable
-                            key={meeting.id}
-                            style={styles.mapMeetingRow}
+                            style={styles.mapMeetingCard}
                             onPress={() => {
-                              setSelectedMeeting(meeting);
+                              setSelectedMeeting(selectedLocationGroup.meetings[0]);
                               setScreen("DETAIL");
                             }}
                           >
-                            <Text style={styles.detailButtonText}>
-                              {meeting.startsAtLocal} • {meeting.name}
+                            <Text style={styles.meetingName}>
+                              {selectedLocationGroup.meetings[0].name}
+                            </Text>
+                            <Text style={styles.sectionMeta}>{selectedLocationGroup.address}</Text>
+                            <Text style={styles.sectionMeta}>
+                              {formatHhmmForDisplay(
+                                selectedLocationGroup.meetings[0].startsAtLocal,
+                              )}
                             </Text>
                           </Pressable>
-                        ))}
-                      </View>
-                    )
-                  ) : null}
-
-                  {!loadingMeetings && meetingLocationGroups.length === 0 ? (
-                    <Text style={styles.sectionMeta}>
-                      No in-person meetings with coordinates for this day.
-                    </Text>
-                  ) : null}
-                </>
-              ) : null}
-
-              {screen === "LIST" && meetingsViewMode === "LIST" ? (
-                <>
-                  {meetingsForDay.map((meeting) => {
-                    const plan = selectedDayPlan.plans[meeting.id] ?? {
-                      going: false,
-                      earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
-                      serviceCommitmentMinutes: null,
-                    };
-                    const isHomeGroup = selectedDayPlan.homeGroupMeetingId === meeting.id;
-                    const preview = buildDriveSchedulePreview(meeting, selectedDayPlan);
-
-                    return (
-                      <View key={meeting.id} style={styles.meetingCard}>
-                        <Text style={styles.meetingName}>{meeting.name}</Text>
-                        <Text style={styles.sectionMeta}>
-                          {meeting.startsAtLocal || "Unknown"} • {meeting.openness || "Unknown"} •{" "}
-                          {meeting.format || "Unknown"}
-                        </Text>
-                        <Text style={styles.sectionMeta}>
-                          {meeting.format === "ONLINE"
-                            ? "Online"
-                            : meeting.address || "Unknown address"}{" "}
-                          • {formatDistance(meeting.distanceMeters)}
-                        </Text>
-
-                        <Pressable
-                          style={styles.checkboxRow}
-                          onPress={() => setMeetingGoing(meeting.id, !plan.going)}
-                        >
-                          <View
-                            style={[styles.checkbox, plan.going ? styles.checkboxChecked : null]}
-                          >
-                            {plan.going ? <Text style={styles.checkboxTick}>✓</Text> : null}
-                          </View>
-                          <Text style={styles.label}>Going</Text>
-                        </Pressable>
-
-                        {plan.going ? (
-                          <>
-                            <View style={styles.inlineRowGap}>
-                              <Text style={styles.sectionMeta}>Minutes early</Text>
-                              <TextInput
-                                style={styles.smallInput}
-                                value={String(plan.earlyMinutes)}
-                                keyboardType="number-pad"
-                                onChangeText={(value) => setMeetingEarlyMinutes(meeting.id, value)}
-                              />
-                            </View>
-
-                            <View style={styles.inlineRowGap}>
-                              <Button
-                                title={isHomeGroup ? "Unset home group" : "Set as home group"}
-                                onPress={() => toggleHomeGroupMeeting(meeting.id)}
-                              />
-                            </View>
-
-                            {isHomeGroup ? (
-                              <View style={styles.inlineRowGap}>
-                                <Text style={styles.sectionMeta}>
-                                  Service commitment (minutes early)
+                        ) : (
+                          <View style={styles.mapMeetingCard}>
+                            <Text style={styles.meetingName}>Meetings at this location</Text>
+                            <Text style={styles.sectionMeta}>{selectedLocationGroup.address}</Text>
+                            {selectedLocationGroup.meetings.map((meeting) => (
+                              <Pressable
+                                key={meeting.id}
+                                style={styles.mapMeetingRow}
+                                onPress={() => {
+                                  setSelectedMeeting(meeting);
+                                  setScreen("DETAIL");
+                                }}
+                              >
+                                <Text style={styles.detailButtonText}>
+                                  {formatHhmmForDisplay(meeting.startsAtLocal)} • {meeting.name}
                                 </Text>
-                                <TextInput
-                                  style={styles.smallInput}
-                                  value={String(
-                                    plan.serviceCommitmentMinutes ??
-                                      DEFAULT_SERVICE_COMMITMENT_MINUTES,
-                                  )}
-                                  keyboardType="number-pad"
-                                  onChangeText={(value) =>
-                                    setServiceCommitmentMinutes(meeting.id, value)
-                                  }
-                                />
+                              </Pressable>
+                            ))}
+                          </View>
+                        )
+                      ) : null}
+
+                      {!loadingMeetings && meetingLocationGroups.length === 0 ? (
+                        <Text style={styles.sectionMeta}>
+                          No in-person meetings with coordinates for this day.
+                        </Text>
+                      ) : null}
+                    </>
+                  ) : null}
+
+                  {screen === "LIST" && meetingsViewMode === "LIST" ? (
+                    <>
+                      {meetingsForDay.map((meeting) => {
+                        const plan = selectedDayPlan.plans[meeting.id] ?? {
+                          going: false,
+                          earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
+                          serviceCommitmentMinutes: null,
+                        };
+                        const isHomeGroup = selectedDayPlan.homeGroupMeetingId === meeting.id;
+                        const preview = buildDriveSchedulePreview(meeting, selectedDayPlan);
+
+                        return (
+                          <View key={meeting.id} style={styles.meetingCard}>
+                            <Text style={styles.meetingName}>{meeting.name}</Text>
+                            <Text style={styles.sectionMeta}>
+                              {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
+                              {meeting.openness || "Unknown"} • {meeting.format || "Unknown"}
+                            </Text>
+                            <Text style={styles.sectionMeta}>
+                              {meeting.format === "ONLINE"
+                                ? "Online"
+                                : meeting.address || "Unknown address"}{" "}
+                              • {formatDistance(meeting.distanceMeters)}
+                            </Text>
+
+                            <Pressable
+                              style={styles.checkboxRow}
+                              onPress={() => setMeetingGoing(meeting.id, !plan.going)}
+                            >
+                              <View
+                                style={[
+                                  styles.checkbox,
+                                  plan.going ? styles.checkboxChecked : null,
+                                ]}
+                              >
+                                {plan.going ? <Text style={styles.checkboxTick}>✓</Text> : null}
                               </View>
+                              <Text style={styles.label}>Going</Text>
+                            </Pressable>
+
+                            {plan.going ? (
+                              <>
+                                <View style={styles.inlineRowGap}>
+                                  <Text style={styles.sectionMeta}>Minutes early</Text>
+                                  <TextInput
+                                    style={styles.smallInput}
+                                    value={String(plan.earlyMinutes)}
+                                    keyboardType="number-pad"
+                                    onChangeText={(value) =>
+                                      setMeetingEarlyMinutes(meeting.id, value)
+                                    }
+                                  />
+                                </View>
+
+                                <View style={styles.inlineRowGap}>
+                                  <Button
+                                    title={isHomeGroup ? "Unset home group" : "Set as home group"}
+                                    onPress={() => toggleHomeGroupMeeting(meeting.id)}
+                                  />
+                                </View>
+
+                                {isHomeGroup ? (
+                                  <View style={styles.inlineRowGap}>
+                                    <Text style={styles.sectionMeta}>
+                                      Service commitment (minutes early)
+                                    </Text>
+                                    <TextInput
+                                      style={styles.smallInput}
+                                      value={String(
+                                        plan.serviceCommitmentMinutes ??
+                                          DEFAULT_SERVICE_COMMITMENT_MINUTES,
+                                      )}
+                                      keyboardType="number-pad"
+                                      onChangeText={(value) =>
+                                        setServiceCommitmentMinutes(meeting.id, value)
+                                      }
+                                    />
+                                  </View>
+                                ) : null}
+
+                                {preview ? (
+                                  <Text style={styles.sectionMeta}>
+                                    {preview.usesServiceCommitment
+                                      ? "Service commitment override"
+                                      : "Standard early arrival"}
+                                    : start {preview.meetingStartAt.toLocaleTimeString()}, travel{" "}
+                                    {preview.travelMinutes}m, depart{" "}
+                                    {preview.departAt.toLocaleTimeString()}, notify{" "}
+                                    {preview.notifyAt.toLocaleTimeString()}
+                                  </Text>
+                                ) : null}
+                              </>
                             ) : null}
 
-                            {preview ? (
-                              <Text style={styles.sectionMeta}>
-                                {preview.usesServiceCommitment
-                                  ? "Service commitment override"
-                                  : "Standard early arrival"}
-                                : start {preview.meetingStartAt.toLocaleTimeString()}, travel{" "}
-                                {preview.travelMinutes}m, depart{" "}
-                                {preview.departAt.toLocaleTimeString()}, notify{" "}
-                                {preview.notifyAt.toLocaleTimeString()}
-                              </Text>
-                            ) : null}
-                          </>
-                        ) : null}
+                            <Pressable
+                              style={styles.detailButton}
+                              onPress={() => {
+                                setSelectedMeeting(meeting);
+                                setScreen("DETAIL");
+                              }}
+                            >
+                              <Text style={styles.detailButtonText}>View details</Text>
+                            </Pressable>
+                          </View>
+                        );
+                      })}
+                      {!loadingMeetings && meetingsForDay.length === 0 ? (
+                        <Text style={styles.sectionMeta}>
+                          {selectedDayIsPast
+                            ? "No upcoming meetings for a past day."
+                            : selectedDayIsToday
+                              ? "No upcoming meetings remaining today."
+                              : "No upcoming meetings for this day."}
+                        </Text>
+                      ) : null}
+                    </>
+                  ) : null}
 
-                        <Pressable
-                          style={styles.detailButton}
-                          onPress={() => {
-                            setSelectedMeeting(meeting);
-                            setScreen("DETAIL");
-                          }}
-                        >
-                          <Text style={styles.detailButtonText}>View details</Text>
-                        </Pressable>
+                  {screen === "DETAIL" && selectedMeeting ? (
+                    <View style={styles.meetingCard}>
+                      <Text style={styles.meetingName}>{selectedMeeting.name}</Text>
+                      <Text style={styles.sectionMeta}>
+                        {selectedMeeting.address || "Unknown address"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        {formatHhmmForDisplay(selectedMeeting.startsAtLocal)} •{" "}
+                        {selectedMeeting.openness || "Unknown"} •{" "}
+                        {selectedMeeting.format || "Unknown"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Distance:{" "}
+                        {formatDistance(
+                          currentLocation &&
+                            selectedMeeting.lat !== null &&
+                            selectedMeeting.lng !== null
+                            ? distanceMetersBetween(
+                                currentLocation.lat,
+                                currentLocation.lng,
+                                selectedMeeting.lat,
+                                selectedMeeting.lng,
+                              )
+                            : null,
+                        )}
+                      </Text>
+
+                      <View style={styles.buttonRow}>
+                        <Button title="Back" onPress={() => setScreen("LIST")} />
+                        <View style={styles.buttonSpacer} />
+                        <Button
+                          title="Drive now"
+                          onPress={() => void openMeetingDestination(selectedMeeting)}
+                        />
                       </View>
-                    );
-                  })}
-                  {!loadingMeetings && meetingsForDay.length === 0 ? (
-                    <Text style={styles.sectionMeta}>No meetings for this day.</Text>
-                  ) : null}
-                </>
-              ) : null}
 
-              {screen === "DETAIL" && selectedMeeting ? (
-                <View style={styles.meetingCard}>
-                  <Text style={styles.meetingName}>{selectedMeeting.name}</Text>
-                  <Text style={styles.sectionMeta}>
-                    {selectedMeeting.address || "Unknown address"}
-                  </Text>
-                  <Text style={styles.sectionMeta}>
-                    {selectedMeeting.startsAtLocal || "Unknown"} •{" "}
-                    {selectedMeeting.openness || "Unknown"} • {selectedMeeting.format || "Unknown"}
-                  </Text>
-                  <Text style={styles.sectionMeta}>
-                    Distance:{" "}
-                    {formatDistance(
-                      currentLocation &&
-                        selectedMeeting.lat !== null &&
-                        selectedMeeting.lng !== null
-                        ? distanceMetersBetween(
-                            currentLocation.lat,
-                            currentLocation.lng,
-                            selectedMeeting.lat,
-                            selectedMeeting.lng,
-                          )
-                        : null,
-                    )}
-                  </Text>
+                      {selectedMeeting.onlineUrl ? (
+                        <View style={styles.buttonRow}>
+                          <Button
+                            title="Open meeting link"
+                            onPress={() =>
+                              void Linking.openURL(selectedMeeting.onlineUrl as string)
+                            }
+                          />
+                        </View>
+                      ) : null}
 
-                  <View style={styles.buttonRow}>
-                    <Button title="Back" onPress={() => setScreen("LIST")} />
-                    <View style={styles.buttonSpacer} />
-                    <Button
-                      title="Drive now"
-                      onPress={() => void openMeetingDestination(selectedMeeting)}
-                    />
-                  </View>
+                      <View style={styles.buttonRow}>
+                        <Button
+                          title="Start attendance"
+                          onPress={() => void startAttendance(selectedMeeting)}
+                        />
+                        <View style={styles.buttonSpacer} />
+                        <Button
+                          title="Mark attended"
+                          onPress={() => markMeetingAttended(selectedMeeting)}
+                        />
+                      </View>
 
-                  {selectedMeeting.onlineUrl ? (
-                    <View style={styles.buttonRow}>
-                      <Button
-                        title="Open meeting link"
-                        onPress={() => void Linking.openURL(selectedMeeting.onlineUrl as string)}
-                      />
+                      <Text style={styles.sectionMeta}>
+                        Arrival watcher: you will be prompted when within ~200 ft on iOS.
+                      </Text>
                     </View>
                   ) : null}
-
-                  <View style={styles.buttonRow}>
-                    <Button
-                      title="Start attendance"
-                      onPress={() => void startAttendance(selectedMeeting)}
-                    />
-                  </View>
-
-                  <Text style={styles.sectionMeta}>
-                    Arrival watcher: you will be prompted when within ~200 ft on iOS.
-                  </Text>
                 </View>
-              ) : null}
-            </View>
 
-            {(screen === "SESSION" || screen === "SIGNATURE") && activeAttendance ? (
-              <View style={styles.card}>
-                <Text style={styles.sectionTitle}>Verified Attendance</Text>
-                <Text style={styles.sectionMeta}>{attendanceStatus}</Text>
-                <Text style={styles.sectionMeta}>Meeting: {activeAttendance.meetingName}</Text>
-                <Text style={styles.sectionMeta}>
-                  Started: {new Date(activeAttendance.startAt).toLocaleString()}
-                </Text>
-                <Text style={styles.sectionMeta}>
-                  Duration: {formatDuration(openSessionDurationSeconds)}
-                </Text>
+                {(screen === "SESSION" || screen === "SIGNATURE") && activeAttendance ? (
+                  <View style={styles.card}>
+                    <Text style={styles.sectionTitle}>Verified Attendance</Text>
+                    <Text style={styles.sectionMeta}>{attendanceStatus}</Text>
+                    <Text style={styles.sectionMeta}>Meeting: {activeAttendance.meetingName}</Text>
+                    <Text style={styles.sectionMeta}>
+                      Started: {new Date(activeAttendance.startAt).toLocaleString()}
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      Duration: {formatDuration(openSessionDurationSeconds)}
+                    </Text>
 
-                {!activeAttendance.endAt ? (
-                  <Button title="End attendance" onPress={() => void endAttendance()} />
+                    {!activeAttendance.endAt ? (
+                      <Button title="End attendance" onPress={() => void endAttendance()} />
+                    ) : null}
+
+                    {activeAttendance.endAt ? (
+                      <>
+                        <Text style={styles.sectionMeta}>
+                          Ended: {new Date(activeAttendance.endAt).toLocaleString()}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          Signature: {activeAttendance.signaturePngBase64 ? "Saved" : "Missing"}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          PDF: {activeAttendance.pdfUri ?? "Not exported"}
+                        </Text>
+
+                        <View style={styles.buttonRow}>
+                          <Button title="Back to meetings" onPress={() => setScreen("LIST")} />
+                          <View style={styles.buttonSpacer} />
+                          <Button title="Add signature" onPress={() => setScreen("SIGNATURE")} />
+                        </View>
+
+                        <View style={styles.buttonRow}>
+                          <Button
+                            title={exportingPdf ? "Exporting..." : "Export attendance PDF"}
+                            onPress={() => void exportAttendance()}
+                            disabled={exportingPdf}
+                          />
+                        </View>
+                      </>
+                    ) : null}
+
+                    <Text style={styles.sectionMeta}>
+                      PDF file name: {ATTENDANCE_PDF_FILE_NAME}
+                    </Text>
+                  </View>
                 ) : null}
 
-                {activeAttendance.endAt ? (
-                  <>
-                    <Text style={styles.sectionMeta}>
-                      Ended: {new Date(activeAttendance.endAt).toLocaleString()}
-                    </Text>
-                    <Text style={styles.sectionMeta}>
-                      Signature: {activeAttendance.signaturePngBase64 ? "Saved" : "Missing"}
-                    </Text>
-                    <Text style={styles.sectionMeta}>
-                      PDF: {activeAttendance.pdfUri ?? "Not exported"}
-                    </Text>
+                {screen === "SIGNATURE" && activeAttendance ? (
+                  <View style={styles.card}>
+                    <Text style={styles.sectionTitle}>Signature Capture</Text>
+                    <Text style={styles.sectionMeta}>Draw chairperson signature with finger.</Text>
 
-                    <View style={styles.buttonRow}>
-                      <Button title="Back to meetings" onPress={() => setScreen("LIST")} />
-                      <View style={styles.buttonSpacer} />
-                      <Button title="Add signature" onPress={() => setScreen("SIGNATURE")} />
-                    </View>
-
-                    <View style={styles.buttonRow}>
-                      <Button
-                        title={exportingPdf ? "Exporting..." : "Export attendance PDF"}
-                        onPress={() => void exportAttendance()}
-                        disabled={exportingPdf}
-                      />
-                    </View>
-                  </>
-                ) : null}
-
-                <Text style={styles.sectionMeta}>PDF file name: {ATTENDANCE_PDF_FILE_NAME}</Text>
-              </View>
-            ) : null}
-
-            {screen === "SIGNATURE" && activeAttendance ? (
-              <View style={styles.card}>
-                <Text style={styles.sectionTitle}>Signature Capture</Text>
-                <Text style={styles.sectionMeta}>Draw chairperson signature with finger.</Text>
-
-                <View
-                  style={styles.signatureCanvas}
-                  onLayout={(event) => {
-                    setSignatureCanvasSize({
-                      width: event.nativeEvent.layout.width,
-                      height: event.nativeEvent.layout.height,
-                    });
-                  }}
-                  onStartShouldSetResponder={() => true}
-                  onMoveShouldSetResponder={() => true}
-                  onResponderGrant={addSignaturePoint}
-                  onResponderMove={addSignaturePoint}
-                >
-                  {signaturePoints.map((point, index) => (
                     <View
-                      key={`${point.x}-${point.y}-${index}`}
-                      style={[
-                        styles.signaturePoint,
-                        {
-                          left: point.x,
-                          top: point.y,
-                        },
-                      ]}
-                    />
+                      style={styles.signatureCanvas}
+                      onLayout={(event) => {
+                        setSignatureCanvasSize({
+                          width: event.nativeEvent.layout.width,
+                          height: event.nativeEvent.layout.height,
+                        });
+                      }}
+                      onStartShouldSetResponder={() => true}
+                      onMoveShouldSetResponder={() => true}
+                      onResponderGrant={addSignaturePoint}
+                      onResponderMove={addSignaturePoint}
+                    >
+                      {signaturePoints.map((point, index) => (
+                        <View
+                          key={`${point.x}-${point.y}-${index}`}
+                          style={[
+                            styles.signaturePoint,
+                            {
+                              left: point.x,
+                              top: point.y,
+                            },
+                          ]}
+                        />
+                      ))}
+                    </View>
+
+                    <View style={styles.buttonRow}>
+                      <Button title="Back" onPress={() => setScreen("SESSION")} />
+                      <View style={styles.buttonSpacer} />
+                      <Button title="Clear" onPress={() => setSignaturePoints([])} />
+                      <View style={styles.buttonSpacer} />
+                      <Button title="Save" onPress={saveSignature} />
+                    </View>
+                  </View>
+                ) : null}
+
+                <View style={styles.card}>
+                  <Text style={styles.sectionTitle}>Recent Attendance</Text>
+                  {attendanceRecords.slice(0, 5).map((record) => (
+                    <View key={record.id} style={styles.historyCard}>
+                      <Text style={styles.meetingName}>{record.meetingName}</Text>
+                      <Text style={styles.sectionMeta}>
+                        {new Date(record.startAt).toLocaleString()} •{" "}
+                        {formatDuration(record.durationSeconds)}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        {record.endAt ? "Completed" : "In progress"} • Signature:{" "}
+                        {record.signaturePngBase64 ? "Yes" : "No"}
+                      </Text>
+                    </View>
                   ))}
+                  {attendanceRecords.length === 0 ? (
+                    <Text style={styles.sectionMeta}>No attendance records yet.</Text>
+                  ) : null}
                 </View>
-
-                <View style={styles.buttonRow}>
-                  <Button title="Back" onPress={() => setScreen("SESSION")} />
-                  <View style={styles.buttonSpacer} />
-                  <Button title="Clear" onPress={() => setSignaturePoints([])} />
-                  <View style={styles.buttonSpacer} />
-                  <Button title="Save" onPress={saveSignature} />
-                </View>
-              </View>
+              </>
             ) : null}
-
-            <View style={styles.card}>
-              <Text style={styles.sectionTitle}>Recent Attendance</Text>
-              {attendanceRecords.slice(0, 5).map((record) => (
-                <View key={record.id} style={styles.historyCard}>
-                  <Text style={styles.meetingName}>{record.meetingName}</Text>
-                  <Text style={styles.sectionMeta}>
-                    {new Date(record.startAt).toLocaleString()} •{" "}
-                    {formatDuration(record.durationSeconds)}
-                  </Text>
-                  <Text style={styles.sectionMeta}>
-                    {record.endAt ? "Completed" : "In progress"} • Signature:{" "}
-                    {record.signaturePngBase64 ? "Yes" : "No"}
-                  </Text>
-                </View>
-              ))}
-              {attendanceRecords.length === 0 ? (
-                <Text style={styles.sectionMeta}>No attendance records yet.</Text>
-              ) : null}
-            </View>
           </>
         ) : null}
       </ScrollView>
@@ -3280,6 +4575,30 @@ const styles = StyleSheet.create({
   modeRow: {
     flexDirection: "row",
     gap: 8,
+  },
+  homeNavRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  homeNavChip: {
+    borderWidth: 1,
+    borderColor: "#d0d5dd",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: "#ffffff",
+  },
+  homeNavChipSelected: {
+    borderColor: "#155eef",
+    backgroundColor: "#e0eaff",
+  },
+  homeNavChipText: {
+    color: "#344054",
+    fontWeight: "600",
+    fontSize: 12,
+  },
+  homeNavChipTextSelected: {
+    color: "#1d4ed8",
   },
   modeChip: {
     flex: 1,
@@ -3327,6 +4646,12 @@ const styles = StyleSheet.create({
   sectionMeta: {
     color: "#475467",
     fontSize: 12,
+  },
+  daysSoberValue: {
+    fontSize: 36,
+    fontWeight: "800",
+    color: "#101828",
+    lineHeight: 42,
   },
   errorText: {
     color: "#b42318",
@@ -3543,6 +4868,20 @@ const styles = StyleSheet.create({
     borderTopColor: "#dbe4ff",
     paddingTop: 8,
     marginTop: 4,
+  },
+  homeGroupSelectedCard: {
+    borderColor: "#155eef",
+    backgroundColor: "#eef4ff",
+  },
+  progressTrack: {
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: "#eaecf0",
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: "100%",
+    backgroundColor: "#155eef",
   },
   signatureCanvas: {
     borderWidth: 1,

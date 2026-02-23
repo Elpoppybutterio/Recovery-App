@@ -32,6 +32,20 @@ describe("meeting-guide ingest", () => {
               ? "Wed, 21 Oct 2026 07:28:00 GMT"
               : null,
       },
+      text: async () =>
+        JSON.stringify([
+          {
+            slug: "downtown-noon",
+            name: "Downtown Noon",
+            day: 2,
+            time: "12:00",
+            latitude: 40.1,
+            longitude: -105.1,
+          },
+          {
+            slug: "missing-name",
+          },
+        ]),
       json: async () => [
         {
           slug: "downtown-noon",
