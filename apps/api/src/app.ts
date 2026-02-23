@@ -1765,7 +1765,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   app.post(
     "/v1/admin/meetings/refresh",
     {
-      preHandler: [authenticateRequest, requireRole(Role.ADMIN)],
+      preHandler: [authenticateRequest],
     },
     async (request, reply) => {
       const actor = request.actor;

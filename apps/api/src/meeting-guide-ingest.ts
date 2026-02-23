@@ -842,6 +842,69 @@ async function geocodeWithOpenStreetMap(options: {
   return { lat, lng };
 }
 
+const BUILTIN_MEETING_GUIDE_FEEDS: Record<string, unknown[]> = {
+  "builtin://billings-test": [
+    {
+      slug: "billings-noon-aa-mon",
+      name: "Billings Noon Recovery",
+      day: 1,
+      time: "12:00",
+      formatted_address: "2919 2nd Ave N, Billings, MT 59101",
+      address: "2919 2nd Ave N",
+      city: "Billings",
+      state: "MT",
+      postal_code: "59101",
+      country: "US",
+      latitude: 45.7836,
+      longitude: -108.5002,
+      types: ["O"],
+      updated: "2026-02-20T12:00:00Z",
+    },
+    {
+      slug: "billings-evening-aa-tue",
+      name: "Downtown Serenity Group",
+      day: 2,
+      time: "18:30",
+      formatted_address: "115 N 30th St, Billings, MT 59101",
+      address: "115 N 30th St",
+      city: "Billings",
+      state: "MT",
+      postal_code: "59101",
+      country: "US",
+      latitude: 45.7831,
+      longitude: -108.5095,
+      types: ["C"],
+      updated: "2026-02-20T12:00:00Z",
+    },
+    {
+      slug: "billings-early-na-wed",
+      name: "Southside NA Morning",
+      day: 3,
+      time: "07:00",
+      formatted_address: "3940 Rimrock Rd, Billings, MT 59102",
+      address: "3940 Rimrock Rd",
+      city: "Billings",
+      state: "MT",
+      postal_code: "59102",
+      country: "US",
+      latitude: 45.7555,
+      longitude: -108.6031,
+      types: ["O", "SP"],
+      updated: "2026-02-20T12:00:00Z",
+    },
+    {
+      slug: "billings-online-thu",
+      name: "Online Open Recovery",
+      day: 4,
+      time: "20:00",
+      formatted_address: "Online",
+      conference_url: "https://example.org/online-room",
+      types: ["O", "ONL"],
+      updated: "2026-02-20T12:00:00Z",
+    },
+  ],
+};
+
 function extractEntries(payload: unknown): unknown[] {
   if (Array.isArray(payload)) {
     return payload;
