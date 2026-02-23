@@ -61,6 +61,8 @@ const meetingsNearbyQuerySchema = z.object({
   radiusMiles: z.coerce.number().positive().max(200).default(20),
   format: z.enum(["in_person", "online", "any"]).default("any"),
   dayOfWeek: z.coerce.number().int().min(0).max(6).optional(),
+  when: z.enum(["upcoming", "all"]).default("upcoming"),
+  now: z.string().datetime().optional(),
   types: z.string().optional(),
   timeFrom: z
     .string()
@@ -195,6 +197,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   const now = options.now ?? (() => new Date());
   let meetingGuideTimer: NodeJS.Timeout | undefined;
   let devMeetingRefreshLastRunAtMs = 0;
+  const devMeetingNearbyWarmupByTenantMs = new Map<string, number>();
 
   app.decorate("db", db);
   app.decorate("auditLogger", createAuditLogger(db));
@@ -224,6 +227,36 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   const configuredMeetingGuideFeeds = parseConfiguredMeetingGuideFeeds(
     env.MEETING_GUIDE_FEEDS_JSON,
   );
+  const legacyMeetingFeedUrls = Array.from(
+    new Set(
+      [...(env.MEETING_FEEDS_AA ?? "").split(","), ...(env.MEETING_FEEDS_NA ?? "").split(",")]
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0),
+    ),
+  );
+  let warnedNoMeetingGuideFeeds = false;
+
+  logger.info("meeting_guide.config", {
+    autoIngest: env.MEETING_GUIDE_AUTO_INGEST,
+    defaultTenantId: env.MEETING_GUIDE_DEFAULT_TENANT_ID ?? null,
+    refreshIntervalMs: env.MEETING_GUIDE_REFRESH_INTERVAL_MS,
+    configuredFeedsCount: configuredMeetingGuideFeeds.length,
+    legacyFeedsCount: legacyMeetingFeedUrls.length,
+  });
+
+  if (configuredMeetingGuideFeeds.length === 0 && legacyMeetingFeedUrls.length === 0) {
+    logger.warn("meeting_guide.config.empty", {
+      message:
+        "No Meeting Guide feeds configured. Set MEETING_GUIDE_FEEDS_JSON or MEETING_FEEDS_AA/MEETING_FEEDS_NA.",
+      developmentFallback:
+        env.NODE_ENV !== "production"
+          ? [
+              "https://www.aa-montana.org/index.php?city=Billings",
+              "https://www.aa-montana.org/index.php?city=Laurel",
+            ]
+          : null,
+    });
+  }
 
   const resolveTenantFeedConfigs = (tenantId: string) => {
     const scoped = configuredMeetingGuideFeeds.filter(
@@ -234,14 +267,43 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       return scoped;
     }
 
-    const legacyUrls = Array.from(
-      new Set(
-        [...env.MEETING_FEEDS_AA.split(","), ...env.MEETING_FEEDS_NA.split(",")]
-          .map((entry) => entry.trim())
-          .filter((entry) => entry.length > 0),
-      ),
-    );
-    return legacyUrls.map((url) => ({
+    if (legacyMeetingFeedUrls.length > 0) {
+      return legacyMeetingFeedUrls.map((url) => ({
+        name: "Legacy Meeting Feed",
+        url,
+      }));
+    }
+
+    if (env.NODE_ENV !== "production") {
+      if (!warnedNoMeetingGuideFeeds) {
+        warnedNoMeetingGuideFeeds = true;
+        logger.warn("meeting_guide.config.dev_fallback", {
+          tenantId,
+          fallbackFeeds: [
+            "https://www.aa-montana.org/index.php?city=Billings",
+            "https://www.aa-montana.org/index.php?city=Laurel",
+          ],
+          message:
+            "Using AA Montana city feeds because no external Meeting Guide feeds are configured.",
+        });
+      }
+      return [
+        {
+          name: "AA Montana - Billings",
+          url: "https://www.aa-montana.org/index.php?city=Billings",
+          entity: "AA Montana",
+          entityUrl: "https://www.aa-montana.org",
+        },
+        {
+          name: "AA Montana - Laurel",
+          url: "https://www.aa-montana.org/index.php?city=Laurel",
+          entity: "AA Montana",
+          entityUrl: "https://www.aa-montana.org",
+        },
+      ];
+    }
+
+    return legacyMeetingFeedUrls.map((url) => ({
       name: "Legacy Meeting Feed",
       url,
     }));
@@ -268,6 +330,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       now,
       logger,
       geocodeMissingCoordinates: env.NODE_ENV !== "production",
+      geocodeMissingCoordinates: env.NODE_ENV !== "production",
     });
   };
 
@@ -285,13 +348,34 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     }
 
     void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
+  const autoIngestTenantId =
+    env.MEETING_GUIDE_DEFAULT_TENANT_ID ??
+    (env.NODE_ENV !== "production" && env.ENABLE_DEV_AUTH ? "tenant-a" : undefined);
+
+  if (env.MEETING_GUIDE_AUTO_INGEST && autoIngestTenantId) {
+    if (!env.MEETING_GUIDE_DEFAULT_TENANT_ID && env.NODE_ENV !== "production") {
+      logger.warn("meeting_guide.config.dev_default_tenant_fallback", {
+        tenantId: autoIngestTenantId,
+        message:
+          "MEETING_GUIDE_DEFAULT_TENANT_ID not set; using tenant-a fallback for dev auto-ingest.",
+      });
+    }
+
+    void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
       logger.error("meeting_guide.ingest.startup_failed", {
+        tenantId: autoIngestTenantId,
         tenantId: autoIngestTenantId,
         reason: error instanceof Error ? error.message : "unknown",
       });
     });
 
     meetingGuideTimer = setInterval(() => {
+      void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
+        logger.error("meeting_guide.ingest.interval_failed", {
+          tenantId: autoIngestTenantId,
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+      });
       void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
         logger.error("meeting_guide.ingest.interval_failed", {
           tenantId: autoIngestTenantId,
@@ -900,6 +984,164 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           radiusM: meeting.radius_m,
           createdAt: meeting.created_at,
           createdByUserId: meeting.created_by_user_id,
+        })),
+        filters: {
+          dayOfWeek: query.dayOfWeek ?? query.day ?? null,
+          radiusMiles: resolvedRadiusMiles,
+          locationScoped: hasLocationFilter,
+        },
+      };
+    },
+  );
+
+  app.get(
+    "/v1/meetings/nearby",
+    {
+      preHandler: [
+        authenticateRequest,
+        requireRole(Role.END_USER, Role.SUPERVISOR, Role.ADMIN, Role.MEETING_VERIFIER),
+      ],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = meetingsNearbyQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid nearby meetings query",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      const typeFilters = parsedQuery.data.types
+        ? parsedQuery.data.types
+            .split(",")
+            .map((entry) => entry.trim().toUpperCase())
+            .filter((entry) => entry.length > 0)
+        : [];
+
+      const meetings = await tenantRepositories.meetingGuide.nearby(
+        actor,
+        {
+          lat: parsedQuery.data.lat,
+          lng: parsedQuery.data.lng,
+          radiusMiles: parsedQuery.data.radiusMiles,
+        },
+        {
+          format: parsedQuery.data.format,
+          dayOfWeek: parsedQuery.data.dayOfWeek,
+          types: typeFilters,
+          timeFrom: parsedQuery.data.timeFrom,
+          timeTo: parsedQuery.data.timeTo,
+          limit: parsedQuery.data.limit,
+        },
+      );
+
+      let scopedMeetings = meetings;
+      if (
+        scopedMeetings.length === 0 &&
+        env.NODE_ENV !== "production" &&
+        env.ENABLE_DEV_AUTH &&
+        isDevAuthHeader(request.headers.authorization)
+      ) {
+        const minWarmupIntervalMs = 30_000;
+        const lastWarmupMs = devMeetingNearbyWarmupByTenantMs.get(actor.tenantId) ?? 0;
+        const elapsedMs = now().getTime() - lastWarmupMs;
+        if (elapsedMs >= minWarmupIntervalMs) {
+          devMeetingNearbyWarmupByTenantMs.set(actor.tenantId, now().getTime());
+          try {
+            const ingestResult = await runMeetingGuideIngestForTenant(actor.tenantId);
+            logger.info("meeting_guide.nearby.dev_warmup", {
+              tenantId: actor.tenantId,
+              ...ingestResult,
+            });
+
+            scopedMeetings = await tenantRepositories.meetingGuide.nearby(
+              actor,
+              {
+                lat: parsedQuery.data.lat,
+                lng: parsedQuery.data.lng,
+                radiusMiles: parsedQuery.data.radiusMiles,
+              },
+              {
+                format: parsedQuery.data.format,
+                dayOfWeek: parsedQuery.data.dayOfWeek,
+                types: typeFilters,
+                timeFrom: parsedQuery.data.timeFrom,
+                timeTo: parsedQuery.data.timeTo,
+                limit: parsedQuery.data.limit,
+              },
+            );
+          } catch (error) {
+            logger.error("meeting_guide.nearby.dev_warmup_failed", {
+              tenantId: actor.tenantId,
+              reason: error instanceof Error ? error.message : "unknown",
+            });
+          }
+        }
+      }
+
+      const parseMinutesFromHhmm = (value: string | null): number => {
+        if (!value) {
+          return Number.POSITIVE_INFINITY;
+        }
+        const match = value.match(/^(\d{2}):(\d{2})$/);
+        if (!match) {
+          return Number.POSITIVE_INFINITY;
+        }
+        return Number(match[1]) * 60 + Number(match[2]);
+      };
+
+      let filteredMeetings = scopedMeetings;
+      if (parsedQuery.data.when === "upcoming" && parsedQuery.data.dayOfWeek !== undefined) {
+        const referenceNow = parsedQuery.data.now ? new Date(parsedQuery.data.now) : now();
+        if (
+          !Number.isNaN(referenceNow.getTime()) &&
+          parsedQuery.data.dayOfWeek === referenceNow.getDay()
+        ) {
+          const nowMinutes = referenceNow.getHours() * 60 + referenceNow.getMinutes();
+          filteredMeetings = filteredMeetings.filter(
+            (meeting) => parseMinutesFromHhmm(meeting.time) >= nowMinutes,
+          );
+        }
+      }
+
+      filteredMeetings = [...filteredMeetings].sort((left, right) => {
+        if (parsedQuery.data.dayOfWeek !== undefined) {
+          const byTime = parseMinutesFromHhmm(left.time) - parseMinutesFromHhmm(right.time);
+          if (byTime !== 0) {
+            return byTime;
+          }
+        }
+        const leftDistance = left.distance_meters ?? Number.POSITIVE_INFINITY;
+        const rightDistance = right.distance_meters ?? Number.POSITIVE_INFINITY;
+        if (leftDistance !== rightDistance) {
+          return leftDistance - rightDistance;
+        }
+        return left.name.localeCompare(right.name);
+      });
+
+      return {
+        meetings: filteredMeetings.map((meeting) => ({
+          id: meeting.id,
+          name: meeting.name,
+          address: meeting.formatted_address ?? meeting.address ?? "Address unavailable",
+          format: meeting.inferred_format,
+          dayOfWeek: meeting.day,
+          startsAtLocal: meeting.time,
+          endsAtLocal: meeting.end_time,
+          lat: meeting.lat,
+          lng: meeting.lng,
+          onlineUrl: meeting.conference_url,
+          types: meeting.types,
+          typesDisplay: mapTypeCodesToLabels(meeting.types),
+          distanceMeters: meeting.distance_meters,
         })),
       };
     },
