@@ -88,3 +88,9 @@ export function getInsightForDay(daysSober: number): RecoveryInsight {
     }
   );
 }
+
+export const PHYSICAL_RECOVERY_COPY =
+  "Months 4-6: Deep healing\n\n" +
+  "After four to six months sober, your body undertakes deeper repairs.\n\n" +
+  "By about 4-6 months, if you had alcohol-related fatty liver or mild hepatitis, much of it may reverse with abstinence. [11] Additionally, your liver cells regenerate and return to near-normal function. Your immune system also bounces back. Just after six months, people report getting sick less frequently because alcohol's immune-suppressing effects have faded. [2]\n\n" +
+  'Mentally, your focus and memory continue to sharpen, and any lingering anxiety is much improved compared to early sobriety. Each alcohol-free month in this phase makes you feel healthier and more "yourself."';

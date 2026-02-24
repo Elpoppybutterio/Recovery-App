@@ -1,14 +1,22 @@
 {
   "expo": {
-    "name": "Recovery Accountability",
-    "slug": "recovery-accountability",
+    "name": "Sober AI",
+    "slug": "sober-ai",
+    "icon": "./assets/icon.png",
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
+      "icon": "./assets/icon.png",
       "bundleIdentifier": "com.recovery.accountability",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Location is used to show nearby meetings and arrival prompts."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon-foreground.png",
+        "backgroundImage": "./assets/icon-background.png"
       }
     },
     "assetBundlePatterns": ["**/*"],

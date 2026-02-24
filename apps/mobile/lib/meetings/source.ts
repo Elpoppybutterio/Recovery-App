@@ -239,7 +239,7 @@ function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecor
   };
 }
 
-function normalizeApiMeeting(value: unknown, dayOfWeek: number): MeetingRecord | null {
+function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): MeetingRecord | null {
   const input = asObject(value);
   if (!input) {
     return null;
@@ -263,7 +263,7 @@ function normalizeApiMeeting(value: unknown, dayOfWeek: number): MeetingRecord |
     name,
     address,
     startsAtLocal: toHhmm(input.startsAtLocal ?? input.startTimeLocal, "19:00"),
-    dayOfWeek,
+    dayOfWeek: normalizeDayOfWeek(input.dayOfWeek ?? input.day, fallbackDayOfWeek),
     format,
     openness,
     lat,
@@ -320,6 +320,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
 
       let meetings: MeetingRecord[] = [];
       let apiWarning: string | undefined;
+<<<<<<< HEAD
       const hasLocation = typeof params.lat === "number" && typeof params.lng === "number";
       let shouldFallbackToTenantMeetings = !hasLocation;
 
@@ -329,8 +330,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         nearbyQuery.set("lng", String(params.lng));
         nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
         nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
-        nearbyQuery.set("when", "upcoming");
-        nearbyQuery.set("now", new Date().toISOString());
+        nearbyQuery.set("when", "all");
 
         const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
         if (__DEV__) {
@@ -370,8 +370,44 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           }
         }
       }
+=======
 
+>>>>>>> 62b7d18 (feat(meetings): ingest meeting guide feeds and add nearby map flow)
+      if (typeof params.lat === "number" && typeof params.lng === "number") {
+        const nearbyQuery = new URLSearchParams();
+        nearbyQuery.set("lat", String(params.lat));
+        nearbyQuery.set("lng", String(params.lng));
+        nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
+        nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
+
+        const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
+        if (__DEV__) {
+          console.log("[meetings] nearby request", {
+            url: nearbyUrl,
+            lat: params.lat,
+            lng: params.lng,
+            radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
+          });
+        }
+
+        try {
+          const nearbyResponse = await fetch(nearbyUrl, { headers });
+
+        if (nearbyResponse.ok) {
+          const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
+          meetings = (nearbyPayload.meetings ?? [])
+            .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+            .filter((entry): entry is MeetingRecord => entry !== null);
+        } else {
+          apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
+        }
+      }
+
+<<<<<<< HEAD
       if (shouldFallbackToTenantMeetings) {
+=======
+      if (meetings.length === 0) {
+>>>>>>> 62b7d18 (feat(meetings): ingest meeting guide feeds and add nearby map flow)
         const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
         const response = await fetch(url, { headers });
         if (!response.ok) {

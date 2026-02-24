@@ -161,11 +161,6 @@ const supervisionUpdateBodySchema = z.object({
 const WARNING_DISTANCE_FEET = 200;
 const FEET_TO_METERS = 0.3048;
 const MILES_TO_METERS = 1609.344;
-const DEV_AUTH_BEARER_PATTERN = /^Bearer DEV_[A-Za-z0-9_-]+$/;
-
-function isDevAuthHeader(authorization: unknown): boolean {
-  return typeof authorization === "string" && DEV_AUTH_BEARER_PATTERN.test(authorization);
-}
 const WARNING_DISTANCE_METERS = WARNING_DISTANCE_FEET * FEET_TO_METERS;
 const INCIDENT_DEDUPE_WINDOW_MINUTES = 10;
 const EARTH_RADIUS_METERS = 6371000;
@@ -335,6 +330,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       now,
       logger,
       geocodeMissingCoordinates: env.NODE_ENV !== "production",
+      geocodeMissingCoordinates: env.NODE_ENV !== "production",
     });
   };
 
@@ -352,13 +348,34 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     }
 
     void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
+  const autoIngestTenantId =
+    env.MEETING_GUIDE_DEFAULT_TENANT_ID ??
+    (env.NODE_ENV !== "production" && env.ENABLE_DEV_AUTH ? "tenant-a" : undefined);
+
+  if (env.MEETING_GUIDE_AUTO_INGEST && autoIngestTenantId) {
+    if (!env.MEETING_GUIDE_DEFAULT_TENANT_ID && env.NODE_ENV !== "production") {
+      logger.warn("meeting_guide.config.dev_default_tenant_fallback", {
+        tenantId: autoIngestTenantId,
+        message:
+          "MEETING_GUIDE_DEFAULT_TENANT_ID not set; using tenant-a fallback for dev auto-ingest.",
+      });
+    }
+
+    void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
       logger.error("meeting_guide.ingest.startup_failed", {
+        tenantId: autoIngestTenantId,
         tenantId: autoIngestTenantId,
         reason: error instanceof Error ? error.message : "unknown",
       });
     });
 
     meetingGuideTimer = setInterval(() => {
+      void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
+        logger.error("meeting_guide.ingest.interval_failed", {
+          tenantId: autoIngestTenantId,
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+      });
       void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
         logger.error("meeting_guide.ingest.interval_failed", {
           tenantId: autoIngestTenantId,
@@ -1765,7 +1782,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   app.post(
     "/v1/admin/meetings/refresh",
     {
-      preHandler: [authenticateRequest],
+      preHandler: [authenticateRequest, requireRole(Role.ADMIN)],
     },
     async (request, reply) => {
       const actor = request.actor;

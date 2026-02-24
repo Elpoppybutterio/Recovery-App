@@ -27,3 +27,8 @@ declare module "react-native-maps" {
   export const Marker: ComponentType<Record<string, unknown>>;
   export default MapView;
 }
+
+declare module "*.png" {
+  const value: number;
+  export default value;
+}

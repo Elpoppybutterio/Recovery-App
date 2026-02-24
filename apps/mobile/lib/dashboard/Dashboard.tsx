@@ -1,8 +1,7 @@
-import { LinearGradient } from "expo-linear-gradient";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import Svg, { Circle, Rect } from "react-native-svg";
-import { colors, radius, spacing, typography } from "../theme/tokens";
+import { useState } from "react";
 import { GlassCard } from "../ui/GlassCard";
+import { Design } from "../ui/design";
 import type { RecoveryInsight } from "../recoveryInsights";
 
 type DashboardMeeting = {
@@ -27,10 +26,32 @@ type DashboardProps = {
   meetingBarsLast7: number[];
   sponsorAdherence: { days: number; completed: number; percent: number };
   sponsorBarsLast14: boolean[];
+  morningRoutine: {
+    streakDays: number;
+    last30CompletionPct: number;
+    todayCompletedCount: number;
+    todayTotalCount: number;
+  };
+  nightlyInventory: {
+    todayCompleted: boolean;
+    todayIssueCount: number;
+  };
+  routineInsights: {
+    averageIssuesOnMorningCompleteDays: number;
+    averageIssuesOnMorningIncompleteDays: number;
+    trend: "up" | "down" | "flat";
+  };
   onMeetingPress: (meetingId: string) => void;
   onSearchArea: () => void;
   onCallSponsor: () => void;
-  onOpenSettings: () => void;
+  onOpenMorningRoutine: () => void;
+  onOpenNightlyInventory: () => void;
+  onOpenRecoverySettings: () => void;
+  onOpenMeetings: () => void;
+  onOpenAttendance: () => void;
+  onOpenTools: () => void;
+  onOpenSoberHousingSettings: () => void;
+  onOpenProbationParoleSettings: () => void;
   onRefresh: () => void;
   onLogMeeting: () => void;
   onLearnMore: () => void;
@@ -53,10 +74,27 @@ function toTwelveHour(hhmm: string): string {
 
 function distanceLabel(distanceMeters: number | null): string {
   if (distanceMeters === null) {
-    return "Distance unavailable";
+    return "Online";
   }
-  return `${(distanceMeters / 1609.344).toFixed(1)} mi`;
+  const miles = distanceMeters / 1609.344;
+  if (miles > 0 && miles < 0.1) {
+    return "<0.1 mi";
+  }
+  return `${miles.toFixed(1)} mi`;
 }
+
+function meetingTypeLabel(meeting: DashboardMeeting): string {
+  if (meeting.format === "ONLINE") {
+    return "Online";
+  }
+  if (meeting.format === "HYBRID") {
+    return `${distanceLabel(meeting.distanceMeters)} • In-Person / Online`;
+  }
+  return `${distanceLabel(meeting.distanceMeters)} • In-Person`;
+}
+
+const SPONSOR_WISDOM_TEXT =
+  "Getting A Sponsor Is Simply A Suggestion, But So Is Pulling A Ripcord On A Parachute.";
 
 export function Dashboard({
   daysSober,
@@ -64,384 +102,611 @@ export function Dashboard({
   insight,
   locationEnabled,
   nextMeetings,
-  homeGroupMeeting,
   meetingsAttendedInNinetyDays,
   ninetyDayGoalTarget,
   ninetyDayProgressPct,
-  meetingBarsLast7,
   sponsorAdherence,
   sponsorBarsLast14,
+  morningRoutine,
+  nightlyInventory,
+  routineInsights,
   onMeetingPress,
   onSearchArea,
   onCallSponsor,
-  onOpenSettings,
+  onOpenMorningRoutine,
+  onOpenNightlyInventory,
+  onOpenRecoverySettings,
+  onOpenMeetings,
+  onOpenAttendance,
+  onOpenTools,
+  onOpenSoberHousingSettings,
+  onOpenProbationParoleSettings,
   onRefresh,
   onLogMeeting,
-  onLearnMore,
 }: DashboardProps) {
-  const graphMax = Math.max(1, ...meetingBarsLast7);
-  const barWidth = 22;
-  const barGap = 10;
-  const barsWidth = meetingBarsLast7.length * barWidth + (meetingBarsLast7.length - 1) * barGap;
-
-  const sponsorDotGap = 16;
-  const dotsWidth =
-    sponsorBarsLast14.length > 0
-      ? sponsorBarsLast14.length * 8 + (sponsorBarsLast14.length - 1) * sponsorDotGap
-      : 0;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const successRate = Math.max(0, Math.min(100, Math.round(sponsorAdherence.percent)));
+  const sponsorBars = sponsorBarsLast14.slice(-8);
+  const sponsorStreakDays = Math.max(0, sponsorAdherence.completed);
+  const upcoming = nextMeetings.slice(0, 3);
 
   return (
-    <LinearGradient colors={[colors.bgTop, colors.bgMid, colors.bgBottom]} style={styles.gradient}>
-      <View style={styles.glowTop} />
-      <View style={styles.glowBottom} />
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <GlassCard>
-          <Text style={styles.heroLabel}>Days Sober</Text>
-          <View style={styles.heroRow}>
-            <Text style={styles.heroValue}>{daysSober}</Text>
-            <View style={styles.streakPill}>
-              <Text style={styles.streakPillText}>Today</Text>
-            </View>
-          </View>
-          <Text style={styles.metaText}>Sobriety date: {sobrietyDateLabel || "Not set"}</Text>
-          <Text style={styles.insightTitle}>Body & brain today</Text>
-          <Text style={styles.insightBody}>{insight.body}</Text>
-          <Pressable onPress={onLearnMore}>
-            <Text style={styles.linkText}>Learn more</Text>
-          </Pressable>
+    <View style={styles.root}>
+      <View style={styles.topBar}>
+        <Pressable onPress={() => setMenuOpen((current) => !current)} style={styles.iconButton}>
+          <Text style={styles.iconText}>☰</Text>
+        </Pressable>
+        <View style={styles.titleWrap}>
+          <Text style={styles.appTitle}>Sober AI</Text>
+          <Text style={styles.appSubtitle}>Recovery</Text>
+        </View>
+        <Pressable onPress={onRefresh} style={styles.iconButton}>
+          <Text style={styles.iconText}>🔔</Text>
+        </Pressable>
+      </View>
+
+      {menuOpen ? (
+        <View style={styles.menuWrap}>
+          <GlassCard style={styles.menuCard}>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onOpenRecoverySettings();
+              }}
+            >
+              <Text style={styles.menuItemText}>Recovery Settings</Text>
+            </Pressable>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onOpenMeetings();
+              }}
+            >
+              <Text style={styles.menuItemText}>Meetings</Text>
+            </Pressable>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onOpenAttendance();
+              }}
+            >
+              <Text style={styles.menuItemText}>Meeting Attendance</Text>
+            </Pressable>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onOpenTools();
+              }}
+            >
+              <Text style={styles.menuItemText}>Tools</Text>
+            </Pressable>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onOpenSoberHousingSettings();
+              }}
+            >
+              <Text style={styles.menuItemText}>Sober Housing Settings</Text>
+            </Pressable>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                onOpenProbationParoleSettings();
+              }}
+            >
+              <Text style={styles.menuItemText}>Probation/Parole Settings</Text>
+            </Pressable>
+          </GlassCard>
+        </View>
+      ) : null}
+
+      <View style={styles.wave} />
+
+      <ScrollView
+        style={styles.bodyScroll}
+        contentContainerStyle={styles.bodyScrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.heroBlock}>
+          <Text style={styles.welcomeText}>Sobriety date: {sobrietyDateLabel || "Not set"}</Text>
+          <Text style={styles.daysText}>{daysSober} Days Sober</Text>
+        </View>
+
+        <GlassCard strong blurIntensity={12} style={[styles.factCard, styles.liquidGlassTile]}>
+          <Text style={styles.factHeading}>💡 Wisdom To Know The Difference</Text>
+          <View style={styles.separator} />
+          <ScrollView
+            style={styles.factScroll}
+            contentContainerStyle={styles.factScrollContent}
+            nestedScrollEnabled
+            showsVerticalScrollIndicator
+          >
+            <Text style={styles.factText}>{SPONSOR_WISDOM_TEXT}</Text>
+          </ScrollView>
         </GlassCard>
 
-        <GlassCard>
-          <View style={styles.rowBetween}>
-            <Text style={styles.sectionTitle}>Next meetings (20 mi)</Text>
-            <View
-              style={[
-                styles.statusPill,
-                {
-                  backgroundColor: locationEnabled
-                    ? "rgba(52,211,153,0.16)"
-                    : "rgba(251,113,133,0.2)",
-                },
-              ]}
-            >
-              <Text style={styles.statusPillText}>
-                Location: {locationEnabled ? "Enabled" : "Off"}
-              </Text>
+        <View style={styles.metricsRow}>
+          <GlassCard
+            strong
+            blurIntensity={12}
+            darken
+            gradientDark
+            style={[styles.metricCard, styles.liquidGlassTile]}
+          >
+            <Text style={styles.metricHeading}>{ninetyDayGoalTarget} Meetings in 90 Days</Text>
+            <View style={styles.separator} />
+            <View style={styles.ringOuter}>
+              <View style={styles.ringInner}>
+                <Text style={styles.ringValue}>
+                  {meetingsAttendedInNinetyDays}/{ninetyDayGoalTarget}
+                </Text>
+                <Text style={styles.ringGoal}>{ninetyDayProgressPct}% toward your 90-day goal</Text>
+              </View>
+            </View>
+          </GlassCard>
+
+          <GlassCard
+            strong
+            blurIntensity={12}
+            darken
+            gradientDark
+            style={[styles.metricCard, styles.liquidGlassTile]}
+          >
+            <Text style={styles.metricHeading}>Sponsor Call Consistency</Text>
+            <View style={styles.separator} />
+            <Text style={styles.successText}>{successRate}% Success Rate</Text>
+            <View style={styles.barChart}>
+              {sponsorBars.map((hit, index) => (
+                <View
+                  key={`sponsor-bar-${index}`}
+                  style={[
+                    styles.chartBar,
+                    {
+                      height: hit ? 50 - (index % 3) * 6 : 30 - (index % 2) * 4,
+                      backgroundColor: hit ? "rgba(228,246,102,0.94)" : "rgba(255,255,255,0.65)",
+                    },
+                  ]}
+                />
+              ))}
+            </View>
+            <Pressable style={styles.callNowButton} onPress={onCallSponsor}>
+              <Text style={styles.callNowText}>📞 Call Now</Text>
+            </Pressable>
+            <Text style={styles.streakLabel}>{sponsorStreakDays} day streak</Text>
+          </GlassCard>
+        </View>
+
+        <View style={styles.metricsRow}>
+          <GlassCard strong blurIntensity={12} style={[styles.metricCard, styles.liquidGlassTile]}>
+            <Text style={styles.metricHeading}>Morning Routine</Text>
+            <View style={styles.separator} />
+            <Text style={styles.metricMeta}>
+              Today: {morningRoutine.todayCompletedCount}/{morningRoutine.todayTotalCount}
+            </Text>
+            <Text style={styles.metricMeta}>Streak: {morningRoutine.streakDays} days</Text>
+            <Text style={styles.metricMeta}>
+              Last 30 days: {morningRoutine.last30CompletionPct}%
+            </Text>
+            <Pressable style={styles.callNowButton} onPress={onOpenMorningRoutine}>
+              <Text style={styles.callNowText}>Open Morning Routine</Text>
+            </Pressable>
+          </GlassCard>
+
+          <GlassCard strong blurIntensity={12} style={[styles.metricCard, styles.liquidGlassTile]}>
+            <Text style={styles.metricHeading}>Nightly Inventory</Text>
+            <View style={styles.separator} />
+            <Text style={styles.metricMeta}>
+              Today: {nightlyInventory.todayCompleted ? "Completed" : "Not completed"}
+            </Text>
+            <Text style={styles.metricMeta}>Issues logged: {nightlyInventory.todayIssueCount}</Text>
+            <Text style={styles.metricMeta}>
+              Trend: {routineInsights.trend.toUpperCase()} (
+              {routineInsights.averageIssuesOnMorningCompleteDays} vs{" "}
+              {routineInsights.averageIssuesOnMorningIncompleteDays})
+            </Text>
+            <Pressable style={styles.callNowButton} onPress={onOpenNightlyInventory}>
+              <Text style={styles.callNowText}>Open Nightly Inventory</Text>
+            </Pressable>
+          </GlassCard>
+        </View>
+
+        <GlassCard strong blurIntensity={12} style={[styles.upcomingCard, styles.liquidGlassTile]}>
+          <View style={styles.upcomingHeader}>
+            <Text style={styles.upcomingTitle}>Upcoming Meetings</Text>
+            <View style={styles.dotRow}>
+              <View style={styles.dot} />
+              <View style={styles.dot} />
+              <View style={styles.dot} />
             </View>
           </View>
-          {nextMeetings.slice(0, 3).map((meeting) => (
+
+          {upcoming.map((meeting, index) => (
             <Pressable
               key={meeting.id}
-              style={styles.meetingRow}
+              style={styles.meetingItem}
               onPress={() => onMeetingPress(meeting.id)}
             >
-              <View style={styles.meetingTimeCol}>
-                <Text style={styles.meetingTime}>{toTwelveHour(meeting.startsAtLocal)}</Text>
+              <View style={[styles.meetingIcon, index === 2 ? styles.meetingIconPink : null]}>
+                <Text style={styles.meetingIconText}>
+                  {index === 1 ? "🔒" : index === 2 ? "✦" : "↪"}
+                </Text>
               </View>
-              <View style={styles.meetingBodyCol}>
+              <View style={styles.meetingTextCol}>
                 <Text numberOfLines={1} style={styles.meetingName}>
                   {meeting.name}
                 </Text>
                 <Text numberOfLines={1} style={styles.meetingMeta}>
-                  {distanceLabel(meeting.distanceMeters)} •{" "}
-                  {meeting.format === "IN_PERSON" ? "In-person" : "Online"}
+                  {meetingTypeLabel(meeting)}
                 </Text>
               </View>
-              <Text style={styles.chevron}>›</Text>
+              <Text style={styles.meetingTime}>{toTwelveHour(meeting.startsAtLocal)}</Text>
             </Pressable>
           ))}
-          {nextMeetings.length === 0 ? (
-            <>
-              <Text style={styles.emptyText}>No upcoming meetings within 20 miles.</Text>
-              <Pressable style={styles.secondaryAction} onPress={onSearchArea}>
-                <Text style={styles.secondaryActionText}>Search this area</Text>
-              </Pressable>
-            </>
+
+          {upcoming.length === 0 ? (
+            <Pressable style={styles.emptyMeetingCta} onPress={onSearchArea}>
+              <Text style={styles.emptyMeetingText}>
+                {locationEnabled
+                  ? "No upcoming meetings in your area. Tap to search this area."
+                  : "Location is off. Tap to refresh and try again."}
+              </Text>
+            </Pressable>
           ) : null}
-        </GlassCard>
 
-        <GlassCard>
-          <Text style={styles.sectionTitle}>Home Group</Text>
-          {homeGroupMeeting ? (
-            <>
-              <Text style={styles.homeGroupName}>{homeGroupMeeting.name}</Text>
-              <Text style={styles.meetingMeta}>
-                {toTwelveHour(homeGroupMeeting.startsAtLocal)} •{" "}
-                {distanceLabel(homeGroupMeeting.distanceMeters)}
-              </Text>
-              <Text numberOfLines={2} style={styles.meetingMeta}>
-                {homeGroupMeeting.address}
-              </Text>
-            </>
-          ) : (
-            <Text style={styles.emptyText}>No home group selected yet.</Text>
-          )}
-        </GlassCard>
-
-        <GlassCard>
-          <Text style={styles.sectionTitle}>90 Day Meeting Goal</Text>
-          <Text style={styles.metricText}>
-            {meetingsAttendedInNinetyDays} / {ninetyDayGoalTarget}
-          </Text>
-          <View style={styles.progressTrack}>
-            <View
-              style={[
-                styles.progressFill,
-                { width: `${Math.max(0, Math.min(100, ninetyDayProgressPct))}%` },
-              ]}
-            />
-          </View>
-          <Text style={styles.meetingMeta}>
-            {daysSober < 90
-              ? "Aim for 1 meeting today. Small wins compound."
-              : "Keep momentum. Consistency protects recovery."}
-          </Text>
-          <Svg width={barsWidth} height={52}>
-            {meetingBarsLast7.map((value, index) => {
-              const ratio = Math.max(0.1, value / graphMax);
-              const height = Math.round(36 * ratio);
-              const x = index * (barWidth + barGap);
-              const y = 46 - height;
-              return (
-                <Rect
-                  key={`meeting-bar-${index}`}
-                  x={x}
-                  y={y}
-                  width={barWidth}
-                  height={height}
-                  rx={6}
-                  fill={colors.neonLavender}
-                  opacity={0.92}
-                />
-              );
-            })}
-          </Svg>
-        </GlassCard>
-
-        <GlassCard>
-          <Text style={styles.sectionTitle}>Sponsor Call Consistency</Text>
-          <Text style={styles.metricText}>{sponsorAdherence.percent.toFixed(1)}%</Text>
-          <Text style={styles.meetingMeta}>
-            {sponsorAdherence.completed} calls / {sponsorAdherence.days} days
-          </Text>
-          <Svg width={dotsWidth} height={20}>
-            {sponsorBarsLast14.map((value, index) => (
-              <Circle
-                key={`sponsor-dot-${index}`}
-                cx={index * (8 + sponsorDotGap) + 4}
-                cy={10}
-                r={4}
-                fill={value ? colors.success : "rgba(255,255,255,0.28)"}
-              />
-            ))}
-          </Svg>
-          <Pressable style={styles.primaryAction} onPress={onCallSponsor}>
-            <Text style={styles.primaryActionText}>Call sponsor</Text>
+          <Pressable style={styles.logMeetingButton} onPress={onLogMeeting}>
+            <Text style={styles.logMeetingText}>☑ Log Meeting</Text>
           </Pressable>
         </GlassCard>
 
-        <GlassCard>
-          <Text style={styles.sectionTitle}>Quick Actions</Text>
-          <View style={styles.quickActionsRow}>
-            <Pressable style={styles.secondaryAction} onPress={onOpenSettings}>
-              <Text style={styles.secondaryActionText}>Settings</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryAction} onPress={onRefresh}>
-              <Text style={styles.secondaryActionText}>Refresh</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryAction} onPress={onLogMeeting}>
-              <Text style={styles.secondaryActionText}>Log meeting</Text>
-            </Pressable>
+        <GlassCard strong blurIntensity={12} style={[styles.recoveryCard, styles.liquidGlassTile]}>
+          <View style={styles.upcomingHeader}>
+            <Text style={styles.recoveryTitle}>Physical Recovery</Text>
+            <View style={styles.dotRow}>
+              <View style={styles.dot} />
+              <View style={styles.dot} />
+              <View style={styles.dot} />
+            </View>
           </View>
+          <Text style={styles.recoveryText}>{insight.body}</Text>
         </GlassCard>
       </ScrollView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  gradient: {
-    borderRadius: radius.lg,
-    overflow: "hidden",
-    padding: spacing.sm,
-    gap: spacing.sm,
-  },
-  glowTop: {
-    position: "absolute",
-    top: -120,
-    right: -100,
-    width: 240,
-    height: 240,
-    borderRadius: 999,
-    backgroundColor: "rgba(196,181,253,0.26)",
-  },
-  glowBottom: {
-    position: "absolute",
-    bottom: -130,
-    left: -120,
-    width: 260,
-    height: 260,
-    borderRadius: 999,
-    backgroundColor: "rgba(240,171,252,0.22)",
-  },
-  content: {
-    gap: spacing.md,
-    paddingBottom: spacing.xl,
-  },
-  heroLabel: {
-    color: colors.textSecondary,
-    fontSize: typography.small,
-    fontWeight: typography.weightSemi,
-  },
-  heroRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  heroValue: {
-    color: colors.textPrimary,
-    fontSize: typography.h1,
-    fontWeight: typography.weightBold,
-    lineHeight: 44,
-  },
-  streakPill: {
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-    backgroundColor: "rgba(255,255,255,0.12)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.24)",
-  },
-  streakPillText: {
-    color: colors.textPrimary,
-    fontSize: typography.tiny,
-    fontWeight: typography.weightSemi,
-  },
-  insightTitle: {
-    color: colors.textPrimary,
-    fontWeight: typography.weightSemi,
-    fontSize: typography.body,
-  },
-  insightBody: {
-    color: colors.textSecondary,
-    fontSize: typography.body,
-    lineHeight: 20,
-  },
-  metaText: {
-    color: colors.textMuted,
-    fontSize: typography.small,
-  },
-  linkText: {
-    color: colors.neonCyan,
-    fontSize: typography.small,
-    fontWeight: typography.weightSemi,
-  },
-  rowBetween: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: spacing.sm,
-  },
-  sectionTitle: {
-    color: colors.textPrimary,
-    fontSize: typography.h3,
-    fontWeight: typography.weightBold,
-  },
-  statusPill: {
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-  },
-  statusPillText: {
-    color: colors.textPrimary,
-    fontSize: typography.tiny,
-    fontWeight: typography.weightSemi,
-  },
-  meetingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(255,255,255,0.12)",
-    paddingTop: spacing.sm,
-  },
-  meetingTimeCol: {
-    minWidth: 80,
-  },
-  meetingBodyCol: {
+  root: {
     flex: 1,
-    gap: 2,
   },
-  meetingTime: {
-    color: colors.textPrimary,
-    fontSize: typography.body,
-    fontWeight: typography.weightBold,
+  topBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingTop: 2,
+    paddingHorizontal: 6,
   },
-  meetingName: {
-    color: colors.textPrimary,
-    fontSize: typography.body,
-    fontWeight: typography.weightSemi,
-  },
-  meetingMeta: {
-    color: colors.textSecondary,
-    fontSize: typography.small,
-  },
-  chevron: {
-    color: colors.neonLavender,
-    fontSize: 20,
-    fontWeight: typography.weightBold,
-  },
-  emptyText: {
-    color: colors.textSecondary,
-    fontSize: typography.body,
-  },
-  metricText: {
-    color: colors.textPrimary,
-    fontSize: 30,
-    fontWeight: typography.weightBold,
-  },
-  progressTrack: {
-    height: 10,
-    borderRadius: radius.pill,
-    backgroundColor: "rgba(255,255,255,0.16)",
-    overflow: "hidden",
-  },
-  progressFill: {
-    height: "100%",
-    backgroundColor: colors.purple400,
-  },
-  homeGroupName: {
-    color: colors.textPrimary,
-    fontSize: typography.body,
-    fontWeight: typography.weightBold,
-  },
-  primaryAction: {
-    borderRadius: radius.pill,
+  iconButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: spacing.sm,
-    backgroundColor: colors.purple600,
-  },
-  primaryActionText: {
-    color: colors.textPrimary,
-    fontWeight: typography.weightSemi,
-    fontSize: typography.body,
-  },
-  quickActionsRow: {
-    flexDirection: "row",
-    gap: spacing.sm,
-  },
-  secondaryAction: {
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    backgroundColor: "rgba(255,255,255,0.08)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.24)",
+    borderColor: "rgba(255,255,255,0.2)",
+  },
+  iconText: {
+    color: Design.color.textPrimary,
+    fontSize: 20,
+    fontWeight: "700",
+  },
+  appTitle: {
+    color: Design.color.textPrimary,
+    fontSize: 24,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  titleWrap: {
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 1,
+  },
+  appSubtitle: {
+    color: Design.color.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  wave: {
+    height: 3,
+    borderRadius: 99,
+    backgroundColor: "rgba(48, 3, 106, 0.5)",
+    marginHorizontal: 4,
+  },
+  menuWrap: {
+    position: "absolute",
+    top: 48,
+    left: 6,
+    zIndex: 20,
+    width: 260,
+  },
+  menuCard: {
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    gap: 2,
+  },
+  menuItem: {
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  menuItemText: {
+    color: Design.color.textPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  bodyScroll: {
+    flex: 1,
+    marginTop: 6,
+  },
+  bodyScrollContent: {
+    gap: 12,
+    paddingBottom: 10,
+  },
+  heroBlock: {
+    alignItems: "center",
+    gap: 4,
+  },
+  welcomeText: {
+    color: Design.color.textSecondary,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  daysText: {
+    color: Design.color.textPrimary,
+    fontSize: 38,
+    lineHeight: 42,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  factCard: {
+    padding: 14,
+    gap: 10,
+  },
+  liquidGlassTile: {
+    backgroundColor: "rgba(255,255,255,0.01)",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.2)",
+    borderRadius: 20,
+    shadowColor: "rgba(31,38,135,1)",
+    shadowOpacity: 0.154,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 6,
+  },
+  factHeading: {
+    color: Design.color.textPrimary,
+    fontSize: 17,
+    fontWeight: "800",
+    textAlign: "left",
+  },
+  separator: {
+    height: 1,
+    backgroundColor: "rgba(255,255,255,0.22)",
+  },
+  factText: {
+    color: Design.color.textPrimary,
+    fontSize: 15,
+    lineHeight: 23,
+    fontWeight: "600",
+  },
+  factScroll: {
+    maxHeight: 170,
+  },
+  factScrollContent: {
+    paddingBottom: 2,
+  },
+  metricsRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  metricCard: {
+    flex: 1,
+    padding: 12,
+    gap: 8,
+  },
+  metricHeading: {
+    color: Design.color.textPrimary,
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  ringOuter: {
+    alignSelf: "center",
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    borderWidth: 9,
+    borderColor: "rgba(255,255,255,0.78)",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(168,85,247,0.2)",
+  },
+  ringInner: {
+    width: 102,
+    height: 102,
+    borderRadius: 51,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 8,
+    backgroundColor: "rgba(39,12,87,0.92)",
+  },
+  ringValue: {
+    color: Design.color.textPrimary,
+    fontSize: 25,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  ringGoal: {
+    color: Design.color.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  successText: {
+    color: Design.color.textPrimary,
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  metricMeta: {
+    color: Design.color.textSecondary,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  barChart: {
+    marginTop: 2,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    height: 58,
+  },
+  chartBar: {
+    width: 12,
+    borderRadius: 3,
+  },
+  callNowButton: {
+    marginTop: 4,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.35)",
+    backgroundColor: "rgba(90,44,206,0.8)",
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  callNowText: {
+    color: Design.color.textPrimary,
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  streakLabel: {
+    color: Design.color.textSecondary,
+    fontSize: 11,
+    textAlign: "center",
+  },
+  upcomingCard: {
+    padding: 12,
+    gap: 8,
+  },
+  upcomingHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  upcomingTitle: {
+    color: Design.color.textPrimary,
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  dotRow: {
+    flexDirection: "row",
+    gap: 5,
+  },
+  dot: {
+    width: 7,
+    height: 7,
+    borderRadius: 99,
+    backgroundColor: "rgba(255,255,255,0.55)",
+  },
+  meetingItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 9,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.92)",
+  },
+  meetingIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#6D4FD8",
+  },
+  meetingIconPink: {
+    backgroundColor: "#DE56AE",
+  },
+  meetingIconText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  meetingTextCol: {
+    flex: 1,
+    gap: 1,
+  },
+  meetingName: {
+    color: "#2B1F72",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  meetingMeta: {
+    color: "#3F2E88",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  meetingTime: {
+    color: "#2F2380",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  emptyMeetingCta: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.35)",
+    padding: 12,
     backgroundColor: "rgba(255,255,255,0.08)",
   },
-  secondaryActionText: {
-    color: colors.textPrimary,
-    fontSize: typography.small,
-    fontWeight: typography.weightSemi,
+  emptyMeetingText: {
+    color: Design.color.textPrimary,
+    textAlign: "center",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  logMeetingButton: {
+    marginTop: 2,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.35)",
+    backgroundColor: "rgba(90,44,206,0.8)",
+    paddingVertical: 9,
+    alignItems: "center",
+  },
+  logMeetingText: {
+    color: Design.color.textPrimary,
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  recoveryCard: {
+    padding: 12,
+    gap: 8,
+  },
+  recoveryTitle: {
+    color: Design.color.textPrimary,
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  recoveryText: {
+    color: Design.color.textPrimary,
+    fontSize: 15,
+    lineHeight: 22,
+    fontWeight: "600",
   },
 });
