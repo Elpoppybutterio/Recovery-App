@@ -55,16 +55,23 @@ const meetingsListQuerySchema = z
     },
   );
 
-
 const meetingsNearbyQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90),
   lng: z.coerce.number().min(-180).max(180),
   radiusMiles: z.coerce.number().positive().max(200).default(20),
   format: z.enum(["in_person", "online", "any"]).default("any"),
   dayOfWeek: z.coerce.number().int().min(0).max(6).optional(),
+  when: z.enum(["upcoming", "all"]).default("upcoming"),
+  now: z.string().datetime().optional(),
   types: z.string().optional(),
-  timeFrom: z.string().regex(/^\d{2}:\d{2}$/).optional(),
-  timeTo: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  timeFrom: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .optional(),
+  timeTo: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .optional(),
   limit: z.coerce.number().int().positive().max(500).optional(),
 });
 
@@ -194,6 +201,8 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   const isManagedDb = !options.db;
   const now = options.now ?? (() => new Date());
   let meetingGuideTimer: NodeJS.Timeout | undefined;
+  let devMeetingRefreshLastRunAtMs = 0;
+  const devMeetingNearbyWarmupByTenantMs = new Map<string, number>();
 
   app.decorate("db", db);
   app.decorate("auditLogger", createAuditLogger(db));
@@ -244,7 +253,13 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     logger.warn("meeting_guide.config.empty", {
       message:
         "No Meeting Guide feeds configured. Set MEETING_GUIDE_FEEDS_JSON or MEETING_FEEDS_AA/MEETING_FEEDS_NA.",
-      developmentFallback: env.NODE_ENV !== "production" ? "builtin://billings-test" : null,
+      developmentFallback:
+        env.NODE_ENV !== "production"
+          ? [
+              "https://www.aa-montana.org/index.php?city=Billings",
+              "https://www.aa-montana.org/index.php?city=Laurel",
+            ]
+          : null,
     });
   }
 
@@ -269,17 +284,26 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         warnedNoMeetingGuideFeeds = true;
         logger.warn("meeting_guide.config.dev_fallback", {
           tenantId,
-          fallbackFeed: "builtin://billings-test",
+          fallbackFeeds: [
+            "https://www.aa-montana.org/index.php?city=Billings",
+            "https://www.aa-montana.org/index.php?city=Laurel",
+          ],
           message:
-            "Using built-in Billings test feed because no external Meeting Guide feeds are configured.",
+            "Using AA Montana city feeds because no external Meeting Guide feeds are configured.",
         });
       }
       return [
         {
-          name: "Billings Test Feed",
-          url: "builtin://billings-test",
-          entity: "Recovery Test Data",
-          entityUrl: "https://github.com/code4recovery/spec",
+          name: "AA Montana - Billings",
+          url: "https://www.aa-montana.org/index.php?city=Billings",
+          entity: "AA Montana",
+          entityUrl: "https://www.aa-montana.org",
+        },
+        {
+          name: "AA Montana - Laurel",
+          url: "https://www.aa-montana.org/index.php?city=Laurel",
+          entity: "AA Montana",
+          entityUrl: "https://www.aa-montana.org",
         },
       ];
     }
@@ -310,26 +334,37 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       configuredFeeds: feeds,
       now,
       logger,
+      geocodeMissingCoordinates: env.NODE_ENV !== "production",
     });
   };
 
-  if (env.MEETING_GUIDE_AUTO_INGEST && env.MEETING_GUIDE_DEFAULT_TENANT_ID) {
-    void runMeetingGuideIngestForTenant(env.MEETING_GUIDE_DEFAULT_TENANT_ID).catch((error) => {
+  const autoIngestTenantId =
+    env.MEETING_GUIDE_DEFAULT_TENANT_ID ??
+    (env.NODE_ENV !== "production" && env.ENABLE_DEV_AUTH ? "tenant-a" : undefined);
+
+  if (env.MEETING_GUIDE_AUTO_INGEST && autoIngestTenantId) {
+    if (!env.MEETING_GUIDE_DEFAULT_TENANT_ID && env.NODE_ENV !== "production") {
+      logger.warn("meeting_guide.config.dev_default_tenant_fallback", {
+        tenantId: autoIngestTenantId,
+        message:
+          "MEETING_GUIDE_DEFAULT_TENANT_ID not set; using tenant-a fallback for dev auto-ingest.",
+      });
+    }
+
+    void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
       logger.error("meeting_guide.ingest.startup_failed", {
-        tenantId: env.MEETING_GUIDE_DEFAULT_TENANT_ID,
+        tenantId: autoIngestTenantId,
         reason: error instanceof Error ? error.message : "unknown",
       });
     });
 
     meetingGuideTimer = setInterval(() => {
-      void runMeetingGuideIngestForTenant(env.MEETING_GUIDE_DEFAULT_TENANT_ID as string).catch(
-        (error) => {
-          logger.error("meeting_guide.ingest.interval_failed", {
-            tenantId: env.MEETING_GUIDE_DEFAULT_TENANT_ID,
-            reason: error instanceof Error ? error.message : "unknown",
-          });
-        },
-      );
+      void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
+        logger.error("meeting_guide.ingest.interval_failed", {
+          tenantId: autoIngestTenantId,
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+      });
     }, env.MEETING_GUIDE_REFRESH_INTERVAL_MS);
   }
 
@@ -991,8 +1026,92 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         },
       );
 
+      let scopedMeetings = meetings;
+      if (
+        scopedMeetings.length === 0 &&
+        env.NODE_ENV !== "production" &&
+        env.ENABLE_DEV_AUTH &&
+        isDevAuthHeader(request.headers.authorization)
+      ) {
+        const minWarmupIntervalMs = 30_000;
+        const lastWarmupMs = devMeetingNearbyWarmupByTenantMs.get(actor.tenantId) ?? 0;
+        const elapsedMs = now().getTime() - lastWarmupMs;
+        if (elapsedMs >= minWarmupIntervalMs) {
+          devMeetingNearbyWarmupByTenantMs.set(actor.tenantId, now().getTime());
+          try {
+            const ingestResult = await runMeetingGuideIngestForTenant(actor.tenantId);
+            logger.info("meeting_guide.nearby.dev_warmup", {
+              tenantId: actor.tenantId,
+              ...ingestResult,
+            });
+
+            scopedMeetings = await tenantRepositories.meetingGuide.nearby(
+              actor,
+              {
+                lat: parsedQuery.data.lat,
+                lng: parsedQuery.data.lng,
+                radiusMiles: parsedQuery.data.radiusMiles,
+              },
+              {
+                format: parsedQuery.data.format,
+                dayOfWeek: parsedQuery.data.dayOfWeek,
+                types: typeFilters,
+                timeFrom: parsedQuery.data.timeFrom,
+                timeTo: parsedQuery.data.timeTo,
+                limit: parsedQuery.data.limit,
+              },
+            );
+          } catch (error) {
+            logger.error("meeting_guide.nearby.dev_warmup_failed", {
+              tenantId: actor.tenantId,
+              reason: error instanceof Error ? error.message : "unknown",
+            });
+          }
+        }
+      }
+
+      const parseMinutesFromHhmm = (value: string | null): number => {
+        if (!value) {
+          return Number.POSITIVE_INFINITY;
+        }
+        const match = value.match(/^(\d{2}):(\d{2})$/);
+        if (!match) {
+          return Number.POSITIVE_INFINITY;
+        }
+        return Number(match[1]) * 60 + Number(match[2]);
+      };
+
+      let filteredMeetings = scopedMeetings;
+      if (parsedQuery.data.when === "upcoming" && parsedQuery.data.dayOfWeek !== undefined) {
+        const referenceNow = parsedQuery.data.now ? new Date(parsedQuery.data.now) : now();
+        if (
+          !Number.isNaN(referenceNow.getTime()) &&
+          parsedQuery.data.dayOfWeek === referenceNow.getDay()
+        ) {
+          const nowMinutes = referenceNow.getHours() * 60 + referenceNow.getMinutes();
+          filteredMeetings = filteredMeetings.filter(
+            (meeting) => parseMinutesFromHhmm(meeting.time) >= nowMinutes,
+          );
+        }
+      }
+
+      filteredMeetings = [...filteredMeetings].sort((left, right) => {
+        if (parsedQuery.data.dayOfWeek !== undefined) {
+          const byTime = parseMinutesFromHhmm(left.time) - parseMinutesFromHhmm(right.time);
+          if (byTime !== 0) {
+            return byTime;
+          }
+        }
+        const leftDistance = left.distance_meters ?? Number.POSITIVE_INFINITY;
+        const rightDistance = right.distance_meters ?? Number.POSITIVE_INFINITY;
+        if (leftDistance !== rightDistance) {
+          return leftDistance - rightDistance;
+        }
+        return left.name.localeCompare(right.name);
+      });
+
       return {
-        meetings: meetings.map((meeting) => ({
+        meetings: filteredMeetings.map((meeting) => ({
           id: meeting.id,
           name: meeting.name,
           address: meeting.formatted_address ?? meeting.address ?? "Address unavailable",
@@ -1643,9 +1762,6 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     return result;
   };
 
-  const canBypassMeetingRefreshAdmin = (authorization: unknown): boolean =>
-    env.NODE_ENV !== "production" && isDevAuthHeader(authorization);
-
   app.post(
     "/v1/admin/meetings/refresh",
     {
@@ -1658,134 +1774,152 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         return;
       }
 
-      const isAdmin = actor.roles.includes(Role.ADMIN);
-      const allowDevBypass = canBypassMeetingRefreshAdmin(request.headers.authorization);
-      if (!isAdmin && !allowDevBypass) {
-        reply.code(403).send({ error: "forbidden", message: `Requires role: ${Role.ADMIN}` });
-        return;
-      }
-
       const result = await runMeetingGuideRefreshForActor(actor, "meeting_guide.refresh");
       return { result };
     },
   );
 
-  app.post(
-    "/v1/dev/meetings/refresh",
-    {
-      preHandler: [authenticateRequest],
-    },
-    async (request, reply) => {
-      const actor = request.actor;
-      if (!actor) {
-        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
-        return;
-      }
+  if (env.ENABLE_DEV_AUTH) {
+    app.post(
+      "/v1/dev/meetings/refresh",
+      {
+        preHandler: [authenticateRequest],
+      },
+      async (request, reply) => {
+        const actor = request.actor;
+        if (!actor) {
+          reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+          return;
+        }
 
-      if (!canBypassMeetingRefreshAdmin(request.headers.authorization)) {
-        reply.code(403).send({
-          error: "forbidden",
-          message:
-            "Dev meetings refresh is only available for DEV auth in non-production environments.",
-        });
-        return;
-      }
+        if (!isDevAuthHeader(request.headers.authorization)) {
+          reply.code(403).send({
+            error: "forbidden",
+            message: "Dev meetings refresh requires Authorization: Bearer DEV_<userId>.",
+          });
+          return;
+        }
 
-      const result = await runMeetingGuideRefreshForActor(actor, "meeting_guide.refresh.dev");
-      return { result };
-    },
-  );
+        const elapsedMs = now().getTime() - devMeetingRefreshLastRunAtMs;
+        const minIntervalMs = 30_000;
+        if (elapsedMs >= 0 && elapsedMs < minIntervalMs) {
+          const retryAfterSeconds = Math.ceil((minIntervalMs - elapsedMs) / 1000);
+          reply.code(429).send({
+            error: "too_many_requests",
+            message: `Dev meetings refresh cooldown active. Retry in ${retryAfterSeconds}s.`,
+          });
+          return;
+        }
 
-  app.get(
-    "/v1/dev/meetings/status",
-    {
-      preHandler: [authenticateRequest],
-    },
-    async (request, reply) => {
-      const actor = request.actor;
-      if (!actor) {
-        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
-        return;
-      }
+        devMeetingRefreshLastRunAtMs = now().getTime();
+        const result = await runMeetingGuideRefreshForActor(actor, "meeting_guide.refresh.dev");
+        const feeds = await repositories.meetingFeeds.listActive(actor.tenantId);
+        const errors = Array.from(
+          new Set(
+            feeds
+              .map((feed) => feed.last_error)
+              .filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
+          ),
+        );
 
-      if (!canBypassMeetingRefreshAdmin(request.headers.authorization)) {
-        reply.code(403).send({
-          error: "forbidden",
-          message:
-            "Dev meetings status is only available for DEV auth in non-production environments.",
-        });
-        return;
-      }
+        return {
+          feedsProcessed: result.feedsAttempted,
+          meetingsImported: result.meetingsImported,
+          errors,
+        };
+      },
+    );
 
-      const parsedQuery = meetingsIngestStatusQuerySchema.safeParse(request.query ?? {});
-      if (!parsedQuery.success) {
-        reply.code(400).send({
-          error: "bad_request",
-          message: "Invalid meetings status query",
-          details: parsedQuery.error.flatten(),
-        });
-        return;
-      }
+    app.get(
+      "/v1/dev/meetings/status",
+      {
+        preHandler: [authenticateRequest],
+      },
+      async (request, reply) => {
+        const actor = request.actor;
+        if (!actor) {
+          reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+          return;
+        }
 
-      const feeds = await repositories.meetingFeeds.listActive(actor.tenantId);
-      const counts = await db.query<{
-        total_meetings: number;
-        meetings_with_coordinates: number;
-        meetings_without_coordinates: number;
-      }>(
-        `
-          SELECT
-            COUNT(*)::int AS total_meetings,
-            COUNT(*) FILTER (WHERE lat IS NOT NULL AND lng IS NOT NULL)::int AS meetings_with_coordinates,
-            COUNT(*) FILTER (WHERE lat IS NULL OR lng IS NULL)::int AS meetings_without_coordinates
-          FROM meeting_guide_meetings
-          WHERE tenant_id = $1
-        `,
-        [actor.tenantId],
-      );
+        if (!isDevAuthHeader(request.headers.authorization)) {
+          reply.code(403).send({
+            error: "forbidden",
+            message: "Dev meetings status requires Authorization: Bearer DEV_<userId>.",
+          });
+          return;
+        }
 
-      const nearbySample = await tenantRepositories.meetingGuide.nearby(
-        actor,
-        {
-          lat: parsedQuery.data.lat,
-          lng: parsedQuery.data.lng,
-          radiusMiles: parsedQuery.data.radiusMiles,
-        },
-        {
-          format: "in_person",
-          limit: 5,
-        },
-      );
+        const parsedQuery = meetingsIngestStatusQuerySchema.safeParse(request.query ?? {});
+        if (!parsedQuery.success) {
+          reply.code(400).send({
+            error: "bad_request",
+            message: "Invalid meetings status query",
+            details: parsedQuery.error.flatten(),
+          });
+          return;
+        }
 
-      return {
-        tenantId: actor.tenantId,
-        query: parsedQuery.data,
-        feedsCount: feeds.length,
-        feeds: feeds.map((feed) => ({
-          id: feed.id,
-          name: feed.name,
-          url: feed.url,
-          lastFetchedAt: feed.last_fetched_at,
-          lastError: feed.last_error,
-        })),
-        meetingStats: counts.rows[0] ?? {
-          total_meetings: 0,
-          meetings_with_coordinates: 0,
-          meetings_without_coordinates: 0,
-        },
-        nearbySample: nearbySample.map((meeting) => ({
-          id: meeting.id,
-          name: meeting.name,
-          lat: meeting.lat,
-          lng: meeting.lng,
-          time: meeting.time,
-          day: meeting.day,
-          distanceMeters: meeting.distance_meters,
-          format: meeting.inferred_format,
-        })),
-      };
-    },
-  );
+        const feeds = await repositories.meetingFeeds.listActive(actor.tenantId);
+        const counts = await db.query<{
+          total_meetings: number;
+          meetings_with_coordinates: number;
+          meetings_without_coordinates: number;
+        }>(
+          `
+            SELECT
+              COUNT(*)::int AS total_meetings,
+              COUNT(*) FILTER (WHERE lat IS NOT NULL AND lng IS NOT NULL)::int AS meetings_with_coordinates,
+              COUNT(*) FILTER (WHERE lat IS NULL OR lng IS NULL)::int AS meetings_without_coordinates
+            FROM meeting_guide_meetings
+            WHERE tenant_id = $1
+          `,
+          [actor.tenantId],
+        );
+
+        const nearbySample = await tenantRepositories.meetingGuide.nearby(
+          actor,
+          {
+            lat: parsedQuery.data.lat,
+            lng: parsedQuery.data.lng,
+            radiusMiles: parsedQuery.data.radiusMiles,
+          },
+          {
+            format: "in_person",
+            limit: 5,
+          },
+        );
+
+        return {
+          tenantId: actor.tenantId,
+          query: parsedQuery.data,
+          feedsCount: feeds.length,
+          feeds: feeds.map((feed) => ({
+            id: feed.id,
+            name: feed.name,
+            url: feed.url,
+            lastFetchedAt: feed.last_fetched_at,
+            lastError: feed.last_error,
+          })),
+          meetingStats: counts.rows[0] ?? {
+            total_meetings: 0,
+            meetings_with_coordinates: 0,
+            meetings_without_coordinates: 0,
+          },
+          nearbySample: nearbySample.map((meeting) => ({
+            id: meeting.id,
+            name: meeting.name,
+            lat: meeting.lat,
+            lng: meeting.lng,
+            time: meeting.time,
+            day: meeting.day,
+            distanceMeters: meeting.distance_meters,
+            format: meeting.inferred_format,
+          })),
+        };
+      },
+    );
+  }
 
   return app;
 }

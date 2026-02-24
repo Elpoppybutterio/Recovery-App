@@ -6,19 +6,18 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
+      "bundleIdentifier": "com.recovery.accountability",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Location is used to show nearby meetings and arrival prompts."
       }
     },
     "assetBundlePatterns": ["**/*"],
     "extra": {
-      "apiUrl": "http://192.168.0.73:3001",
+      "apiUrl": "http://localhost:3031",
       "devAuthUserId": "enduser-a1",
       "devUserDisplayName": "DEV User",
       "meetingFeedUrl": "",
-      "supervisionEnabled": false,
-      "fallbackLat": 33.755,
-      "fallbackLng": -84.39
+      "supervisionEnabled": false
     }
   }
 }
