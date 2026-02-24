@@ -33,6 +33,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 
 - User features: sponsor contact config, sponsor enable toggle + reminder toggle restructuring, single-source sponsor status hygiene, simulator-safe call-now handling, reliable location enable messaging, and meeting drive reminder planning.
 - Recovery UX v2: setup wizard flow, dashboard-first home experience, purple liquid-glass cards, and local recovery analytics (days sober, 90-day progress, sponsor adherence).
+- Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
 - Mobile dev correctness: API URL alignment (`localhost:3031`), no hardcoded SF map origin defaults, nearby-meetings request diagnostics, and map search-origin visibility.
 - API dev tooling: DEV-auth-gated meeting ingest trigger (`POST /v1/dev/meetings/refresh`) with cooldown guard for local workflows.
 - API endpoints: `GET /v1/me/sponsor`, `PUT /v1/me/sponsor`, `POST /v1/dev/meetings/refresh`.
@@ -44,3 +45,4 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - [ ] Import AA/NA meetings feeds (Meeting Guide spec) and return meetings within 20-mile radius when location is available.
 - [ ] Meeting Guide distributed feed ingest + tenant-scoped `/v1/meetings/nearby` search (20-mile default) with map/list toggle UX.
 - [ ] Dashboard + Setup Wizard + upcoming-meetings logic hardening across timezones and tenant policy controls.
+- [ ] Tools: AM routine + Nightly inventory + insights (local-first storage, optional API sync later).

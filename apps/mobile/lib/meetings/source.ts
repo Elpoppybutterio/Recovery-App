@@ -239,7 +239,7 @@ function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecor
   };
 }
 
-function normalizeApiMeeting(value: unknown, dayOfWeek: number): MeetingRecord | null {
+function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): MeetingRecord | null {
   const input = asObject(value);
   if (!input) {
     return null;
@@ -263,7 +263,7 @@ function normalizeApiMeeting(value: unknown, dayOfWeek: number): MeetingRecord |
     name,
     address,
     startsAtLocal: toHhmm(input.startsAtLocal ?? input.startTimeLocal, "19:00"),
-    dayOfWeek,
+    dayOfWeek: normalizeDayOfWeek(input.dayOfWeek ?? input.day, fallbackDayOfWeek),
     format,
     openness,
     lat,
@@ -330,8 +330,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         nearbyQuery.set("lng", String(params.lng));
         nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
         nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
-        nearbyQuery.set("when", "upcoming");
-        nearbyQuery.set("now", new Date().toISOString());
+        nearbyQuery.set("when", "all");
 
         const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
         if (__DEV__) {
