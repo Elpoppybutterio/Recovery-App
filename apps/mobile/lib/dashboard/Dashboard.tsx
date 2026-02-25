@@ -1,5 +1,5 @@
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GlassCard } from "../ui/GlassCard";
 import { Design } from "../ui/design";
 import type { RecoveryInsight } from "../recoveryInsights";
@@ -15,17 +15,27 @@ type DashboardMeeting = {
 
 type DashboardProps = {
   daysSober: number;
+  sobrietyDateIso: string | null;
   sobrietyDateLabel: string;
   insight: RecoveryInsight;
   locationEnabled: boolean;
   nextMeetings: DashboardMeeting[];
+  showingOnlineMeetingsFallback: boolean;
+  sponsorEnabled: boolean;
+  dailyChecklist: {
+    rows: Array<{ id: string; label: string; complete: boolean }>;
+    percent: number;
+    summary: string;
+  };
   homeGroupMeeting: DashboardMeeting | null;
   meetingsAttendedInNinetyDays: number;
   ninetyDayGoalTarget: number;
   ninetyDayProgressPct: number;
+  meetingsAttendedToday: {
+    count: number;
+    goal: number;
+  };
   meetingBarsLast7: number[];
-  sponsorAdherence: { days: number; completed: number; percent: number };
-  sponsorBarsLast14: boolean[];
   morningRoutine: {
     streakDays: number;
     last30CompletionPct: number;
@@ -100,20 +110,85 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
+function dailyChecklistMessage(percent: number): string {
+  if (percent <= 10) {
+    return "It's gonna be a rough one today";
+  }
+  if (percent <= 20) {
+    return "Rocketed into the 2 3/4 Dimension";
+  }
+  if (percent <= 30) {
+    return "It will be hard to get out of self";
+  }
+  if (percent <= 40) {
+    return "Your will is strong today";
+  }
+  if (percent <= 50) {
+    return "Get that Amends List out";
+  }
+  if (percent <= 60) {
+    return "Progress not Perfection";
+  }
+  if (percent <= 70) {
+    return "Higher Power has you!";
+  }
+  if (percent <= 80) {
+    return "Peace, and Serenity";
+  }
+  if (percent <= 90) {
+    return "Sober AF";
+  }
+  return "You sure you belong here?";
+}
+
+function parseSobrietyStartMs(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const dateOnlyMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnlyMatch) {
+    const year = Number(dateOnlyMatch[1]);
+    const month = Number(dateOnlyMatch[2]);
+    const day = Number(dateOnlyMatch[3]);
+    const localStart = new Date(year, month - 1, day, 0, 0, 0, 0);
+    return Number.isNaN(localStart.getTime()) ? null : localStart.getTime();
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
+function formatSobrietyTicker(startMs: number | null, nowMs: number, fallbackDays: number): string {
+  if (startMs === null || nowMs < startMs) {
+    return `${fallbackDays} Days Sober`;
+  }
+
+  const elapsedSeconds = Math.floor((nowMs - startMs) / 1000);
+  const days = Math.floor(elapsedSeconds / 86_400);
+  const hours = Math.floor((elapsedSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((elapsedSeconds % 3_600) / 60);
+  const seconds = elapsedSeconds % 60;
+  return `${days}d ${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+}
+
 const SPONSOR_WISDOM_TEXT =
   "Getting A Sponsor Is Simply A Suggestion, But So Is Pulling A Ripcord On A Parachute.";
 
 export function Dashboard({
   daysSober,
+  sobrietyDateIso,
   sobrietyDateLabel,
   insight,
   locationEnabled,
   nextMeetings,
+  showingOnlineMeetingsFallback,
+  sponsorEnabled,
+  dailyChecklist,
   meetingsAttendedInNinetyDays,
   ninetyDayGoalTarget,
   ninetyDayProgressPct,
-  sponsorAdherence,
-  sponsorBarsLast14,
+  meetingsAttendedToday,
   morningRoutine,
   nightlyInventory,
   routineInsights,
@@ -132,16 +207,46 @@ export function Dashboard({
   onLogMeeting,
 }: DashboardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const successRate = Math.max(0, Math.min(100, Math.round(sponsorAdherence.percent)));
-  const sponsorBars = sponsorBarsLast14.slice(-8);
-  const sponsorStreakDays = Math.max(0, sponsorAdherence.completed);
+  const [hoveredTileId, setHoveredTileId] = useState<string | null>(null);
+  const [tickerNowMs, setTickerNowMs] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTickerNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const sobrietyTicker = formatSobrietyTicker(
+    parseSobrietyStartMs(sobrietyDateIso),
+    tickerNowMs,
+    daysSober,
+  );
+  const dailyChecklistRows = dailyChecklist.rows;
+  const dailyChecklistPct = clampPercent(dailyChecklist.percent);
+  const dailyChecklistSummary = dailyChecklist.summary;
+  const dailyChecklistInsight = dailyChecklistMessage(dailyChecklistPct);
   const upcoming = nextMeetings.slice(0, 3);
   const todayTotal = Math.max(1, morningRoutine.todayTotalCount);
   const todayCompleted = Math.max(0, Math.min(morningRoutine.todayCompletedCount, todayTotal));
   const morningCompletionPct = clampPercent((todayCompleted / todayTotal) * 100);
-  const morning30DayPct = clampPercent(morningRoutine.last30CompletionPct);
   const morningSegmentCount = Math.min(10, todayTotal);
   const morningFilledSegments = Math.round((todayCompleted / todayTotal) * morningSegmentCount);
+  const meetingsTodayGoal = Math.max(1, meetingsAttendedToday.goal);
+  const meetingsTodayCount = Math.max(0, meetingsAttendedToday.count);
+  const meetingsTodayPct = clampPercent(
+    (Math.min(meetingsTodayCount, meetingsTodayGoal) / meetingsTodayGoal) * 100,
+  );
+  const meetingsTodayFuelColor =
+    meetingsTodayPct >= 100
+      ? "rgba(136,255,179,0.95)"
+      : meetingsTodayPct >= 67
+        ? "rgba(253,224,71,0.95)"
+        : meetingsTodayPct > 0
+          ? "rgba(251,146,60,0.95)"
+          : "rgba(255,130,160,0.9)";
+  const meetingsTodaySummary =
+    meetingsTodayCount === 1
+      ? "1 meeting attended today"
+      : `${meetingsTodayCount} meetings attended today`;
 
   const issuesOnMorningDone = Math.max(0, routineInsights.averageIssuesOnMorningCompleteDays);
   const issuesOnMorningMissed = Math.max(0, routineInsights.averageIssuesOnMorningIncompleteDays);
@@ -152,16 +257,19 @@ export function Dashboard({
     nightlyTodayIssues,
     1,
   );
-  const doneIssuesPct = (issuesOnMorningDone / nightlyScaleMax) * 100;
-  const missedIssuesPct = (issuesOnMorningMissed / nightlyScaleMax) * 100;
+  const nightlyTodayPct = (nightlyTodayIssues / nightlyScaleMax) * 100;
+  const nightlyDonePct = (issuesOnMorningDone / nightlyScaleMax) * 100;
+  const nightlyMissedPct = (issuesOnMorningMissed / nightlyScaleMax) * 100;
   const trendArrow =
     routineInsights.trend === "down" ? "↘" : routineInsights.trend === "up" ? "↗" : "→";
-  const trendLabel =
-    routineInsights.trend === "down"
-      ? "Improving"
-      : routineInsights.trend === "up"
-        ? "Rising Risk"
-        : "Stable";
+  const setTileHover = (tileId: string, hovering: boolean) => {
+    setHoveredTileId((current) => {
+      if (hovering) {
+        return tileId;
+      }
+      return current === tileId ? null : current;
+    });
+  };
 
   return (
     <View style={styles.root}>
@@ -207,7 +315,7 @@ export function Dashboard({
                   onOpenAttendance();
                 }}
               >
-                <Text style={styles.menuItemText}>Meeting Attendance</Text>
+                <Text style={styles.menuItemText}>Meetings Logged</Text>
               </Pressable>
               <Pressable
                 style={styles.menuItem}
@@ -252,225 +360,424 @@ export function Dashboard({
       >
         <View style={styles.heroBlock}>
           <Text style={styles.welcomeText}>Sobriety date: {sobrietyDateLabel || "Not set"}</Text>
-          <Text style={styles.daysText}>{daysSober} Days Sober</Text>
+          <Text style={styles.daysText}>{sobrietyTicker}</Text>
         </View>
 
-        <GlassCard strong blurIntensity={12} style={[styles.factCard, styles.liquidGlassTile]}>
-          <Text style={styles.factHeading}>💡 Wisdom To Know The Difference</Text>
-          <View style={styles.separator} />
-          <ScrollView
-            style={styles.factScroll}
-            contentContainerStyle={styles.factScrollContent}
-            nestedScrollEnabled
-            showsVerticalScrollIndicator
-          >
-            <Text style={styles.factText}>{SPONSOR_WISDOM_TEXT}</Text>
-          </ScrollView>
-        </GlassCard>
-
-        <View style={styles.metricsRow}>
+        <Pressable
+          onHoverIn={() => setTileHover("wisdom", true)}
+          onHoverOut={() => setTileHover("wisdom", false)}
+          accessible={false}
+        >
           <GlassCard
             strong
             blurIntensity={12}
-            darken
-            gradientDark
-            style={[styles.metricCard, styles.liquidGlassTile]}
+            style={[
+              styles.factCard,
+              styles.liquidGlassTile,
+              hoveredTileId === "wisdom" ? styles.liquidGlassTileHover : null,
+            ]}
           >
-            <Text style={styles.metricHeading}>{ninetyDayGoalTarget} Meetings in 90 Days</Text>
+            <Text style={styles.factHeading}>💡 Wisdom To Know The Difference</Text>
             <View style={styles.separator} />
-            <View style={styles.ringOuter}>
-              <View style={styles.ringInner}>
-                <Text style={styles.ringValue}>
-                  {meetingsAttendedInNinetyDays}/{ninetyDayGoalTarget}
-                </Text>
-                <Text style={styles.ringGoal}>{ninetyDayProgressPct}% toward your 90-day goal</Text>
+            <ScrollView
+              style={styles.factScroll}
+              contentContainerStyle={styles.factScrollContent}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator
+            >
+              <Text style={styles.factText}>{SPONSOR_WISDOM_TEXT}</Text>
+            </ScrollView>
+          </GlassCard>
+        </Pressable>
+        {sponsorEnabled ? (
+          <Pressable style={styles.callSponsorButtonBelowWisdom} onPress={onCallSponsor}>
+            <Text style={styles.callNowText}>📞 Call Sponsor</Text>
+          </Pressable>
+        ) : null}
+
+        <View style={styles.metricsRow}>
+          <Pressable
+            style={styles.metricTilePressable}
+            onHoverIn={() => setTileHover("ninety-day", true)}
+            onHoverOut={() => setTileHover("ninety-day", false)}
+            accessible={false}
+          >
+            <GlassCard
+              strong
+              blurIntensity={12}
+              darken
+              gradientDark
+              style={[
+                styles.metricCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "ninety-day" ? styles.liquidGlassTileHover : null,
+              ]}
+            >
+              <View style={styles.upcomingHeader}>
+                <Text style={styles.metricHeading}>{ninetyDayGoalTarget} Meetings in 90 Days</Text>
+                <Pressable
+                  style={styles.upcomingMoreButton}
+                  onPress={onOpenAttendance}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open meetings logged page"
+                >
+                  <View style={styles.dotRow}>
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
+                  </View>
+                </Pressable>
               </View>
-            </View>
-          </GlassCard>
-
-          <GlassCard
-            strong
-            blurIntensity={12}
-            darken
-            gradientDark
-            style={[styles.metricCard, styles.liquidGlassTile]}
-          >
-            <Text style={styles.metricHeading}>Sponsor Call Consistency</Text>
-            <View style={styles.separator} />
-            <Text style={styles.successText}>{successRate}% Success Rate</Text>
-            <View style={styles.barChart}>
-              {sponsorBars.map((hit, index) => (
-                <View
-                  key={`sponsor-bar-${index}`}
-                  style={[
-                    styles.chartBar,
-                    {
-                      height: hit ? 50 - (index % 3) * 6 : 30 - (index % 2) * 4,
-                      backgroundColor: hit ? "rgba(228,246,102,0.94)" : "rgba(255,255,255,0.65)",
-                    },
-                  ]}
-                />
-              ))}
-            </View>
-            <Pressable style={styles.callNowButton} onPress={onCallSponsor}>
-              <Text style={styles.callNowText}>📞 Call Now</Text>
-            </Pressable>
-            <Text style={styles.streakLabel}>{sponsorStreakDays} day streak</Text>
-          </GlassCard>
-        </View>
-
-        <View style={styles.metricsRow}>
-          <GlassCard strong blurIntensity={12} style={[styles.metricCard, styles.liquidGlassTile]}>
-            <Text style={styles.metricHeading}>Morning Routine</Text>
-            <View style={styles.separator} />
-            <View style={styles.metricGraphicRow}>
-              <View style={styles.miniProgressRingOuter}>
-                <View style={styles.miniProgressRingInner}>
-                  <Text style={styles.miniProgressValue}>{morning30DayPct}%</Text>
-                  <Text style={styles.miniProgressLabel}>30d</Text>
+              <View style={styles.separator} />
+              <View style={styles.ringOuter}>
+                <View style={styles.ringInner}>
+                  <Text style={styles.ringValue}>
+                    {meetingsAttendedInNinetyDays}/{ninetyDayGoalTarget}
+                  </Text>
+                  <Text style={styles.ringGoal}>
+                    {ninetyDayProgressPct}% toward your 90-day goal
+                  </Text>
                 </View>
               </View>
-              <View style={styles.metricGraphicCol}>
-                <Text style={styles.metricMeta}>Today completion</Text>
-                <View style={styles.progressSegmentsRow}>
-                  {Array.from({ length: morningSegmentCount }).map((_, index) => (
+            </GlassCard>
+          </Pressable>
+
+          <Pressable
+            style={styles.metricTilePressable}
+            onPress={onOpenAttendance}
+            onHoverIn={() => setTileHover("meetings-attended", true)}
+            onHoverOut={() => setTileHover("meetings-attended", false)}
+            accessibilityRole="button"
+            accessibilityLabel="Open meetings logged page"
+          >
+            <GlassCard
+              strong
+              blurIntensity={12}
+              darken
+              gradientDark
+              style={[
+                styles.metricCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "meetings-attended" ? styles.liquidGlassTileHover : null,
+              ]}
+            >
+              <Text style={styles.metricHeading}>Meetings Attended</Text>
+              <View style={styles.separator} />
+              <View style={styles.fuelGaugeMetaRow}>
+                <Text style={styles.successText}>
+                  {meetingsTodayCount}/{meetingsTodayGoal}
+                </Text>
+                <Text style={styles.metricMeta}>{meetingsTodayPct}%</Text>
+              </View>
+              <View style={styles.fuelGaugeShell}>
+                <View style={styles.fuelGaugeTrack}>
+                  <View
+                    style={[
+                      styles.fuelGaugeFill,
+                      { width: `${meetingsTodayPct}%`, backgroundColor: meetingsTodayFuelColor },
+                    ]}
+                  />
+                </View>
+                <View style={styles.fuelGaugeCap} />
+              </View>
+              <View style={styles.fuelGaugeScale}>
+                <Text style={styles.fuelGaugeScaleText}>E</Text>
+                <Text style={styles.fuelGaugeScaleText}>1</Text>
+                <Text style={styles.fuelGaugeScaleText}>2</Text>
+                <Text style={styles.fuelGaugeScaleText}>F</Text>
+              </View>
+              <Text style={styles.streakLabel}>{meetingsTodaySummary}</Text>
+            </GlassCard>
+          </Pressable>
+        </View>
+
+        <View style={styles.metricsRow}>
+          <Pressable
+            style={styles.metricTilePressable}
+            onHoverIn={() => setTileHover("daily-checklist", true)}
+            onHoverOut={() => setTileHover("daily-checklist", false)}
+            accessible={false}
+          >
+            <GlassCard
+              strong
+              blurIntensity={12}
+              darken
+              gradientDark
+              style={[
+                styles.metricCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "daily-checklist" ? styles.liquidGlassTileHover : null,
+              ]}
+            >
+              <Text style={styles.metricHeading}>Daily Checklist</Text>
+              <Text style={styles.dailyChecklistInsight}>{dailyChecklistInsight}</Text>
+              <View style={styles.separator} />
+              <View style={styles.dailyChecklistProgressRow}>
+                <View style={styles.dailyChecklistTrack}>
+                  <View style={[styles.dailyChecklistFill, { width: `${dailyChecklistPct}%` }]} />
+                </View>
+                <Text style={styles.dailyChecklistValue}>{dailyChecklistPct}%</Text>
+              </View>
+              <View style={styles.dailyChecklistRows}>
+                {dailyChecklistRows.map((row) => (
+                  <View key={row.id} style={styles.dailyChecklistRow}>
                     <View
-                      key={`morning-segment-${index}`}
                       style={[
-                        styles.progressSegment,
-                        index < morningFilledSegments ? styles.progressSegmentFilled : null,
+                        styles.nightlyStatusDot,
+                        row.complete ? styles.nightlyStatusDotDone : null,
                       ]}
                     />
-                  ))}
-                </View>
-                <Text style={styles.metricMeta}>
-                  {todayCompleted}/{todayTotal} • {morningCompletionPct}%
-                </Text>
-                <View style={styles.streakPill}>
-                  <Text style={styles.streakPillText}>{morningRoutine.streakDays} day streak</Text>
-                </View>
+                    <Text style={styles.dailyChecklistLabel}>{row.label}</Text>
+                    <Text style={styles.dailyChecklistStatus}>
+                      {row.complete ? "Done" : "Pending"}
+                    </Text>
+                  </View>
+                ))}
               </View>
-            </View>
-            <Pressable style={styles.callNowButton} onPress={onOpenMorningRoutine}>
-              <Text style={styles.callNowText}>Open Morning Routine</Text>
-            </Pressable>
-          </GlassCard>
-
-          <GlassCard strong blurIntensity={12} style={[styles.metricCard, styles.liquidGlassTile]}>
-            <Text style={styles.metricHeading}>Nightly Inventory</Text>
-            <View style={styles.separator} />
-            <View style={styles.nightlyStatusRow}>
-              <View
-                style={[
-                  styles.nightlyStatusDot,
-                  nightlyInventory.todayCompleted ? styles.nightlyStatusDotDone : null,
-                ]}
-              />
-              <Text style={styles.metricMeta}>
-                {nightlyInventory.todayCompleted ? "Today completed" : "Today pending"} •{" "}
-                {nightlyTodayIssues} issues
-              </Text>
-              <View
-                style={[
-                  styles.trendBadge,
-                  routineInsights.trend === "down"
-                    ? styles.trendBadgeDown
-                    : routineInsights.trend === "up"
-                      ? styles.trendBadgeUp
-                      : styles.trendBadgeFlat,
-                ]}
-              >
-                <Text style={styles.trendBadgeText}>
-                  {trendArrow} {trendLabel}
-                </Text>
-              </View>
-            </View>
-            <View style={styles.comparisonRow}>
-              <Text style={styles.comparisonLabel}>Morning done</Text>
-              <View style={styles.comparisonTrack}>
-                <View style={[styles.comparisonFillDone, { width: `${doneIssuesPct}%` }]} />
-              </View>
-              <Text style={styles.comparisonValue}>{issuesOnMorningDone.toFixed(1)}</Text>
-            </View>
-            <View style={styles.comparisonRow}>
-              <Text style={styles.comparisonLabel}>Morning missed</Text>
-              <View style={styles.comparisonTrack}>
-                <View style={[styles.comparisonFillMissed, { width: `${missedIssuesPct}%` }]} />
-              </View>
-              <Text style={styles.comparisonValue}>{issuesOnMorningMissed.toFixed(1)}</Text>
-            </View>
-            <Pressable style={styles.callNowButton} onPress={onOpenNightlyInventory}>
-              <Text style={styles.callNowText}>Open Nightly Inventory</Text>
-            </Pressable>
-          </GlassCard>
+              <Text style={styles.streakLabel}>{dailyChecklistSummary}</Text>
+            </GlassCard>
+          </Pressable>
         </View>
 
-        <GlassCard strong blurIntensity={12} style={[styles.upcomingCard, styles.liquidGlassTile]}>
-          <View style={styles.upcomingHeader}>
-            <Text style={styles.upcomingTitle}>Upcoming Meetings</Text>
-            <Pressable
-              style={styles.upcomingMoreButton}
-              onPress={onOpenMeetings}
-              accessibilityRole="button"
-              accessibilityLabel="Open meetings page"
+        <View style={styles.metricsRow}>
+          <Pressable
+            style={styles.metricTilePressable}
+            onPress={onOpenMorningRoutine}
+            onHoverIn={() => setTileHover("morning-routine", true)}
+            onHoverOut={() => setTileHover("morning-routine", false)}
+            accessibilityRole="button"
+            accessibilityLabel="Open morning routine"
+          >
+            <GlassCard
+              strong
+              blurIntensity={12}
+              style={[
+                styles.metricCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "morning-routine" ? styles.liquidGlassTileHover : null,
+              ]}
             >
+              <View style={styles.upcomingHeader}>
+                <Text style={styles.metricHeading}>Morning Routine</Text>
+                <View style={styles.upcomingMoreButton}>
+                  <View style={styles.dotRow}>
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
+                  </View>
+                </View>
+              </View>
+              <View style={styles.separator} />
+              <View style={styles.morningGaugeRow}>
+                <View style={styles.miniProgressRingOuter}>
+                  <View style={styles.miniProgressRingInner}>
+                    <Text style={styles.miniProgressValue}>{morningCompletionPct}%</Text>
+                    <Text style={styles.miniProgressLabel}>Today</Text>
+                  </View>
+                </View>
+              </View>
+              <View style={styles.morningBarsRow}>
+                {Array.from({ length: morningSegmentCount }).map((_, index) => (
+                  <View
+                    key={`morning-segment-${index}`}
+                    style={[
+                      styles.morningBar,
+                      index < morningFilledSegments ? styles.morningBarFilled : null,
+                    ]}
+                  />
+                ))}
+              </View>
+              <View style={styles.morningStatsRow}>
+                <View style={styles.streakPill}>
+                  <Text style={styles.streakPillText}>
+                    {todayCompleted}/{todayTotal}
+                  </Text>
+                </View>
+                <View style={styles.streakPill}>
+                  <Text style={styles.streakPillText}>{morningRoutine.streakDays}d</Text>
+                </View>
+              </View>
+            </GlassCard>
+          </Pressable>
+
+          <Pressable
+            style={styles.metricTilePressable}
+            onPress={onOpenNightlyInventory}
+            onHoverIn={() => setTileHover("nightly-inventory", true)}
+            onHoverOut={() => setTileHover("nightly-inventory", false)}
+            accessibilityRole="button"
+            accessibilityLabel="Open nightly inventory"
+          >
+            <GlassCard
+              strong
+              blurIntensity={12}
+              style={[
+                styles.metricCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "nightly-inventory" ? styles.liquidGlassTileHover : null,
+              ]}
+            >
+              <View style={styles.upcomingHeader}>
+                <Text style={styles.metricHeading}>Nightly Inventory</Text>
+                <View style={styles.upcomingMoreButton}>
+                  <View style={styles.dotRow}>
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
+                  </View>
+                </View>
+              </View>
+              <View style={styles.separator} />
+              <View style={styles.nightlyTrendRow}>
+                <View
+                  style={[
+                    styles.nightlyStatusDot,
+                    nightlyInventory.todayCompleted ? styles.nightlyStatusDotDone : null,
+                  ]}
+                />
+                <View
+                  style={[
+                    styles.trendBadge,
+                    routineInsights.trend === "down"
+                      ? styles.trendBadgeDown
+                      : routineInsights.trend === "up"
+                        ? styles.trendBadgeUp
+                        : styles.trendBadgeFlat,
+                  ]}
+                >
+                  <Text style={styles.trendBadgeText}>{trendArrow}</Text>
+                </View>
+              </View>
+              <View style={styles.nightlyBarsRow}>
+                <View style={styles.nightlyBarCol}>
+                  <View style={styles.nightlyBarTrack}>
+                    <View style={[styles.nightlyBarFillToday, { height: `${nightlyTodayPct}%` }]} />
+                  </View>
+                  <Text style={styles.nightlyBarValue}>{nightlyTodayIssues.toFixed(1)}</Text>
+                  <Text style={styles.nightlyBarLabel}>Today</Text>
+                </View>
+                <View style={styles.nightlyBarCol}>
+                  <View style={styles.nightlyBarTrack}>
+                    <View style={[styles.nightlyBarFillDone, { height: `${nightlyDonePct}%` }]} />
+                  </View>
+                  <Text style={styles.nightlyBarValue}>{issuesOnMorningDone.toFixed(1)}</Text>
+                  <Text style={styles.nightlyBarLabel}>Done</Text>
+                </View>
+                <View style={styles.nightlyBarCol}>
+                  <View style={styles.nightlyBarTrack}>
+                    <View
+                      style={[styles.nightlyBarFillMissed, { height: `${nightlyMissedPct}%` }]}
+                    />
+                  </View>
+                  <Text style={styles.nightlyBarValue}>{issuesOnMorningMissed.toFixed(1)}</Text>
+                  <Text style={styles.nightlyBarLabel}>Missed</Text>
+                </View>
+              </View>
+              <View style={styles.nightlyRiskTrack}>
+                <View style={[styles.nightlyRiskFill, { width: `${nightlyTodayPct}%` }]} />
+              </View>
+            </GlassCard>
+          </Pressable>
+        </View>
+
+        <Pressable
+          onHoverIn={() => setTileHover("upcoming", true)}
+          onHoverOut={() => setTileHover("upcoming", false)}
+          accessible={false}
+        >
+          <GlassCard
+            strong
+            blurIntensity={12}
+            style={[
+              styles.upcomingCard,
+              styles.liquidGlassTile,
+              hoveredTileId === "upcoming" ? styles.liquidGlassTileHover : null,
+            ]}
+          >
+            <View style={styles.upcomingHeader}>
+              <Text style={styles.upcomingTitle}>Upcoming Meetings</Text>
+              <Pressable
+                style={styles.upcomingMoreButton}
+                onPress={onOpenMeetings}
+                accessibilityRole="button"
+                accessibilityLabel="Open meetings page"
+              >
+                <View style={styles.dotRow}>
+                  <View style={styles.dot} />
+                  <View style={styles.dot} />
+                  <View style={styles.dot} />
+                </View>
+              </Pressable>
+            </View>
+            {showingOnlineMeetingsFallback ? (
+              <Text style={styles.upcomingNotice}>
+                No in-person meetings available for the rest of today. Showing online meetings.
+              </Text>
+            ) : null}
+
+            {upcoming.map((meeting, index) => (
+              <View key={meeting.id} style={styles.meetingItem}>
+                <Pressable
+                  style={styles.meetingDetailsButton}
+                  onPress={() => onMeetingPress(meeting.id)}
+                >
+                  <View style={[styles.meetingIcon, index === 2 ? styles.meetingIconPink : null]}>
+                    <Text style={styles.meetingIconText}>
+                      {index === 1 ? "🔒" : index === 2 ? "✦" : "↪"}
+                    </Text>
+                  </View>
+                  <View style={styles.meetingTextCol}>
+                    <Text numberOfLines={1} style={styles.meetingName}>
+                      {meeting.name}
+                    </Text>
+                    <Text numberOfLines={1} style={styles.meetingMeta}>
+                      {meetingTypeLabel(meeting)}
+                    </Text>
+                  </View>
+                  <Text style={styles.meetingTime}>{toTwelveHour(meeting.startsAtLocal)}</Text>
+                </Pressable>
+                <Pressable style={styles.meetingLogButton} onPress={() => onLogMeeting(meeting.id)}>
+                  <Text style={styles.meetingLogButtonText}>Log</Text>
+                </Pressable>
+              </View>
+            ))}
+
+            {upcoming.length === 0 ? (
+              <Pressable style={styles.emptyMeetingCta} onPress={onSearchArea}>
+                <Text style={styles.emptyMeetingText}>
+                  {locationEnabled
+                    ? "No upcoming meetings in your area. Tap to search this area."
+                    : "Location is off. Tap to refresh and try again."}
+                </Text>
+              </Pressable>
+            ) : null}
+          </GlassCard>
+        </Pressable>
+
+        <Pressable
+          onHoverIn={() => setTileHover("physical-recovery", true)}
+          onHoverOut={() => setTileHover("physical-recovery", false)}
+          accessible={false}
+        >
+          <GlassCard
+            strong
+            blurIntensity={12}
+            style={[
+              styles.recoveryCard,
+              styles.liquidGlassTile,
+              hoveredTileId === "physical-recovery" ? styles.liquidGlassTileHover : null,
+            ]}
+          >
+            <View style={styles.upcomingHeader}>
+              <Text style={styles.recoveryTitle}>Physical Recovery</Text>
               <View style={styles.dotRow}>
                 <View style={styles.dot} />
                 <View style={styles.dot} />
                 <View style={styles.dot} />
               </View>
-            </Pressable>
-          </View>
-
-          {upcoming.map((meeting, index) => (
-            <View key={meeting.id} style={styles.meetingItem}>
-              <Pressable
-                style={styles.meetingDetailsButton}
-                onPress={() => onMeetingPress(meeting.id)}
-              >
-                <View style={[styles.meetingIcon, index === 2 ? styles.meetingIconPink : null]}>
-                  <Text style={styles.meetingIconText}>
-                    {index === 1 ? "🔒" : index === 2 ? "✦" : "↪"}
-                  </Text>
-                </View>
-                <View style={styles.meetingTextCol}>
-                  <Text numberOfLines={1} style={styles.meetingName}>
-                    {meeting.name}
-                  </Text>
-                  <Text numberOfLines={1} style={styles.meetingMeta}>
-                    {meetingTypeLabel(meeting)}
-                  </Text>
-                </View>
-                <Text style={styles.meetingTime}>{toTwelveHour(meeting.startsAtLocal)}</Text>
-              </Pressable>
-              <Pressable style={styles.meetingLogButton} onPress={() => onLogMeeting(meeting.id)}>
-                <Text style={styles.meetingLogButtonText}>Log</Text>
-              </Pressable>
             </View>
-          ))}
-
-          {upcoming.length === 0 ? (
-            <Pressable style={styles.emptyMeetingCta} onPress={onSearchArea}>
-              <Text style={styles.emptyMeetingText}>
-                {locationEnabled
-                  ? "No upcoming meetings in your area. Tap to search this area."
-                  : "Location is off. Tap to refresh and try again."}
-              </Text>
-            </Pressable>
-          ) : null}
-        </GlassCard>
-
-        <GlassCard strong blurIntensity={12} style={[styles.recoveryCard, styles.liquidGlassTile]}>
-          <View style={styles.upcomingHeader}>
-            <Text style={styles.recoveryTitle}>Physical Recovery</Text>
-            <View style={styles.dotRow}>
-              <View style={styles.dot} />
-              <View style={styles.dot} />
-              <View style={styles.dot} />
-            </View>
-          </View>
-          <Text style={styles.recoveryText}>{insight.body}</Text>
-        </GlassCard>
+            <Text style={styles.recoveryText}>{insight.body}</Text>
+          </GlassCard>
+        </Pressable>
       </ScrollView>
     </View>
   );
@@ -599,6 +906,15 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 12 },
     elevation: 6,
   },
+  liquidGlassTileHover: {
+    borderColor: "rgba(255,255,255,0.4)",
+    shadowColor: "rgba(160,196,255,1)",
+    shadowOpacity: 0.34,
+    shadowRadius: 32,
+    shadowOffset: { width: 0, height: 16 },
+    elevation: 14,
+    transform: [{ translateY: -2 }],
+  },
   factHeading: {
     color: Design.color.textPrimary,
     fontSize: 17,
@@ -629,6 +945,9 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 12,
     gap: 8,
+  },
+  metricTilePressable: {
+    flex: 1,
   },
   metricHeading: {
     color: Design.color.textPrimary,
@@ -667,10 +986,125 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     textAlign: "center",
   },
+  fuelGaugeMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  fuelGaugeShell: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  fuelGaugeTrack: {
+    flex: 1,
+    height: 22,
+    borderRadius: 999,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.32)",
+    backgroundColor: "rgba(255,255,255,0.12)",
+  },
+  fuelGaugeFill: {
+    height: "100%",
+    borderRadius: 999,
+  },
+  fuelGaugeCap: {
+    width: 8,
+    height: 12,
+    borderRadius: 3,
+    backgroundColor: "rgba(255,255,255,0.42)",
+  },
+  fuelGaugeScale: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 2,
+  },
+  fuelGaugeScaleText: {
+    color: Design.color.textSecondary,
+    fontSize: 10,
+    fontWeight: "700",
+  },
   successText: {
     color: Design.color.textPrimary,
     fontSize: 16,
     fontWeight: "800",
+  },
+  sponsorTodayRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  sponsorTodayTrack: {
+    flex: 1,
+    height: 10,
+    borderRadius: 10,
+    overflow: "hidden",
+    backgroundColor: "rgba(255,255,255,0.16)",
+  },
+  sponsorTodayFill: {
+    height: "100%",
+    borderRadius: 10,
+    backgroundColor: "rgba(228,246,102,0.94)",
+  },
+  sponsorTodayValue: {
+    minWidth: 44,
+    textAlign: "right",
+    color: Design.color.textPrimary,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  dailyChecklistProgressRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  dailyChecklistTrack: {
+    flex: 1,
+    height: 10,
+    borderRadius: 10,
+    overflow: "hidden",
+    backgroundColor: "rgba(255,255,255,0.16)",
+  },
+  dailyChecklistFill: {
+    height: "100%",
+    borderRadius: 10,
+    backgroundColor: "rgba(134,239,172,0.94)",
+  },
+  dailyChecklistValue: {
+    minWidth: 44,
+    textAlign: "right",
+    color: Design.color.textPrimary,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  dailyChecklistRows: {
+    gap: 6,
+  },
+  dailyChecklistRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  dailyChecklistLabel: {
+    flex: 1,
+    color: Design.color.textPrimary,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  dailyChecklistStatus: {
+    minWidth: 56,
+    textAlign: "right",
+    color: Design.color.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  dailyChecklistInsight: {
+    color: Design.color.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+    lineHeight: 15,
   },
   metricMeta: {
     color: Design.color.textSecondary,
@@ -682,14 +1116,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
+  morningGaugeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
   metricGraphicCol: {
     flex: 1,
     gap: 6,
   },
   miniProgressRingOuter: {
-    width: 82,
-    height: 82,
-    borderRadius: 41,
+    width: 102,
+    height: 102,
+    borderRadius: 51,
     borderWidth: 6,
     borderColor: "rgba(255,255,255,0.7)",
     alignItems: "center",
@@ -697,22 +1137,22 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(110,72,190,0.26)",
   },
   miniProgressRingInner: {
-    width: 62,
-    height: 62,
-    borderRadius: 31,
+    width: 78,
+    height: 78,
+    borderRadius: 39,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(30,13,71,0.9)",
   },
   miniProgressValue: {
     color: Design.color.textPrimary,
-    fontSize: 16,
+    fontSize: 19,
     fontWeight: "800",
-    lineHeight: 18,
+    lineHeight: 21,
   },
   miniProgressLabel: {
     color: Design.color.textSecondary,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: "700",
     textTransform: "uppercase",
     letterSpacing: 0.4,
@@ -729,6 +1169,29 @@ const styles = StyleSheet.create({
   },
   progressSegmentFilled: {
     backgroundColor: "rgba(170,255,200,0.95)",
+  },
+  morningBarsRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 4,
+    height: 42,
+  },
+  morningBar: {
+    flex: 1,
+    minWidth: 8,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: "rgba(255,255,255,0.2)",
+  },
+  morningBarFilled: {
+    height: 38,
+    backgroundColor: "rgba(170,255,200,0.95)",
+  },
+  morningStatsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 8,
   },
   streakPill: {
     alignSelf: "flex-start",
@@ -749,6 +1212,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     flexWrap: "wrap",
     gap: 6,
+  },
+  nightlyTrendRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
   nightlyStatusDot: {
     width: 10,
@@ -780,8 +1248,63 @@ const styles = StyleSheet.create({
   },
   trendBadgeText: {
     color: Design.color.textPrimary,
-    fontSize: 11,
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  nightlyBarsRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    gap: 8,
+    minHeight: 112,
+  },
+  nightlyBarCol: {
+    flex: 1,
+    alignItems: "center",
+    gap: 4,
+  },
+  nightlyBarTrack: {
+    width: "100%",
+    maxWidth: 42,
+    height: 72,
+    borderRadius: 10,
+    justifyContent: "flex-end",
+    overflow: "hidden",
+    backgroundColor: "rgba(255,255,255,0.14)",
+  },
+  nightlyBarFillToday: {
+    width: "100%",
+    backgroundColor: "rgba(240,123,255,0.95)",
+  },
+  nightlyBarFillDone: {
+    width: "100%",
+    backgroundColor: "rgba(123,230,162,0.95)",
+  },
+  nightlyBarFillMissed: {
+    width: "100%",
+    backgroundColor: "rgba(255,131,156,0.95)",
+  },
+  nightlyBarValue: {
+    color: Design.color.textPrimary,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  nightlyBarLabel: {
+    color: Design.color.textSecondary,
+    fontSize: 10,
     fontWeight: "700",
+    textTransform: "uppercase",
+  },
+  nightlyRiskTrack: {
+    height: 10,
+    borderRadius: 10,
+    overflow: "hidden",
+    backgroundColor: "rgba(255,255,255,0.14)",
+  },
+  nightlyRiskFill: {
+    height: "100%",
+    borderRadius: 10,
+    backgroundColor: "rgba(240,123,255,0.92)",
   },
   comparisonRow: {
     flexDirection: "row",
@@ -829,13 +1352,12 @@ const styles = StyleSheet.create({
     width: 12,
     borderRadius: 3,
   },
-  callNowButton: {
-    marginTop: 4,
+  callSponsorButtonBelowWisdom: {
     borderRadius: 20,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.35)",
     backgroundColor: "rgba(90,44,206,0.8)",
-    paddingVertical: 8,
+    paddingVertical: 10,
     alignItems: "center",
   },
   callNowText: {
@@ -871,6 +1393,12 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
+  },
+  upcomingNotice: {
+    color: Design.color.textSecondary,
+    fontSize: 12,
+    fontWeight: "600",
+    marginBottom: 2,
   },
   dot: {
     width: 7,

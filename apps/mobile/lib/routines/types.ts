@@ -1,6 +1,7 @@
 export type RoutineChecklistItem = {
   id: string;
   title: string;
+  enabled: boolean;
   detail?: string;
   readerLabel?: string;
   readerUrl?: string | null;
@@ -31,6 +32,7 @@ export type MorningRoutineTemplate = {
 export type MorningRoutineDayState = {
   dateKey: string;
   completedByItemId: Record<string, string>;
+  gotOnKneesCompleted: boolean;
   notes: string;
   audioRefs: Record<string, string>;
   completedAt: string | null;
@@ -44,6 +46,7 @@ export type NightlyInventoryEntry = {
 export type NightlyInventoryDayState = {
   dateKey: string;
   prompt: string;
+  gotOnKneesCompleted: boolean;
   resentful: NightlyInventoryEntry[];
   selfish: NightlyInventoryEntry[];
   dishonest: NightlyInventoryEntry[];

@@ -27,8 +27,19 @@ function issueCountForNightlyDay(
   );
 }
 
-function isMorningComplete(completedByItemId: Record<string, string>, totalCount: number): boolean {
-  return totalCount > 0 && Object.keys(completedByItemId).length >= totalCount;
+function countEnabledCompletions(
+  completedByItemId: Record<string, string>,
+  enabledItemIds: Set<string>,
+): number {
+  return Object.keys(completedByItemId).filter((itemId) => enabledItemIds.has(itemId)).length;
+}
+
+function isMorningComplete(
+  completedByItemId: Record<string, string>,
+  enabledItemIds: Set<string>,
+): boolean {
+  const totalCount = enabledItemIds.size;
+  return totalCount > 0 && countEnabledCompletions(completedByItemId, enabledItemIds) >= totalCount;
 }
 
 export function computeMorningRoutineStats(
@@ -37,14 +48,17 @@ export function computeMorningRoutineStats(
 ): MorningRoutineStats {
   const todayKey = dateKeyForRoutines(today);
   const todayDay = store.morningByDate[todayKey] ?? createEmptyMorningRoutineDayState(todayKey);
-  const total = store.morningTemplate.items.length;
-  const todayCount = Object.keys(todayDay.completedByItemId).length;
+  const enabledItemIds = new Set(
+    store.morningTemplate.items.filter((item) => item.enabled).map((item) => item.id),
+  );
+  const total = enabledItemIds.size;
+  const todayCount = countEnabledCompletions(todayDay.completedByItemId, enabledItemIds);
 
   let streak = 0;
   for (let offset = 0; offset < 365; offset += 1) {
     const key = dateKeyForRoutines(new Date(today.getTime() - offset * 86_400_000));
     const day = store.morningByDate[key] ?? createEmptyMorningRoutineDayState(key);
-    if (!isMorningComplete(day.completedByItemId, total)) {
+    if (!isMorningComplete(day.completedByItemId, enabledItemIds)) {
       break;
     }
     streak += 1;
@@ -53,7 +67,7 @@ export function computeMorningRoutineStats(
   const last30Keys = getDayWindow(today, 30);
   const completeDays = last30Keys.filter((key) => {
     const day = store.morningByDate[key] ?? createEmptyMorningRoutineDayState(key);
-    return isMorningComplete(day.completedByItemId, total);
+    return isMorningComplete(day.completedByItemId, enabledItemIds);
   }).length;
 
   return {
@@ -79,7 +93,9 @@ export function computeNightlyInventoryStats(
 
 export function computeRoutineInsights(store: RecoveryRoutinesStore, today: Date): RoutineInsights {
   const last30Keys = getDayWindow(today, 30);
-  const totalMorningItems = store.morningTemplate.items.length;
+  const enabledItemIds = new Set(
+    store.morningTemplate.items.filter((item) => item.enabled).map((item) => item.id),
+  );
 
   let completeIssueTotal = 0;
   let completeDays = 0;
@@ -91,7 +107,7 @@ export function computeRoutineInsights(store: RecoveryRoutinesStore, today: Date
     const nightly = store.nightlyByDate[key] ?? createEmptyNightlyInventoryDayState(key);
     const issues = issueCountForNightlyDay(nightly);
 
-    if (isMorningComplete(morning.completedByItemId, totalMorningItems)) {
+    if (isMorningComplete(morning.completedByItemId, enabledItemIds)) {
       completeIssueTotal += issues;
       completeDays += 1;
     } else {

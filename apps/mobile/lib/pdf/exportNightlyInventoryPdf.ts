@@ -4,6 +4,7 @@ export type NightlyInventoryPdfPayload = {
   userLabel: string;
   dateKey: string;
   prompt: string;
+  gotOnKneesCompleted: boolean;
   resentful: string[];
   selfish: string[];
   dishonest: string[];
@@ -102,6 +103,7 @@ function buildNightlyInventoryHtml(payload: NightlyInventoryPdfPayload): string 
     <p class=\"muted\">Date: ${escapeHtml(payload.dateKey)}</p>
     <p class=\"muted\">User: ${escapeHtml(payload.userLabel)}</p>
     <p class=\"muted\">Completed: ${escapeHtml(formatDateTime(payload.completedAt))}</p>
+    <p class=\"muted\">Got on knees: ${payload.gotOnKneesCompleted ? "Yes" : "No"}</p>
 
     <h2>Prompt</h2>
     <div class=\"box\">${escapeHtml(payload.prompt)}</div>

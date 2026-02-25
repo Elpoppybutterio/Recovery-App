@@ -12,6 +12,7 @@ import {
   Linking,
   Platform,
   Pressable,
+  Share,
   ScrollView,
   StyleSheet,
   Switch,
@@ -119,6 +120,8 @@ type HomeScreen = "SETUP" | "DASHBOARD" | "MEETINGS" | "ATTENDANCE" | "SETTINGS"
 type SetupStep = 1 | 2 | 3 | 4 | 5 | 6;
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
+type MeetingsLocationFilter = "CURRENT" | "MILES_50" | "MILES_100";
+type MeetingsFilterDropdown = "FORMAT" | "DAY" | "TIME" | "LOCATION";
 type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER";
 type RoutineInventoryCategory = keyof Pick<
   NightlyInventoryDayState,
@@ -223,6 +226,7 @@ const DEFAULT_MEETING_EARLY_MINUTES = 10;
 const DEFAULT_SERVICE_COMMITMENT_MINUTES = 45;
 const MAX_MEETING_MINUTES = 99;
 const DEFAULT_NINETY_DAY_GOAL_TARGET = 90;
+const DEFAULT_DAILY_MEETINGS_GOAL_TARGET = 3;
 const DASHBOARD_NEARBY_RADIUS_MILES = 20;
 const DASHBOARD_NEARBY_RADIUS_METERS = DASHBOARD_NEARBY_RADIUS_MILES * 1609.344;
 const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for simulator/device.";
@@ -255,6 +259,11 @@ const MEETINGS_TIME_OPTIONS: Array<{ value: MeetingsTimeFilter; label: string }>
   { value: "MORNING", label: "Morning" },
   { value: "AFTERNOON", label: "Afternoon" },
   { value: "EVENING", label: "Evening" },
+];
+const MEETINGS_LOCATION_OPTIONS: Array<{ value: MeetingsLocationFilter; label: string }> = [
+  { value: "CURRENT", label: "Current" },
+  { value: "MILES_50", label: "50 miles" },
+  { value: "MILES_100", label: "100 miles" },
 ];
 
 const SHOW_MODE_TILES = false;
@@ -721,6 +730,29 @@ function parseGoalTargetInput(value: string): number | null {
   return Math.max(1, Math.min(9999, Math.floor(parsed)));
 }
 
+function meetingsLocationFilterFromRadius(radiusMiles: number): MeetingsLocationFilter {
+  if (radiusMiles >= 100) {
+    return "MILES_100";
+  }
+  if (radiusMiles >= 50) {
+    return "MILES_50";
+  }
+  return "CURRENT";
+}
+
+function radiusMilesFromMeetingsLocationFilter(
+  filter: MeetingsLocationFilter,
+  currentRadiusMiles: number,
+): number {
+  if (filter === "MILES_50") {
+    return 50;
+  }
+  if (filter === "MILES_100") {
+    return 100;
+  }
+  return currentRadiusMiles > 0 && currentRadiusMiles < 50 ? currentRadiusMiles : 20;
+}
+
 function parseDdMmYyyyToIso(value: string): string | null {
   const normalized = value.trim();
   const match = normalized.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
@@ -1039,6 +1071,10 @@ export default function App() {
   const [selectedDayOffset, setSelectedDayOffset] = useState(0);
   const [meetingsFormatFilter, setMeetingsFormatFilter] = useState<MeetingsFormatFilter>("ALL");
   const [meetingsTimeFilter, setMeetingsTimeFilter] = useState<MeetingsTimeFilter>("ANY");
+  const [meetingsLocationFilter, setMeetingsLocationFilter] =
+    useState<MeetingsLocationFilter>("CURRENT");
+  const [openMeetingsFilterDropdown, setOpenMeetingsFilterDropdown] =
+    useState<MeetingsFilterDropdown | null>(null);
   const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
   const [todayNearbyMeetings, setTodayNearbyMeetings] = useState<MeetingRecord[]>([]);
   const [loadingMeetings, setLoadingMeetings] = useState(false);
@@ -1094,14 +1130,13 @@ export default function App() {
   const [wizardHasHomeGroup, setWizardHasHomeGroup] = useState<boolean | null>(null);
   const [homeGroupMeetingIds, setHomeGroupMeetingIds] = useState<string[]>([]);
   const [sponsorEnabledAtIso, setSponsorEnabledAtIso] = useState<string | null>(null);
-  const [sponsorCallLogs, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
+  const [, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
   const [meetingAttendanceLogs, setMeetingAttendanceLogs] = useState<MeetingAttendanceLog[]>([]);
   const [routinesStore, setRoutinesStore] = useState<RecoveryRoutinesStore>(
     createDefaultRoutinesStore,
   );
   const [routinesStatus, setRoutinesStatus] = useState<string | null>(null);
   const [routineReader, setRoutineReader] = useState<RoutineReaderState | null>(null);
-  const [recordingItemId, setRecordingItemId] = useState<string | null>(null);
 
   const [meetingPlansByDate, setMeetingPlansByDate] = useState<MeetingPlansState>({});
   const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(__DEV__);
@@ -1115,13 +1150,15 @@ export default function App() {
   const mapRef = useRef<any>(null);
   const meetingsRequestInFlightRef = useRef(false);
   const lastMeetingsRequestKeyRef = useRef<string | null>(null);
-  const hasSkippedInitialSelectedDayRefreshRef = useRef(false);
+  const meetingsAutoRefreshKeyRef = useRef<string | null>(null);
+  const refreshMeetingsRef = useRef<
+    ((options?: { location?: LocationStamp | null }) => Promise<void>) | null
+  >(null);
   const bootstrapStartedRef = useRef(false);
   const setupStep4RefreshLocationKeyRef = useRef<string | null>(null);
   const saveSponsorConfigRef = useRef<(overrides?: SaveSponsorConfigOverrides) => Promise<boolean>>(
     async () => false,
   );
-  const recordingRef = useRef<any>(null);
   const playbackRef = useRef<any>(null);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
@@ -1332,6 +1369,27 @@ export default function App() {
       return minutes >= 17 * 60;
     });
   }, [meetingsForDay, meetingsFormatFilter, meetingsTimeFilter]);
+  const selectedMeetingsFormatLabel = useMemo(
+    () =>
+      MEETINGS_FORMAT_OPTIONS.find((option) => option.value === meetingsFormatFilter)?.label ??
+      "All",
+    [meetingsFormatFilter],
+  );
+  const selectedMeetingsTimeLabel = useMemo(
+    () =>
+      MEETINGS_TIME_OPTIONS.find((option) => option.value === meetingsTimeFilter)?.label ?? "Any",
+    [meetingsTimeFilter],
+  );
+  const selectedMeetingsDayLabel = useMemo(
+    () => dayOptions.find((option) => option.offset === selectedDayOffset)?.label ?? "Today",
+    [dayOptions, selectedDayOffset],
+  );
+  const selectedMeetingsLocationLabel = useMemo(
+    () =>
+      MEETINGS_LOCATION_OPTIONS.find((option) => option.value === meetingsLocationFilter)?.label ??
+      "Current",
+    [meetingsLocationFilter],
+  );
 
   const allMeetings = useMemo(() => {
     const byId = new Map<string, MeetingRecord>();
@@ -1346,19 +1404,37 @@ export default function App() {
     return Array.from(byId.values());
   }, [meetings, todayNearbyMeetings]);
 
+  const dashboardUpcomingInPerson = useMemo(
+    () => meetingsTodayUpcoming.filter((meeting) => meeting.format !== "ONLINE"),
+    [meetingsTodayUpcoming],
+  );
+  const dashboardUpcomingOnline = useMemo(
+    () =>
+      meetingsTodayUpcoming.filter(
+        (meeting) => meeting.format === "ONLINE" || typeof meeting.onlineUrl === "string",
+      ),
+    [meetingsTodayUpcoming],
+  );
   const dashboardNextThreeMeetings = useMemo(() => {
-    const withinRadius = meetingsTodayUpcoming.filter(
+    const nearbyInPerson = dashboardUpcomingInPerson.filter(
       (meeting) =>
         meeting.distanceMeters !== null && meeting.distanceMeters <= DASHBOARD_NEARBY_RADIUS_METERS,
     );
 
-    if (withinRadius.length > 0) {
-      return withinRadius.slice(0, 3);
+    if (nearbyInPerson.length > 0) {
+      return nearbyInPerson.slice(0, 3);
     }
 
-    // Fallback: if location/coords are unavailable, still show upcoming meetings.
-    return meetingsTodayUpcoming.slice(0, 3);
-  }, [meetingsTodayUpcoming]);
+    if (dashboardUpcomingInPerson.length > 0) {
+      return dashboardUpcomingInPerson.slice(0, 3);
+    }
+
+    return dashboardUpcomingOnline.slice(0, 3);
+  }, [dashboardUpcomingInPerson, dashboardUpcomingOnline]);
+  const dashboardShowsOnlineFallback = useMemo(
+    () => dashboardUpcomingInPerson.length === 0 && dashboardUpcomingOnline.length > 0,
+    [dashboardUpcomingInPerson, dashboardUpcomingOnline],
+  );
   const homeGroupCandidateMeetings = useMemo(() => meetingsTodayAll, [meetingsTodayAll]);
 
   const mapMeetingsForDay = useMemo(
@@ -1517,20 +1593,6 @@ export default function App() {
     [meetingsAttendedInNinetyDays, ninetyDayGoalTarget],
   );
 
-  const sponsorAdherence = useMemo(() => {
-    if (!sponsorEnabledAtIso) {
-      return { days: 0, completed: 0, percent: 0 };
-    }
-    const since = new Date(sponsorEnabledAtIso).getTime();
-    if (Number.isNaN(since)) {
-      return { days: 0, completed: 0, percent: 0 };
-    }
-    const days = Math.max(1, Math.floor((clockTickMs - since) / 86_400_000) + 1);
-    const completed = sponsorCallLogs.filter((entry) => entry.success).length;
-    const percent = Math.min(100, (completed / days) * 100);
-    return { days, completed, percent };
-  }, [sponsorEnabledAtIso, sponsorCallLogs, clockTickMs]);
-
   const meetingsLast7Bars = useMemo(() => {
     const byDate = new Map<string, number>();
     for (const entry of meetingAttendanceLogs) {
@@ -1545,22 +1607,22 @@ export default function App() {
     return bars;
   }, [meetingAttendanceLogs, clockTickMs]);
 
-  const sponsorLast14Bars = useMemo(() => {
-    const successByDate = new Map<string, boolean>();
-    for (const entry of sponsorCallLogs) {
-      if (!entry.success) {
-        continue;
+  const meetingsAttendedTodayCount = useMemo(() => {
+    const attendedMeetingIds = new Set<string>();
+    for (const entry of meetingAttendanceLogs) {
+      if (dateKeyForDate(new Date(entry.atIso)) === todayDateKey) {
+        attendedMeetingIds.add(entry.meetingId);
       }
-      const key = dateKeyForDate(new Date(entry.atIso));
-      successByDate.set(key, true);
     }
-    const bars: boolean[] = [];
-    for (let offset = 13; offset >= 0; offset -= 1) {
-      const date = new Date(clockTickMs - offset * 86_400_000);
-      bars.push(successByDate.get(dateKeyForDate(date)) === true);
+    if (
+      activeAttendance &&
+      !activeAttendance.endAt &&
+      dateKeyForDate(new Date(activeAttendance.startAt)) === todayDateKey
+    ) {
+      attendedMeetingIds.add(activeAttendance.meetingId);
     }
-    return bars;
-  }, [sponsorCallLogs, clockTickMs]);
+    return attendedMeetingIds.size;
+  }, [meetingAttendanceLogs, activeAttendance, todayDateKey]);
 
   const morningRoutineDayState = useMemo(
     () => getMorningDayState(routinesStore, routineDateKey),
@@ -1571,6 +1633,59 @@ export default function App() {
     () => getNightlyDayState(routinesStore, routineDateKey),
     [routinesStore, routineDateKey],
   );
+  const dailyChecklistStatus = useMemo(() => {
+    const morningEnabledRows = routinesStore.morningTemplate.items
+      .filter((item) => item.enabled)
+      .map((item) => ({
+        id: `morning-${item.id}`,
+        label: `Morning: ${item.title}`,
+        complete: Boolean(morningRoutineDayState.completedByItemId[item.id]),
+      }));
+    const meetingAttendanceLabel =
+      meetingsAttendedTodayCount === 1
+        ? "1 meeting attended"
+        : `${meetingsAttendedTodayCount} meetings attended`;
+    const attendedMeetingToday = meetingsAttendedTodayCount > 0;
+    const meetingAttendanceRow = {
+      id: "meeting-attended",
+      label: meetingAttendanceLabel,
+      complete: attendedMeetingToday,
+    };
+    const rows: Array<{ id: string; label: string; complete: boolean }> = [
+      ...morningEnabledRows,
+      {
+        id: "morning-got-on-knees",
+        label: "Morning: Got on knees",
+        complete: Boolean(morningRoutineDayState.gotOnKneesCompleted),
+      },
+      meetingAttendanceRow,
+      {
+        id: "nightly-inventory",
+        label: "Nightly inventory",
+        complete: Boolean(nightlyInventoryDayState.completedAt),
+      },
+      {
+        id: "nightly-got-on-knees",
+        label: "Nightly: Got on knees",
+        complete: Boolean(nightlyInventoryDayState.gotOnKneesCompleted),
+      },
+    ];
+    const completedCount = rows.filter((row) => row.complete).length;
+    const percent = rows.length > 0 ? Math.round((completedCount / rows.length) * 100) : 0;
+    return {
+      rows,
+      percent,
+      summary: `${completedCount}/${rows.length} completed today`,
+    };
+  }, [
+    routinesStore.morningTemplate.items,
+    morningRoutineDayState.completedByItemId,
+    morningRoutineDayState.gotOnKneesCompleted,
+    meetingsAttendedTodayCount,
+    todayDateKey,
+    nightlyInventoryDayState.completedAt,
+    nightlyInventoryDayState.gotOnKneesCompleted,
+  ]);
 
   const morningRoutineStats = useMemo(
     () => computeMorningRoutineStats(routinesStore, new Date(clockTickMs)),
@@ -1942,6 +2057,43 @@ export default function App() {
     [routineDateKey, updateRoutinesStore],
   );
 
+  const autoCompleteSponsorCheckIn = useCallback(() => {
+    updateRoutinesStore((store) => {
+      const todayKey = dateKeyForRoutines(new Date());
+      const currentDay = getMorningDayState(store, todayKey);
+      if (currentDay.completedByItemId["sponsor-check-in"]) {
+        return store;
+      }
+
+      const completedByItemId = {
+        ...currentDay.completedByItemId,
+        "sponsor-check-in": new Date().toISOString(),
+      };
+      const enabledItemIds = new Set(
+        store.morningTemplate.items.filter((item) => item.enabled).map((item) => item.id),
+      );
+      const completedEnabledCount = Object.keys(completedByItemId).filter((itemId) =>
+        enabledItemIds.has(itemId),
+      ).length;
+      const nextCompletedAt =
+        enabledItemIds.size > 0 && completedEnabledCount >= enabledItemIds.size
+          ? new Date().toISOString()
+          : null;
+
+      return {
+        ...store,
+        morningByDate: {
+          ...store.morningByDate,
+          [todayKey]: {
+            ...currentDay,
+            completedByItemId,
+            completedAt: nextCompletedAt,
+          },
+        },
+      };
+    });
+  }, [updateRoutinesStore]);
+
   const speakRoutineText = useCallback((text: string) => {
     const nextText = text.trim();
     if (!nextText) {
@@ -1965,95 +2117,6 @@ export default function App() {
       setRoutinesStatus("Text-to-speech unavailable. Install expo-speech.");
     }
   }, []);
-
-  const recordRoutineItem = useCallback(
-    async (itemId: string) => {
-      try {
-        const avModule = loadOptionalModule<{
-          Audio?: {
-            requestPermissionsAsync: () => Promise<{ granted: boolean }>;
-            setAudioModeAsync: (input: Record<string, unknown>) => Promise<void>;
-            Recording: new () => {
-              prepareToRecordAsync: (options: unknown) => Promise<void>;
-              startAsync: () => Promise<void>;
-              stopAndUnloadAsync: () => Promise<void>;
-              getURI: () => string | null;
-            };
-            RecordingOptionsPresets?: { HIGH_QUALITY?: unknown };
-            Sound?: {
-              createAsync: (source: { uri: string }) => Promise<{
-                sound: { unloadAsync: () => Promise<void>; playAsync: () => Promise<void> };
-              }>;
-            };
-          };
-        }>("expo-av");
-
-        const audio = avModule?.Audio;
-        if (!audio) {
-          setRoutinesStatus("Audio recording unavailable. Install expo-av.");
-          return;
-        }
-
-        if (recordingRef.current && recordingItemId === itemId) {
-          const recording = recordingRef.current as {
-            stopAndUnloadAsync: () => Promise<void>;
-            getURI: () => string | null;
-          };
-          await recording.stopAndUnloadAsync();
-          const uri = recording.getURI();
-          recordingRef.current = null;
-          setRecordingItemId(null);
-          if (uri) {
-            updateMorningDayState(
-              (day) => ({
-                ...day,
-                audioRefs: { ...day.audioRefs, [itemId]: uri },
-              }),
-              "Recording saved.",
-            );
-          } else {
-            setRoutinesStatus("Recording finished, but no audio file was produced.");
-          }
-          return;
-        }
-
-        if (recordingRef.current) {
-          const recording = recordingRef.current as {
-            stopAndUnloadAsync: () => Promise<void>;
-          };
-          await recording.stopAndUnloadAsync();
-          recordingRef.current = null;
-          setRecordingItemId(null);
-        }
-
-        const permission = await audio.requestPermissionsAsync();
-        if (!permission.granted) {
-          setRoutinesStatus("Microphone permission denied.");
-          return;
-        }
-
-        await audio.setAudioModeAsync({
-          allowsRecordingIOS: true,
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: false,
-        });
-
-        const recording = new audio.Recording();
-        await recording.prepareToRecordAsync(
-          audio.RecordingOptionsPresets?.HIGH_QUALITY ?? undefined,
-        );
-        await recording.startAsync();
-        recordingRef.current = recording;
-        setRecordingItemId(itemId);
-        setRoutinesStatus("Recording... tap Record again to stop.");
-      } catch {
-        setRecordingItemId(null);
-        recordingRef.current = null;
-        setRoutinesStatus("Unable to record audio on this device.");
-      }
-    },
-    [recordingItemId, updateMorningDayState],
-  );
 
   const playRoutineItemAudio = useCallback(
     async (itemId: string) => {
@@ -2177,6 +2240,7 @@ export default function App() {
         userLabel: devUserDisplayName,
         dateKey: routineDateKey,
         prompt: dayState.prompt,
+        gotOnKneesCompleted: dayState.gotOnKneesCompleted,
         resentful: dayState.resentful.map((entry) => entry.text),
         selfish: dayState.selfish.map((entry) => entry.text),
         dishonest: dayState.dishonest.map((entry) => entry.text),
@@ -2203,6 +2267,7 @@ export default function App() {
       `${label}: ${values.length > 0 ? values.map((entry) => entry.text).join("; ") : "None"}`;
     const body = [
       `Nightly Inventory ${routineDateKey}`,
+      `Got on knees: ${dayState.gotOnKneesCompleted ? "Yes" : "No"}`,
       summarize("Resentful", dayState.resentful),
       summarize("Selfish", dayState.selfish),
       summarize("Dishonest", dayState.dishonest),
@@ -2211,15 +2276,33 @@ export default function App() {
       `Notes: ${dayState.notes || "None"}`,
     ].join("\n");
 
-    const separator = Platform.OS === "ios" ? "&" : "?";
-    const url = `sms:${digits}${separator}body=${encodeURIComponent(body)}`;
-    try {
-      await Linking.openURL(url);
-      setRoutinesStatus("Opened SMS draft for sponsor.");
-    } catch {
-      setRoutinesStatus("Unable to open SMS on this device.");
+    const recipient = sponsorPhoneE164 ?? digits;
+    const encodedBody = encodeURIComponent(body);
+    const candidateUrls =
+      Platform.OS === "ios"
+        ? [
+            `sms:${recipient}&body=${encodedBody}`,
+            `sms:${recipient}?body=${encodedBody}`,
+            `sms:${recipient}`,
+          ]
+        : [
+            `sms:${recipient}?body=${encodedBody}`,
+            `sms:${recipient}&body=${encodedBody}`,
+            `smsto:${recipient}?body=${encodedBody}`,
+            `sms:${recipient}`,
+          ];
+
+    for (const url of candidateUrls) {
+      try {
+        await Linking.openURL(url);
+        setRoutinesStatus("Opened SMS draft for sponsor.");
+        return;
+      } catch {
+        // try next URL shape
+      }
     }
-  }, [sponsorPhoneDigits, nightlyInventoryDayState, routineDateKey]);
+    setRoutinesStatus("Unable to open SMS on this device.");
+  }, [sponsorPhoneDigits, sponsorPhoneE164, nightlyInventoryDayState, routineDateKey]);
 
   const updateNightlyCategoryEntry = useCallback(
     (category: RoutineInventoryCategory, id: string, value: string) => {
@@ -2272,14 +2355,27 @@ export default function App() {
           ...requestParams,
         });
 
-        let todayResultMeetings = selectedDayResult.meetings;
-        if (selectedDay.dayOfWeek !== todayDayOfWeek) {
-          const todayResult = await source.listMeetings({
-            dayOfWeek: todayDayOfWeek,
-            ...requestParams,
-          });
-          todayResultMeetings = todayResult.meetings;
+        const todayScopedResult =
+          selectedDay.dayOfWeek === todayDayOfWeek
+            ? selectedDayResult
+            : await source.listMeetings({
+                dayOfWeek: todayDayOfWeek,
+                ...requestParams,
+              });
+
+        // Always merge in an unscoped "today" fetch so setup can offer all meetings for today's
+        // home-group selection, not only meetings inside the nearby radius.
+        const todayUnscopedResult = await source.listMeetings({
+          dayOfWeek: todayDayOfWeek,
+        });
+        const todayById = new Map<string, MeetingRecord>();
+        for (const meeting of todayUnscopedResult.meetings) {
+          todayById.set(meeting.id, meeting);
         }
+        for (const meeting of todayScopedResult.meetings) {
+          todayById.set(meeting.id, meeting);
+        }
+        const todayResultMeetings = Array.from(todayById.values());
 
         setMeetings(selectedDayResult.meetings);
         setTodayNearbyMeetings(todayResultMeetings);
@@ -2290,9 +2386,7 @@ export default function App() {
         }
 
         const warningSuffix = selectedDayResult.warning ? ` (${selectedDayResult.warning})` : "";
-        setMeetingsStatus(
-          `Loaded ${selectedDayResult.meetings.length} meetings from ${selectedDayResult.source}${warningSuffix}.`,
-        );
+        setMeetingsStatus(`Meetings updated${warningSuffix}.`);
       } catch (error) {
         setMeetingsError(formatApiErrorWithHint(formatError(error)));
         setMeetingsStatus("Unable to load meetings.");
@@ -2310,6 +2404,10 @@ export default function App() {
       formatApiErrorWithHint,
     ],
   );
+
+  useEffect(() => {
+    refreshMeetingsRef.current = refreshMeetings;
+  }, [refreshMeetings]);
 
   const handleModeSelect = useCallback(
     (nextMode: RecoveryMode) => {
@@ -2688,12 +2786,14 @@ export default function App() {
         await Linking.openURL(primaryUrl);
         setSponsorStatus(null);
         appendSponsorCallLog({ sponsorPhoneE164: normalizedE164, source, success: true });
+        autoCompleteSponsorCheckIn();
         return;
       } catch {
         try {
           await Linking.openURL(fallbackUrl);
           setSponsorStatus(null);
           appendSponsorCallLog({ sponsorPhoneE164: normalizedE164, source, success: true });
+          autoCompleteSponsorCheckIn();
           return;
         } catch {
           setSponsorStatus("Calling is not supported on this device (simulator).");
@@ -2701,7 +2801,7 @@ export default function App() {
         }
       }
     },
-    [appendSponsorCallLog, sponsorPhoneDigits],
+    [appendSponsorCallLog, autoCompleteSponsorCheckIn, sponsorPhoneDigits],
   );
 
   const openMeetingDestination = useCallback(async (meeting: MeetingRecord) => {
@@ -3760,6 +3860,36 @@ export default function App() {
     }
   }, [attendanceRecords, selectedAttendanceIds, devUserDisplayName]);
 
+  const shareSelectedAttendanceText = useCallback(async () => {
+    const selectedRecords = attendanceRecords.filter((record) =>
+      selectedAttendanceIds.includes(record.id),
+    );
+    if (selectedRecords.length === 0) {
+      setAttendanceStatus("Select at least one attendance record to text.");
+      return;
+    }
+
+    const lines = selectedRecords.map((record) => {
+      const started = new Date(record.startAt);
+      const ended = record.endAt ? new Date(record.endAt) : null;
+      return [
+        `• ${record.meetingName}`,
+        `  Start: ${Number.isNaN(started.getTime()) ? record.startAt : started.toLocaleString()}`,
+        `  End: ${ended ? ended.toLocaleString() : "In progress"}`,
+        `  Duration: ${formatDuration(record.durationSeconds)}`,
+      ].join("\n");
+    });
+
+    const message = [`Meetings Attended (${selectedRecords.length})`, ...lines].join("\n\n");
+
+    try {
+      await Share.share({ message });
+      setAttendanceStatus(`Prepared text summary for ${selectedRecords.length} meeting record(s).`);
+    } catch (error) {
+      setAttendanceStatus(`Failed to share selected attendance text: ${formatError(error)}`);
+    }
+  }, [attendanceRecords, selectedAttendanceIds]);
+
   const updateSelectedDayPlan = useCallback(
     (updater: (current: DayPlanState) => DayPlanState, callback?: (next: DayPlanState) => void) => {
       setMeetingPlansByDate((previous) => {
@@ -4138,9 +4268,6 @@ export default function App() {
       if (playbackRef.current) {
         void playbackRef.current.unloadAsync?.();
       }
-      if (recordingRef.current) {
-        void recordingRef.current.stopAndUnloadAsync?.();
-      }
     };
   }, []);
 
@@ -4471,15 +4598,11 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!bootstrapped) {
-      return;
-    }
-    if (!hasSkippedInitialSelectedDayRefreshRef.current) {
-      hasSkippedInitialSelectedDayRefreshRef.current = true;
-      return;
-    }
-    void refreshMeetings();
-  }, [selectedDay.dayOfWeek, refreshMeetings, bootstrapped]);
+    setMeetingsLocationFilter((current) => {
+      const next = meetingsLocationFilterFromRadius(meetingRadiusMiles);
+      return current === next ? current : next;
+    });
+  }, [meetingRadiusMiles]);
 
   useEffect(() => {
     if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 5) {
@@ -4503,14 +4626,44 @@ export default function App() {
   }, [bootstrapped, homeScreen, setupStep, refreshMeetings, currentLocation]);
 
   useEffect(() => {
+    if (homeScreen !== "MEETINGS") {
+      setOpenMeetingsFilterDropdown(null);
+    }
+  }, [homeScreen]);
+
+  useEffect(() => {
     if (!bootstrapped || homeScreen !== "MEETINGS") {
+      meetingsAutoRefreshKeyRef.current = null;
       return;
     }
+    const nextKey = [
+      selectedDay.dayOfWeek,
+      meetingsFormatFilter,
+      meetingsTimeFilter,
+      meetingsLocationFilter,
+      meetingRadiusMiles,
+    ].join("|");
+
+    if (meetingsAutoRefreshKeyRef.current === nextKey) {
+      return;
+    }
+    meetingsAutoRefreshKeyRef.current = nextKey;
+
     void (async () => {
       const location = currentLocation ?? (await requestLocationPermission());
-      await refreshMeetings({ location });
+      await refreshMeetingsRef.current?.({ location });
     })();
-  }, [bootstrapped, homeScreen, currentLocation, requestLocationPermission, refreshMeetings]);
+  }, [
+    bootstrapped,
+    homeScreen,
+    currentLocation,
+    requestLocationPermission,
+    selectedDay.dayOfWeek,
+    meetingsFormatFilter,
+    meetingsTimeFilter,
+    meetingsLocationFilter,
+    meetingRadiusMiles,
+  ]);
 
   useEffect(() => {
     if (!sponsorEnabled) {
@@ -5183,12 +5336,11 @@ export default function App() {
                       {wizardHasHomeGroup ? (
                         <>
                           <Text style={styles.sectionMeta}>
-                            Select a home group from upcoming meetings within {meetingRadiusMiles}{" "}
-                            miles.
+                            Select a home group from today's meetings.
                           </Text>
                           {homeGroupCandidateMeetings.length === 0 ? (
                             <Text style={styles.sectionMeta}>
-                              No nearby upcoming meetings loaded yet.
+                              No meetings loaded for today yet.
                             </Text>
                           ) : (
                             <ScrollView
@@ -5278,10 +5430,14 @@ export default function App() {
               {homeScreen === "DASHBOARD" ? (
                 <Dashboard
                   daysSober={daysSober}
+                  sobrietyDateIso={sobrietyDateIso}
                   sobrietyDateLabel={formatIsoToDdMmYyyy(sobrietyDateIso)}
                   insight={soberInsight}
                   locationEnabled={locationPermission === "granted"}
                   nextMeetings={dashboardNextThreeMeetings}
+                  showingOnlineMeetingsFallback={dashboardShowsOnlineFallback}
+                  sponsorEnabled={sponsorEnabled}
+                  dailyChecklist={dailyChecklistStatus}
                   homeGroupMeeting={
                     homeGroupUpcoming
                       ? {
@@ -5303,9 +5459,11 @@ export default function App() {
                   meetingsAttendedInNinetyDays={meetingsAttendedInNinetyDays}
                   ninetyDayGoalTarget={ninetyDayGoalTarget}
                   ninetyDayProgressPct={ninetyDayProgressPct}
+                  meetingsAttendedToday={{
+                    count: meetingsAttendedTodayCount,
+                    goal: DEFAULT_DAILY_MEETINGS_GOAL_TARGET,
+                  }}
                   meetingBarsLast7={meetingsLast7Bars}
-                  sponsorAdherence={sponsorAdherence}
-                  sponsorBarsLast14={sponsorLast14Bars}
                   morningRoutine={morningRoutineStats}
                   nightlyInventory={nightlyInventoryStats}
                   routineInsights={routineInsights}
@@ -5351,11 +5509,11 @@ export default function App() {
                 <GlassCard style={styles.card} strong>
                   <View style={styles.inlineRow}>
                     <Text style={styles.sectionTitle}>Meetings</Text>
-                    <AppButton
-                      title="Back to Dashboard"
-                      onPress={openDashboard}
-                      variant="secondary"
-                    />
+                    <GlassCard style={styles.meetingsBackPill} darken blurIntensity={14}>
+                      <Pressable onPress={openDashboard} style={styles.meetingsBackPillButton}>
+                        <Text style={styles.meetingsBackPillText}>Back to Dashboard</Text>
+                      </Pressable>
+                    </GlassCard>
                   </View>
 
                   <Text style={styles.sectionMeta}>
@@ -5364,88 +5522,219 @@ export default function App() {
                   <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
                   {meetingsError ? <Text style={styles.errorText}>{meetingsError}</Text> : null}
 
-                  <View style={styles.buttonRow}>
-                    <AppButton title="Refresh meetings" onPress={() => void refreshMeetings()} />
-                    <View style={styles.buttonSpacer} />
-                    <AppButton
-                      title="Use current location"
-                      onPress={() => {
-                        void (async () => {
-                          const position = await requestLocationPermission();
-                          await refreshMeetings({ location: position });
-                        })();
-                      }}
-                      variant="secondary"
-                    />
-                  </View>
-
-                  <Text style={styles.label}>Format</Text>
-                  <View style={styles.chipRow}>
-                    {MEETINGS_FORMAT_OPTIONS.map((option) => (
+                  <View style={styles.meetingsFiltersRow}>
+                    <View style={styles.meetingsFilterItem}>
+                      <Text style={styles.meetingsFilterLabel}>Style</Text>
                       <Pressable
-                        key={option.value}
                         style={[
-                          styles.chip,
-                          meetingsFormatFilter === option.value ? styles.chipSelected : null,
+                          styles.filterDropdownTrigger,
+                          openMeetingsFilterDropdown === "FORMAT"
+                            ? styles.filterDropdownTriggerOpen
+                            : null,
                         ]}
-                        onPress={() => setMeetingsFormatFilter(option.value)}
+                        onPress={() =>
+                          setOpenMeetingsFilterDropdown((current) =>
+                            current === "FORMAT" ? null : "FORMAT",
+                          )
+                        }
                       >
-                        <Text
-                          style={[
-                            styles.chipText,
-                            meetingsFormatFilter === option.value ? styles.chipTextSelected : null,
-                          ]}
-                        >
-                          {option.label}
+                        <Text style={styles.filterDropdownValue}>
+                          {selectedMeetingsFormatLabel}
+                        </Text>
+                        <Text style={styles.filterDropdownChevron}>
+                          {openMeetingsFilterDropdown === "FORMAT" ? "▲" : "▼"}
                         </Text>
                       </Pressable>
-                    ))}
-                  </View>
+                      {openMeetingsFilterDropdown === "FORMAT" ? (
+                        <View style={styles.filterDropdownMenu}>
+                          {MEETINGS_FORMAT_OPTIONS.map((option) => {
+                            const selected = meetingsFormatFilter === option.value;
+                            return (
+                              <Pressable
+                                key={option.value}
+                                style={styles.filterDropdownOption}
+                                onPress={() => {
+                                  setMeetingsFormatFilter(option.value);
+                                  setOpenMeetingsFilterDropdown(null);
+                                }}
+                              >
+                                <Text
+                                  style={[
+                                    styles.filterDropdownOptionText,
+                                    selected ? styles.filterDropdownOptionTextSelected : null,
+                                  ]}
+                                >
+                                  {option.label}
+                                </Text>
+                                {selected ? (
+                                  <Text style={styles.filterDropdownOptionCheck}>✓</Text>
+                                ) : null}
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                    </View>
 
-                  <Text style={styles.label}>Day</Text>
-                  <View style={styles.chipRow}>
-                    {dayOptions.map((option) => (
+                    <View style={styles.meetingsFilterItem}>
+                      <Text style={styles.meetingsFilterLabel}>Day</Text>
                       <Pressable
-                        key={option.offset}
                         style={[
-                          styles.chip,
-                          selectedDayOffset === option.offset ? styles.chipSelected : null,
+                          styles.filterDropdownTrigger,
+                          openMeetingsFilterDropdown === "DAY"
+                            ? styles.filterDropdownTriggerOpen
+                            : null,
                         ]}
-                        onPress={() => onDayPress(option)}
+                        onPress={() =>
+                          setOpenMeetingsFilterDropdown((current) =>
+                            current === "DAY" ? null : "DAY",
+                          )
+                        }
                       >
-                        <Text
-                          style={[
-                            styles.chipText,
-                            selectedDayOffset === option.offset ? styles.chipTextSelected : null,
-                          ]}
-                        >
-                          {option.label}
+                        <Text style={styles.filterDropdownValue}>{selectedMeetingsDayLabel}</Text>
+                        <Text style={styles.filterDropdownChevron}>
+                          {openMeetingsFilterDropdown === "DAY" ? "▲" : "▼"}
                         </Text>
                       </Pressable>
-                    ))}
-                  </View>
+                      {openMeetingsFilterDropdown === "DAY" ? (
+                        <View style={styles.filterDropdownMenu}>
+                          {dayOptions.map((option) => {
+                            const selected = selectedDayOffset === option.offset;
+                            return (
+                              <Pressable
+                                key={option.offset}
+                                style={styles.filterDropdownOption}
+                                onPress={() => {
+                                  onDayPress(option);
+                                  setOpenMeetingsFilterDropdown(null);
+                                }}
+                              >
+                                <Text
+                                  style={[
+                                    styles.filterDropdownOptionText,
+                                    selected ? styles.filterDropdownOptionTextSelected : null,
+                                  ]}
+                                >
+                                  {option.label}
+                                </Text>
+                                {selected ? (
+                                  <Text style={styles.filterDropdownOptionCheck}>✓</Text>
+                                ) : null}
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                    </View>
 
-                  <Text style={styles.label}>Time</Text>
-                  <View style={styles.chipRow}>
-                    {MEETINGS_TIME_OPTIONS.map((option) => (
+                    <View style={styles.meetingsFilterItem}>
+                      <Text style={styles.meetingsFilterLabel}>Time</Text>
                       <Pressable
-                        key={option.value}
                         style={[
-                          styles.chip,
-                          meetingsTimeFilter === option.value ? styles.chipSelected : null,
+                          styles.filterDropdownTrigger,
+                          openMeetingsFilterDropdown === "TIME"
+                            ? styles.filterDropdownTriggerOpen
+                            : null,
                         ]}
-                        onPress={() => setMeetingsTimeFilter(option.value)}
+                        onPress={() =>
+                          setOpenMeetingsFilterDropdown((current) =>
+                            current === "TIME" ? null : "TIME",
+                          )
+                        }
                       >
-                        <Text
-                          style={[
-                            styles.chipText,
-                            meetingsTimeFilter === option.value ? styles.chipTextSelected : null,
-                          ]}
-                        >
-                          {option.label}
+                        <Text style={styles.filterDropdownValue}>{selectedMeetingsTimeLabel}</Text>
+                        <Text style={styles.filterDropdownChevron}>
+                          {openMeetingsFilterDropdown === "TIME" ? "▲" : "▼"}
                         </Text>
                       </Pressable>
-                    ))}
+                      {openMeetingsFilterDropdown === "TIME" ? (
+                        <View style={styles.filterDropdownMenu}>
+                          {MEETINGS_TIME_OPTIONS.map((option) => {
+                            const selected = meetingsTimeFilter === option.value;
+                            return (
+                              <Pressable
+                                key={option.value}
+                                style={styles.filterDropdownOption}
+                                onPress={() => {
+                                  setMeetingsTimeFilter(option.value);
+                                  setOpenMeetingsFilterDropdown(null);
+                                }}
+                              >
+                                <Text
+                                  style={[
+                                    styles.filterDropdownOptionText,
+                                    selected ? styles.filterDropdownOptionTextSelected : null,
+                                  ]}
+                                >
+                                  {option.label}
+                                </Text>
+                                {selected ? (
+                                  <Text style={styles.filterDropdownOptionCheck}>✓</Text>
+                                ) : null}
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                    </View>
+
+                    <View style={styles.meetingsFilterItem}>
+                      <Text style={styles.meetingsFilterLabel}>Location</Text>
+                      <Pressable
+                        style={[
+                          styles.filterDropdownTrigger,
+                          openMeetingsFilterDropdown === "LOCATION"
+                            ? styles.filterDropdownTriggerOpen
+                            : null,
+                        ]}
+                        onPress={() =>
+                          setOpenMeetingsFilterDropdown((current) =>
+                            current === "LOCATION" ? null : "LOCATION",
+                          )
+                        }
+                      >
+                        <Text style={styles.filterDropdownValue}>
+                          {selectedMeetingsLocationLabel}
+                        </Text>
+                        <Text style={styles.filterDropdownChevron}>
+                          {openMeetingsFilterDropdown === "LOCATION" ? "▲" : "▼"}
+                        </Text>
+                      </Pressable>
+                      {openMeetingsFilterDropdown === "LOCATION" ? (
+                        <View style={styles.filterDropdownMenu}>
+                          {MEETINGS_LOCATION_OPTIONS.map((option) => {
+                            const selected = meetingsLocationFilter === option.value;
+                            return (
+                              <Pressable
+                                key={option.value}
+                                style={styles.filterDropdownOption}
+                                onPress={() => {
+                                  const nextRadiusMiles = radiusMilesFromMeetingsLocationFilter(
+                                    option.value,
+                                    defaultMeetingRadiusMiles,
+                                  );
+                                  setMeetingsLocationFilter(option.value);
+                                  setMeetingRadiusMiles(nextRadiusMiles);
+                                  setOpenMeetingsFilterDropdown(null);
+                                }}
+                              >
+                                <Text
+                                  style={[
+                                    styles.filterDropdownOptionText,
+                                    selected ? styles.filterDropdownOptionTextSelected : null,
+                                  ]}
+                                >
+                                  {option.label}
+                                </Text>
+                                {selected ? (
+                                  <Text style={styles.filterDropdownOptionCheck}>✓</Text>
+                                ) : null}
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                    </View>
                   </View>
 
                   {loadingMeetings ? (
@@ -5467,6 +5756,14 @@ export default function App() {
                               : meeting.address || "Unknown address"}{" "}
                             • {formatDistance(meeting.distanceMeters)}
                           </Text>
+
+                          <View style={styles.buttonRow}>
+                            <AppButton
+                              title="Attend & Log"
+                              onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
+                              variant="secondary"
+                            />
+                          </View>
 
                           <Pressable
                             style={styles.detailButton}
@@ -5585,7 +5882,7 @@ export default function App() {
               {homeScreen === "ATTENDANCE" ? (
                 <GlassCard style={styles.card} strong>
                   <View style={styles.inlineRow}>
-                    <Text style={styles.sectionTitle}>Meeting Attendance</Text>
+                    <Text style={styles.sectionTitle}>Meetings Logged</Text>
                     <AppButton
                       title="Back to Dashboard"
                       onPress={openDashboard}
@@ -5617,6 +5914,12 @@ export default function App() {
                       }
                       onPress={() => void exportSelectedAttendance()}
                       disabled={exportingAttendanceSelectionPdf}
+                    />
+                    <View style={styles.buttonSpacer} />
+                    <AppButton
+                      title={`Text selected (${selectedAttendanceIds.length})`}
+                      onPress={() => void shareSelectedAttendanceText()}
+                      variant="secondary"
                     />
                   </View>
 
@@ -5678,6 +5981,13 @@ export default function App() {
                       dateLabel={routineDateKey}
                       onBack={() => setToolsScreen("HOME")}
                       onToggleItem={(itemId) => {
+                        const checklistItem = routinesStore.morningTemplate.items.find(
+                          (item) => item.id === itemId,
+                        );
+                        if (!checklistItem?.enabled) {
+                          setRoutinesStatus("Turn this checklist item on first.");
+                          return;
+                        }
                         updateMorningDayState((day) => {
                           const completedByItemId = { ...day.completedByItemId };
                           if (completedByItemId[itemId]) {
@@ -5685,15 +5995,62 @@ export default function App() {
                           } else {
                             completedByItemId[itemId] = new Date().toISOString();
                           }
-                          const totalCount = routinesStore.morningTemplate.items.length;
+                          const enabledItemIds = new Set(
+                            routinesStore.morningTemplate.items
+                              .filter((item) => item.enabled)
+                              .map((item) => item.id),
+                          );
+                          const completedEnabledCount = Object.keys(completedByItemId).filter(
+                            (completedItemId) => enabledItemIds.has(completedItemId),
+                          ).length;
                           const nextCompletedAt =
-                            totalCount > 0 && Object.keys(completedByItemId).length >= totalCount
+                            enabledItemIds.size > 0 && completedEnabledCount >= enabledItemIds.size
                               ? new Date().toISOString()
                               : null;
                           return {
                             ...day,
                             completedByItemId,
                             completedAt: nextCompletedAt,
+                          };
+                        });
+                      }}
+                      onToggleItemEnabled={(itemId) => {
+                        updateRoutinesStore((store) => {
+                          const nextItems = store.morningTemplate.items.map((item) =>
+                            item.id === itemId ? { ...item, enabled: !item.enabled } : item,
+                          );
+                          const toggledItem = nextItems.find((item) => item.id === itemId);
+                          const currentDay = getMorningDayState(store, routineDateKey);
+                          const completedByItemId = { ...currentDay.completedByItemId };
+                          if (toggledItem && !toggledItem.enabled) {
+                            delete completedByItemId[itemId];
+                          }
+
+                          const enabledItemIds = new Set(
+                            nextItems.filter((item) => item.enabled).map((item) => item.id),
+                          );
+                          const completedEnabledCount = Object.keys(completedByItemId).filter(
+                            (completedItemId) => enabledItemIds.has(completedItemId),
+                          ).length;
+                          const nextCompletedAt =
+                            enabledItemIds.size > 0 && completedEnabledCount >= enabledItemIds.size
+                              ? (currentDay.completedAt ?? new Date().toISOString())
+                              : null;
+
+                          return {
+                            ...store,
+                            morningTemplate: {
+                              ...store.morningTemplate,
+                              items: nextItems,
+                            },
+                            morningByDate: {
+                              ...store.morningByDate,
+                              [routineDateKey]: {
+                                ...currentDay,
+                                completedByItemId,
+                                completedAt: nextCompletedAt,
+                              },
+                            },
                           };
                         });
                       }}
@@ -5729,13 +6086,18 @@ export default function App() {
                           ),
                         }))
                       }
+                      onToggleGotOnKnees={() =>
+                        updateMorningDayState((day) => ({
+                          ...day,
+                          gotOnKneesCompleted: !day.gotOnKneesCompleted,
+                        }))
+                      }
                       onOpenReader={openRoutineReader}
                       onReadDailyReflections={openDailyReflectionsRead}
                       onListenDailyReflections={() => {
                         void openDailyReflectionsListen();
                       }}
                       onListenText={speakRoutineText}
-                      onRecordItem={(itemId) => void recordRoutineItem(itemId)}
                       onPlayItem={(itemId) => void playRoutineItemAudio(itemId)}
                       onAddCustomPrayer={() =>
                         updateMorningTemplate((template) => ({
@@ -5818,6 +6180,12 @@ export default function App() {
                         updateNightlyDayState((day) => ({
                           ...day,
                           notes: value,
+                        }))
+                      }
+                      onToggleGotOnKnees={() =>
+                        updateNightlyDayState((day) => ({
+                          ...day,
+                          gotOnKneesCompleted: !day.gotOnKneesCompleted,
                         }))
                       }
                       onToggleCompleted={() =>
@@ -6201,8 +6569,6 @@ export default function App() {
                     {meetingsError ? <Text style={styles.errorText}>{meetingsError}</Text> : null}
 
                     <View style={styles.buttonRow}>
-                      <AppButton title="Refresh meetings" onPress={() => void refreshMeetings()} />
-                      <View style={styles.buttonSpacer} />
                       <AppButton
                         title="Enable location"
                         onPress={() => {
@@ -6438,6 +6804,14 @@ export default function App() {
                                   ) : null}
                                 </>
                               ) : null}
+
+                              <View style={styles.buttonRow}>
+                                <AppButton
+                                  title="Attend & Log"
+                                  onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
+                                  variant="secondary"
+                                />
+                              </View>
 
                               <Pressable
                                 style={styles.detailButton}
@@ -6799,7 +7173,7 @@ export default function App() {
                   ]}
                   onPress={openToolsHub}
                 >
-                  <Text style={styles.dashboardTabIcon}>👥</Text>
+                  <Text style={styles.dashboardTabIcon}>☀️🌙</Text>
                   <Text
                     style={
                       homeScreen === "TOOLS"
@@ -6807,7 +7181,7 @@ export default function App() {
                         : styles.dashboardTabText
                     }
                   >
-                    Tools
+                    AM/PM
                   </Text>
                 </Pressable>
                 <Pressable style={styles.dashboardTabItem} onPress={openSettingsHub}>
@@ -7059,6 +7433,101 @@ const styles = StyleSheet.create({
   chipTextSelected: {
     color: colors.textPrimary,
     fontWeight: "700",
+  },
+  meetingsFiltersWrap: {
+    gap: 8,
+  },
+  meetingsFiltersRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  meetingsFilterItem: {
+    flex: 1,
+    minWidth: 0,
+    gap: 6,
+  },
+  meetingsFilterLabel: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.2,
+    textTransform: "uppercase",
+    paddingHorizontal: 2,
+  },
+  meetingsBackPill: {
+    borderRadius: 999,
+    borderColor: "rgba(196,181,253,0.42)",
+    backgroundColor: "rgba(24,14,52,0.64)",
+  },
+  meetingsBackPillButton: {
+    minHeight: 40,
+    paddingHorizontal: Design.spacing.md,
+    paddingVertical: Design.spacing.sm,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  meetingsBackPillText: {
+    color: colors.textPrimary,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  filterDropdownTrigger: {
+    borderWidth: 2,
+    borderColor: "rgba(196,181,253,0.45)",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    backgroundColor: "rgba(30,20,64,0.88)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 6,
+  },
+  filterDropdownTriggerOpen: {
+    borderColor: colors.neonLavender,
+    backgroundColor: "rgba(61,34,126,0.9)",
+  },
+  filterDropdownValue: {
+    color: colors.textPrimary,
+    fontSize: 12,
+    fontWeight: "700",
+    flex: 1,
+  },
+  filterDropdownChevron: {
+    color: colors.textPrimary,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  filterDropdownMenu: {
+    borderWidth: 1,
+    borderColor: "rgba(196,181,253,0.45)",
+    borderRadius: 12,
+    backgroundColor: "rgba(20,12,44,0.95)",
+    overflow: "hidden",
+  },
+  filterDropdownOption: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(196,181,253,0.2)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  filterDropdownOptionText: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  filterDropdownOptionTextSelected: {
+    color: colors.textPrimary,
+    fontWeight: "800",
+  },
+  filterDropdownOptionCheck: {
+    color: colors.neonLavender,
+    fontSize: 14,
+    fontWeight: "800",
   },
   inlineRow: {
     flexDirection: "row",

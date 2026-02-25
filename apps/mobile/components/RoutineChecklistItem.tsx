@@ -1,54 +1,61 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { routineTheme } from "../theme/tokens";
 
 export function RoutineChecklistItem({
   title,
   detail,
+  enabled,
   checked,
   onToggle,
+  onToggleEnabled,
   onListen,
-  onRecord,
   onPlay,
   onOpenReader,
 }: {
   title: string;
   detail?: string;
+  enabled: boolean;
   checked: boolean;
   onToggle: () => void;
+  onToggleEnabled: () => void;
   onListen?: () => void;
-  onRecord?: () => void;
   onPlay?: () => void;
   onOpenReader?: () => void;
 }) {
   return (
     <View style={styles.item}>
-      <Pressable style={styles.row} onPress={onToggle}>
-        <View style={[styles.checkbox, checked ? styles.checkboxChecked : null]}>
-          {checked ? <Text style={styles.checkmark}>✓</Text> : null}
-        </View>
-        <View style={styles.textWrap}>
-          <Text style={styles.title}>{title}</Text>
-          {detail ? <Text style={styles.detail}>{detail}</Text> : null}
-        </View>
-      </Pressable>
+      <View style={[styles.row, !enabled ? styles.rowDisabled : null]}>
+        <Pressable style={styles.rowPressTarget} onPress={enabled ? onToggle : undefined}>
+          <View style={styles.textWrap}>
+            <Text style={[styles.title, !enabled ? styles.titleDisabled : null]}>{title}</Text>
+            {detail ? (
+              <Text style={[styles.detail, !enabled ? styles.detailDisabled : null]}>{detail}</Text>
+            ) : null}
+            <Text style={[styles.completionState, checked ? styles.completionStateDone : null]}>
+              {checked ? "Completed" : "Not completed"}
+            </Text>
+          </View>
+        </Pressable>
+        <Switch
+          value={enabled}
+          onValueChange={onToggleEnabled}
+          ios_backgroundColor="rgba(148,163,184,0.45)"
+          trackColor={{ false: "rgba(148,163,184,0.45)", true: "rgba(52,199,89,0.65)" }}
+        />
+      </View>
       <View style={styles.actions}>
         {onListen ? (
-          <Pressable style={styles.actionBtn} onPress={onListen}>
+          <Pressable style={styles.actionBtn} onPress={onListen} disabled={!enabled}>
             <Text style={styles.actionText}>Listen</Text>
           </Pressable>
         ) : null}
-        {onRecord ? (
-          <Pressable style={styles.actionBtn} onPress={onRecord}>
-            <Text style={styles.actionText}>Record</Text>
-          </Pressable>
-        ) : null}
         {onPlay ? (
-          <Pressable style={styles.actionBtn} onPress={onPlay}>
+          <Pressable style={styles.actionBtn} onPress={onPlay} disabled={!enabled}>
             <Text style={styles.actionText}>Play</Text>
           </Pressable>
         ) : null}
         {onOpenReader ? (
-          <Pressable style={styles.actionBtn} onPress={onOpenReader}>
+          <Pressable style={styles.actionBtn} onPress={onOpenReader} disabled={!enabled}>
             <Text style={styles.actionText}>Read</Text>
           </Pressable>
         ) : null}
@@ -69,24 +76,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
-  checkbox: {
-    width: 22,
-    height: 22,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: routineTheme.colors.cardStroke,
-    backgroundColor: "rgba(255,255,255,0.06)",
+  rowPressTarget: {
+    flex: 1,
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
   },
-  checkboxChecked: {
-    backgroundColor: routineTheme.colors.accent2,
-    borderColor: routineTheme.colors.accent2,
-  },
-  checkmark: {
-    color: "#fff",
-    fontWeight: "800",
-    fontSize: 12,
+  rowDisabled: {
+    opacity: 0.65,
   },
   textWrap: {
     flex: 1,
@@ -96,16 +92,30 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "700",
   },
+  titleDisabled: {
+    color: routineTheme.colors.textSecondary,
+  },
   detail: {
     color: routineTheme.colors.textSecondary,
     fontSize: 12,
     marginTop: 2,
   },
+  detailDisabled: {
+    opacity: 0.8,
+  },
+  completionState: {
+    marginTop: 4,
+    color: routineTheme.colors.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  completionStateDone: {
+    color: "#bbf7d0",
+  },
   actions: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
-    paddingLeft: 32,
   },
   actionBtn: {
     paddingHorizontal: 10,
