@@ -221,6 +221,7 @@ const DRIVE_ACTION_ID = "DRIVE_NOW";
 
 const DEFAULT_MEETING_EARLY_MINUTES = 10;
 const DEFAULT_SERVICE_COMMITMENT_MINUTES = 45;
+const MAX_MEETING_MINUTES = 99;
 const DEFAULT_NINETY_DAY_GOAL_TARGET = 90;
 const DASHBOARD_NEARBY_RADIUS_MILES = 20;
 const DASHBOARD_NEARBY_RADIUS_METERS = DASHBOARD_NEARBY_RADIUS_MILES * 1609.344;
@@ -257,6 +258,23 @@ const MEETINGS_TIME_OPTIONS: Array<{ value: MeetingsTimeFilter; label: string }>
 ];
 
 const SHOW_MODE_TILES = false;
+const DAILY_REFLECTIONS_SOUND_CLOUD_BASE_URL = "https://soundcloud.com/aaws";
+const DAILY_REFLECTIONS_SOUND_CLOUD_TOKEN = "s-8IxPSjlasYX";
+const DAILY_REFLECTIONS_AUDIO_DAY_OFFSET = 2;
+const MONTH_SLUGS = [
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
+] as const;
 
 const SPONSOR_LEAD_OPTIONS: Array<{ value: SponsorLeadMinutes; label: string }> = [
   { value: 0, label: "None" },
@@ -552,6 +570,14 @@ function parsePositiveInt(value: string, fallback: number): number {
   return Math.max(0, Math.floor(parsed));
 }
 
+function parseTwoDigitMinutes(value: string, fallback: number): number {
+  const digitsOnly = value.replace(/\D/g, "").slice(0, 2);
+  if (!digitsOnly) {
+    return fallback;
+  }
+  return Math.min(MAX_MEETING_MINUTES, parsePositiveInt(digitsOnly, fallback));
+}
+
 function encodeBase64(value: string): string {
   const btoaFn = (globalThis as { btoa?: (data: string) => string }).btoa;
   if (typeof btoaFn === "function") {
@@ -716,6 +742,45 @@ function parseDdMmYyyyToIso(value: string): string | null {
     return null;
   }
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function parseDateKeyToLocalDate(dateKey: string): Date | null {
+  const match = dateKey.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+
+  const parsed = new Date(year, month - 1, day, 12, 0, 0, 0);
+  if (
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function dayOfYear(date: Date): number {
+  const startOfYear = new Date(date.getFullYear(), 0, 1, 0, 0, 0, 0);
+  const currentDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+  return Math.floor((currentDay.getTime() - startOfYear.getTime()) / 86_400_000) + 1;
+}
+
+function buildDailyReflectionsListenUrl(dateKey: string): string {
+  const targetDate = parseDateKeyToLocalDate(dateKey) ?? new Date();
+  const trackNumber = dayOfYear(targetDate) + DAILY_REFLECTIONS_AUDIO_DAY_OFFSET;
+  const monthSlug = MONTH_SLUGS[targetDate.getMonth()] ?? "january";
+  const dayOfMonth = targetDate.getDate();
+  return `${DAILY_REFLECTIONS_SOUND_CLOUD_BASE_URL}/${String(trackNumber).padStart(3, "0")}-${monthSlug}-${dayOfMonth}/${DAILY_REFLECTIONS_SOUND_CLOUD_TOKEN}`;
 }
 
 function formatIsoToDdMmYyyy(value: string | null): string {
@@ -980,6 +1045,9 @@ export default function App() {
   const [meetingsStatus, setMeetingsStatus] = useState("Meetings not loaded yet.");
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
   const [selectedMeeting, setSelectedMeeting] = useState<MeetingRecord | null>(null);
+  const [pendingGeofenceLogMeetingId, setPendingGeofenceLogMeetingId] = useState<string | null>(
+    null,
+  );
   const [clockTickMs, setClockTickMs] = useState(Date.now());
 
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
@@ -1048,6 +1116,8 @@ export default function App() {
   const meetingsRequestInFlightRef = useRef(false);
   const lastMeetingsRequestKeyRef = useRef<string | null>(null);
   const hasSkippedInitialSelectedDayRefreshRef = useRef(false);
+  const bootstrapStartedRef = useRef(false);
+  const setupStep4RefreshLocationKeyRef = useRef<string | null>(null);
   const saveSponsorConfigRef = useRef<(overrides?: SaveSponsorConfigOverrides) => Promise<boolean>>(
     async () => false,
   );
@@ -1121,6 +1191,16 @@ export default function App() {
     () => meetingPlansByDate[selectedDay.dateKey] ?? EMPTY_DAY_PLAN,
     [meetingPlansByDate, selectedDay.dateKey],
   );
+  const selectedMeetingPlan =
+    selectedMeeting && selectedDayPlan.plans[selectedMeeting.id]
+      ? selectedDayPlan.plans[selectedMeeting.id]
+      : {
+          going: false,
+          earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
+          serviceCommitmentMinutes: DEFAULT_SERVICE_COMMITMENT_MINUTES,
+        };
+  const selectedMeetingIsHomeGroup =
+    selectedMeeting !== null && selectedDayPlan.homeGroupMeetingId === selectedMeeting.id;
   const todayDateKey = useMemo(() => dateKeyForDate(new Date(clockTickMs)), [clockTickMs]);
   const selectedDayIsToday = selectedDay.dateKey === todayDateKey;
   const selectedDayIsPast = selectedDay.date.getTime() < new Date(todayDateKey).getTime();
@@ -1896,9 +1976,7 @@ export default function App() {
             };
             RecordingOptionsPresets?: { HIGH_QUALITY?: unknown };
             Sound?: {
-              createAsync: (source: {
-                uri: string;
-              }) => Promise<{
+              createAsync: (source: { uri: string }) => Promise<{
                 sound: { unloadAsync: () => Promise<void>; playAsync: () => Promise<void> };
               }>;
             };
@@ -2032,6 +2110,16 @@ export default function App() {
     setToolsScreen("READER");
   }, []);
 
+  const dailyReflectionsReadUrl = useMemo(() => {
+    const configuredLink = routinesStore.morningTemplate.dailyReflectionsLink.trim();
+    return configuredLink.length > 0 ? configuredLink : "https://www.aa.org/daily-reflections";
+  }, [routinesStore.morningTemplate.dailyReflectionsLink]);
+
+  const dailyReflectionsListenUrl = useMemo(
+    () => buildDailyReflectionsListenUrl(routineDateKey),
+    [routineDateKey],
+  );
+
   const openRoutineReaderLink = useCallback(async (url: string) => {
     try {
       await Linking.openURL(url);
@@ -2039,6 +2127,14 @@ export default function App() {
       setRoutinesStatus("Unable to open this link.");
     }
   }, []);
+
+  const openDailyReflectionsRead = useCallback(() => {
+    openRoutineReader("Daily Reflections", dailyReflectionsReadUrl);
+  }, [dailyReflectionsReadUrl, openRoutineReader]);
+
+  const openDailyReflectionsListen = useCallback(async () => {
+    await openRoutineReaderLink(dailyReflectionsListenUrl);
+  }, [dailyReflectionsListenUrl, openRoutineReaderLink]);
 
   const exportMorningRoutineForToday = useCallback(async () => {
     try {
@@ -2362,6 +2458,7 @@ export default function App() {
           setSetupError("Enter sponsor name and phone.");
           return;
         }
+        setWizardWantsReminders((current) => (current === null ? true : current));
         setSponsorEnabled(true);
       } else {
         setSponsorEnabled(false);
@@ -2373,21 +2470,22 @@ export default function App() {
 
     if (setupStep === 3) {
       if (wizardHasSponsor) {
+        const remindersEnabled = wizardWantsReminders ?? true;
         if (wizardWantsReminders === null) {
-          setSetupError("Choose whether sponsor call reminders are enabled.");
-          return;
+          setWizardWantsReminders(remindersEnabled);
         }
-        const remindersEnabled = wizardWantsReminders === true;
         setSponsorEnabled(true);
         setSponsorActive(remindersEnabled);
-        const saved = await saveSponsorConfigRef.current({
-          sponsorEnabled: true,
-          sponsorActive: remindersEnabled,
-        });
-        if (!saved) {
-          setSponsorStatus("Sponsor auto-save failed. You can continue and retry from Settings.");
-        }
         setSponsorEnabledAtIso((current) => current ?? new Date().toISOString());
+        void (async () => {
+          const saved = await saveSponsorConfigRef.current({
+            sponsorEnabled: true,
+            sponsorActive: remindersEnabled,
+          });
+          if (!saved) {
+            setSponsorStatus("Sponsor auto-save failed. You can continue and retry from Settings.");
+          }
+        })();
       } else {
         setWizardWantsReminders(false);
       }
@@ -2548,36 +2646,39 @@ export default function App() {
   }, [apiUrl, authHeader, formatApiErrorWithHint]);
 
   const openPhoneCall = useCallback(
-    async (phoneE164: string | null, source: "button" | "notification" = "button") => {
-      if (!phoneE164) {
-        setSponsorStatus("Enter sponsor name and phone to enable reminders.");
-        appendSponsorCallLog({ sponsorPhoneE164: null, source, success: false });
-        return;
-      }
-      const digits = normalizePhoneDigits(phoneE164);
-      if (!digits) {
-        setSponsorStatus("Enter sponsor name and phone to enable reminders.");
-        appendSponsorCallLog({ sponsorPhoneE164: phoneE164, source, success: false });
-        return;
-      }
-      const telUrl = `tel:${digits}`;
-      try {
-        const canOpen = await Linking.canOpenURL(telUrl);
-        if (!canOpen) {
-          setSponsorStatus("Calling is not supported on this device (simulator).");
-          appendSponsorCallLog({ sponsorPhoneE164: phoneE164, source, success: false });
-          return;
-        }
+    async (phoneE164?: string | null, source: "button" | "notification" = "button") => {
+      const fallbackE164 = toE164FromUsTenDigit(sponsorPhoneDigits);
+      const resolvedInput = phoneE164 ?? fallbackE164;
+      const digits = normalizePhoneDigits(resolvedInput ?? "");
 
-        await Linking.openURL(telUrl);
+      if (!digits) {
+        setSponsorStatus("Enter sponsor name and phone to enable calling.");
+        appendSponsorCallLog({ sponsorPhoneE164: resolvedInput ?? null, source, success: false });
+        return;
+      }
+
+      const normalizedE164 = toE164FromUsTenDigit(digits) ?? resolvedInput ?? null;
+      const primaryUrl = Platform.OS === "ios" ? `telprompt:${digits}` : `tel:${digits}`;
+      const fallbackUrl = `tel:${digits}`;
+
+      try {
+        await Linking.openURL(primaryUrl);
         setSponsorStatus(null);
-        appendSponsorCallLog({ sponsorPhoneE164: phoneE164, source, success: true });
+        appendSponsorCallLog({ sponsorPhoneE164: normalizedE164, source, success: true });
+        return;
       } catch {
-        setSponsorStatus("Calling is not supported on this device (simulator).");
-        appendSponsorCallLog({ sponsorPhoneE164: phoneE164, source, success: false });
+        try {
+          await Linking.openURL(fallbackUrl);
+          setSponsorStatus(null);
+          appendSponsorCallLog({ sponsorPhoneE164: normalizedE164, source, success: true });
+          return;
+        } catch {
+          setSponsorStatus("Calling is not supported on this device (simulator).");
+          appendSponsorCallLog({ sponsorPhoneE164: normalizedE164, source, success: false });
+        }
       }
     },
-    [appendSponsorCallLog],
+    [appendSponsorCallLog, sponsorPhoneDigits],
   );
 
   const openMeetingDestination = useCallback(async (meeting: MeetingRecord) => {
@@ -3424,7 +3525,8 @@ export default function App() {
       meetingId: activeAttendance.meetingId,
       method: "verified",
     });
-    setAttendanceStatus("Attendance ended. Add signature, then export PDF.");
+    setAttendanceStatus("Attendance ended. Capture chairperson signature to complete the log.");
+    setScreen("SIGNATURE");
   }, [activeAttendance, readCurrentLocation, upsertAttendanceRecord, appendMeetingAttendanceLog]);
 
   const saveSignature = useCallback(() => {
@@ -3678,7 +3780,10 @@ export default function App() {
 
   const setMeetingEarlyMinutes = useCallback(
     (meetingId: string, earlyMinutesText: string) => {
-      const nextEarlyMinutes = parsePositiveInt(earlyMinutesText, DEFAULT_MEETING_EARLY_MINUTES);
+      const nextEarlyMinutes = parseTwoDigitMinutes(
+        earlyMinutesText,
+        DEFAULT_MEETING_EARLY_MINUTES,
+      );
       updateSelectedDayPlan((current) => {
         const existing = current.plans[meetingId] ?? {
           going: true,
@@ -3734,7 +3839,7 @@ export default function App() {
 
   const setServiceCommitmentMinutes = useCallback(
     (meetingId: string, valueText: string) => {
-      const parsed = parsePositiveInt(valueText, DEFAULT_SERVICE_COMMITMENT_MINUTES);
+      const parsed = parseTwoDigitMinutes(valueText, DEFAULT_SERVICE_COMMITMENT_MINUTES);
       updateSelectedDayPlan((current) => {
         const existing = current.plans[meetingId] ?? {
           going: true,
@@ -3769,13 +3874,75 @@ export default function App() {
     [appendMeetingAttendanceLog],
   );
 
-  const logMeetingToday = useCallback(() => {
-    appendMeetingAttendanceLog({
-      meetingId: "manual-dashboard",
-      method: "manual",
-    });
-    setAttendanceStatus("Logged one meeting for today.");
-  }, [appendMeetingAttendanceLog]);
+  const resolveMeetingForLogging = useCallback(
+    (meetingId: string): MeetingRecord | null => {
+      return (
+        meetingsTodayUpcoming.find((meeting) => meeting.id === meetingId) ??
+        meetingsForDay.find((meeting) => meeting.id === meetingId) ??
+        allMeetings.find((meeting) => meeting.id === meetingId) ??
+        null
+      );
+    },
+    [meetingsTodayUpcoming, meetingsForDay, allMeetings],
+  );
+
+  const logUpcomingMeetingFromDashboard = useCallback(
+    async (meetingId: string) => {
+      if (activeAttendance && !activeAttendance.endAt) {
+        Alert.alert(
+          "Attendance in progress",
+          "Finish the current meeting attendance before logging another meeting.",
+        );
+        return;
+      }
+
+      const meeting = resolveMeetingForLogging(meetingId);
+      if (!meeting) {
+        Alert.alert("Meeting unavailable", "This meeting is no longer in the upcoming list.");
+        return;
+      }
+
+      if (
+        meeting.format === "ONLINE" ||
+        meeting.lat === null ||
+        meeting.lng === null ||
+        !Number.isFinite(meeting.lat) ||
+        !Number.isFinite(meeting.lng)
+      ) {
+        Alert.alert(
+          "Geofence unavailable",
+          "This meeting does not have a valid in-person geofence location.",
+        );
+        return;
+      }
+
+      const location = await readCurrentLocation(true);
+      if (location) {
+        const distance = distanceMetersBetween(
+          location.lat,
+          location.lng,
+          meeting.lat,
+          meeting.lng,
+        );
+        if (distance <= ARRIVAL_RADIUS_METERS) {
+          setPendingGeofenceLogMeetingId(null);
+          setSelectedMeeting(meeting);
+          setHomeScreen("MEETINGS");
+          await startAttendance(meeting);
+          return;
+        }
+      }
+
+      setPendingGeofenceLogMeetingId(meeting.id);
+      setSelectedMeeting(meeting);
+      setAttendanceStatus(`Queued ${meeting.name}. Logging starts automatically at arrival.`);
+      Alert.alert(
+        "Outside meeting geofence",
+        `${meeting.name} will be logged once you are at the meeting location (~200 ft geofence).`,
+      );
+    },
+    [activeAttendance, readCurrentLocation, resolveMeetingForLogging, startAttendance],
+  );
 
   const scheduleDebugSponsorNotification = useCallback(async () => {
     const hasPermission = await ensureNotificationPermission();
@@ -3977,6 +4144,11 @@ export default function App() {
   }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter, updateMapCenter]);
 
   useEffect(() => {
+    if (bootstrapStartedRef.current) {
+      return;
+    }
+    bootstrapStartedRef.current = true;
+
     void (async () => {
       const position = await requestLocationPermission();
       await Promise.all([refreshMeetings({ location: position }), fetchSponsorConfig()]);
@@ -4288,8 +4460,18 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 4) {
+      setupStep4RefreshLocationKeyRef.current = null;
       return;
     }
+
+    const locationKey = currentLocation
+      ? `${currentLocation.lat.toFixed(4)}|${currentLocation.lng.toFixed(4)}`
+      : "none";
+    if (setupStep4RefreshLocationKeyRef.current === locationKey) {
+      return;
+    }
+    setupStep4RefreshLocationKeyRef.current = locationKey;
+
     if (currentLocation) {
       void refreshMeetings({ location: currentLocation });
       return;
@@ -4434,6 +4616,77 @@ export default function App() {
     };
   }, [selectedMeeting, activeAttendance, readCurrentLocation, startAttendance]);
 
+  useEffect(() => {
+    if (!pendingGeofenceLogMeetingId) {
+      return;
+    }
+    if (activeAttendance && !activeAttendance.endAt) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const checkPendingMeeting = async () => {
+      if (cancelled) {
+        return;
+      }
+
+      const meeting = resolveMeetingForLogging(pendingGeofenceLogMeetingId);
+      if (!meeting) {
+        setPendingGeofenceLogMeetingId(null);
+        return;
+      }
+
+      if (
+        meeting.format === "ONLINE" ||
+        meeting.lat === null ||
+        meeting.lng === null ||
+        !Number.isFinite(meeting.lat) ||
+        !Number.isFinite(meeting.lng)
+      ) {
+        setPendingGeofenceLogMeetingId(null);
+        return;
+      }
+
+      const location = await readCurrentLocation(false);
+      if (!location || cancelled) {
+        return;
+      }
+
+      const distance = distanceMetersBetween(location.lat, location.lng, meeting.lat, meeting.lng);
+      if (distance > ARRIVAL_RADIUS_METERS) {
+        return;
+      }
+
+      setPendingGeofenceLogMeetingId(null);
+      setSelectedMeeting(meeting);
+      setHomeScreen("MEETINGS");
+      await startAttendance(meeting);
+      if (!cancelled) {
+        Alert.alert("Meeting log started", `${meeting.name} attendance logging has started.`);
+      }
+    };
+
+    void checkPendingMeeting();
+    timer = setInterval(() => {
+      void checkPendingMeeting();
+    }, 15_000);
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, [
+    pendingGeofenceLogMeetingId,
+    activeAttendance,
+    resolveMeetingForLogging,
+    readCurrentLocation,
+    startAttendance,
+  ]);
+
   function toggleRepeatDay(day: WeekdayCode) {
     setSponsorRepeatDays((previous) => {
       const next = previous.includes(day)
@@ -4505,7 +4758,9 @@ export default function App() {
       homeScreen === "MEETINGS" ||
       homeScreen === "ATTENDANCE" ||
       homeScreen === "TOOLS");
-  const shouldLockOuterScrollForDashboard = homeScreen === "DASHBOARD" && showFixedBottomMenu;
+  // Keep dashboard content scrollable from the parent container so users can reach
+  // the Upcoming Meetings tile reliably on all devices.
+  const shouldLockOuterScrollForDashboard = false;
 
   return (
     <LiquidBackground>
@@ -4520,6 +4775,7 @@ export default function App() {
             styles.contentContainer,
             showFixedBottomMenu ? styles.contentContainerWithFooterNav : null,
           ]}
+          pointerEvents={shouldLockOuterScrollForDashboard ? "box-none" : "auto"}
           scrollEnabled={!shouldLockOuterScrollForDashboard}
           scrollIndicatorInsets={{ bottom: showFixedBottomMenu ? DASHBOARD_FOOTER_NAV_HEIGHT : 24 }}
           keyboardShouldPersistTaps="handled"
@@ -4668,7 +4924,6 @@ export default function App() {
                               setSponsorPhoneDigits(normalizePhoneDigits(value))
                             }
                             keyboardType="phone-pad"
-                            maxLength={14}
                             placeholder="(555) 555-1234"
                           />
                         </>
@@ -4881,34 +5136,42 @@ export default function App() {
                               No nearby upcoming meetings loaded yet.
                             </Text>
                           ) : (
-                            homeGroupCandidateMeetings.map((meeting) => {
-                              const selected = homeGroupMeetingIds.includes(meeting.id);
-                              return (
-                                <Pressable
-                                  key={meeting.id}
-                                  style={[
-                                    styles.meetingCard,
-                                    selected ? styles.homeGroupSelectedCard : null,
-                                  ]}
-                                  onPress={() =>
-                                    setHomeGroupMeetingIds((current) =>
-                                      current.includes(meeting.id) ? [] : [meeting.id],
-                                    )
-                                  }
-                                >
-                                  <Text style={styles.meetingName}>{meeting.name}</Text>
-                                  <Text style={styles.sectionMeta}>
-                                    {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
-                                    {formatDistance(meeting.distanceMeters)}
-                                  </Text>
-                                  <Text style={styles.sectionMeta}>
-                                    {selected
-                                      ? "Selected as home group"
-                                      : "Tap to set as home group"}
-                                  </Text>
-                                </Pressable>
-                              );
-                            })
+                            <ScrollView
+                              style={styles.setupMeetingListScroll}
+                              contentContainerStyle={styles.setupMeetingListContent}
+                              nestedScrollEnabled
+                              showsVerticalScrollIndicator
+                              keyboardShouldPersistTaps="handled"
+                            >
+                              {homeGroupCandidateMeetings.map((meeting) => {
+                                const selected = homeGroupMeetingIds.includes(meeting.id);
+                                return (
+                                  <Pressable
+                                    key={meeting.id}
+                                    style={[
+                                      styles.meetingCard,
+                                      selected ? styles.homeGroupSelectedCard : null,
+                                    ]}
+                                    onPress={() =>
+                                      setHomeGroupMeetingIds((current) =>
+                                        current.includes(meeting.id) ? [] : [meeting.id],
+                                      )
+                                    }
+                                  >
+                                    <Text style={styles.meetingName}>{meeting.name}</Text>
+                                    <Text style={styles.sectionMeta}>
+                                      {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
+                                      {formatDistance(meeting.distanceMeters)}
+                                    </Text>
+                                    <Text style={styles.sectionMeta}>
+                                      {selected
+                                        ? "Selected as home group"
+                                        : "Tap to set as home group"}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </ScrollView>
                           )}
                         </>
                       ) : null}
@@ -5005,7 +5268,7 @@ export default function App() {
                     void searchMeetingsFromDashboard();
                   }}
                   onCallSponsor={() => {
-                    void openPhoneCall(sponsorPhoneE164);
+                    void openPhoneCall();
                   }}
                   onOpenMorningRoutine={openMorningRoutine}
                   onOpenNightlyInventory={openNightlyInventory}
@@ -5021,7 +5284,9 @@ export default function App() {
                       await refreshMeetings({ location });
                     })();
                   }}
-                  onLogMeeting={logMeetingToday}
+                  onLogMeeting={(meetingId) => {
+                    void logUpcomingMeetingFromDashboard(meetingId);
+                  }}
                   onLearnMore={openSettingsHub}
                 />
               ) : null}
@@ -5182,6 +5447,58 @@ export default function App() {
                         {selectedMeeting.openness || "Unknown"} •{" "}
                         {selectedMeeting.format || "Unknown"}
                       </Text>
+
+                      <Pressable
+                        style={styles.checkboxRow}
+                        onPress={() => toggleHomeGroupMeeting(selectedMeeting.id)}
+                      >
+                        <View
+                          style={[
+                            styles.checkbox,
+                            selectedMeetingIsHomeGroup ? styles.checkboxChecked : null,
+                          ]}
+                        >
+                          {selectedMeetingIsHomeGroup ? (
+                            <Text style={styles.checkboxTick}>✓</Text>
+                          ) : null}
+                        </View>
+                        <Text style={styles.label}>Home group</Text>
+                      </Pressable>
+
+                      <View style={styles.inlineRowGap}>
+                        <Text style={styles.sectionMeta}>Arrive early (mins)</Text>
+                        <TextInput
+                          style={styles.smallInput}
+                          value={String(selectedMeetingPlan.earlyMinutes)}
+                          keyboardType="number-pad"
+                          maxLength={2}
+                          onChangeText={(value) =>
+                            setMeetingEarlyMinutes(selectedMeeting.id, value)
+                          }
+                        />
+                      </View>
+
+                      <View style={styles.inlineRowGap}>
+                        <Text style={styles.sectionMeta}>End meeting (mins)</Text>
+                        <TextInput
+                          style={styles.smallInput}
+                          value={String(
+                            selectedMeetingPlan.serviceCommitmentMinutes ??
+                              DEFAULT_SERVICE_COMMITMENT_MINUTES,
+                          )}
+                          keyboardType="number-pad"
+                          maxLength={2}
+                          editable={selectedMeetingIsHomeGroup}
+                          onChangeText={(value) =>
+                            setServiceCommitmentMinutes(selectedMeeting.id, value)
+                          }
+                        />
+                      </View>
+                      {!selectedMeetingIsHomeGroup ? (
+                        <Text style={styles.sectionMeta}>
+                          Select home group to edit end meeting minutes.
+                        </Text>
+                      ) : null}
 
                       <View style={styles.buttonRow}>
                         <AppButton title="Back to list" onPress={() => setScreen("LIST")} />
@@ -5357,6 +5674,10 @@ export default function App() {
                         }))
                       }
                       onOpenReader={openRoutineReader}
+                      onReadDailyReflections={openDailyReflectionsRead}
+                      onListenDailyReflections={() => {
+                        void openDailyReflectionsListen();
+                      }}
                       onListenText={speakRoutineText}
                       onRecordItem={(itemId) => void recordRoutineItem(itemId)}
                       onPlayItem={(itemId) => void playRoutineItemAudio(itemId)}
@@ -5567,7 +5888,6 @@ export default function App() {
                             setSponsorPhoneDigits(normalizePhoneDigits(value))
                           }
                           keyboardType="phone-pad"
-                          maxLength={14}
                           placeholder="(555) 555-1234"
                         />
 
@@ -6014,6 +6334,7 @@ export default function App() {
                                       style={styles.smallInput}
                                       value={String(plan.earlyMinutes)}
                                       keyboardType="number-pad"
+                                      maxLength={2}
                                       onChangeText={(value) =>
                                         setMeetingEarlyMinutes(meeting.id, value)
                                       }
@@ -6040,6 +6361,7 @@ export default function App() {
                                             DEFAULT_SERVICE_COMMITMENT_MINUTES,
                                         )}
                                         keyboardType="number-pad"
+                                        maxLength={2}
                                         onChangeText={(value) =>
                                           setServiceCommitmentMinutes(meeting.id, value)
                                         }
@@ -6111,6 +6433,58 @@ export default function App() {
                               : null,
                           )}
                         </Text>
+
+                        <Pressable
+                          style={styles.checkboxRow}
+                          onPress={() => toggleHomeGroupMeeting(selectedMeeting.id)}
+                        >
+                          <View
+                            style={[
+                              styles.checkbox,
+                              selectedMeetingIsHomeGroup ? styles.checkboxChecked : null,
+                            ]}
+                          >
+                            {selectedMeetingIsHomeGroup ? (
+                              <Text style={styles.checkboxTick}>✓</Text>
+                            ) : null}
+                          </View>
+                          <Text style={styles.label}>Home group</Text>
+                        </Pressable>
+
+                        <View style={styles.inlineRowGap}>
+                          <Text style={styles.sectionMeta}>Arrive early (mins)</Text>
+                          <TextInput
+                            style={styles.smallInput}
+                            value={String(selectedMeetingPlan.earlyMinutes)}
+                            keyboardType="number-pad"
+                            maxLength={2}
+                            onChangeText={(value) =>
+                              setMeetingEarlyMinutes(selectedMeeting.id, value)
+                            }
+                          />
+                        </View>
+
+                        <View style={styles.inlineRowGap}>
+                          <Text style={styles.sectionMeta}>End meeting (mins)</Text>
+                          <TextInput
+                            style={styles.smallInput}
+                            value={String(
+                              selectedMeetingPlan.serviceCommitmentMinutes ??
+                                DEFAULT_SERVICE_COMMITMENT_MINUTES,
+                            )}
+                            keyboardType="number-pad"
+                            maxLength={2}
+                            editable={selectedMeetingIsHomeGroup}
+                            onChangeText={(value) =>
+                              setServiceCommitmentMinutes(selectedMeeting.id, value)
+                            }
+                          />
+                        </View>
+                        {!selectedMeetingIsHomeGroup ? (
+                          <Text style={styles.sectionMeta}>
+                            Select home group to edit end meeting minutes.
+                          </Text>
+                        ) : null}
 
                         <View style={styles.buttonRow}>
                           <AppButton title="Back" onPress={() => setScreen("LIST")} />
@@ -6296,7 +6670,7 @@ export default function App() {
                     : "Configure probation/parole rules, reporting windows, and reminder preferences."}
                 </Text>
                 <View style={styles.buttonRow}>
-                  <AppButton title="Back to Dashboard" onPress={openDashboard} />
+                  <AppButton title="Back to Dashboard" onPress={() => handleModeSelect("A")} />
                 </View>
               </GlassCard>
 
@@ -6834,6 +7208,13 @@ const styles = StyleSheet.create({
     borderTopColor: "rgba(255,255,255,0.2)",
     paddingTop: 8,
     marginTop: 4,
+  },
+  setupMeetingListScroll: {
+    maxHeight: 320,
+  },
+  setupMeetingListContent: {
+    gap: 8,
+    paddingRight: 4,
   },
   homeGroupSelectedCard: {
     borderColor: colors.neonLavender,

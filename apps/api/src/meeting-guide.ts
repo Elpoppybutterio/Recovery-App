@@ -228,6 +228,48 @@ export function inferMeetingFormat(value: {
   return "IN_PERSON";
 }
 
+function normalizeDedupeText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeStreetAddressForDedupe(value: string | null): string {
+  const text = asString(value);
+  if (!text) {
+    return "";
+  }
+  const beforeComma = text.split(",")[0]?.trim() ?? text;
+  return normalizeDedupeText(beforeComma);
+}
+
+export function buildMeetingDedupeKey(value: {
+  name: string;
+  day: number | null;
+  time: string | null;
+  formattedAddress: string | null;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+}): string {
+  const day = value.day ?? -1;
+  const time = value.time ?? "unknown";
+  const name = normalizeDedupeText(value.name);
+  const addressKey = normalizeStreetAddressForDedupe(value.formattedAddress ?? value.address);
+
+  if (addressKey.length > 0) {
+    return `${day}|${time}|${name}|addr:${addressKey}`;
+  }
+
+  if (value.lat !== null && value.lng !== null) {
+    return `${day}|${time}|${name}|geo:${value.lat.toFixed(3)}|${value.lng.toFixed(3)}`;
+  }
+
+  return `${day}|${time}|${name}|unknown`;
+}
+
 let cachedTypeLabels: Record<string, string> | null = null;
 
 export function mapTypeCodesToLabels(typeCodes: string[]): string[] {

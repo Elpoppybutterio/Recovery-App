@@ -68,7 +68,7 @@ export default async function HomePage(): Promise<JSX.Element> {
 
   return (
     <main style={{ fontFamily: "sans-serif", padding: "2rem" }}>
-      <h1>Recovery Accountability Dashboard (Scaffold)</h1>
+      <h1>Sober AI Dashboard (Scaffold)</h1>
       <p>API health: {health}</p>
 
       <LiveSupervisionPanel devUserId={devUserId} />

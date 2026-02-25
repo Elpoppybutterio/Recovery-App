@@ -702,52 +702,45 @@ function decodeBasicHtmlEntities(value: string): string {
 }
 
 function parseAaMontanaHtmlEntries(rawHtml: string, feedUrl: string): unknown[] {
-  const withLineBreaks = rawHtml
-    .replace(/<\s*br\s*\/?>/gi, "\n")
-    .replace(/<\/tr>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<\/li>/gi, "\n")
-    .replace(/<\/div>/gi, "\n");
-
-  const plainText = decodeBasicHtmlEntities(withLineBreaks).replace(/<[^>]+>/g, " ");
-  const lines = plainText
-    .split("\n")
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter((line) => line.length > 0);
-
   const cityFromUrl = parseCityFromFeedUrl(feedUrl);
   const parsedEntries: unknown[] = [];
 
-  for (const line of lines) {
-    const dayMatch = line.match(/\b(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\b/i);
-    if (!dayMatch || dayMatch.index === undefined) {
+  const stripCellHtml = (value: string): string =>
+    decodeBasicHtmlEntities(value)
+      .replace(/<\s*br\s*\/?>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const tableBodyMatch = rawHtml.match(/<tbody[^>]*id=["']fbody["'][^>]*>([\s\S]*?)<\/tbody>/i);
+  const rowsSource = tableBodyMatch?.[1] ?? rawHtml;
+  const rowMatches = Array.from(rowsSource.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi));
+
+  for (const rowMatch of rowMatches) {
+    const rowHtml = rowMatch[1] ?? "";
+    const cells = Array.from(rowHtml.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)).map((match) =>
+      stripCellHtml(match[1] ?? ""),
+    );
+
+    if (cells.length < 5) {
       continue;
     }
 
-    const dayIndex = DAY_NAME_TO_INDEX[dayMatch[1].toLowerCase()];
+    const namePartRaw = cells[0];
+    const dayText = cells[1];
+    const timeText = cells[3];
+    const addressRaw = cells[4];
+    if (!namePartRaw || !dayText || !timeText || !addressRaw) {
+      continue;
+    }
+
+    const dayIndex = DAY_NAME_TO_INDEX[dayText.toLowerCase()];
     if (dayIndex === undefined) {
       continue;
     }
 
-    const namePartRaw = line.slice(0, dayMatch.index).trim();
-    const timeMatches = Array.from(
-      line.matchAll(/(\d{1,2}:\d{2}\s*(?:A\.?M\.?|P\.?M\.?|AM|PM|am|pm))/g),
-    );
-    const lastTimeMatch = timeMatches[timeMatches.length - 1];
-    if (!lastTimeMatch || lastTimeMatch.index === undefined) {
-      continue;
-    }
-
-    const time24 = toTwentyFourHour(lastTimeMatch[1]);
+    const time24 = toTwentyFourHour(timeText);
     if (!time24) {
-      continue;
-    }
-
-    const addressRaw = line
-      .slice(lastTimeMatch.index + lastTimeMatch[0].length)
-      .replace(/\s*!+\s*$/g, "")
-      .trim();
-    if (!addressRaw) {
       continue;
     }
 
@@ -763,7 +756,7 @@ function parseAaMontanaHtmlEntries(rawHtml: string, feedUrl: string): unknown[] 
     const isOnline = /virtual|zoom|online/i.test(addressRaw);
 
     parsedEntries.push({
-      slug: slugify(`${cityFromUrl ?? "montana"}-${name}-${dayMatch[1]}-${time24}`),
+      slug: slugify(`${cityFromUrl ?? "montana"}-${name}-${dayText}-${time24}`),
       name,
       day: dayIndex,
       time: time24,
@@ -841,69 +834,6 @@ async function geocodeWithOpenStreetMap(options: {
 
   return { lat, lng };
 }
-
-const BUILTIN_MEETING_GUIDE_FEEDS: Record<string, unknown[]> = {
-  "builtin://billings-test": [
-    {
-      slug: "billings-noon-aa-mon",
-      name: "Billings Noon Recovery",
-      day: 1,
-      time: "12:00",
-      formatted_address: "2919 2nd Ave N, Billings, MT 59101",
-      address: "2919 2nd Ave N",
-      city: "Billings",
-      state: "MT",
-      postal_code: "59101",
-      country: "US",
-      latitude: 45.7836,
-      longitude: -108.5002,
-      types: ["O"],
-      updated: "2026-02-20T12:00:00Z",
-    },
-    {
-      slug: "billings-evening-aa-tue",
-      name: "Downtown Serenity Group",
-      day: 2,
-      time: "18:30",
-      formatted_address: "115 N 30th St, Billings, MT 59101",
-      address: "115 N 30th St",
-      city: "Billings",
-      state: "MT",
-      postal_code: "59101",
-      country: "US",
-      latitude: 45.7831,
-      longitude: -108.5095,
-      types: ["C"],
-      updated: "2026-02-20T12:00:00Z",
-    },
-    {
-      slug: "billings-early-na-wed",
-      name: "Southside NA Morning",
-      day: 3,
-      time: "07:00",
-      formatted_address: "3940 Rimrock Rd, Billings, MT 59102",
-      address: "3940 Rimrock Rd",
-      city: "Billings",
-      state: "MT",
-      postal_code: "59102",
-      country: "US",
-      latitude: 45.7555,
-      longitude: -108.6031,
-      types: ["O", "SP"],
-      updated: "2026-02-20T12:00:00Z",
-    },
-    {
-      slug: "billings-online-thu",
-      name: "Online Open Recovery",
-      day: 4,
-      time: "20:00",
-      formatted_address: "Online",
-      conference_url: "https://example.org/online-room",
-      types: ["O", "ONL"],
-      updated: "2026-02-20T12:00:00Z",
-    },
-  ],
-};
 
 function extractEntries(payload: unknown): unknown[] {
   if (Array.isArray(payload)) {

@@ -1,4 +1,4 @@
-# Recovery Accountability App Requirements
+# Sober AI App Requirements
 
 ## Scope
 

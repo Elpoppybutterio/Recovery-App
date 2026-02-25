@@ -5,6 +5,8 @@ import type {
   RecoveryRoutinesStore,
 } from "./types";
 
+export const DAILY_REFLECTIONS_URL = "https://www.aa.org/daily-reflections";
+
 function createId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -49,11 +51,11 @@ export function createDefaultMorningRoutineTemplate(): MorningRoutineTemplate {
         id: "daily-reflections",
         title: "Daily Reflections",
         readerLabel: "Read",
-        readerUrl: null,
+        readerUrl: DAILY_REFLECTIONS_URL,
       },
     ],
     sponsorSuggestions: "",
-    dailyReflectionsLink: "",
+    dailyReflectionsLink: DAILY_REFLECTIONS_URL,
     dailyReflectionsText:
       "Add your licensed Daily Reflections source link or your own reflection text.",
     customPrayers: [
