@@ -9,7 +9,7 @@
     "dev:dashboard": "pnpm --filter @recovery/dashboard dev",
     "dev:worker": "pnpm --filter @recovery/worker dev",
     "dev:mobile": "pnpm --filter @recovery/mobile dev",
-    "dev:ports:kill": "sh -c 'PIDS=$(lsof -ti :3001 -i :8081 2>/dev/null | sort -u); [ -n \"$PIDS\" ] && kill -9 $PIDS || true'",
+    "dev:ports:kill": "sh -c 'PIDS=$(lsof -ti :3031 -i :8081 2>/dev/null | sort -u); [ -n \"$PIDS\" ] && kill -9 $PIDS || true'",
     "dev:stack": "pnpm dev:ports:kill && turbo run dev --parallel --filter=@recovery/api --filter=@recovery/mobile",
     "dev:all": "pnpm dev:ports:kill && turbo run dev --parallel --filter=@recovery/api --filter=@recovery/dashboard --filter=@recovery/worker --filter=@recovery/mobile",
     "dev:clean": "turbo run clean --parallel || true",

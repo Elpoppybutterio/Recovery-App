@@ -3,7 +3,7 @@ import type { JSX, ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Recovery Accountability Dashboard",
+  title: "Sober AI Dashboard",
   description: "Monorepo scaffold dashboard",
 };
 

@@ -187,6 +187,13 @@ function distanceMetersBetween(
   return EARTH_RADIUS_METERS * arc;
 }
 
+function isDevAuthHeader(value: string | undefined): boolean {
+  if (typeof value !== "string") {
+    return false;
+  }
+  return /^Bearer DEV_[A-Za-z0-9_-]+$/.test(value.trim());
+}
+
 export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date } = {}) {
   const env = options.env ?? loadApiEnv();
   const app = Fastify();
@@ -330,7 +337,6 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       now,
       logger,
       geocodeMissingCoordinates: env.NODE_ENV !== "production",
-      geocodeMissingCoordinates: env.NODE_ENV !== "production",
     });
   };
 
@@ -348,34 +354,13 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     }
 
     void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
-  const autoIngestTenantId =
-    env.MEETING_GUIDE_DEFAULT_TENANT_ID ??
-    (env.NODE_ENV !== "production" && env.ENABLE_DEV_AUTH ? "tenant-a" : undefined);
-
-  if (env.MEETING_GUIDE_AUTO_INGEST && autoIngestTenantId) {
-    if (!env.MEETING_GUIDE_DEFAULT_TENANT_ID && env.NODE_ENV !== "production") {
-      logger.warn("meeting_guide.config.dev_default_tenant_fallback", {
-        tenantId: autoIngestTenantId,
-        message:
-          "MEETING_GUIDE_DEFAULT_TENANT_ID not set; using tenant-a fallback for dev auto-ingest.",
-      });
-    }
-
-    void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
       logger.error("meeting_guide.ingest.startup_failed", {
-        tenantId: autoIngestTenantId,
         tenantId: autoIngestTenantId,
         reason: error instanceof Error ? error.message : "unknown",
       });
     });
 
     meetingGuideTimer = setInterval(() => {
-      void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
-        logger.error("meeting_guide.ingest.interval_failed", {
-          tenantId: autoIngestTenantId,
-          reason: error instanceof Error ? error.message : "unknown",
-        });
-      });
       void runMeetingGuideIngestForTenant(autoIngestTenantId).catch((error) => {
         logger.error("meeting_guide.ingest.interval_failed", {
           tenantId: autoIngestTenantId,

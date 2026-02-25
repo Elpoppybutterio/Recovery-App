@@ -12,6 +12,7 @@ import type { ActorContext } from "../domain/actor";
 import type { DbClient } from "./client";
 import {
   boundingBoxForRadius,
+  buildMeetingDedupeKey,
   haversineDistanceMeters,
   inferMeetingFormat,
   type NormalizedMeetingGuideMeeting,
@@ -275,6 +276,83 @@ function toRole(role: string): Role | null {
 
 function toJsonParam(value: unknown) {
   return JSON.stringify(value ?? {});
+}
+
+function toComparableTimestamp(value: string | null): number {
+  if (!value) {
+    return Number.NEGATIVE_INFINITY;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
+function scoreNearbyMeetingMetadata(meeting: NearbyMeetingRow): number {
+  let score = 0;
+  if (meeting.formatted_address) {
+    score += 2;
+  }
+  if (meeting.address) {
+    score += 1;
+  }
+  if (meeting.city) {
+    score += 1;
+  }
+  if (meeting.state) {
+    score += 1;
+  }
+  if (meeting.postal_code) {
+    score += 1;
+  }
+  if (meeting.location) {
+    score += 1;
+  }
+  if (meeting.notes) {
+    score += 1;
+  }
+  if (meeting.conference_url) {
+    score += 1;
+  }
+  if (meeting.conference_phone) {
+    score += 1;
+  }
+  if (meeting.end_time) {
+    score += 1;
+  }
+  if (meeting.types.length > 0) {
+    score += Math.min(meeting.types.length, 3);
+  }
+  return score;
+}
+
+function preferNearbyMeeting(
+  existing: NearbyMeetingRow,
+  candidate: NearbyMeetingRow,
+): NearbyMeetingRow {
+  const existingDistance = existing.distance_meters ?? Number.POSITIVE_INFINITY;
+  const candidateDistance = candidate.distance_meters ?? Number.POSITIVE_INFINITY;
+  if (Math.abs(existingDistance - candidateDistance) > 1) {
+    return candidateDistance < existingDistance ? candidate : existing;
+  }
+
+  const existingScore = scoreNearbyMeetingMetadata(existing);
+  const candidateScore = scoreNearbyMeetingMetadata(candidate);
+  if (candidateScore !== existingScore) {
+    return candidateScore > existingScore ? candidate : existing;
+  }
+
+  const existingUpdated = Math.max(
+    toComparableTimestamp(existing.updated_at_source),
+    toComparableTimestamp(existing.last_ingested_at),
+  );
+  const candidateUpdated = Math.max(
+    toComparableTimestamp(candidate.updated_at_source),
+    toComparableTimestamp(candidate.last_ingested_at),
+  );
+  if (candidateUpdated !== existingUpdated) {
+    return candidateUpdated > existingUpdated ? candidate : existing;
+  }
+
+  return candidate.id.localeCompare(existing.id) < 0 ? candidate : existing;
 }
 
 export function createRepositories(db: DbClient) {
@@ -1112,7 +1190,27 @@ export function createRepositories(db: DbClient) {
           })
           .filter((row): row is NearbyMeetingRow => row !== null);
 
-        const sorted = normalized.sort((left, right) => {
+        const dedupedByKey = new Map<string, NearbyMeetingRow>();
+        for (const meeting of normalized) {
+          const dedupeKey = buildMeetingDedupeKey({
+            name: meeting.name,
+            day: meeting.day,
+            time: meeting.time,
+            formattedAddress: meeting.formatted_address,
+            address: meeting.address,
+            lat: meeting.lat,
+            lng: meeting.lng,
+          });
+          const existing = dedupedByKey.get(dedupeKey);
+          if (!existing) {
+            dedupedByKey.set(dedupeKey, meeting);
+            continue;
+          }
+          dedupedByKey.set(dedupeKey, preferNearbyMeeting(existing, meeting));
+        }
+
+        const dedupedMeetings = Array.from(dedupedByKey.values());
+        const sorted = dedupedMeetings.sort((left, right) => {
           if (filters.dayOfWeek !== undefined) {
             const leftTime = left.time ?? "99:99";
             const rightTime = right.time ?? "99:99";

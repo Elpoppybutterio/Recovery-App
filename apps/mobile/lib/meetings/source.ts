@@ -135,6 +135,74 @@ function hashStableId(seed: string): string {
   return `feed-${Math.abs(hash)}`;
 }
 
+function normalizeDedupeText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeAddressForDedupe(address: string): string {
+  const normalized = asString(address);
+  if (!normalized || normalized.toLowerCase() === "address unavailable") {
+    return "";
+  }
+  const beforeComma = normalized.split(",")[0]?.trim() ?? normalized;
+  return normalizeDedupeText(beforeComma);
+}
+
+function buildMeetingDedupeKey(meeting: MeetingRecord): string {
+  const name = normalizeDedupeText(meeting.name);
+  const addressKey = normalizeAddressForDedupe(meeting.address);
+  if (addressKey.length > 0) {
+    return `${meeting.dayOfWeek}|${meeting.startsAtLocal}|${name}|addr:${addressKey}`;
+  }
+  if (meeting.lat !== null && meeting.lng !== null) {
+    return `${meeting.dayOfWeek}|${meeting.startsAtLocal}|${name}|geo:${meeting.lat.toFixed(3)}|${meeting.lng.toFixed(3)}`;
+  }
+  return `${meeting.dayOfWeek}|${meeting.startsAtLocal}|${name}|unknown`;
+}
+
+function scoreMeetingRecord(meeting: MeetingRecord): number {
+  let score = 0;
+  if (meeting.lat !== null && meeting.lng !== null) {
+    score += 2;
+  }
+  if (meeting.onlineUrl) {
+    score += 1;
+  }
+  if (meeting.address !== "Address unavailable") {
+    score += 1;
+  }
+  if (meeting.openness !== "UNKNOWN") {
+    score += 1;
+  }
+  if (meeting.format === "HYBRID") {
+    score += 1;
+  }
+  return score;
+}
+
+function dedupeMeetings(meetings: MeetingRecord[]): MeetingRecord[] {
+  const dedupedByKey = new Map<string, MeetingRecord>();
+  for (const meeting of meetings) {
+    const dedupeKey = buildMeetingDedupeKey(meeting);
+    const existing = dedupedByKey.get(dedupeKey);
+    if (!existing) {
+      dedupedByKey.set(dedupeKey, meeting);
+      continue;
+    }
+
+    const existingScore = scoreMeetingRecord(existing);
+    const candidateScore = scoreMeetingRecord(meeting);
+    if (candidateScore > existingScore) {
+      dedupedByKey.set(dedupeKey, meeting);
+    }
+  }
+  return Array.from(dedupedByKey.values());
+}
+
 function normalizeOpenness(value: unknown, types: unknown): MeetingOpenness {
   const direct = asString(value)?.toUpperCase();
   if (direct?.includes("OPEN")) {
@@ -301,7 +369,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
             warning = `Meeting feed failed (${response.status})`;
           } else {
             const payload = (await response.json()) as unknown;
-            const meetings = extractFeedMeetings(payload, params.dayOfWeek);
+            const meetings = dedupeMeetings(extractFeedMeetings(payload, params.dayOfWeek));
             if (meetings.length > 0) {
               return { meetings, source: "feed" };
             }
@@ -320,9 +388,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
 
       let meetings: MeetingRecord[] = [];
       let apiWarning: string | undefined;
-<<<<<<< HEAD
       const hasLocation = typeof params.lat === "number" && typeof params.lng === "number";
-      let shouldFallbackToTenantMeetings = !hasLocation;
 
       if (hasLocation) {
         const nearbyQuery = new URLSearchParams();
@@ -347,10 +413,11 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
 
           if (nearbyResponse.ok) {
             const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
-            meetings = (nearbyPayload.meetings ?? [])
-              .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
-              .filter((entry): entry is MeetingRecord => entry !== null);
-            shouldFallbackToTenantMeetings = false;
+            meetings = dedupeMeetings(
+              (nearbyPayload.meetings ?? [])
+                .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+                .filter((entry): entry is MeetingRecord => entry !== null),
+            );
           } else {
             apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
             if (__DEV__) {
@@ -370,44 +437,8 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           }
         }
       }
-=======
 
->>>>>>> 62b7d18 (feat(meetings): ingest meeting guide feeds and add nearby map flow)
-      if (typeof params.lat === "number" && typeof params.lng === "number") {
-        const nearbyQuery = new URLSearchParams();
-        nearbyQuery.set("lat", String(params.lat));
-        nearbyQuery.set("lng", String(params.lng));
-        nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
-        nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
-
-        const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
-        if (__DEV__) {
-          console.log("[meetings] nearby request", {
-            url: nearbyUrl,
-            lat: params.lat,
-            lng: params.lng,
-            radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
-          });
-        }
-
-        try {
-          const nearbyResponse = await fetch(nearbyUrl, { headers });
-
-        if (nearbyResponse.ok) {
-          const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
-          meetings = (nearbyPayload.meetings ?? [])
-            .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
-            .filter((entry): entry is MeetingRecord => entry !== null);
-        } else {
-          apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
-        }
-      }
-
-<<<<<<< HEAD
-      if (shouldFallbackToTenantMeetings) {
-=======
-      if (meetings.length === 0) {
->>>>>>> 62b7d18 (feat(meetings): ingest meeting guide feeds and add nearby map flow)
+      if (!hasLocation || meetings.length === 0) {
         const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
         const response = await fetch(url, { headers });
         if (!response.ok) {
@@ -415,9 +446,11 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         }
 
         const payload = (await response.json()) as { meetings?: unknown[] };
-        meetings = (payload.meetings ?? [])
-          .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
-          .filter((entry): entry is MeetingRecord => entry !== null);
+        meetings = dedupeMeetings(
+          (payload.meetings ?? [])
+            .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+            .filter((entry): entry is MeetingRecord => entry !== null),
+        );
       }
 
       return {

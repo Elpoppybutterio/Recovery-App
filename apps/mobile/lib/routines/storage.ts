@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
+  DAILY_REFLECTIONS_URL,
   createDefaultRoutinesStore,
   createEmptyMorningRoutineDayState,
   createEmptyNightlyInventoryDayState,
@@ -34,12 +35,30 @@ export async function loadRoutinesStore(userId: string): Promise<RecoveryRoutine
     if (!parsed || parsed.version !== 1) {
       return createDefaultRoutinesStore();
     }
+    const defaultStore = createDefaultRoutinesStore();
+    const mergedMorningTemplate = {
+      ...defaultStore.morningTemplate,
+      ...parsed.morningTemplate,
+    };
+    const normalizedItems = mergedMorningTemplate.items.map((item) =>
+      item.id === "daily-reflections" &&
+      (typeof item.readerUrl !== "string" || item.readerUrl.trim().length === 0)
+        ? { ...item, readerUrl: DAILY_REFLECTIONS_URL }
+        : item,
+    );
+    const dailyReflectionsLink =
+      typeof mergedMorningTemplate.dailyReflectionsLink === "string" &&
+      mergedMorningTemplate.dailyReflectionsLink.trim().length > 0
+        ? mergedMorningTemplate.dailyReflectionsLink
+        : DAILY_REFLECTIONS_URL;
+
     return {
-      ...createDefaultRoutinesStore(),
+      ...defaultStore,
       ...parsed,
       morningTemplate: {
-        ...createDefaultRoutinesStore().morningTemplate,
-        ...parsed.morningTemplate,
+        ...mergedMorningTemplate,
+        items: normalizedItems,
+        dailyReflectionsLink,
       },
       morningByDate: parsed.morningByDate ?? {},
       nightlyByDate: parsed.nightlyByDate ?? {},

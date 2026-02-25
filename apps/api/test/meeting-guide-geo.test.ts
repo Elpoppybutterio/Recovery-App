@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   boundingBoxForRadius,
+  buildMeetingDedupeKey,
   haversineDistanceMeters,
   normalizeMeetingGuideMeeting,
 } from "../src/meeting-guide";
@@ -42,5 +43,53 @@ describe("meeting-guide geo helpers", () => {
         name: "Missing slug",
       }),
     ).toBeNull();
+  });
+
+  it("builds the same dedupe key when only city/state suffix differs", () => {
+    const leftKey = buildMeetingDedupeKey({
+      name: "Recovery Group",
+      day: 2,
+      time: "20:00",
+      formattedAddress: "510 Cook Ave",
+      address: null,
+      lat: 45.7834,
+      lng: -108.5052,
+    });
+
+    const rightKey = buildMeetingDedupeKey({
+      name: "Recovery Group",
+      day: 2,
+      time: "20:00",
+      formattedAddress: "510 Cook Ave, Billings, MT 59101",
+      address: null,
+      lat: 45.7834,
+      lng: -108.5052,
+    });
+
+    expect(leftKey).toBe(rightKey);
+  });
+
+  it("builds different dedupe keys for different addresses", () => {
+    const leftKey = buildMeetingDedupeKey({
+      name: "Recovery Group",
+      day: 2,
+      time: "20:00",
+      formattedAddress: "510 Cook Ave",
+      address: null,
+      lat: 45.7834,
+      lng: -108.5052,
+    });
+
+    const rightKey = buildMeetingDedupeKey({
+      name: "Recovery Group",
+      day: 2,
+      time: "20:00",
+      formattedAddress: "511 Cook Ave",
+      address: null,
+      lat: 45.7834,
+      lng: -108.5052,
+    });
+
+    expect(leftKey).not.toBe(rightKey);
   });
 });

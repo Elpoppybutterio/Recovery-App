@@ -21,6 +21,8 @@ export function MorningRoutineScreen({
   onSetNotes,
   onSetItemDetail,
   onOpenReader,
+  onReadDailyReflections,
+  onListenDailyReflections,
   onListenText,
   onRecordItem,
   onPlayItem,
@@ -43,6 +45,8 @@ export function MorningRoutineScreen({
   onSetNotes: (value: string) => void;
   onSetItemDetail: (itemId: string, detail: string) => void;
   onOpenReader: (title: string, url: string | null) => void;
+  onReadDailyReflections: () => void;
+  onListenDailyReflections: () => void;
   onListenText: (text: string) => void;
   onRecordItem: (itemId: string) => void;
   onPlayItem: (itemId: string) => void;
@@ -70,37 +74,44 @@ export function MorningRoutineScreen({
 
       <LiquidGlassCard style={styles.card}>
         <Text style={styles.sectionTitle}>Checklist</Text>
-        {template.items.map((item) => (
-          <View key={item.id}>
-            <RoutineChecklistItem
-              title={item.title}
-              detail={item.detail}
-              checked={Boolean(dayState.completedByItemId[item.id])}
-              onToggle={() => onToggleItem(item.id)}
-              onListen={
-                item.voiceText !== undefined
-                  ? () => onListenText(item.voiceText ?? item.title)
-                  : undefined
-              }
-              onRecord={() => onRecordItem(item.id)}
-              onPlay={() => onPlayItem(item.id)}
-              onOpenReader={
-                item.readerLabel
-                  ? () => onOpenReader(item.title, item.readerUrl ?? null)
-                  : undefined
-              }
-            />
-            {item.id === "bb-60-63" ? (
-              <TextInput
-                style={styles.input}
-                value={item.detail ?? ""}
-                onChangeText={(value) => onSetItemDetail(item.id, value)}
-                placeholder="Edit page range (example: 60-63)"
-                placeholderTextColor="rgba(245,243,255,0.45)"
+        {template.items.map((item) => {
+          const isDailyReflections = item.id === "daily-reflections";
+          return (
+            <View key={item.id}>
+              <RoutineChecklistItem
+                title={item.title}
+                detail={item.detail}
+                checked={Boolean(dayState.completedByItemId[item.id])}
+                onToggle={() => onToggleItem(item.id)}
+                onListen={
+                  isDailyReflections
+                    ? onListenDailyReflections
+                    : item.voiceText !== undefined
+                      ? () => onListenText(item.voiceText ?? item.title)
+                      : undefined
+                }
+                onRecord={isDailyReflections ? undefined : () => onRecordItem(item.id)}
+                onPlay={isDailyReflections ? undefined : () => onPlayItem(item.id)}
+                onOpenReader={
+                  isDailyReflections
+                    ? onReadDailyReflections
+                    : item.readerLabel
+                      ? () => onOpenReader(item.title, item.readerUrl ?? null)
+                      : undefined
+                }
               />
-            ) : null}
-          </View>
-        ))}
+              {item.id === "bb-60-63" ? (
+                <TextInput
+                  style={styles.input}
+                  value={item.detail ?? ""}
+                  onChangeText={(value) => onSetItemDetail(item.id, value)}
+                  placeholder="Edit page range (example: 60-63)"
+                  placeholderTextColor="rgba(245,243,255,0.45)"
+                />
+              ) : null}
+            </View>
+          );
+        })}
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>

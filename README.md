@@ -1,6 +1,6 @@
-# Recovery Accountability App
+# Sober AI App
 
-Day-1 monorepo scaffold for a secure, scalable Recovery Accountability platform.
+Day-1 monorepo scaffold for a secure, scalable Sober AI platform.
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ pnpm dev
 
 This starts:
 
-- API (`apps/api`) on `http://localhost:3001`
+- API (`apps/api`) on `http://localhost:3031`
 - Dashboard (`apps/dashboard`) on `http://localhost:3000`
 - Worker (`apps/worker`)
 
@@ -81,7 +81,7 @@ source ~/.zshrc
 pnpm --filter @recovery/api dev
 ```
 
-API default URL: `http://localhost:3001`
+API default URL: `http://localhost:3031`
 
 ### API migrations
 

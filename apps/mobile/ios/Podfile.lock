@@ -3,6 +3,9 @@ PODS:
   - DoubleConversion (1.1.6)
   - EXApplication (6.0.2):
     - ExpoModulesCore
+  - EXAV (15.0.2):
+    - ExpoModulesCore
+    - ReactCommon/turbomodule/core
   - EXConstants (17.0.8):
     - ExpoModulesCore
   - EXNotifications (0.29.14):
@@ -48,6 +51,12 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - Yoga
+  - ExpoPrint (13.0.1):
+    - ExpoModulesCore
+  - ExpoSharing (13.0.1):
+    - ExpoModulesCore
+  - ExpoSpeech (13.0.1):
+    - ExpoModulesCore
   - fast_float (6.1.4)
   - FBLazyVector (0.76.9)
   - fmt (11.0.2)
@@ -1618,6 +1627,7 @@ DEPENDENCIES:
   - "boost (from `../../../node_modules/.pnpm/react-native@0.76.9_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.29.0__@types+react@18.3.28_react@18.3.1/node_modules/react-native/third-party-podspecs/boost.podspec`)"
   - "DoubleConversion (from `../../../node_modules/.pnpm/react-native@0.76.9_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.29.0__@types+react@18.3.28_react@18.3.1/node_modules/react-native/third-party-podspecs/DoubleConversion.podspec`)"
   - "EXApplication (from `../../../node_modules/.pnpm/expo-application@6.0.2_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+_1b6ed49a308abf2e2b3842027572cb21/node_modules/expo-application/ios`)"
+  - "EXAV (from `../../../node_modules/.pnpm/expo-av@15.0.2_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.2_b857c66a8ea32bbcdc7db5828b8fbf99/node_modules/expo-av/ios`)"
   - "EXConstants (from `../../../node_modules/.pnpm/expo-constants@17.0.8_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+c_5ddbd34d82d4d37723730395296d9dcf/node_modules/expo-constants/ios`)"
   - "EXNotifications (from `../../../node_modules/.pnpm/expo-notifications@0.29.14_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@ba_9a3309ff15e19c2d44b282231eecff5d/node_modules/expo-notifications/ios`)"
   - "Expo (from `../../../node_modules/.pnpm/expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.29.0__react-nati_005ba58553653fe86e13a9557fa59349/node_modules/expo`)"
@@ -1630,6 +1640,9 @@ DEPENDENCIES:
   - "ExpoLinearGradient (from `../../../node_modules/.pnpm/expo-linear-gradient@15.0.8_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@b_20756c4c50637607f421c75e3a036e06/node_modules/expo-linear-gradient/ios`)"
   - "ExpoLocation (from `../../../node_modules/.pnpm/expo-location@18.0.10_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+c_662b44ce989b4c2b0f7ae56fa5213efe/node_modules/expo-location/ios`)"
   - "ExpoModulesCore (from `../../../node_modules/.pnpm/expo-modules-core@2.2.3/node_modules/expo-modules-core`)"
+  - "ExpoPrint (from `../../../node_modules/.pnpm/expo-print@13.0.1_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@_140c32562b314c65fcb2eba055657baa/node_modules/expo-print/ios`)"
+  - "ExpoSharing (from `../../../node_modules/.pnpm/expo-sharing@13.0.1_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+cor_d1f9226f98c9b72ab3b2db0a65f02858/node_modules/expo-sharing/ios`)"
+  - "ExpoSpeech (from `../../../node_modules/.pnpm/expo-speech@13.0.1_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core_fd94a042805ac7aab2fbb5250f92b1e3/node_modules/expo-speech/ios`)"
   - "fast_float (from `../../../node_modules/.pnpm/react-native@0.76.9_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.29.0__@types+react@18.3.28_react@18.3.1/node_modules/react-native/third-party-podspecs/fast_float.podspec`)"
   - "FBLazyVector (from `../../../node_modules/.pnpm/react-native@0.76.9_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.29.0__@types+react@18.3.28_react@18.3.1/node_modules/react-native/Libraries/FBLazyVector`)"
   - "fmt (from `../../../node_modules/.pnpm/react-native@0.76.9_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.29.0__@types+react@18.3.28_react@18.3.1/node_modules/react-native/third-party-podspecs/fmt.podspec`)"
@@ -1709,6 +1722,8 @@ EXTERNAL SOURCES:
     :podspec: "../../../node_modules/.pnpm/react-native@0.76.9_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.29.0__@types+react@18.3.28_react@18.3.1/node_modules/react-native/third-party-podspecs/DoubleConversion.podspec"
   EXApplication:
     :path: "../../../node_modules/.pnpm/expo-application@6.0.2_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+_1b6ed49a308abf2e2b3842027572cb21/node_modules/expo-application/ios"
+  EXAV:
+    :path: "../../../node_modules/.pnpm/expo-av@15.0.2_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.2_b857c66a8ea32bbcdc7db5828b8fbf99/node_modules/expo-av/ios"
   EXConstants:
     :path: "../../../node_modules/.pnpm/expo-constants@17.0.8_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+c_5ddbd34d82d4d37723730395296d9dcf/node_modules/expo-constants/ios"
   EXNotifications:
@@ -1733,6 +1748,12 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/.pnpm/expo-location@18.0.10_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+c_662b44ce989b4c2b0f7ae56fa5213efe/node_modules/expo-location/ios"
   ExpoModulesCore:
     :path: "../../../node_modules/.pnpm/expo-modules-core@2.2.3/node_modules/expo-modules-core"
+  ExpoPrint:
+    :path: "../../../node_modules/.pnpm/expo-print@13.0.1_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@_140c32562b314c65fcb2eba055657baa/node_modules/expo-print/ios"
+  ExpoSharing:
+    :path: "../../../node_modules/.pnpm/expo-sharing@13.0.1_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+cor_d1f9226f98c9b72ab3b2db0a65f02858/node_modules/expo-sharing/ios"
+  ExpoSpeech:
+    :path: "../../../node_modules/.pnpm/expo-speech@13.0.1_expo@52.0.49_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core_fd94a042805ac7aab2fbb5250f92b1e3/node_modules/expo-speech/ios"
   fast_float:
     :podspec: "../../../node_modules/.pnpm/react-native@0.76.9_@babel+core@7.29.0_@babel+preset-env@7.29.0_@babel+core@7.29.0__@types+react@18.3.28_react@18.3.1/node_modules/react-native/third-party-podspecs/fast_float.podspec"
   FBLazyVector:
@@ -1869,6 +1890,7 @@ SPEC CHECKSUMS:
   boost: 1dca942403ed9342f98334bf4c3621f011aa7946
   DoubleConversion: f16ae600a246532c4020132d54af21d0ddb2a385
   EXApplication: 4c72f6017a14a65e338c5e74fca418f35141e819
+  EXAV: 4c41f0a6ae54a0b96597abc90e37962ab2ee0d85
   EXConstants: fcfc75800824ac2d5c592b5bc74130bad17b146b
   EXNotifications: 9d3d17e52c95f377750d4a2ae553a716313dd4aa
   Expo: 4bb70893882e6382b41d1e910d7226c6a1b85f0a
@@ -1881,6 +1903,9 @@ SPEC CHECKSUMS:
   ExpoLinearGradient: 809102bdb979f590083af49f7fa4805cd931bd58
   ExpoLocation: de58a60756fad907139ec422ccabb1ba734e080d
   ExpoModulesCore: 725faec070d590810d2ea5983d9f78f7cf6a38ec
+  ExpoPrint: 512aeeb4efbd49765337c129fda5f0025ebf744a
+  ExpoSharing: 849a5ce9985c22598c16ec027e32969be8062e8e
+  ExpoSpeech: 8f74347608243ee8fdc2faa14e7d2cd5503f33f8
   fast_float: 06eeec4fe712a76acc9376682e4808b05ce978b6
   FBLazyVector: 7605ea4810e0e10ae4815292433c09bf4324ba45
   fmt: 01b82d4ca6470831d1cc0852a1af644be019e8f6
