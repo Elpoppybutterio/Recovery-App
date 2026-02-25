@@ -40,12 +40,30 @@ export async function loadRoutinesStore(userId: string): Promise<RecoveryRoutine
       ...defaultStore.morningTemplate,
       ...parsed.morningTemplate,
     };
-    const normalizedItems = mergedMorningTemplate.items.map((item) =>
-      item.id === "daily-reflections" &&
-      (typeof item.readerUrl !== "string" || item.readerUrl.trim().length === 0)
-        ? { ...item, readerUrl: DAILY_REFLECTIONS_URL }
-        : item,
+    const parsedItemsById = new Map(
+      (Array.isArray(parsed.morningTemplate?.items) ? parsed.morningTemplate.items : []).map(
+        (item) => [item.id, item] as const,
+      ),
     );
+    const normalizedItems = defaultStore.morningTemplate.items.map((defaultItem) => {
+      const parsedItem = parsedItemsById.get(defaultItem.id);
+      const normalizedReaderUrl =
+        defaultItem.id === "daily-reflections"
+          ? typeof parsedItem?.readerUrl === "string" && parsedItem.readerUrl.trim().length > 0
+            ? parsedItem.readerUrl
+            : DAILY_REFLECTIONS_URL
+          : (parsedItem?.readerUrl ?? defaultItem.readerUrl);
+
+      return {
+        ...defaultItem,
+        ...parsedItem,
+        id: defaultItem.id,
+        title: defaultItem.title,
+        readerLabel: defaultItem.readerLabel ?? parsedItem?.readerLabel,
+        readerUrl: normalizedReaderUrl,
+        enabled: parsedItem?.enabled === true,
+      };
+    });
     const dailyReflectionsLink =
       typeof mergedMorningTemplate.dailyReflectionsLink === "string" &&
       mergedMorningTemplate.dailyReflectionsLink.trim().length > 0
@@ -80,12 +98,35 @@ export function getMorningDayState(
   store: RecoveryRoutinesStore,
   dateKey: string,
 ): MorningRoutineDayState {
-  return store.morningByDate[dateKey] ?? createEmptyMorningRoutineDayState(dateKey);
+  const empty = createEmptyMorningRoutineDayState(dateKey);
+  const saved = store.morningByDate[dateKey];
+  if (!saved) {
+    return empty;
+  }
+  return {
+    ...empty,
+    ...saved,
+    completedByItemId: saved.completedByItemId ?? {},
+    audioRefs: saved.audioRefs ?? {},
+  };
 }
 
 export function getNightlyDayState(
   store: RecoveryRoutinesStore,
   dateKey: string,
 ): NightlyInventoryDayState {
-  return store.nightlyByDate[dateKey] ?? createEmptyNightlyInventoryDayState(dateKey);
+  const empty = createEmptyNightlyInventoryDayState(dateKey);
+  const saved = store.nightlyByDate[dateKey];
+  if (!saved) {
+    return empty;
+  }
+  return {
+    ...empty,
+    ...saved,
+    resentful: saved.resentful ?? [],
+    selfish: saved.selfish ?? [],
+    dishonest: saved.dishonest ?? [],
+    afraid: saved.afraid ?? [],
+    apology: saved.apology ?? [],
+  };
 }

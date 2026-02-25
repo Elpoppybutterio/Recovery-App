@@ -16,6 +16,7 @@ export function NightlyInventoryScreen({
   onUpdateEntry,
   onRemoveEntry,
   onSetNotes,
+  onToggleGotOnKnees,
   onToggleCompleted,
   onTextSponsor,
   onExportPdf,
@@ -45,6 +46,7 @@ export function NightlyInventoryScreen({
     id: string,
   ) => void;
   onSetNotes: (value: string) => void;
+  onToggleGotOnKnees: () => void;
   onToggleCompleted: () => void;
   onTextSponsor: () => void;
   onExportPdf: () => void;
@@ -107,6 +109,18 @@ export function NightlyInventoryScreen({
           onRemove={(id) => onRemoveEntry("apology", id)}
           placeholder="Who + message draft..."
         />
+      </LiquidGlassCard>
+
+      <LiquidGlassCard style={styles.card}>
+        <Text style={styles.promptTitle}>Daily Checklist</Text>
+        <Pressable style={styles.checkboxRow} onPress={onToggleGotOnKnees}>
+          <View
+            style={[styles.checkbox, dayState.gotOnKneesCompleted ? styles.checkboxChecked : null]}
+          >
+            {dayState.gotOnKneesCompleted ? <Text style={styles.checkboxTick}>✓</Text> : null}
+          </View>
+          <Text style={styles.checkboxLabel}>Got on knees</Text>
+        </Pressable>
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -183,6 +197,36 @@ const styles = StyleSheet.create({
     color: routineTheme.colors.textPrimary,
     fontSize: 14,
     backgroundColor: "rgba(255,255,255,0.07)",
+  },
+  checkboxRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 4,
+  },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  checkboxChecked: {
+    backgroundColor: "rgba(52,199,89,0.4)",
+    borderColor: "rgba(126,255,170,0.75)",
+  },
+  checkboxTick: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  checkboxLabel: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 14,
+    fontWeight: "700",
   },
   multiline: {
     minHeight: 88,

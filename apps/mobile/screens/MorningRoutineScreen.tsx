@@ -15,16 +15,17 @@ export function MorningRoutineScreen({
   dateLabel,
   onBack,
   onToggleItem,
+  onToggleItemEnabled,
   onSetSponsorSuggestions,
   onSetDailyReflectionsLink,
   onSetDailyReflectionsText,
   onSetNotes,
   onSetItemDetail,
+  onToggleGotOnKnees,
   onOpenReader,
   onReadDailyReflections,
   onListenDailyReflections,
   onListenText,
-  onRecordItem,
   onPlayItem,
   onAddCustomPrayer,
   onUpdateCustomPrayer,
@@ -39,16 +40,17 @@ export function MorningRoutineScreen({
   dateLabel: string;
   onBack: () => void;
   onToggleItem: (itemId: string) => void;
+  onToggleItemEnabled: (itemId: string) => void;
   onSetSponsorSuggestions: (value: string) => void;
   onSetDailyReflectionsLink: (value: string) => void;
   onSetDailyReflectionsText: (value: string) => void;
   onSetNotes: (value: string) => void;
   onSetItemDetail: (itemId: string, detail: string) => void;
+  onToggleGotOnKnees: () => void;
   onOpenReader: (title: string, url: string | null) => void;
   onReadDailyReflections: () => void;
   onListenDailyReflections: () => void;
   onListenText: (text: string) => void;
-  onRecordItem: (itemId: string) => void;
   onPlayItem: (itemId: string) => void;
   onAddCustomPrayer: () => void;
   onUpdateCustomPrayer: (id: string, value: string) => void;
@@ -76,13 +78,17 @@ export function MorningRoutineScreen({
         <Text style={styles.sectionTitle}>Checklist</Text>
         {template.items.map((item) => {
           const isDailyReflections = item.id === "daily-reflections";
+          const isSponsorCheckIn = item.id === "sponsor-check-in";
+          const isAdditionalSuggestions = item.id === "additional-suggestions";
           return (
             <View key={item.id}>
               <RoutineChecklistItem
                 title={item.title}
                 detail={item.detail}
+                enabled={item.enabled}
                 checked={Boolean(dayState.completedByItemId[item.id])}
                 onToggle={() => onToggleItem(item.id)}
+                onToggleEnabled={() => onToggleItemEnabled(item.id)}
                 onListen={
                   isDailyReflections
                     ? onListenDailyReflections
@@ -90,8 +96,11 @@ export function MorningRoutineScreen({
                       ? () => onListenText(item.voiceText ?? item.title)
                       : undefined
                 }
-                onRecord={isDailyReflections ? undefined : () => onRecordItem(item.id)}
-                onPlay={isDailyReflections ? undefined : () => onPlayItem(item.id)}
+                onPlay={
+                  isDailyReflections || isSponsorCheckIn || isAdditionalSuggestions
+                    ? undefined
+                    : () => onPlayItem(item.id)
+                }
                 onOpenReader={
                   isDailyReflections
                     ? onReadDailyReflections
@@ -109,21 +118,31 @@ export function MorningRoutineScreen({
                   placeholderTextColor="rgba(245,243,255,0.45)"
                 />
               ) : null}
+              {isAdditionalSuggestions ? (
+                <TextInput
+                  style={[styles.input, styles.multiline]}
+                  value={template.sponsorSuggestions}
+                  onChangeText={onSetSponsorSuggestions}
+                  placeholder="Add additional suggestions"
+                  placeholderTextColor="rgba(245,243,255,0.45)"
+                  multiline
+                />
+              ) : null}
             </View>
           );
         })}
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
-        <Text style={styles.sectionTitle}>Sponsorship Suggestions</Text>
-        <TextInput
-          style={styles.input}
-          value={template.sponsorSuggestions}
-          onChangeText={onSetSponsorSuggestions}
-          placeholder="Add morning sponsor notes"
-          placeholderTextColor="rgba(245,243,255,0.45)"
-          multiline
-        />
+        <Text style={styles.sectionTitle}>Daily Checklist</Text>
+        <Pressable style={styles.checkboxRow} onPress={onToggleGotOnKnees}>
+          <View
+            style={[styles.checkbox, dayState.gotOnKneesCompleted ? styles.checkboxChecked : null]}
+          >
+            {dayState.gotOnKneesCompleted ? <Text style={styles.checkboxTick}>✓</Text> : null}
+          </View>
+          <Text style={styles.checkboxLabel}>Got on knees</Text>
+        </Pressable>
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -263,6 +282,36 @@ const styles = StyleSheet.create({
   },
   rowWrap: {
     gap: 8,
+  },
+  checkboxRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 4,
+  },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  checkboxChecked: {
+    backgroundColor: "rgba(52,199,89,0.4)",
+    borderColor: "rgba(126,255,170,0.75)",
+  },
+  checkboxTick: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  checkboxLabel: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 14,
+    fontWeight: "700",
   },
   removeBtn: {
     alignSelf: "flex-end",

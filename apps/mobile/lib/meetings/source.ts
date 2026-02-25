@@ -386,6 +386,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
       const meetingsQuery = new URLSearchParams();
       meetingsQuery.set("day", String(params.dayOfWeek));
 
+      let nearbyMeetings: MeetingRecord[] = [];
       let meetings: MeetingRecord[] = [];
       let apiWarning: string | undefined;
       const hasLocation = typeof params.lat === "number" && typeof params.lng === "number";
@@ -413,7 +414,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
 
           if (nearbyResponse.ok) {
             const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
-            meetings = dedupeMeetings(
+            nearbyMeetings = dedupeMeetings(
               (nearbyPayload.meetings ?? [])
                 .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
                 .filter((entry): entry is MeetingRecord => entry !== null),
@@ -438,20 +439,22 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         }
       }
 
-      if (!hasLocation || meetings.length === 0) {
-        const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
-        const response = await fetch(url, { headers });
-        if (!response.ok) {
-          throw new Error(`Meetings API failed (${response.status})`);
-        }
-
-        const payload = (await response.json()) as { meetings?: unknown[] };
-        meetings = dedupeMeetings(
-          (payload.meetings ?? [])
-            .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
-            .filter((entry): entry is MeetingRecord => entry !== null),
-        );
+      const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
+      const response = await fetch(url, { headers });
+      if (!response.ok) {
+        throw new Error(`Meetings API failed (${response.status})`);
       }
+
+      const payload = (await response.json()) as { meetings?: unknown[] };
+      const allMeetingsForDay = dedupeMeetings(
+        (payload.meetings ?? [])
+          .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+          .filter((entry): entry is MeetingRecord => entry !== null),
+      );
+
+      meetings = hasLocation
+        ? dedupeMeetings([...nearbyMeetings, ...allMeetingsForDay])
+        : allMeetingsForDay;
 
       return {
         meetings,
