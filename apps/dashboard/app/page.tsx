@@ -11,8 +11,13 @@ type SupervisorAttendanceItem = {
   dwellSeconds: number | null;
 };
 
+function resolveApiUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
+  return configured && configured.length > 0 ? configured : "http://localhost:3001";
+}
+
 async function getHealth(): Promise<string> {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+  const apiUrl = resolveApiUrl();
 
   try {
     const response = await fetch(`${apiUrl}/health`, { cache: "no-store" });
@@ -31,7 +36,7 @@ async function getSupervisorAttendance(): Promise<{
   data: SupervisorAttendanceItem[];
   error: string | null;
 }> {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+  const apiUrl = resolveApiUrl();
   const devUserId = process.env.DASHBOARD_DEV_USER_ID ?? "supervisor-a";
 
   try {

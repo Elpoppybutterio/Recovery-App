@@ -21,7 +21,7 @@
     },
     "assetBundlePatterns": ["**/*"],
     "extra": {
-      "apiUrl": "http://192.168.0.73:3031",
+      "apiUrl": "",
       "devAuthUserId": "enduser-a1",
       "devUserDisplayName": "DEV User",
       "meetingFeedUrl": "",

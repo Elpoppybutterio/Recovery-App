@@ -166,6 +166,51 @@ type SponsorConfig = {
   updated_by_user_id: string;
 };
 
+type MeetingFeed = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  url: string;
+  entity: string | null;
+  entity_url: string | null;
+  active: boolean;
+  last_fetched_at: string | null;
+  etag: string | null;
+  last_modified: string | null;
+  last_error: string | null;
+  updated_at: string;
+};
+
+type MeetingGuideMeeting = {
+  id: string;
+  tenant_id: string;
+  source_feed_id: string;
+  slug: string;
+  name: string;
+  day: number | null;
+  time: string | null;
+  end_time: string | null;
+  timezone: string | null;
+  formatted_address: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  postal_code: string | null;
+  country: string | null;
+  region: string | null;
+  location: string | null;
+  notes: string | null;
+  types_json: unknown;
+  conference_url: string | null;
+  conference_phone: string | null;
+  lat: number | null;
+  lng: number | null;
+  geo_status: "present" | "missing";
+  updated_at_source: string | null;
+  last_ingested_at: string;
+  updated_at: string;
+};
+
 export class InMemoryDb implements DbPool {
   private tenants: Tenant[] = [];
   private users: User[] = [];
@@ -183,6 +228,8 @@ export class InMemoryDb implements DbPool {
   private lastKnownLocations: LastKnownLocation[] = [];
   private complianceEvents: ComplianceEvent[] = [];
   private sponsorConfigs: SponsorConfig[] = [];
+  private meetingFeeds: MeetingFeed[] = [];
+  private meetingGuideMeetings: MeetingGuideMeeting[] = [];
   private supervisorAssignmentId = 1;
   private tenantConfigId = 1;
   private auditId = 1;
@@ -534,6 +581,359 @@ export class InMemoryDb implements DbPool {
       return {
         rowCount: 1,
         rows: [meeting as Row],
+      };
+    }
+
+    if (normalized.includes("insert into meeting_feeds")) {
+      const [id, tenantId, name, url, entity, entityUrl, active] = params as [
+        string,
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        boolean,
+      ];
+
+      const nowIso = new Date().toISOString();
+      const existing = this.meetingFeeds.find(
+        (entry) => entry.tenant_id === tenantId && entry.url === url,
+      );
+
+      if (existing) {
+        existing.name = name;
+        existing.entity = entity;
+        existing.entity_url = entityUrl;
+        existing.active = active;
+        existing.updated_at = nowIso;
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              id: existing.id,
+              tenant_id: existing.tenant_id,
+              name: existing.name,
+              url: existing.url,
+              entity: existing.entity,
+              entity_url: existing.entity_url,
+              active: existing.active,
+              last_fetched_at: existing.last_fetched_at,
+              etag: existing.etag,
+              last_modified: existing.last_modified,
+              last_error: existing.last_error,
+            } as Row,
+          ],
+        };
+      }
+
+      const row: MeetingFeed = {
+        id,
+        tenant_id: tenantId,
+        name,
+        url,
+        entity,
+        entity_url: entityUrl,
+        active,
+        last_fetched_at: null,
+        etag: null,
+        last_modified: null,
+        last_error: null,
+        updated_at: nowIso,
+      };
+      this.meetingFeeds.push(row);
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            name: row.name,
+            url: row.url,
+            entity: row.entity,
+            entity_url: row.entity_url,
+            active: row.active,
+            last_fetched_at: row.last_fetched_at,
+            etag: row.etag,
+            last_modified: row.last_modified,
+            last_error: row.last_error,
+          } as Row,
+        ],
+      };
+    }
+
+    if (normalized.includes("from meeting_feeds") && normalized.includes("and active = true")) {
+      const [tenantId] = params as [string];
+      const rows = this.meetingFeeds
+        .filter((entry) => entry.tenant_id === tenantId && entry.active)
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map((entry) => ({
+          id: entry.id,
+          tenant_id: entry.tenant_id,
+          name: entry.name,
+          url: entry.url,
+          entity: entry.entity,
+          entity_url: entry.entity_url,
+          active: entry.active,
+          last_fetched_at: entry.last_fetched_at,
+          etag: entry.etag,
+          last_modified: entry.last_modified,
+          last_error: entry.last_error,
+        })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("update meeting_feeds") &&
+      normalized.includes("last_fetched_at = $1")
+    ) {
+      const [lastFetchedAt, etag, lastModified, lastError, tenantId, feedId] = params as [
+        string,
+        string | null,
+        string | null,
+        string | null,
+        string,
+        string,
+      ];
+      const row = this.meetingFeeds.find(
+        (entry) => entry.tenant_id === tenantId && entry.id === feedId,
+      );
+      if (!row) {
+        return { rowCount: 0, rows: [] };
+      }
+      row.last_fetched_at = lastFetchedAt;
+      row.etag = etag ?? row.etag;
+      row.last_modified = lastModified ?? row.last_modified;
+      row.last_error = lastError;
+      row.updated_at = new Date().toISOString();
+      return { rowCount: 1, rows: [] };
+    }
+
+    if (normalized.includes("insert into meeting_guide_meetings")) {
+      const [
+        id,
+        tenantId,
+        sourceFeedId,
+        slug,
+        name,
+        day,
+        time,
+        endTime,
+        timezone,
+        formattedAddress,
+        address,
+        city,
+        state,
+        postalCode,
+        country,
+        region,
+        location,
+        notes,
+        typesJson,
+        conferenceUrl,
+        conferencePhone,
+        lat,
+        lng,
+        geoStatus,
+        updatedAtSource,
+        lastIngestedAt,
+      ] = params as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        number | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string,
+        string | null,
+        string | null,
+        number | null,
+        number | null,
+        "present" | "missing",
+        string | null,
+        string,
+      ];
+
+      const parsedTypes = JSON.parse(typesJson) as unknown;
+      const nowIso = new Date().toISOString();
+      const existing = this.meetingGuideMeetings.find(
+        (entry) =>
+          entry.tenant_id === tenantId &&
+          entry.source_feed_id === sourceFeedId &&
+          entry.slug === slug,
+      );
+
+      if (existing) {
+        existing.id = id;
+        existing.name = name;
+        existing.day = day;
+        existing.time = time;
+        existing.end_time = endTime;
+        existing.timezone = timezone;
+        existing.formatted_address = formattedAddress;
+        existing.address = address;
+        existing.city = city;
+        existing.state = state;
+        existing.postal_code = postalCode;
+        existing.country = country;
+        existing.region = region;
+        existing.location = location;
+        existing.notes = notes;
+        existing.types_json = parsedTypes;
+        existing.conference_url = conferenceUrl;
+        existing.conference_phone = conferencePhone;
+        existing.lat = lat;
+        existing.lng = lng;
+        existing.geo_status = geoStatus;
+        existing.updated_at_source = updatedAtSource;
+        existing.last_ingested_at = lastIngestedAt;
+        existing.updated_at = nowIso;
+        return { rowCount: 1, rows: [] };
+      }
+
+      this.meetingGuideMeetings.push({
+        id,
+        tenant_id: tenantId,
+        source_feed_id: sourceFeedId,
+        slug,
+        name,
+        day,
+        time,
+        end_time: endTime,
+        timezone,
+        formatted_address: formattedAddress,
+        address,
+        city,
+        state,
+        postal_code: postalCode,
+        country,
+        region,
+        location,
+        notes,
+        types_json: parsedTypes,
+        conference_url: conferenceUrl,
+        conference_phone: conferencePhone,
+        lat,
+        lng,
+        geo_status: geoStatus,
+        updated_at_source: updatedAtSource,
+        last_ingested_at: lastIngestedAt,
+        updated_at: nowIso,
+      });
+      return { rowCount: 1, rows: [] };
+    }
+
+    if (
+      normalized.includes("from meeting_guide_meetings") &&
+      normalized.includes("($2::int is null or day = $2)") &&
+      normalized.includes("limit $3")
+    ) {
+      const [tenantId, dayOfWeek, limit] = params as [string, number | null, number];
+      const rows = this.meetingGuideMeetings
+        .filter((entry) => entry.tenant_id === tenantId)
+        .filter((entry) => dayOfWeek === null || entry.day === dayOfWeek)
+        .sort((left, right) => {
+          if (left.day === null && right.day !== null) {
+            return 1;
+          }
+          if (left.day !== null && right.day === null) {
+            return -1;
+          }
+          const dayCmp = (left.day ?? 0) - (right.day ?? 0);
+          if (dayCmp !== 0) {
+            return dayCmp;
+          }
+          const timeCmp = (left.time ?? "99:99").localeCompare(right.time ?? "99:99");
+          if (timeCmp !== 0) {
+            return timeCmp;
+          }
+          return left.name.localeCompare(right.name);
+        })
+        .slice(0, limit)
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("from meeting_guide_meetings") &&
+      normalized.includes("geo_status = 'present'") &&
+      normalized.includes("lat between $5 and $6 and lng between $7 and $8") &&
+      normalized.includes("limit $9")
+    ) {
+      const [tenantId, dayOfWeek, timeFrom, timeTo, latMin, latMax, lngMin, lngMax, limit] =
+        params as [
+          string,
+          number | null,
+          string | null,
+          string | null,
+          number,
+          number,
+          number,
+          number,
+          number,
+        ];
+
+      const rows = this.meetingGuideMeetings
+        .filter((entry) => entry.tenant_id === tenantId)
+        .filter((entry) => entry.geo_status === "present")
+        .filter((entry) => dayOfWeek === null || entry.day === dayOfWeek)
+        .filter((entry) => !timeFrom || (entry.time !== null && entry.time >= timeFrom))
+        .filter((entry) => !timeTo || (entry.time !== null && entry.time <= timeTo))
+        .filter(
+          (entry) =>
+            entry.lat !== null &&
+            entry.lng !== null &&
+            entry.lat >= latMin &&
+            entry.lat <= latMax &&
+            entry.lng >= lngMin &&
+            entry.lng <= lngMax,
+        )
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+        .slice(0, limit)
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("count(*)::int as total_meetings") &&
+      normalized.includes("from meeting_guide_meetings") &&
+      normalized.includes("where tenant_id = $1")
+    ) {
+      const [tenantId] = params as [string];
+      const scoped = this.meetingGuideMeetings.filter((entry) => entry.tenant_id === tenantId);
+      const withCoordinates = scoped.filter(
+        (entry) => entry.lat !== null && entry.lng !== null,
+      ).length;
+      const withoutCoordinates = scoped.length - withCoordinates;
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            total_meetings: scoped.length,
+            meetings_with_coordinates: withCoordinates,
+            meetings_without_coordinates: withoutCoordinates,
+          } as Row,
+        ],
       };
     }
 
