@@ -970,7 +970,12 @@ function locationGroupKeyForMeeting(meeting: MeetingListItem): string {
 
 export default function App() {
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
-  const apiUrl = typeof extra.apiUrl === "string" ? extra.apiUrl : "http://localhost:3001";
+  const apiUrlFromEnv =
+    typeof process.env.EXPO_PUBLIC_API_URL === "string"
+      ? process.env.EXPO_PUBLIC_API_URL.trim()
+      : "";
+  const apiUrlFromConfig = typeof extra.apiUrl === "string" ? extra.apiUrl.trim() : "";
+  const apiUrl = apiUrlFromEnv || apiUrlFromConfig || "http://localhost:3001";
   const devAuthUserId =
     typeof extra.devAuthUserId === "string" ? extra.devAuthUserId : "enduser-a1";
   const devUserDisplayName =

@@ -15,6 +15,11 @@ type LiveApiResponse = {
   users?: LiveSupervisionItem[];
 };
 
+function resolveApiUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
+  return configured && configured.length > 0 ? configured : "http://localhost:3001";
+}
+
 function formatRelativeTime(isoTimestamp: string, nowMs: number): string {
   const timestampMs = Date.parse(isoTimestamp);
   if (Number.isNaN(timestampMs)) {
@@ -46,7 +51,7 @@ export function LiveSupervisionPanel({ devUserId }: { devUserId: string }) {
 
     async function poll() {
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+        const apiUrl = resolveApiUrl();
         const response = await fetch(`${apiUrl}/v1/supervisor/live`, {
           headers: {
             Authorization: `Bearer DEV_${devUserId}`,

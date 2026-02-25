@@ -129,7 +129,11 @@ Migrations live in `/apps/api/migrations`.
 - Mobile dev wiring uses `apps/mobile/app.json`:
   - `expo.extra.devAuthUserId`
   - `expo.extra.apiUrl`
+  - `EXPO_PUBLIC_API_URL` (preferred override for local/preview/prod API URL)
   - TODO: replace this DEV auth wiring with real auth.
+
+- Dashboard API wiring:
+  - `NEXT_PUBLIC_API_URL` (set this to your Render API URL in hosted dashboard environments)
 
 ### MVP Slice C (iOS-first realtime supervision)
 
