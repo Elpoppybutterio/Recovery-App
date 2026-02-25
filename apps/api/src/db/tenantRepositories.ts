@@ -109,6 +109,9 @@ export function createTenantRepositories(repositories: Repositories) {
       },
     },
     meetingGuide: {
+      list(actor: ActorContext, filters: { dayOfWeek?: number; limit?: number } = {}) {
+        return repositories.meetingGuideMeetings.list(actor.tenantId, filters);
+      },
       nearby(
         actor: ActorContext,
         center: { lat: number; lng: number; radiusMiles: number },

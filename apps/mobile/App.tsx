@@ -116,7 +116,7 @@ type MeetingListItem = MeetingRecord & {
 
 type MeetingsViewMode = "LIST" | "MAP";
 type HomeScreen = "SETUP" | "DASHBOARD" | "MEETINGS" | "ATTENDANCE" | "SETTINGS" | "TOOLS";
-type SetupStep = 1 | 2 | 3 | 4 | 5;
+type SetupStep = 1 | 2 | 3 | 4 | 5 | 6;
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
 type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER";
@@ -1260,13 +1260,10 @@ export default function App() {
     selectedDayIsToday,
   ]);
 
-  const meetingsTodayUpcoming = useMemo<MeetingListItem[]>(() => {
-    const nowLocal = new Date(clockTickMs);
-    const todayDay = nowLocal.getDay();
-    const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+  const meetingsTodayAll = useMemo<MeetingListItem[]>(() => {
+    const todayDay = new Date(clockTickMs).getDay();
     const list = todayNearbyMeetings
       .filter((meeting) => meeting.dayOfWeek === todayDay)
-      .filter((meeting) => parseMinutesFromHhmm(meeting.startsAtLocal) >= nowMinutes)
       .map((meeting) => {
         const distanceMeters =
           currentLocation && meeting.lat !== null && meeting.lng !== null
@@ -1299,6 +1296,14 @@ export default function App() {
 
     return list;
   }, [todayNearbyMeetings, currentLocation, clockTickMs]);
+
+  const meetingsTodayUpcoming = useMemo<MeetingListItem[]>(() => {
+    const nowLocal = new Date(clockTickMs);
+    const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+    return meetingsTodayAll.filter(
+      (meeting) => parseMinutesFromHhmm(meeting.startsAtLocal) >= nowMinutes,
+    );
+  }, [meetingsTodayAll, clockTickMs]);
 
   const meetingsForMeetingsScreen = useMemo<MeetingListItem[]>(() => {
     return meetingsForDay.filter((meeting) => {
@@ -1354,7 +1359,7 @@ export default function App() {
     // Fallback: if location/coords are unavailable, still show upcoming meetings.
     return meetingsTodayUpcoming.slice(0, 3);
   }, [meetingsTodayUpcoming]);
-  const homeGroupCandidateMeetings = useMemo(() => meetingsTodayUpcoming, [meetingsTodayUpcoming]);
+  const homeGroupCandidateMeetings = useMemo(() => meetingsTodayAll, [meetingsTodayAll]);
 
   const mapMeetingsForDay = useMemo(
     () =>
@@ -2458,29 +2463,44 @@ export default function App() {
           setSetupError("Enter sponsor name and phone.");
           return;
         }
-        setWizardWantsReminders((current) => (current === null ? true : current));
         setSponsorEnabled(true);
+        setSetupStep(3);
       } else {
         setSponsorEnabled(false);
         setSponsorActive(false);
+        setWizardWantsReminders(false);
+        setSetupStep(5);
       }
-      setSetupStep(3);
       return;
     }
 
     if (setupStep === 3) {
+      setSetupStep(4);
+      return;
+    }
+
+    if (setupStep === 4) {
       if (wizardHasSponsor) {
-        const remindersEnabled = wizardWantsReminders ?? true;
         if (wizardWantsReminders === null) {
-          setWizardWantsReminders(remindersEnabled);
+          setSetupError("Choose whether calendar notifications and alerts are enabled.");
+          return;
         }
+        if (
+          wizardWantsReminders &&
+          sponsorRepeatUnit === "WEEKLY" &&
+          sponsorRepeatDaysSorted.length === 0
+        ) {
+          setSetupError("Select at least one reminder day.");
+          return;
+        }
+
         setSponsorEnabled(true);
-        setSponsorActive(remindersEnabled);
+        setSponsorActive(wizardWantsReminders);
         setSponsorEnabledAtIso((current) => current ?? new Date().toISOString());
         void (async () => {
           const saved = await saveSponsorConfigRef.current({
             sponsorEnabled: true,
-            sponsorActive: remindersEnabled,
+            sponsorActive: wizardWantsReminders,
           });
           if (!saved) {
             setSponsorStatus("Sponsor auto-save failed. You can continue and retry from Settings.");
@@ -2489,11 +2509,11 @@ export default function App() {
       } else {
         setWizardWantsReminders(false);
       }
-      setSetupStep(4);
+      setSetupStep(5);
       return;
     }
 
-    if (setupStep === 4) {
+    if (setupStep === 5) {
       if (wizardHasHomeGroup === null) {
         setSetupError("Choose whether you have a home group.");
         return;
@@ -2502,7 +2522,7 @@ export default function App() {
         setSetupError("Select a home group meeting.");
         return;
       }
-      setSetupStep(5);
+      setSetupStep(6);
     }
   }, [
     setupStep,
@@ -2512,6 +2532,8 @@ export default function App() {
     normalizedSponsorName,
     sponsorPhoneE164,
     wizardWantsReminders,
+    sponsorRepeatUnit,
+    sponsorRepeatDaysSorted.length,
     wizardHasHomeGroup,
     homeGroupMeetingIds.length,
   ]);
@@ -3351,12 +3373,12 @@ export default function App() {
     }
     if (wantsReminders && sponsorRepeatUnit === "WEEKLY" && sponsorRepeatDaysSorted.length === 0) {
       setSetupError("Select at least one reminder day.");
-      setSetupStep(3);
+      setSetupStep(4);
       return;
     }
     if (wizardHasHomeGroup === true && homeGroupMeetingIds.length === 0) {
       setSetupError("Select a home group meeting.");
-      setSetupStep(4);
+      setSetupStep(5);
       return;
     }
 
@@ -4459,7 +4481,7 @@ export default function App() {
   }, [selectedDay.dayOfWeek, refreshMeetings, bootstrapped]);
 
   useEffect(() => {
-    if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 4) {
+    if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 5) {
       setupStep4RefreshLocationKeyRef.current = null;
       return;
     }
@@ -4933,45 +4955,9 @@ export default function App() {
 
                   {setupStep === 3 ? (
                     <>
-                      <Text style={styles.label}>Do you want sponsor call reminders?</Text>
-                      <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardWantsReminders === true ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardWantsReminders(true)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardWantsReminders === true ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            Yes
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardWantsReminders === false ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardWantsReminders(false)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardWantsReminders === false ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            No
-                          </Text>
-                        </Pressable>
-                      </View>
-
-                      {wizardWantsReminders ? (
+                      {wizardHasSponsor ? (
                         <>
-                          <Text style={styles.label}>Call time</Text>
+                          <Text style={styles.label}>Sponsor call time</Text>
                           <View style={styles.timeRow}>
                             <Pressable style={styles.stepButton} onPress={() => incrementHour(-1)}>
                               <Text style={styles.stepButtonText}>-</Text>
@@ -5004,90 +4990,158 @@ export default function App() {
                               <Text style={styles.meridiemText}>{sponsorMeridiem}</Text>
                             </Pressable>
                           </View>
-                          <Text style={styles.label}>Repeat</Text>
+                          <Text style={styles.sectionMeta}>
+                            Next step configures calendar notifications and alerts for this call
+                            time.
+                          </Text>
+                        </>
+                      ) : (
+                        <Text style={styles.sectionMeta}>Sponsor is disabled for this setup.</Text>
+                      )}
+                    </>
+                  ) : null}
+
+                  {setupStep === 4 ? (
+                    <>
+                      {wizardHasSponsor ? (
+                        <>
+                          <Text style={styles.label}>
+                            Do you want calendar notifications and alerts for your sponsor call
+                            time?
+                          </Text>
                           <View style={styles.chipRow}>
-                            {SPONSOR_REPEAT_OPTIONS.map((option) => (
-                              <Pressable
-                                key={option.value}
+                            <Pressable
+                              style={[
+                                styles.chip,
+                                wizardWantsReminders === true ? styles.chipSelected : null,
+                              ]}
+                              onPress={() => setWizardWantsReminders(true)}
+                            >
+                              <Text
                                 style={[
-                                  styles.chip,
-                                  sponsorRepeatPreset === option.value ? styles.chipSelected : null,
+                                  styles.chipText,
+                                  wizardWantsReminders === true ? styles.chipTextSelected : null,
                                 ]}
-                                onPress={() => setSponsorRepeatPreset(option.value)}
                               >
-                                <Text
-                                  style={[
-                                    styles.chipText,
-                                    sponsorRepeatPreset === option.value
-                                      ? styles.chipTextSelected
-                                      : null,
-                                  ]}
-                                >
-                                  {option.label}
-                                </Text>
-                              </Pressable>
-                            ))}
+                                Yes
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              style={[
+                                styles.chip,
+                                wizardWantsReminders === false ? styles.chipSelected : null,
+                              ]}
+                              onPress={() => setWizardWantsReminders(false)}
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  wizardWantsReminders === false ? styles.chipTextSelected : null,
+                                ]}
+                              >
+                                No
+                              </Text>
+                            </Pressable>
                           </View>
-                          {sponsorRepeatPreset !== "MONTHLY" ? (
+
+                          {wizardWantsReminders ? (
                             <>
-                              <Text style={styles.label}>Days</Text>
+                              <Text style={styles.label}>Frequency</Text>
                               <View style={styles.chipRow}>
-                                {WEEKDAY_OPTIONS.map((day) => (
+                                {SPONSOR_REPEAT_OPTIONS.map((option) => (
                                   <Pressable
-                                    key={day.code}
+                                    key={option.value}
                                     style={[
                                       styles.chip,
-                                      sponsorRepeatDays.includes(day.code)
+                                      sponsorRepeatPreset === option.value
                                         ? styles.chipSelected
                                         : null,
                                     ]}
-                                    onPress={() => toggleRepeatDay(day.code)}
+                                    onPress={() => setSponsorRepeatPreset(option.value)}
                                   >
                                     <Text
                                       style={[
                                         styles.chipText,
-                                        sponsorRepeatDays.includes(day.code)
+                                        sponsorRepeatPreset === option.value
                                           ? styles.chipTextSelected
                                           : null,
                                       ]}
                                     >
-                                      {day.label}
+                                      {option.label}
+                                    </Text>
+                                  </Pressable>
+                                ))}
+                              </View>
+
+                              {sponsorRepeatPreset !== "MONTHLY" ? (
+                                <>
+                                  <Text style={styles.label}>Day of week</Text>
+                                  <View style={styles.chipRow}>
+                                    {WEEKDAY_OPTIONS.map((day) => (
+                                      <Pressable
+                                        key={day.code}
+                                        style={[
+                                          styles.chip,
+                                          sponsorRepeatDays.includes(day.code)
+                                            ? styles.chipSelected
+                                            : null,
+                                        ]}
+                                        onPress={() => toggleRepeatDay(day.code)}
+                                      >
+                                        <Text
+                                          style={[
+                                            styles.chipText,
+                                            sponsorRepeatDays.includes(day.code)
+                                              ? styles.chipTextSelected
+                                              : null,
+                                          ]}
+                                        >
+                                          {day.label}
+                                        </Text>
+                                      </Pressable>
+                                    ))}
+                                  </View>
+                                </>
+                              ) : null}
+
+                              <Text style={styles.label}>Reminder option</Text>
+                              <View style={styles.chipRow}>
+                                {SPONSOR_LEAD_OPTIONS.map((option) => (
+                                  <Pressable
+                                    key={option.value}
+                                    style={[
+                                      styles.chip,
+                                      sponsorLeadMinutes === option.value
+                                        ? styles.chipSelected
+                                        : null,
+                                    ]}
+                                    onPress={() => setSponsorLeadMinutes(option.value)}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.chipText,
+                                        sponsorLeadMinutes === option.value
+                                          ? styles.chipTextSelected
+                                          : null,
+                                      ]}
+                                    >
+                                      {option.label}
                                     </Text>
                                   </Pressable>
                                 ))}
                               </View>
                             </>
                           ) : null}
-                          <Text style={styles.label}>Alert lead time</Text>
-                          <View style={styles.chipRow}>
-                            {SPONSOR_LEAD_OPTIONS.map((option) => (
-                              <Pressable
-                                key={option.value}
-                                style={[
-                                  styles.chip,
-                                  sponsorLeadMinutes === option.value ? styles.chipSelected : null,
-                                ]}
-                                onPress={() => setSponsorLeadMinutes(option.value)}
-                              >
-                                <Text
-                                  style={[
-                                    styles.chipText,
-                                    sponsorLeadMinutes === option.value
-                                      ? styles.chipTextSelected
-                                      : null,
-                                  ]}
-                                >
-                                  {option.label}
-                                </Text>
-                              </Pressable>
-                            ))}
-                          </View>
                         </>
-                      ) : null}
+                      ) : (
+                        <Text style={styles.sectionMeta}>
+                          Sponsor is disabled, so notifications and alerts are skipped.
+                        </Text>
+                      )}
                     </>
                   ) : null}
 
-                  {setupStep === 4 ? (
+                  {setupStep === 5 ? (
                     <>
                       <Text style={styles.label}>Do you have a home group meeting?</Text>
                       <View style={styles.chipRow}>
@@ -5178,7 +5232,7 @@ export default function App() {
                     </>
                   ) : null}
 
-                  {setupStep === 5 ? (
+                  {setupStep === 6 ? (
                     <>
                       <Text style={styles.label}>Review</Text>
                       <Text style={styles.sectionMeta}>
@@ -5189,7 +5243,8 @@ export default function App() {
                         Sponsor: {wizardHasSponsor ? "Enabled" : "Not enabled"}
                       </Text>
                       <Text style={styles.sectionMeta}>
-                        Sponsor reminders: {wizardWantsReminders ? "Enabled" : "Disabled"}
+                        Calendar notifications and alerts:{" "}
+                        {wizardWantsReminders ? "Enabled" : "Disabled"}
                       </Text>
                       <Text style={styles.sectionMeta}>
                         Home group:{" "}

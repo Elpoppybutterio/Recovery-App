@@ -941,13 +941,20 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       }
 
       const query = parsedQuery.data;
-      const meetings = await tenantRepositories.meetings.list(actor);
+      const requestedDayOfWeek = query.dayOfWeek ?? query.day;
+      const [manualMeetings, meetingGuideMeetings] = await Promise.all([
+        tenantRepositories.meetings.list(actor),
+        tenantRepositories.meetingGuide.list(actor, {
+          dayOfWeek: requestedDayOfWeek,
+          limit: 1000,
+        }),
+      ]);
       const resolvedRadiusMiles = query.radiusMiles ?? env.MEETING_IMPORT_RADIUS_MILES;
       const resolvedRadiusMeters = resolvedRadiusMiles * MILES_TO_METERS;
       const hasLocationFilter = typeof query.lat === "number" && typeof query.lng === "number";
 
-      const scopedMeetings = hasLocationFilter
-        ? meetings.filter((meeting) => {
+      const scopedManualMeetings = hasLocationFilter
+        ? manualMeetings.filter((meeting) => {
             const distanceM = distanceMetersBetween(
               query.lat!,
               query.lng!,
@@ -956,22 +963,92 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
             );
             return distanceM <= resolvedRadiusMeters;
           })
-        : meetings;
+        : manualMeetings;
 
-      return {
-        meetings: scopedMeetings.map((meeting) => ({
+      const scopedMeetingGuideMeetings = hasLocationFilter
+        ? meetingGuideMeetings.filter((meeting) => {
+            if (meeting.lat === null || meeting.lng === null) {
+              return false;
+            }
+            const distanceM = distanceMetersBetween(
+              query.lat!,
+              query.lng!,
+              meeting.lat,
+              meeting.lng,
+            );
+            return distanceM <= resolvedRadiusMeters;
+          })
+        : meetingGuideMeetings;
+
+      const mappedManualMeetings = scopedManualMeetings.map((meeting) => ({
+        id: meeting.id,
+        tenantId: meeting.tenant_id,
+        name: meeting.name,
+        address: meeting.address,
+        lat: meeting.lat,
+        lng: meeting.lng,
+        radiusM: meeting.radius_m,
+        createdAt: meeting.created_at,
+        createdByUserId: meeting.created_by_user_id,
+        dayOfWeek: requestedDayOfWeek ?? null,
+        startsAtLocal: null,
+        endsAtLocal: null,
+        onlineUrl: null,
+        types: [],
+        typesDisplay: [],
+        format: "IN_PERSON" as const,
+      }));
+
+      const mappedMeetingGuideMeetings = scopedMeetingGuideMeetings.map((meeting) => {
+        const typeCodes = Array.isArray(meeting.types_json)
+          ? meeting.types_json
+              .map((entry) => (typeof entry === "string" ? entry.toUpperCase() : null))
+              .filter((entry): entry is string => entry !== null)
+          : [];
+        const hasOnline =
+          typeof meeting.conference_url === "string" && meeting.conference_url.length > 0;
+        const hasPhysical = meeting.lat !== null && meeting.lng !== null;
+        const format = hasOnline && hasPhysical ? "HYBRID" : hasOnline ? "ONLINE" : "IN_PERSON";
+        const fallbackAddress = [meeting.address, meeting.city, meeting.state]
+          .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+          .join(", ");
+        const address =
+          meeting.formatted_address ??
+          (fallbackAddress.length > 0 ? fallbackAddress : "Address unavailable");
+
+        return {
           id: meeting.id,
           tenantId: meeting.tenant_id,
           name: meeting.name,
-          address: meeting.address,
+          address,
           lat: meeting.lat,
           lng: meeting.lng,
-          radiusM: meeting.radius_m,
-          createdAt: meeting.created_at,
-          createdByUserId: meeting.created_by_user_id,
-        })),
+          radiusM: null,
+          createdAt: meeting.last_ingested_at,
+          createdByUserId: "meeting-guide",
+          dayOfWeek: meeting.day,
+          startsAtLocal: meeting.time,
+          endsAtLocal: meeting.end_time,
+          onlineUrl: meeting.conference_url,
+          types: typeCodes,
+          typesDisplay: mapTypeCodesToLabels(typeCodes),
+          format,
+        };
+      });
+
+      const combinedById = new Map<string, Record<string, unknown>>();
+      for (const meeting of mappedManualMeetings) {
+        combinedById.set(meeting.id, meeting);
+      }
+      for (const meeting of mappedMeetingGuideMeetings) {
+        combinedById.set(meeting.id, meeting);
+      }
+      const combinedMeetings = Array.from(combinedById.values());
+
+      return {
+        meetings: combinedMeetings,
         filters: {
-          dayOfWeek: query.dayOfWeek ?? query.day ?? null,
+          dayOfWeek: requestedDayOfWeek ?? null,
           radiusMiles: resolvedRadiusMiles,
           locationScoped: hasLocationFilter,
         },
