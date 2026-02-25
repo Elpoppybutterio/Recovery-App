@@ -1081,6 +1081,55 @@ export function createRepositories(db: DbClient) {
         return upserted;
       },
 
+      async list(
+        tenantId: string,
+        filters: { dayOfWeek?: number; limit?: number } = {},
+      ): Promise<MeetingGuideMeetingRow[]> {
+        const limit = Math.max(1, Math.min(filters.limit ?? 500, 2000));
+        const result = await db.query<MeetingGuideMeetingRow>(
+          `
+          SELECT
+            id,
+            tenant_id,
+            source_feed_id,
+            slug,
+            name,
+            day,
+            time,
+            end_time,
+            timezone,
+            formatted_address,
+            address,
+            city,
+            state,
+            postal_code,
+            country,
+            region,
+            location,
+            notes,
+            types_json,
+            conference_url,
+            conference_phone,
+            lat,
+            lng,
+            geo_status,
+            updated_at_source,
+            last_ingested_at
+          FROM meeting_guide_meetings
+          WHERE tenant_id = $1
+            AND ($2::int IS NULL OR day = $2)
+          ORDER BY
+            day ASC NULLS LAST,
+            time ASC NULLS LAST,
+            name ASC
+          LIMIT $3
+        `,
+          [tenantId, filters.dayOfWeek ?? null, limit],
+        );
+
+        return result.rows;
+      },
+
       async listNearby(
         tenantId: string,
         center: { lat: number; lng: number; radiusMiles: number },
