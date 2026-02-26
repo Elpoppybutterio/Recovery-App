@@ -50,6 +50,7 @@ import { ui } from "./lib/ui/ui";
 import { colors } from "./lib/theme/tokens";
 import { MorningRoutineScreen } from "./screens/MorningRoutineScreen";
 import { NightlyInventoryScreen } from "./screens/NightlyInventoryScreen";
+import { BigBookReaderScreen } from "./screens/BigBookReaderScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
 
@@ -123,7 +124,7 @@ type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
 type MeetingsLocationFilter = "CURRENT" | "MILES_50" | "MILES_100";
 type MeetingsFilterDropdown = "FORMAT" | "DAY" | "TIME" | "LOCATION";
-type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER";
+type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER" | "BIGBOOK";
 type RoutineInventoryCategory = keyof Pick<
   NightlyInventoryDayState,
   "resentful" | "selfish" | "dishonest" | "afraid" | "apology"
@@ -131,6 +132,12 @@ type RoutineInventoryCategory = keyof Pick<
 type RoutineReaderState = {
   title: string;
   url: string | null;
+};
+
+type BigBookReaderState = {
+  title: string;
+  startPage: number;
+  endPage: number;
 };
 
 type MapBoundaryCenter = {
@@ -1173,6 +1180,7 @@ export default function App() {
   );
   const [routinesStatus, setRoutinesStatus] = useState<string | null>(null);
   const [routineReader, setRoutineReader] = useState<RoutineReaderState | null>(null);
+  const [bigBookReader, setBigBookReader] = useState<BigBookReaderState | null>(null);
 
   const [meetingPlansByDate, setMeetingPlansByDate] = useState<MeetingPlansState>({});
   const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(__DEV__);
@@ -2209,7 +2217,17 @@ export default function App() {
     [morningRoutineDayState.audioRefs],
   );
 
-  const openRoutineReader = useCallback((title: string, url: string | null) => {
+  const openRoutineReader = useCallback((itemId: string, title: string, url: string | null) => {
+    if (itemId === "bb-60-63") {
+      setBigBookReader({
+        title: "Big Book",
+        startPage: 60,
+        endPage: 63,
+      });
+      setToolsScreen("BIGBOOK");
+      return;
+    }
+
     setRoutineReader({ title, url });
     setToolsScreen("READER");
   }, []);
@@ -2233,7 +2251,7 @@ export default function App() {
   }, []);
 
   const openDailyReflectionsRead = useCallback(() => {
-    openRoutineReader("Daily Reflections", dailyReflectionsReadUrl);
+    openRoutineReader("daily-reflections", "Daily Reflections", dailyReflectionsReadUrl);
   }, [dailyReflectionsReadUrl, openRoutineReader]);
 
   const openDailyReflectionsListen = useCallback(async () => {
@@ -6265,6 +6283,18 @@ export default function App() {
                       }
                       onTextSponsor={() => void textNightlyToSponsor()}
                       onExportPdf={() => void exportNightlyInventoryForToday()}
+                    />
+                  ) : null}
+
+                  {toolsScreen === "BIGBOOK" ? (
+                    <BigBookReaderScreen
+                      title={bigBookReader?.title ?? "Big Book"}
+                      subtitle={`Pages ${bigBookReader?.startPage ?? 60}-${bigBookReader?.endPage ?? 63}`}
+                      startPage={bigBookReader?.startPage ?? 60}
+                      endPage={bigBookReader?.endPage ?? 63}
+                      apiUrl={apiUrl}
+                      authHeader={authHeader}
+                      onBack={() => setToolsScreen("MORNING")}
                     />
                   ) : null}
 

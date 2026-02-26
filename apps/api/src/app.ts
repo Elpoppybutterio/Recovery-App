@@ -16,6 +16,7 @@ import { createPostgresPool } from "./db/postgres";
 import { createRepositories } from "./db/repositories";
 import { AccessDeniedError, createTenantRepositories } from "./db/tenantRepositories";
 import { loadApiEnv, type ApiEnv } from "./env";
+import { bigBookPagesQuerySchema, getBigBookPagesForRange } from "./literature/bigbook";
 import {
   ingestMeetingGuideFeedsForTenant,
   parseConfiguredMeetingGuideFeeds,
@@ -379,6 +380,36 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       ts: new Date().toISOString(),
     };
   });
+
+  app.get(
+    "/v1/literature/bigbook/pages",
+    {
+      preHandler: [
+        authenticateRequest,
+        requireRole(Role.END_USER, Role.SUPERVISOR, Role.ADMIN, Role.MEETING_VERIFIER),
+      ],
+    },
+    async (request, reply) => {
+      const parsedQuery = bigBookPagesQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid Big Book pages query",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      const { start, end } = parsedQuery.data;
+      const result = await getBigBookPagesForRange(start, end);
+      return {
+        edition: result.edition,
+        licenseNotice: result.licenseNotice,
+        range: { start, end },
+        pages: result.pages,
+      };
+    },
+  );
 
   app.get(
     "/v1/me",

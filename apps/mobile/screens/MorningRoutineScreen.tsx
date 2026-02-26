@@ -47,7 +47,7 @@ export function MorningRoutineScreen({
   onSetNotes: (value: string) => void;
   onSetItemDetail: (itemId: string, detail: string) => void;
   onToggleGotOnKnees: () => void;
-  onOpenReader: (title: string, url: string | null) => void;
+  onOpenReader: (itemId: string, title: string, url: string | null) => void;
   onReadDailyReflections: () => void;
   onListenDailyReflections: () => void;
   onListenText: (text: string) => void;
@@ -105,19 +105,10 @@ export function MorningRoutineScreen({
                   isDailyReflections
                     ? onReadDailyReflections
                     : item.readerLabel
-                      ? () => onOpenReader(item.title, item.readerUrl ?? null)
+                      ? () => onOpenReader(item.id, item.title, item.readerUrl ?? null)
                       : undefined
                 }
               />
-              {item.id === "bb-60-63" ? (
-                <TextInput
-                  style={styles.input}
-                  value={item.detail ?? ""}
-                  onChangeText={(value) => onSetItemDetail(item.id, value)}
-                  placeholder="Edit page range (example: 60-63)"
-                  placeholderTextColor="rgba(245,243,255,0.45)"
-                />
-              ) : null}
               {isAdditionalSuggestions ? (
                 <TextInput
                   style={[styles.input, styles.multiline]}
