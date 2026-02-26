@@ -59,6 +59,23 @@ const MapViewCompat: any = MapView;
 const MarkerCompat: any = Marker;
 const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
 const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
+const BIG_BOOK_READINGS: Record<
+  string,
+  { title: string; startPage: number; endPage: number; rangeKey: "bb-86-88" | "bb-60-63" }
+> = {
+  "bb-86-88": {
+    title: "Big Book Reading #1",
+    startPage: 86,
+    endPage: 88,
+    rangeKey: "bb-86-88",
+  },
+  "bb-60-63": {
+    title: "Big Book Reading #2",
+    startPage: 60,
+    endPage: 63,
+    rangeKey: "bb-60-63",
+  },
+};
 
 type RecoveryMode = "A" | "B" | "C";
 type AppScreen = "LIST" | "DETAIL" | "SESSION" | "SIGNATURE";
@@ -141,6 +158,7 @@ type BigBookReaderState = {
   title: string;
   startPage: number;
   endPage: number;
+  rangeKey: "bb-86-88" | "bb-60-63";
 };
 
 type MapBoundaryCenter = {
@@ -2268,20 +2286,21 @@ export default function App() {
     completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
   }, [completeMorningItemForCurrentDayIfEnabled]);
 
-  const openRoutineReader = useCallback((itemId: string, title: string, url: string | null) => {
-    if (itemId === "bb-60-63") {
-      setBigBookReader({
-        title: "Big Book",
-        startPage: 60,
-        endPage: 63,
-      });
-      setToolsScreen("BIGBOOK");
-      return;
-    }
+  const openRoutineReader = useCallback(
+    (itemId: string, title: string, url: string | null) => {
+      const bigBookConfig = BIG_BOOK_READINGS[itemId];
+      if (bigBookConfig) {
+        completeMorningItemForCurrentDayIfEnabled(itemId);
+        setBigBookReader(bigBookConfig);
+        setToolsScreen("BIGBOOK");
+        return;
+      }
 
-    setRoutineReader({ title, url });
-    setToolsScreen("READER");
-  }, []);
+      setRoutineReader({ title, url });
+      setToolsScreen("READER");
+    },
+    [completeMorningItemForCurrentDayIfEnabled],
+  );
 
   const dailyReflectionsReadUrl = useMemo(() => {
     const configuredLink = routinesStore.morningTemplate.dailyReflectionsLink.trim();
