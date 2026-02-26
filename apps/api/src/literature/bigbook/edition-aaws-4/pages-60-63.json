@@ -1,22 +1,23 @@
 {
   "edition": "aaws-4th-edition",
-  "licenseNotice": "Alcoholics Anonymous World Services, Inc. (AAWS) licensed content. In-app display is authorized for this application.",
+  "updatedAt": "2026-02-26T00:00:00.000Z",
+  "copyrightNotice": "Copyright © Alcoholics Anonymous World Services, Inc. Reprinted with permission.",
   "pages": [
     {
       "page": 60,
-      "html": "<article><h1>Big Book - Page 60</h1><p><strong>AAWS Licensed Page Content</strong></p><p>This page is served via the page-content API to preserve page-level fidelity in-app.</p></article>"
+      "html": "<h1>Big Book - Page 60</h1><p><strong>AAWS Licensed Page Content</strong></p><p>This page is served via the page-content API to preserve page-level fidelity in-app.</p>"
     },
     {
       "page": 61,
-      "html": "<article><h1>Big Book - Page 61</h1><p><strong>AAWS Licensed Page Content</strong></p><p>This page is served via the page-content API to preserve page-level fidelity in-app.</p></article>"
+      "html": "<h1>Big Book - Page 61</h1><p><strong>AAWS Licensed Page Content</strong></p><p>This page is served via the page-content API to preserve page-level fidelity in-app.</p>"
     },
     {
       "page": 62,
-      "html": "<article><h1>Big Book - Page 62</h1><p><strong>AAWS Licensed Page Content</strong></p><p>This page is served via the page-content API to preserve page-level fidelity in-app.</p></article>"
+      "html": "<h1>Big Book - Page 62</h1><p><strong>AAWS Licensed Page Content</strong></p><p>This page is served via the page-content API to preserve page-level fidelity in-app.</p>"
     },
     {
       "page": 63,
-      "html": "<article><h1>Big Book - Page 63</h1><p><strong>AAWS Licensed Page Content</strong></p><p>This page is served via the page-content API to preserve page-level fidelity in-app.</p></article>"
+      "html": "<h1>Big Book - Page 63</h1><p><strong>AAWS Licensed Page Content</strong></p><p>This page is served via the page-content API to preserve page-level fidelity in-app.</p>"
     }
   ]
 }

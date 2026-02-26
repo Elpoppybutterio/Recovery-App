@@ -404,7 +404,8 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       const result = await getBigBookPagesForRange(start, end);
       return {
         edition: result.edition,
-        licenseNotice: result.licenseNotice,
+        updatedAt: result.updatedAt,
+        copyrightNotice: result.copyrightNotice,
         range: { start, end },
         pages: result.pages,
       };

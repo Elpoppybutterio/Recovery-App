@@ -11,7 +11,8 @@ const pageSchema = z.object({
 
 const fileSchema = z.object({
   edition: z.string().min(1),
-  licenseNotice: z.string().min(1),
+  updatedAt: z.string().datetime(),
+  copyrightNotice: z.string().min(1),
   pages: z.array(pageSchema),
 });
 
@@ -19,6 +20,33 @@ export type BigBookPage = z.infer<typeof pageSchema>;
 export type BigBookContentFile = z.infer<typeof fileSchema>;
 
 let cachedContent: BigBookContentFile | null = null;
+const ALLOWED_TAGS = new Set(["h1", "h2", "h3", "p", "em", "strong", "ul", "ol", "li", "br"]);
+
+function sanitizeHtml(html: string): string {
+  const withoutScripts = html
+    .replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script>/gi, "")
+    .replace(/<\s*style[^>]*>[\s\S]*?<\s*\/\s*style>/gi, "");
+
+  return withoutScripts.replace(/<\/?([a-z0-9-]+)(\s[^>]*)?>/gi, (full, rawTag: string) => {
+    const tag = rawTag.toLowerCase();
+    if (!ALLOWED_TAGS.has(tag)) {
+      return "";
+    }
+
+    const isClosing = full.startsWith("</");
+    const isSelfClosing = full.endsWith("/>");
+    if (tag === "br") {
+      return "<br>";
+    }
+    if (isClosing) {
+      return `</${tag}>`;
+    }
+    if (isSelfClosing) {
+      return `<${tag}>`;
+    }
+    return `<${tag}>`;
+  });
+}
 
 function getCandidatePaths(): string[] {
   const relativePath = path.join("literature", "bigbook", "edition-aaws-4", "pages-60-63.json");
@@ -88,13 +116,14 @@ export async function getBigBookPagesForRange(start: number, end: number) {
   for (let page = start; page <= end; page += 1) {
     const entry = pagesByNumber.get(page);
     if (entry) {
-      pages.push({ page: entry.page, html: entry.html });
+      pages.push({ page: entry.page, html: sanitizeHtml(entry.html) });
     }
   }
 
   return {
     edition: content.edition,
-    licenseNotice: content.licenseNotice,
+    updatedAt: content.updatedAt,
+    copyrightNotice: content.copyrightNotice,
     start,
     end,
     pages,

@@ -19,10 +19,14 @@ describe("GET /v1/literature/bigbook/pages", () => {
 
     const payload = response.json() as {
       edition: string;
+      updatedAt: string;
+      copyrightNotice: string;
       pages: Array<{ page: number; html: string }>;
     };
 
     expect(payload.edition.length).toBeGreaterThan(0);
+    expect(payload.updatedAt.length).toBeGreaterThan(0);
+    expect(payload.copyrightNotice.length).toBeGreaterThan(0);
     expect(payload.pages).toHaveLength(4);
     expect(payload.pages.map((entry) => entry.page)).toEqual([60, 61, 62, 63]);
     expect(payload.pages.every((entry) => entry.html.trim().length > 0)).toBe(true);
@@ -39,6 +43,25 @@ describe("GET /v1/literature/bigbook/pages", () => {
     const response = await app.inject({
       method: "GET",
       url: "/v1/literature/bigbook/pages?start=60&end=90",
+      headers: {
+        authorization: "Bearer DEV_enduser-a1",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("rejects invalid ranges where start is greater than end", async () => {
+    const db = await createTestDb();
+    await seedCoreFixtures(db);
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/literature/bigbook/pages?start=63&end=60",
       headers: {
         authorization: "Bearer DEV_enduser-a1",
       },
