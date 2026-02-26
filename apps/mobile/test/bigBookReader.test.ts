@@ -3,7 +3,9 @@ import {
   buildBigBookPagesUrl,
   clampBigBookPage,
   loadBigBookPagesWithCache,
+  persistLastBigBookPage,
   persistCachedBigBookPages,
+  readLastBigBookPage,
   type BigBookPagesPayload,
   type StorageLike,
 } from "../lib/literature/bigBookReader";
@@ -31,7 +33,8 @@ describe("bigBookReader utils", () => {
   it("falls back to cached pages when API fails", async () => {
     const cached: BigBookPagesPayload = {
       edition: "aaws-4th-edition",
-      licenseNotice: "Licensed",
+      updatedAt: "2026-02-26T00:00:00.000Z",
+      copyrightNotice: "Licensed",
       range: { start: 60, end: 63 },
       pages: [
         { page: 60, html: "<p>Page 60</p>" },
@@ -61,5 +64,13 @@ describe("bigBookReader utils", () => {
     expect(clampBigBookPage(55, 60, 63)).toBe(60);
     expect(clampBigBookPage(61, 60, 63)).toBe(61);
     expect(clampBigBookPage(80, 60, 63)).toBe(63);
+  });
+
+  it("persists and restores last page for resume behavior", async () => {
+    const storage = createMemoryStorage();
+    await persistLastBigBookPage(storage, 60, 63, 62);
+
+    const restored = await readLastBigBookPage(storage, 60, 63);
+    expect(restored).toBe(62);
   });
 });

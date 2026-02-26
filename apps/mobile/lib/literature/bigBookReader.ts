@@ -5,7 +5,8 @@ export type BigBookPagePayload = {
 
 export type BigBookPagesPayload = {
   edition: string;
-  licenseNotice: string;
+  updatedAt: string;
+  copyrightNotice: string;
   range: {
     start: number;
     end: number;
@@ -37,6 +38,7 @@ type LoadBigBookPagesWithCacheOptions = {
 };
 
 const RANGE_POINTER_PREFIX = "bigbook:range:";
+const LAST_PAGE_PREFIX = "bigbook:lastPage:";
 
 function normalizeApiUrl(url: string): string {
   return url.replace(/\/+$/, "");
@@ -69,6 +71,10 @@ function buildRangePointerKey(startPage: number, endPage: number): string {
 
 export function buildBigBookCacheKey(edition: string, startPage: number, endPage: number): string {
   return `bigbook:${edition}:${buildRangeId(startPage, endPage)}`;
+}
+
+export function buildBigBookLastPageKey(startPage: number, endPage: number): string {
+  return `${LAST_PAGE_PREFIX}${buildRangeId(startPage, endPage)}`;
 }
 
 export async function readCachedBigBookPages(
@@ -117,6 +123,34 @@ export async function persistCachedBigBookPages(
   await storage.setItem(pointerKey, payload.edition);
 }
 
+export async function readLastBigBookPage(
+  storage: StorageLike,
+  startPage: number,
+  endPage: number,
+): Promise<number | null> {
+  const raw = await storage.getItem(buildBigBookLastPageKey(startPage, endPage));
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return clampBigBookPage(parsed, startPage, endPage);
+}
+
+export async function persistLastBigBookPage(
+  storage: StorageLike,
+  startPage: number,
+  endPage: number,
+  page: number,
+): Promise<void> {
+  await storage.setItem(
+    buildBigBookLastPageKey(startPage, endPage),
+    String(clampBigBookPage(page, startPage, endPage)),
+  );
+}
+
 export async function fetchBigBookPages(
   apiUrl: string,
   authHeader: string,
@@ -140,6 +174,10 @@ export async function fetchBigBookPages(
     !payload ||
     typeof payload.edition !== "string" ||
     payload.edition.length === 0 ||
+    typeof payload.updatedAt !== "string" ||
+    payload.updatedAt.length === 0 ||
+    typeof payload.copyrightNotice !== "string" ||
+    payload.copyrightNotice.length === 0 ||
     !Array.isArray(payload.pages)
   ) {
     throw new Error("Big Book API returned an invalid response.");

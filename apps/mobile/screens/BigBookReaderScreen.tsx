@@ -6,6 +6,8 @@ import {
   clampBigBookPage,
   fetchBigBookPages,
   persistCachedBigBookPages,
+  persistLastBigBookPage,
+  readLastBigBookPage,
   readCachedBigBookPages,
   type BigBookPagesPayload,
 } from "../lib/literature/bigBookReader";
@@ -108,7 +110,8 @@ export function BigBookReaderScreen({
 
     const initialize = async () => {
       setError(null);
-      setCurrentPage(startPage);
+      const lastPage = await readLastBigBookPage(AsyncStorage, startPage, endPage);
+      setCurrentPage(lastPage ?? startPage);
       const cached = await readCachedBigBookPages(AsyncStorage, startPage, endPage);
       if (cancelled) {
         return;
@@ -129,6 +132,10 @@ export function BigBookReaderScreen({
       cancelled = true;
     };
   }, [endPage, refreshFromApi, startPage]);
+
+  useEffect(() => {
+    void persistLastBigBookPage(AsyncStorage, startPage, endPage, currentPage);
+  }, [currentPage, endPage, startPage]);
 
   const canGoPrev = currentPage > startPage;
   const canGoNext = currentPage < endPage;
@@ -168,6 +175,10 @@ export function BigBookReaderScreen({
           </Pressable>
         </View>
 
+        <Pressable style={styles.jumpBtn} onPress={() => setCurrentPage(startPage)}>
+          <Text style={styles.jumpText}>{`Jump to ${startPage}`}</Text>
+        </Pressable>
+
         {loading ? (
           <View style={styles.loadingWrap}>
             <ActivityIndicator color={routineTheme.colors.textPrimary} />
@@ -197,8 +208,13 @@ export function BigBookReaderScreen({
           </View>
         ) : null}
 
+        {payload?.updatedAt ? (
+          <Text
+            style={styles.meta}
+          >{`Source updated: ${new Date(payload.updatedAt).toLocaleString()}`}</Text>
+        ) : null}
         <Text style={styles.licenseText}>
-          {payload?.licenseNotice ??
+          {payload?.copyrightNotice ??
             "AAWS licensed material. Display is limited to authorized in-app use."}
         </Text>
       </LiquidGlassCard>
@@ -269,6 +285,20 @@ const styles = StyleSheet.create({
     color: routineTheme.colors.textPrimary,
     fontSize: 13,
     fontWeight: "800",
+  },
+  jumpBtn: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: routineTheme.radii.pill,
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    backgroundColor: "rgba(255,255,255,0.1)",
+  },
+  jumpText: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 12,
+    fontWeight: "700",
   },
   pageIndicator: {
     color: routineTheme.colors.textPrimary,
