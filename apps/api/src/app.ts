@@ -245,6 +245,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
 
   logger.info("meeting_guide.config", {
     autoIngest: env.MEETING_GUIDE_AUTO_INGEST,
+    geocodeMissingCoordinates: env.MEETING_GUIDE_GEOCODE_MISSING,
     defaultTenantId: env.MEETING_GUIDE_DEFAULT_TENANT_ID ?? null,
     refreshIntervalMs: env.MEETING_GUIDE_REFRESH_INTERVAL_MS,
     configuredFeedsCount: configuredMeetingGuideFeeds.length,
@@ -336,7 +337,8 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       configuredFeeds: feeds,
       now,
       logger,
-      geocodeMissingCoordinates: env.NODE_ENV !== "production",
+      geocodeMissingCoordinates: env.MEETING_GUIDE_GEOCODE_MISSING,
+      geocodeUserAgent: env.MEETING_GUIDE_GEOCODE_USER_AGENT,
     });
   };
 

@@ -26,6 +26,8 @@ Optional env:
 
 - `MEETING_GUIDE_DEFAULT_TENANT_ID=tenant-a`
 - `MEETING_GUIDE_AUTO_INGEST=true`
+- `MEETING_GUIDE_GEOCODE_MISSING=true` (recommended for production feeds with missing coordinates)
+- `MEETING_GUIDE_GEOCODE_USER_AGENT=Recovery-Accountability/0.1 (+https://sober-ai.app)`
 - `MEETING_GUIDE_REFRESH_INTERVAL_MS=43200000` (12 hours)
 
 Legacy feed env vars are still supported as fallback:

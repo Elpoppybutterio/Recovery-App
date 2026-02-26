@@ -35,6 +35,10 @@ const apiEnvSchema = z.object({
   MEETING_GUIDE_DEFAULT_TENANT_ID: z.string().optional(),
   MEETING_GUIDE_REFRESH_INTERVAL_MS: z.coerce.number().positive().default(43_200_000),
   MEETING_GUIDE_AUTO_INGEST: z.preprocess(parseBooleanString, z.boolean().optional()),
+  MEETING_GUIDE_GEOCODE_MISSING: z.preprocess(parseBooleanString, z.boolean().optional()),
+  MEETING_GUIDE_GEOCODE_USER_AGENT: z
+    .string()
+    .default("Recovery-Accountability/0.1 (+https://sober-ai.app)"),
 });
 
 type ParsedApiEnv = z.infer<typeof apiEnvSchema>;
@@ -42,6 +46,7 @@ type ParsedApiEnv = z.infer<typeof apiEnvSchema>;
 export type ApiEnv = ParsedApiEnv & {
   ENABLE_DEV_AUTH: boolean;
   MEETING_GUIDE_AUTO_INGEST: boolean;
+  MEETING_GUIDE_GEOCODE_MISSING: boolean;
 };
 
 export function loadApiEnv(env: Record<string, unknown> = process.env): ApiEnv {
@@ -50,5 +55,7 @@ export function loadApiEnv(env: Record<string, unknown> = process.env): ApiEnv {
     ...parsed,
     ENABLE_DEV_AUTH: parsed.ENABLE_DEV_AUTH ?? parsed.NODE_ENV !== "production",
     MEETING_GUIDE_AUTO_INGEST: parsed.MEETING_GUIDE_AUTO_INGEST ?? parsed.NODE_ENV !== "test",
+    MEETING_GUIDE_GEOCODE_MISSING:
+      parsed.MEETING_GUIDE_GEOCODE_MISSING ?? parsed.NODE_ENV !== "test",
   };
 }
