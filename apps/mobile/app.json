@@ -17,7 +17,8 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon-foreground.png",
         "backgroundImage": "./assets/icon-background.png"
-      }
+      },
+      "package": "com.recovery.accountability"
     },
     "assetBundlePatterns": ["**/*"],
     "extra": {

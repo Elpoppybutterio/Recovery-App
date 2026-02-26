@@ -10,6 +10,7 @@ import {
   GestureResponderEvent,
   KeyboardAvoidingView,
   Linking,
+  NativeModules,
   Platform,
   Pressable,
   Share,
@@ -912,6 +913,33 @@ function loadOptionalModule<T>(moduleName: string): T | null {
   }
 }
 
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function resolveApiBaseUrl(fromEnv: string, fromConfig: string): string {
+  const preferred = fromEnv || fromConfig;
+  if (preferred) {
+    return trimTrailingSlashes(preferred);
+  }
+
+  const scriptUrl = (NativeModules as { SourceCode?: { scriptURL?: string } }).SourceCode
+    ?.scriptURL;
+  if (typeof scriptUrl === "string" && scriptUrl.length > 0) {
+    try {
+      const parsed = new URL(scriptUrl);
+      const host = parsed.hostname;
+      if (host && !["localhost", "127.0.0.1", "0.0.0.0"].includes(host)) {
+        return `http://${host}:3031`;
+      }
+    } catch {
+      // fall through to localhost default
+    }
+  }
+
+  return "http://localhost:3031";
+}
+
 function getDaysSober(dateIso: string | null, nowMs: number): number {
   if (!dateIso) {
     return 0;
@@ -975,7 +1003,10 @@ export default function App() {
       ? process.env.EXPO_PUBLIC_API_URL.trim()
       : "";
   const apiUrlFromConfig = typeof extra.apiUrl === "string" ? extra.apiUrl.trim() : "";
-  const apiUrl = apiUrlFromEnv || apiUrlFromConfig || "http://localhost:3001";
+  const apiUrl = useMemo(
+    () => resolveApiBaseUrl(apiUrlFromEnv, apiUrlFromConfig),
+    [apiUrlFromConfig, apiUrlFromEnv],
+  );
   const devAuthUserId =
     typeof extra.devAuthUserId === "string" ? extra.devAuthUserId : "enduser-a1";
   const devUserDisplayName =
