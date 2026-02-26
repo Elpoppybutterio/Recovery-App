@@ -31,6 +31,35 @@ describe("GET /v1/literature/bigbook/pages", () => {
     await db.end?.();
   });
 
+  it("returns page-numbered HTML for pages 86-88", async () => {
+    const db = await createTestDb();
+    await seedCoreFixtures(db);
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/literature/bigbook/pages?start=86&end=88",
+      headers: {
+        authorization: "Bearer DEV_enduser-a1",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const payload = response.json() as {
+      edition: string;
+      pages: Array<{ page: number; html: string }>;
+    };
+
+    expect(payload.edition.length).toBeGreaterThan(0);
+    expect(payload.pages).toHaveLength(3);
+    expect(payload.pages.map((entry) => entry.page)).toEqual([86, 87, 88]);
+    expect(payload.pages.every((entry) => entry.html.trim().length > 0)).toBe(true);
+
+    await app.close();
+    await db.end?.();
+  });
+
   it("rejects oversized page ranges", async () => {
     const db = await createTestDb();
     await seedCoreFixtures(db);
@@ -39,6 +68,44 @@ describe("GET /v1/literature/bigbook/pages", () => {
     const response = await app.inject({
       method: "GET",
       url: "/v1/literature/bigbook/pages?start=60&end=90",
+      headers: {
+        authorization: "Bearer DEV_enduser-a1",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("rejects invalid ranges when start is greater than end", async () => {
+    const db = await createTestDb();
+    await seedCoreFixtures(db);
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/literature/bigbook/pages?start=88&end=86",
+      headers: {
+        authorization: "Bearer DEV_enduser-a1",
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("rejects requests missing required query parameters", async () => {
+    const db = await createTestDb();
+    await seedCoreFixtures(db);
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/literature/bigbook/pages?start=60",
       headers: {
         authorization: "Bearer DEV_enduser-a1",
       },

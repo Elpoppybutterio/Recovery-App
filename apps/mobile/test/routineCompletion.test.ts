@@ -103,4 +103,16 @@ describe("morning routine completion", () => {
       ),
     ).toBe("2026-02-26T08:10:00.000Z");
   });
+
+  it("marks Big Book reading complete when enabled", () => {
+    const result = completeMorningItemIfEnabled(
+      createDayState(),
+      [{ id: "bb-86-88", title: "Big Book Reading #1: 86-88", enabled: true }],
+      "bb-86-88",
+      "2026-02-26T09:00:00.000Z",
+    );
+
+    expect(result.reason).toBe("completed");
+    expect(result.nextDayState.completedByItemId["bb-86-88"]).toBe("2026-02-26T09:00:00.000Z");
+  });
 });
