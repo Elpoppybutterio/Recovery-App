@@ -29,6 +29,7 @@ import { exportNightlyInventoryPdf } from "./lib/pdf/exportNightlyInventoryPdf";
 import { getInsightForDay } from "./lib/recoveryInsights";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
+import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
 import {
   dateKeyForRoutines,
   getMorningDayState,
@@ -56,6 +57,25 @@ import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
 
 const MapViewCompat: any = MapView;
 const MarkerCompat: any = Marker;
+const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
+const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
+const BIG_BOOK_READINGS: Record<
+  string,
+  { title: string; startPage: number; endPage: number; rangeKey: "bb-86-88" | "bb-60-63" }
+> = {
+  "bb-86-88": {
+    title: "Big Book Reading #1",
+    startPage: 86,
+    endPage: 88,
+    rangeKey: "bb-86-88",
+  },
+  "bb-60-63": {
+    title: "Big Book Reading #2",
+    startPage: 60,
+    endPage: 63,
+    rangeKey: "bb-60-63",
+  },
+};
 
 type RecoveryMode = "A" | "B" | "C";
 type AppScreen = "LIST" | "DETAIL" | "SESSION" | "SIGNATURE";
@@ -138,6 +158,7 @@ type BigBookReaderState = {
   title: string;
   startPage: number;
   endPage: number;
+  rangeKey: "bb-86-88" | "bb-60-63";
 };
 
 type MapBoundaryCenter = {
@@ -2138,6 +2159,34 @@ export default function App() {
     });
   }, [updateRoutinesStore]);
 
+  const completeMorningItemForCurrentDayIfEnabled = useCallback(
+    (itemId: string): "completed" | "disabled" | "already-complete" => {
+      let completionReason: "completed" | "disabled" | "already-complete" = "disabled";
+      updateRoutinesStore((store) => {
+        const currentDay = getMorningDayState(store, routineDateKey);
+        const completionResult = completeMorningItemIfEnabled(
+          currentDay,
+          store.morningTemplate.items,
+          itemId,
+          new Date().toISOString(),
+        );
+        completionReason = completionResult.reason;
+        if (!completionResult.changed) {
+          return store;
+        }
+        return {
+          ...store,
+          morningByDate: {
+            ...store.morningByDate,
+            [routineDateKey]: completionResult.nextDayState,
+          },
+        };
+      });
+      return completionReason;
+    },
+    [routineDateKey, updateRoutinesStore],
+  );
+
   const speakRoutineText = useCallback((text: string) => {
     const nextText = text.trim();
     if (!nextText) {
@@ -2164,6 +2213,14 @@ export default function App() {
 
   const playRoutineItemAudio = useCallback(
     async (itemId: string) => {
+      if (itemId === THIRD_STEP_PRAYER_ITEM_ID) {
+        try {
+          await Linking.openURL(THIRD_STEP_PRAYER_YOUTUBE_URL);
+        } catch {
+          setRoutinesStatus("Unable to open video.");
+        }
+        return;
+      }
       const uri = morningRoutineDayState.audioRefs[itemId];
       if (!uri) {
         setRoutinesStatus("No recording found for this item.");
@@ -2217,20 +2274,33 @@ export default function App() {
     [morningRoutineDayState.audioRefs],
   );
 
-  const openRoutineReader = useCallback((itemId: string, title: string, url: string | null) => {
-    if (itemId === "bb-60-63") {
-      setBigBookReader({
-        title: "Big Book",
-        startPage: 60,
-        endPage: 63,
-      });
-      setToolsScreen("BIGBOOK");
-      return;
-    }
+  const onListenThirdStepPrayer = useCallback(
+    (text: string) => {
+      speakRoutineText(text);
+      completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
+    },
+    [completeMorningItemForCurrentDayIfEnabled, speakRoutineText],
+  );
 
-    setRoutineReader({ title, url });
-    setToolsScreen("READER");
-  }, []);
+  const onReadThirdStepPrayer = useCallback(() => {
+    completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
+  }, [completeMorningItemForCurrentDayIfEnabled]);
+
+  const openRoutineReader = useCallback(
+    (itemId: string, title: string, url: string | null) => {
+      const bigBookConfig = BIG_BOOK_READINGS[itemId];
+      if (bigBookConfig) {
+        completeMorningItemForCurrentDayIfEnabled(itemId);
+        setBigBookReader(bigBookConfig);
+        setToolsScreen("BIGBOOK");
+        return;
+      }
+
+      setRoutineReader({ title, url });
+      setToolsScreen("READER");
+    },
+    [completeMorningItemForCurrentDayIfEnabled],
+  );
 
   const dailyReflectionsReadUrl = useMemo(() => {
     const configuredLink = routinesStore.morningTemplate.dailyReflectionsLink.trim();
@@ -6103,23 +6173,15 @@ export default function App() {
                           const nextItems = store.morningTemplate.items.map((item) =>
                             item.id === itemId ? { ...item, enabled: !item.enabled } : item,
                           );
-                          const toggledItem = nextItems.find((item) => item.id === itemId);
                           const currentDay = getMorningDayState(store, routineDateKey);
                           const completedByItemId = { ...currentDay.completedByItemId };
-                          if (toggledItem && !toggledItem.enabled) {
-                            delete completedByItemId[itemId];
-                          }
-
-                          const enabledItemIds = new Set(
-                            nextItems.filter((item) => item.enabled).map((item) => item.id),
+                          const nowIso = new Date().toISOString();
+                          const nextCompletedAt = computeMorningCompletedAt(
+                            nextItems,
+                            completedByItemId,
+                            currentDay.completedAt,
+                            nowIso,
                           );
-                          const completedEnabledCount = Object.keys(completedByItemId).filter(
-                            (completedItemId) => enabledItemIds.has(completedItemId),
-                          ).length;
-                          const nextCompletedAt =
-                            enabledItemIds.size > 0 && completedEnabledCount >= enabledItemIds.size
-                              ? (currentDay.completedAt ?? new Date().toISOString())
-                              : null;
 
                           return {
                             ...store,
@@ -6182,7 +6244,9 @@ export default function App() {
                         void openDailyReflectionsListen();
                       }}
                       onListenText={speakRoutineText}
+                      onListenThirdStepPrayer={onListenThirdStepPrayer}
                       onPlayItem={(itemId) => void playRoutineItemAudio(itemId)}
+                      onReadThirdStepPrayer={onReadThirdStepPrayer}
                       onAddCustomPrayer={() =>
                         updateMorningTemplate((template) => ({
                           ...template,

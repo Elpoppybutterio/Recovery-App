@@ -26,7 +26,9 @@ export function MorningRoutineScreen({
   onReadDailyReflections,
   onListenDailyReflections,
   onListenText,
+  onListenThirdStepPrayer,
   onPlayItem,
+  onReadThirdStepPrayer,
   onAddCustomPrayer,
   onUpdateCustomPrayer,
   onRemoveCustomPrayer,
@@ -51,7 +53,9 @@ export function MorningRoutineScreen({
   onReadDailyReflections: () => void;
   onListenDailyReflections: () => void;
   onListenText: (text: string) => void;
+  onListenThirdStepPrayer: (text: string) => void;
   onPlayItem: (itemId: string) => void;
+  onReadThirdStepPrayer: () => void;
   onAddCustomPrayer: () => void;
   onUpdateCustomPrayer: (id: string, value: string) => void;
   onRemoveCustomPrayer: (id: string) => void;
@@ -80,6 +84,11 @@ export function MorningRoutineScreen({
           const isDailyReflections = item.id === "daily-reflections";
           const isSponsorCheckIn = item.id === "sponsor-check-in";
           const isAdditionalSuggestions = item.id === "additional-suggestions";
+          const isThirdStepPrayer = item.id === "prayer-third-step";
+          const listenText =
+            item.voiceText !== undefined && item.voiceText.trim().length > 0
+              ? item.voiceText
+              : item.title;
           return (
             <View key={item.id}>
               <RoutineChecklistItem
@@ -92,9 +101,11 @@ export function MorningRoutineScreen({
                 onListen={
                   isDailyReflections
                     ? onListenDailyReflections
-                    : item.voiceText !== undefined
-                      ? () => onListenText(item.voiceText ?? item.title)
-                      : undefined
+                    : isThirdStepPrayer
+                      ? () => onListenThirdStepPrayer(listenText)
+                      : item.voiceText !== undefined
+                        ? () => onListenText(listenText)
+                        : undefined
                 }
                 onPlay={
                   isDailyReflections || isSponsorCheckIn || isAdditionalSuggestions
@@ -104,9 +115,11 @@ export function MorningRoutineScreen({
                 onOpenReader={
                   isDailyReflections
                     ? onReadDailyReflections
-                    : item.readerLabel
-                      ? () => onOpenReader(item.id, item.title, item.readerUrl ?? null)
-                      : undefined
+                    : isThirdStepPrayer
+                      ? onReadThirdStepPrayer
+                      : item.readerLabel
+                        ? () => onOpenReader(item.id, item.title, item.readerUrl ?? null)
+                        : undefined
                 }
               />
               {isAdditionalSuggestions ? (

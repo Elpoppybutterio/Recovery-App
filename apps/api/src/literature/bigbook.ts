@@ -21,7 +21,7 @@ export type BigBookContentFile = z.infer<typeof fileSchema>;
 let cachedContent: BigBookContentFile | null = null;
 
 function getCandidatePaths(): string[] {
-  const relativePath = path.join("literature", "bigbook", "edition-aaws-4", "pages-60-63.json");
+  const relativePath = path.join("literature", "bigbook", "edition-aaws-4", "pages.json");
   return [
     path.resolve(process.cwd(), "src", relativePath),
     path.resolve(process.cwd(), "apps", "api", "src", relativePath),

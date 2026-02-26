@@ -11,7 +11,7 @@
     "build": "expo export --platform web",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm -w exec vitest run ./apps/mobile/test/bigBookReader.test.ts"
+    "test": "pnpm -w exec vitest run ./apps/mobile/test"
   },
   "dependencies": {
     "@babel/runtime": "^7.28.6",

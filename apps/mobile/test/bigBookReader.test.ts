@@ -28,6 +28,13 @@ describe("bigBookReader utils", () => {
     );
   });
 
+  it("builds the API URL for the 86-88 page range", () => {
+    const url = buildBigBookPagesUrl("https://sober-ai-api.onrender.com/", 86, 88);
+    expect(url).toBe(
+      "https://sober-ai-api.onrender.com/v1/literature/bigbook/pages?start=86&end=88",
+    );
+  });
+
   it("falls back to cached pages when API fails", async () => {
     const cached: BigBookPagesPayload = {
       edition: "aaws-4th-edition",
@@ -55,6 +62,35 @@ describe("bigBookReader utils", () => {
 
     expect(loaded.source).toBe("cache");
     expect(loaded.payload.pages[0]?.page).toBe(60);
+  });
+
+  it("falls back to cached 86-88 pages when API fails", async () => {
+    const cached: BigBookPagesPayload = {
+      edition: "aaws-4th-edition",
+      licenseNotice: "Licensed",
+      range: { start: 86, end: 88 },
+      pages: [
+        { page: 86, html: "<p>Page 86</p>" },
+        { page: 87, html: "<p>Page 87</p>" },
+      ],
+    };
+
+    const storage = createMemoryStorage();
+    await persistCachedBigBookPages(storage, cached);
+
+    const loaded = await loadBigBookPagesWithCache({
+      storage,
+      apiUrl: "https://api.example.com",
+      authHeader: "Bearer DEV_enduser-a1",
+      startPage: 86,
+      endPage: 88,
+      fetchImpl: async () => {
+        throw new Error("network down");
+      },
+    });
+
+    expect(loaded.source).toBe("cache");
+    expect(loaded.payload.pages[0]?.page).toBe(86);
   });
 
   it("clamps pagination boundaries to the requested range", () => {

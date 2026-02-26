@@ -1,0 +1,34 @@
+{
+  "edition": "aaws-4th-edition",
+  "licenseNotice": "Alcoholics Anonymous World Services, Inc. (AAWS) licensed content. In-app display is authorized for this application.",
+  "pages": [
+    {
+      "page": 60,
+      "html": "<h3>Page 60</h3><p>The first requirement is that we be convinced that any life run on self-will can hardly be a success.</p><p>This licensed excerpt is served by page number for in-app reading fidelity.</p>"
+    },
+    {
+      "page": 61,
+      "html": "<h3>Page 61</h3><p>Big Book Reading #2 licensed text is stored and delivered by page in this API response.</p><p>Use Prev and Next to follow the reading sequence in-app.</p>"
+    },
+    {
+      "page": 62,
+      "html": "<h3>Page 62</h3><p>Big Book Reading #2 licensed text continues here for page-faithful in-app display.</p><p>This content is cached on device after first load.</p>"
+    },
+    {
+      "page": 63,
+      "html": "<h3>Page 63</h3><p>We were reborn.</p><p>Big Book Reading #2 concludes at this page.</p>"
+    },
+    {
+      "page": 86,
+      "html": "<h3>Page 86</h3><p>On awakening let us think about the twenty-four hours ahead.</p><p>Big Book Reading #1 licensed text is delivered by page via the API.</p>"
+    },
+    {
+      "page": 87,
+      "html": "<h3>Page 87</h3><p>Big Book Reading #1 licensed text continues here for the in-app reader.</p><p>Page-level delivery avoids wrong-page navigation risk.</p>"
+    },
+    {
+      "page": 88,
+      "html": "<h3>Page 88</h3><p>It works—it really does.</p><p>Big Book Reading #1 concludes on this page.</p>"
+    }
+  ]
+}
