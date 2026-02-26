@@ -31,9 +31,9 @@ export function createDefaultMorningRoutineTemplate(): MorningRoutineTemplate {
       },
       {
         id: "bb-60-63",
-        title: "Big Book Reading #2: 60-63",
+        title: "Big Book pp. 60-63",
         enabled: false,
-        readerLabel: "Open Reader",
+        readerLabel: "Read",
         readerUrl: null,
       },
       {

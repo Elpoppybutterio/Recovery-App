@@ -804,12 +804,13 @@ function buildGeocodeQuery(entry: NormalizedMeeting): string | null {
 async function geocodeWithOpenStreetMap(options: {
   query: string;
   fetchImpl: FetchLike;
+  userAgent: string;
 }): Promise<{ lat: number; lng: number } | null> {
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(options.query)}`;
   const response = await options.fetchImpl(url, {
     headers: {
       accept: "application/json",
-      "user-agent": "Recovery-Accountability-Dev/0.1",
+      "user-agent": options.userAgent,
     },
   });
   if (!response.ok) {
@@ -864,6 +865,7 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
   fetchImpl?: FetchLike;
   logger?: LoggerLike;
   geocodeMissingCoordinates?: boolean;
+  geocodeUserAgent?: string;
 }): Promise<IngestMeetingGuideResult> {
   const now = options.now ?? (() => new Date());
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -911,6 +913,8 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
             coordinates = await geocodeWithOpenStreetMap({
               query: geocodeQuery,
               fetchImpl,
+              userAgent:
+                options.geocodeUserAgent ?? "Recovery-Accountability/0.1 (+https://sober-ai.app)",
             });
           } catch {
             coordinates = null;

@@ -7,5 +7,6 @@
     "noEmit": true,
     "types": ["react", "react-native", "node"]
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", "ios", "android"]
 }

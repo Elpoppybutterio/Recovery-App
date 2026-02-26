@@ -50,6 +50,7 @@ import { ui } from "./lib/ui/ui";
 import { colors } from "./lib/theme/tokens";
 import { MorningRoutineScreen } from "./screens/MorningRoutineScreen";
 import { NightlyInventoryScreen } from "./screens/NightlyInventoryScreen";
+import { BigBookReaderScreen } from "./screens/BigBookReaderScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
 
@@ -123,7 +124,7 @@ type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
 type MeetingsLocationFilter = "CURRENT" | "MILES_50" | "MILES_100";
 type MeetingsFilterDropdown = "FORMAT" | "DAY" | "TIME" | "LOCATION";
-type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER";
+type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER" | "BIGBOOK";
 type RoutineInventoryCategory = keyof Pick<
   NightlyInventoryDayState,
   "resentful" | "selfish" | "dishonest" | "afraid" | "apology"
@@ -131,6 +132,12 @@ type RoutineInventoryCategory = keyof Pick<
 type RoutineReaderState = {
   title: string;
   url: string | null;
+};
+
+type BigBookReaderState = {
+  title: string;
+  startPage: number;
+  endPage: number;
 };
 
 type MapBoundaryCenter = {
@@ -256,7 +263,7 @@ const MEETINGS_FORMAT_OPTIONS: Array<{ value: MeetingsFormatFilter; label: strin
   { value: "ONLINE", label: "Online" },
 ];
 const MEETINGS_TIME_OPTIONS: Array<{ value: MeetingsTimeFilter; label: string }> = [
-  { value: "ANY", label: "Any time" },
+  { value: "ANY", label: "Any" },
   { value: "MORNING", label: "Morning" },
   { value: "AFTERNOON", label: "Afternoon" },
   { value: "EVENING", label: "Evening" },
@@ -1173,6 +1180,7 @@ export default function App() {
   );
   const [routinesStatus, setRoutinesStatus] = useState<string | null>(null);
   const [routineReader, setRoutineReader] = useState<RoutineReaderState | null>(null);
+  const [bigBookReader, setBigBookReader] = useState<BigBookReaderState | null>(null);
 
   const [meetingPlansByDate, setMeetingPlansByDate] = useState<MeetingPlansState>({});
   const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(__DEV__);
@@ -2209,7 +2217,17 @@ export default function App() {
     [morningRoutineDayState.audioRefs],
   );
 
-  const openRoutineReader = useCallback((title: string, url: string | null) => {
+  const openRoutineReader = useCallback((itemId: string, title: string, url: string | null) => {
+    if (itemId === "bb-60-63") {
+      setBigBookReader({
+        title: "Big Book",
+        startPage: 60,
+        endPage: 63,
+      });
+      setToolsScreen("BIGBOOK");
+      return;
+    }
+
     setRoutineReader({ title, url });
     setToolsScreen("READER");
   }, []);
@@ -2233,7 +2251,7 @@ export default function App() {
   }, []);
 
   const openDailyReflectionsRead = useCallback(() => {
-    openRoutineReader("Daily Reflections", dailyReflectionsReadUrl);
+    openRoutineReader("daily-reflections", "Daily Reflections", dailyReflectionsReadUrl);
   }, [dailyReflectionsReadUrl, openRoutineReader]);
 
   const openDailyReflectionsListen = useCallback(async () => {
@@ -4196,6 +4214,8 @@ export default function App() {
         shouldShowAlert: true,
         shouldPlaySound: false,
         shouldSetBadge: false,
+        shouldShowBanner: true,
+        shouldShowList: true,
       }),
     });
 
@@ -5574,7 +5594,11 @@ export default function App() {
                           )
                         }
                       >
-                        <Text style={styles.filterDropdownValue}>
+                        <Text
+                          style={styles.filterDropdownValue}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
                           {selectedMeetingsFormatLabel}
                         </Text>
                         <Text style={styles.filterDropdownChevron}>
@@ -5599,6 +5623,8 @@ export default function App() {
                                     styles.filterDropdownOptionText,
                                     selected ? styles.filterDropdownOptionTextSelected : null,
                                   ]}
+                                  numberOfLines={1}
+                                  ellipsizeMode="tail"
                                 >
                                   {option.label}
                                 </Text>
@@ -5627,7 +5653,13 @@ export default function App() {
                           )
                         }
                       >
-                        <Text style={styles.filterDropdownValue}>{selectedMeetingsDayLabel}</Text>
+                        <Text
+                          style={styles.filterDropdownValue}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
+                          {selectedMeetingsDayLabel}
+                        </Text>
                         <Text style={styles.filterDropdownChevron}>
                           {openMeetingsFilterDropdown === "DAY" ? "▲" : "▼"}
                         </Text>
@@ -5650,6 +5682,8 @@ export default function App() {
                                     styles.filterDropdownOptionText,
                                     selected ? styles.filterDropdownOptionTextSelected : null,
                                   ]}
+                                  numberOfLines={1}
+                                  ellipsizeMode="tail"
                                 >
                                   {option.label}
                                 </Text>
@@ -5678,7 +5712,13 @@ export default function App() {
                           )
                         }
                       >
-                        <Text style={styles.filterDropdownValue}>{selectedMeetingsTimeLabel}</Text>
+                        <Text
+                          style={styles.filterDropdownValue}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
+                          {selectedMeetingsTimeLabel}
+                        </Text>
                         <Text style={styles.filterDropdownChevron}>
                           {openMeetingsFilterDropdown === "TIME" ? "▲" : "▼"}
                         </Text>
@@ -5701,6 +5741,8 @@ export default function App() {
                                     styles.filterDropdownOptionText,
                                     selected ? styles.filterDropdownOptionTextSelected : null,
                                   ]}
+                                  numberOfLines={1}
+                                  ellipsizeMode="tail"
                                 >
                                   {option.label}
                                 </Text>
@@ -5729,7 +5771,11 @@ export default function App() {
                           )
                         }
                       >
-                        <Text style={styles.filterDropdownValue}>
+                        <Text
+                          style={styles.filterDropdownValue}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
                           {selectedMeetingsLocationLabel}
                         </Text>
                         <Text style={styles.filterDropdownChevron}>
@@ -5759,6 +5805,8 @@ export default function App() {
                                     styles.filterDropdownOptionText,
                                     selected ? styles.filterDropdownOptionTextSelected : null,
                                   ]}
+                                  numberOfLines={1}
+                                  ellipsizeMode="tail"
                                 >
                                   {option.label}
                                 </Text>
@@ -6235,6 +6283,18 @@ export default function App() {
                       }
                       onTextSponsor={() => void textNightlyToSponsor()}
                       onExportPdf={() => void exportNightlyInventoryForToday()}
+                    />
+                  ) : null}
+
+                  {toolsScreen === "BIGBOOK" ? (
+                    <BigBookReaderScreen
+                      title={bigBookReader?.title ?? "Big Book"}
+                      subtitle={`Pages ${bigBookReader?.startPage ?? 60}-${bigBookReader?.endPage ?? 63}`}
+                      startPage={bigBookReader?.startPage ?? 60}
+                      endPage={bigBookReader?.endPage ?? 63}
+                      apiUrl={apiUrl}
+                      authHeader={authHeader}
+                      onBack={() => setToolsScreen("MORNING")}
                     />
                   ) : null}
 
@@ -7477,9 +7537,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-start",
     gap: 8,
+    flexWrap: "wrap",
   },
   meetingsFilterItem: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: 150,
     minWidth: 0,
     gap: 6,
   },
@@ -7529,6 +7591,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     flex: 1,
+    flexShrink: 1,
   },
   filterDropdownChevron: {
     color: colors.textPrimary,
@@ -7555,6 +7618,8 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 13,
     fontWeight: "600",
+    flex: 1,
+    flexShrink: 1,
   },
   filterDropdownOptionTextSelected: {
     color: colors.textPrimary,
