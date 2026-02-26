@@ -1,18 +1,28 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { LiquidGlassCard } from "../components/LiquidGlassCard";
 import { routineTheme } from "../theme/tokens";
 
 export function RoutineReaderScreen({
   title,
   url,
+  bodyText,
   onBack,
   onOpenLink,
 }: {
   title: string;
   url: string | null;
+  bodyText?: string | null;
   onBack: () => void;
   onOpenLink: (url: string) => void;
 }) {
+  const hasBodyText = Boolean(bodyText && bodyText.trim().length > 0);
+  const paragraphs = hasBodyText
+    ? bodyText!
+        .split(/\n\s*\n/)
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0)
+    : [];
+
   return (
     <View style={styles.wrap}>
       <LiquidGlassCard style={styles.card}>
@@ -23,9 +33,22 @@ export function RoutineReaderScreen({
           </Pressable>
         </View>
         <Text style={styles.meta}>
-          Use your licensed source link. Full copyrighted text is not bundled in-app.
+          {hasBodyText
+            ? "Read below."
+            : "Use your licensed source link. Full copyrighted text is not bundled in-app."}
         </Text>
-        {url ? (
+        {hasBodyText ? (
+          <ScrollView style={styles.bodyScroll} contentContainerStyle={styles.bodyScrollContent}>
+            {paragraphs.map((paragraph, index) => (
+              <Text
+                key={`paragraph-${index}`}
+                style={[styles.bodyText, index < paragraphs.length - 1 ? styles.paragraph : null]}
+              >
+                {paragraph}
+              </Text>
+            ))}
+          </ScrollView>
+        ) : url ? (
           <Pressable style={styles.openBtn} onPress={() => onOpenLink(url)}>
             <Text style={styles.openText}>Open Link</Text>
           </Pressable>
@@ -61,6 +84,27 @@ const styles = StyleSheet.create({
     color: routineTheme.colors.textSecondary,
     fontSize: 13,
     fontWeight: "600",
+  },
+  bodyScroll: {
+    minHeight: 420,
+    maxHeight: 620,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    backgroundColor: "rgba(15,23,42,0.28)",
+  },
+  bodyScrollContent: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  bodyText: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 15,
+    lineHeight: 26,
+    fontWeight: "500",
+  },
+  paragraph: {
+    marginBottom: 14,
   },
   placeholder: {
     color: routineTheme.colors.textSecondary,

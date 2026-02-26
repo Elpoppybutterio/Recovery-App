@@ -7,6 +7,11 @@ import type {
   MorningRoutineDayState,
   MorningRoutineTemplate,
 } from "../lib/routines/types";
+import {
+  MORNING_READY_ITEM_ID,
+  MORNING_READY_READ_TEXT,
+  MORNING_READY_TITLE,
+} from "../lib/routines/morningReady";
 import { routineTheme } from "../theme/tokens";
 
 export function MorningRoutineScreen({
@@ -29,6 +34,9 @@ export function MorningRoutineScreen({
   onListenThirdStepPrayer,
   onPlayItem,
   onReadThirdStepPrayer,
+  onReadSeventhStepPrayer,
+  onReadMorningReady,
+  onReadEleventhStepPrayer,
   onAddCustomPrayer,
   onUpdateCustomPrayer,
   onRemoveCustomPrayer,
@@ -53,9 +61,12 @@ export function MorningRoutineScreen({
   onReadDailyReflections: () => void;
   onListenDailyReflections: () => void;
   onListenText: (text: string) => void;
-  onListenThirdStepPrayer: (text: string) => void;
+  onListenThirdStepPrayer: () => void;
   onPlayItem: (itemId: string) => void;
   onReadThirdStepPrayer: () => void;
+  onReadSeventhStepPrayer: () => void;
+  onReadMorningReady: () => void;
+  onReadEleventhStepPrayer: () => void;
   onAddCustomPrayer: () => void;
   onUpdateCustomPrayer: (id: string, value: string) => void;
   onRemoveCustomPrayer: (id: string) => void;
@@ -75,7 +86,8 @@ export function MorningRoutineScreen({
             <Text style={styles.backText}>Back</Text>
           </Pressable>
         </View>
-        <Text style={styles.meta}>{dateLabel}</Text>
+        <Text style={styles.meta}>Toggle each Item you use for your morning routine.</Text>
+        <Text style={styles.metaDate}>{dateLabel}</Text>
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -85,14 +97,23 @@ export function MorningRoutineScreen({
           const isSponsorCheckIn = item.id === "sponsor-check-in";
           const isAdditionalSuggestions = item.id === "additional-suggestions";
           const isThirdStepPrayer = item.id === "prayer-third-step";
-          const listenText =
-            item.voiceText !== undefined && item.voiceText.trim().length > 0
-              ? item.voiceText
+          const isSeventhStepPrayer = item.id === "prayer-seventh-step";
+          const isMorningReady = item.id === MORNING_READY_ITEM_ID;
+          const isEleventhStepPrayer = item.id === "prayer-eleventh-step";
+          const displayTitle = isEleventhStepPrayer
+            ? "11th Step AM Prayer"
+            : isMorningReady
+              ? MORNING_READY_TITLE
               : item.title;
+          const listenText = isMorningReady
+            ? MORNING_READY_READ_TEXT
+            : item.voiceText !== undefined && item.voiceText.trim().length > 0
+              ? item.voiceText
+              : displayTitle;
           return (
             <View key={item.id}>
               <RoutineChecklistItem
-                title={item.title}
+                title={displayTitle}
                 detail={item.detail}
                 enabled={item.enabled}
                 checked={Boolean(dayState.completedByItemId[item.id])}
@@ -102,13 +123,21 @@ export function MorningRoutineScreen({
                   isDailyReflections
                     ? onListenDailyReflections
                     : isThirdStepPrayer
-                      ? () => onListenThirdStepPrayer(listenText)
-                      : item.voiceText !== undefined
+                      ? onListenThirdStepPrayer
+                      : isMorningReady
                         ? () => onListenText(listenText)
-                        : undefined
+                        : item.voiceText !== undefined && !isThirdStepPrayer
+                          ? () => onListenText(listenText)
+                          : undefined
                 }
                 onPlay={
-                  isDailyReflections || isSponsorCheckIn || isAdditionalSuggestions
+                  isDailyReflections ||
+                  isSponsorCheckIn ||
+                  isAdditionalSuggestions ||
+                  isThirdStepPrayer ||
+                  isSeventhStepPrayer ||
+                  isMorningReady ||
+                  isEleventhStepPrayer
                     ? undefined
                     : () => onPlayItem(item.id)
                 }
@@ -117,9 +146,15 @@ export function MorningRoutineScreen({
                     ? onReadDailyReflections
                     : isThirdStepPrayer
                       ? onReadThirdStepPrayer
-                      : item.readerLabel
-                        ? () => onOpenReader(item.id, item.title, item.readerUrl ?? null)
-                        : undefined
+                      : isSeventhStepPrayer
+                        ? onReadSeventhStepPrayer
+                        : isMorningReady
+                          ? onReadMorningReady
+                          : isEleventhStepPrayer
+                            ? onReadEleventhStepPrayer
+                            : item.readerLabel
+                              ? () => onOpenReader(item.id, displayTitle, item.readerUrl ?? null)
+                              : undefined
                 }
               />
               {isAdditionalSuggestions ? (
@@ -251,6 +286,12 @@ const styles = StyleSheet.create({
     color: routineTheme.colors.textSecondary,
     fontSize: 13,
     fontWeight: "600",
+  },
+  metaDate: {
+    color: routineTheme.colors.textSecondary,
+    fontSize: 12,
+    fontWeight: "500",
+    opacity: 0.85,
   },
   backBtn: {
     paddingHorizontal: 12,

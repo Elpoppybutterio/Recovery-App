@@ -1,4 +1,4 @@
-export const NIGHTLY_INVENTORY_PDF_FILE_NAME_PREFIX = "Nightly Inventory";
+export const NIGHTLY_INVENTORY_PDF_FILE_NAME_PREFIX = "Nightly Routine";
 
 export type NightlyInventoryPdfPayload = {
   userLabel: string;
@@ -99,7 +99,7 @@ function buildNightlyInventoryHtml(payload: NightlyInventoryPdfPayload): string 
     </style>
   </head>
   <body>
-    <h1>Nightly Inventory</h1>
+    <h1>Nightly Routine</h1>
     <p class=\"muted\">Date: ${escapeHtml(payload.dateKey)}</p>
     <p class=\"muted\">User: ${escapeHtml(payload.userLabel)}</p>
     <p class=\"muted\">Completed: ${escapeHtml(formatDateTime(payload.completedAt))}</p>

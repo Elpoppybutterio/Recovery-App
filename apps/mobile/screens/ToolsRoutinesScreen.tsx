@@ -24,7 +24,7 @@ export function ToolsRoutinesScreen({
     <View style={styles.wrap}>
       <LiquidGlassCard style={styles.card}>
         <Text style={styles.title}>Recovery Routines</Text>
-        <Text style={styles.meta}>AM routine + nightly inventory, tracked daily.</Text>
+        <Text style={styles.meta}>AM routine + nightly routine, tracked daily.</Text>
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -40,13 +40,13 @@ export function ToolsRoutinesScreen({
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
-        <Text style={styles.cardTitle}>Nightly Inventory</Text>
+        <Text style={styles.cardTitle}>Nightly Routine</Text>
         <Text style={styles.meta}>
           Today: {nightlyStats.todayCompleted ? "Completed" : "Not completed"}
         </Text>
         <Text style={styles.meta}>Issues logged today: {nightlyStats.todayIssueCount}</Text>
         <Pressable style={styles.actionBtn} onPress={onOpenNightly}>
-          <Text style={styles.actionText}>Open Nightly Inventory</Text>
+          <Text style={styles.actionText}>Open Nightly Routine</Text>
         </Pressable>
       </LiquidGlassCard>
 

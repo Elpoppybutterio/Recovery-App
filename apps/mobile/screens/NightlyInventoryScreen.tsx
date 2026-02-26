@@ -1,4 +1,4 @@
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { CrudListEditor } from "../components/CrudListEditor";
 import { LiquidGlassCard } from "../components/LiquidGlassCard";
 import type { NightlyInventoryDayState } from "../lib/routines/types";
@@ -17,6 +17,9 @@ export function NightlyInventoryScreen({
   onRemoveEntry,
   onSetNotes,
   onToggleGotOnKnees,
+  onToggleEleventhStepPrayerEnabled,
+  onListenEleventhStepPrayer,
+  onReadEleventhStepPrayer,
   onToggleCompleted,
   onTextSponsor,
   onExportPdf,
@@ -47,6 +50,9 @@ export function NightlyInventoryScreen({
   ) => void;
   onSetNotes: (value: string) => void;
   onToggleGotOnKnees: () => void;
+  onToggleEleventhStepPrayerEnabled: () => void;
+  onListenEleventhStepPrayer: () => void;
+  onReadEleventhStepPrayer: () => void;
   onToggleCompleted: () => void;
   onTextSponsor: () => void;
   onExportPdf: () => void;
@@ -55,12 +61,46 @@ export function NightlyInventoryScreen({
     <ScrollView contentContainerStyle={styles.wrap}>
       <LiquidGlassCard style={styles.card}>
         <View style={styles.headerRow}>
-          <Text style={styles.title}>Nightly Inventory</Text>
+          <Text style={styles.title}>Nightly Routine</Text>
           <Pressable style={styles.backBtn} onPress={onBack}>
             <Text style={styles.backText}>Back</Text>
           </Pressable>
         </View>
         <Text style={styles.meta}>{dateLabel}</Text>
+      </LiquidGlassCard>
+
+      <LiquidGlassCard style={styles.card}>
+        <View style={styles.switchRow}>
+          <Text style={styles.promptTitle}>11th Step Prayer</Text>
+          <Switch
+            value={dayState.eleventhStepPrayerEnabled}
+            onValueChange={onToggleEleventhStepPrayerEnabled}
+            ios_backgroundColor="rgba(148,163,184,0.45)"
+            trackColor={{ false: "rgba(148,163,184,0.45)", true: "rgba(52,199,89,0.65)" }}
+          />
+        </View>
+        <View style={styles.buttonRow}>
+          <Pressable
+            style={[
+              styles.secondaryBtn,
+              !dayState.eleventhStepPrayerEnabled ? styles.disabledActionBtn : null,
+            ]}
+            onPress={onListenEleventhStepPrayer}
+            disabled={!dayState.eleventhStepPrayerEnabled}
+          >
+            <Text style={styles.secondaryText}>Listen</Text>
+          </Pressable>
+          <Pressable
+            style={[
+              styles.primaryBtn,
+              !dayState.eleventhStepPrayerEnabled ? styles.disabledActionBtn : null,
+            ]}
+            onPress={onReadEleventhStepPrayer}
+            disabled={!dayState.eleventhStepPrayerEnabled}
+          >
+            <Text style={styles.primaryText}>Read</Text>
+          </Pressable>
+        </View>
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -136,7 +176,7 @@ export function NightlyInventoryScreen({
         <View style={styles.buttonRow}>
           <Pressable style={styles.primaryBtn} onPress={onToggleCompleted}>
             <Text style={styles.primaryText}>
-              {dayState.completedAt ? "Mark Incomplete" : "Mark Nightly Complete"}
+              {dayState.completedAt ? "Mark Incomplete" : "Mark Nightly Routine Complete"}
             </Text>
           </Pressable>
         </View>
@@ -166,6 +206,12 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+  },
+  switchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
   },
   title: {
     color: routineTheme.colors.textPrimary,
@@ -275,5 +321,8 @@ const styles = StyleSheet.create({
     color: routineTheme.colors.textPrimary,
     fontSize: 13,
     fontWeight: "700",
+  },
+  disabledActionBtn: {
+    opacity: 0.5,
   },
 });

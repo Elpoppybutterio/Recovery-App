@@ -4,19 +4,19 @@
   "pages": [
     {
       "page": 60,
-      "html": "<h3>Page 60</h3><p>The first requirement is that we be convinced that any life run on self-will can hardly be a success.</p><p>This licensed excerpt is served by page number for in-app reading fidelity.</p>"
+      "html": "<h3>Page 60</h3><p>The first requirement is that we be convinced that any life run on self-will can hardly be a success.</p><p>Big Book Reading #2 is delivered by page via the API.</p>"
     },
     {
       "page": 61,
-      "html": "<h3>Page 61</h3><p>Big Book Reading #2 licensed text is stored and delivered by page in this API response.</p><p>Use Prev and Next to follow the reading sequence in-app.</p>"
+      "html": "<h3>Page 61</h3><p>Big Book Reading #2 continues.</p>"
     },
     {
       "page": 62,
-      "html": "<h3>Page 62</h3><p>Big Book Reading #2 licensed text continues here for page-faithful in-app display.</p><p>This content is cached on device after first load.</p>"
+      "html": "<h3>Page 62</h3><p>Big Book Reading #2 continues.</p>"
     },
     {
       "page": 63,
-      "html": "<h3>Page 63</h3><p>We were reborn.</p><p>Big Book Reading #2 concludes at this page.</p>"
+      "html": "<h3>Page 63</h3><p>We were reborn.</p>"
     },
     {
       "page": 86,
@@ -28,7 +28,7 @@
     },
     {
       "page": 88,
-      "html": "<h3>Page 88</h3><p>It works—it really does.</p><p>Big Book Reading #1 concludes on this page.</p>"
+      "html": "<h3>Page 88</h3><p>It works-it really does.</p><p>Big Book Reading #1 concludes on this page.</p>"
     }
   ]
 }

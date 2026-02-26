@@ -47,6 +47,8 @@ export type NightlyInventoryDayState = {
   dateKey: string;
   prompt: string;
   gotOnKneesCompleted: boolean;
+  eleventhStepPrayerEnabled: boolean;
+  eleventhStepPrayerCompletedAt: string | null;
   resentful: NightlyInventoryEntry[];
   selfish: NightlyInventoryEntry[];
   dishonest: NightlyInventoryEntry[];

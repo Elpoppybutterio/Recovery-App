@@ -40,6 +40,12 @@ import {
   type PendingDailyReflectionsCompletion,
 } from "./lib/routines/dailyReflections";
 import {
+  MORNING_READY_ITEM_ID,
+  MORNING_READY_READ_TEXT,
+  MORNING_READY_TITLE,
+} from "./lib/routines/morningReady";
+import { BIG_BOOK_60_63_READ_TEXT, BIG_BOOK_86_88_READ_TEXT } from "./lib/routines/bigBookTexts";
+import {
   dateKeyForRoutines,
   getMorningDayState,
   getNightlyDayState,
@@ -60,7 +66,6 @@ import { ui } from "./lib/ui/ui";
 import { colors } from "./lib/theme/tokens";
 import { MorningRoutineScreen } from "./screens/MorningRoutineScreen";
 import { NightlyInventoryScreen } from "./screens/NightlyInventoryScreen";
-import { BigBookReaderScreen } from "./screens/BigBookReaderScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
 
@@ -68,22 +73,27 @@ const MapViewCompat: any = MapView;
 const MarkerCompat: any = Marker;
 const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
 const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
-const BIG_BOOK_READINGS: Record<
-  string,
-  { title: string; startPage: number; endPage: number; rangeKey: "bb-86-88" | "bb-60-63" }
-> = {
-  "bb-86-88": {
-    title: "Big Book Reading #1",
-    startPage: 86,
-    endPage: 88,
-    rangeKey: "bb-86-88",
-  },
-  "bb-60-63": {
-    title: "Big Book Reading #2",
-    startPage: 60,
-    endPage: 63,
-    rangeKey: "bb-60-63",
-  },
+const THIRD_STEP_PRAYER_READ_TEXT = "3rd Step Prayer";
+const BIG_BOOK_86_88_ITEM_ID = "bb-86-88";
+const BIG_BOOK_60_63_ITEM_ID = "bb-60-63";
+const SEVENTH_STEP_PRAYER_ITEM_ID = "prayer-seventh-step";
+const ELEVENTH_STEP_PRAYER_ITEM_ID = "prayer-eleventh-step";
+const SEVENTH_STEP_PRAYER_READ_TEXT = [
+  "My Creator, I am now willing that You should have all of me, good and bad.",
+  "I pray that You now remove from me every single defect of character which stand in the way of my usefulness to You and my fellows.",
+  "Grant me strength, as I go out from here to do Your bidding. Amen",
+].join("\n\n");
+const ELEVENTH_STEP_AM_PRAYER_TEXT = [
+  "MORNING PRAYER",
+  "God, direct my thinking today so that it be empty of self pity, dishonesty, self-will, self-seeking and fear. God, inspire my thinking, decisions and intuitions. Help me to relax and take it easy. Free me from doubt and indecision. Guide me through this day and show me my next step. God, show me what I need to do to take care of any problems. I ask all these things that I may be of maximum service to you and my fellow man. In the spirit of the Steps I pray. AMEN",
+].join("\n\n");
+const ELEVENTH_STEP_NIGHTLY_PRAYER_TEXT = [
+  "NIGHTLY PRAYER",
+  "God, forgive me where I have been resentful, selfish, dishonest or afraid today. Help me to not keep anything to myself but to discuss it all openly with another person - show me where I owe an apology and help me make it. Help me to be kind and loving to all people. Use me in the mainstream of life, God. Free me of worry, remorse or morbid (sick) reflections that I may be of usefulness to others. AMEN",
+].join("\n\n");
+const BIG_BOOK_ROUTINE_TEXT: Record<string, string> = {
+  [BIG_BOOK_86_88_ITEM_ID]: BIG_BOOK_86_88_READ_TEXT,
+  [BIG_BOOK_60_63_ITEM_ID]: BIG_BOOK_60_63_READ_TEXT,
 };
 
 type RecoveryMode = "A" | "B" | "C";
@@ -153,7 +163,8 @@ type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
 type MeetingsLocationFilter = "CURRENT" | "MILES_50" | "MILES_100";
 type MeetingsFilterDropdown = "FORMAT" | "DAY" | "TIME" | "LOCATION";
-type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER" | "BIGBOOK";
+type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER";
+type RoutineReaderBackScreen = "MORNING" | "NIGHTLY";
 type RoutineInventoryCategory = keyof Pick<
   NightlyInventoryDayState,
   "resentful" | "selfish" | "dishonest" | "afraid" | "apology"
@@ -161,13 +172,7 @@ type RoutineInventoryCategory = keyof Pick<
 type RoutineReaderState = {
   title: string;
   url: string | null;
-};
-
-type BigBookReaderState = {
-  title: string;
-  startPage: number;
-  endPage: number;
-  rangeKey: "bb-86-88" | "bb-60-63";
+  bodyText?: string | null;
 };
 
 type MapBoundaryCenter = {
@@ -1212,7 +1217,8 @@ export default function App() {
   const [pendingDailyReflectionsCompletion, setPendingDailyReflectionsCompletion] =
     useState<PendingDailyReflectionsCompletion | null>(null);
   const [routineReader, setRoutineReader] = useState<RoutineReaderState | null>(null);
-  const [bigBookReader, setBigBookReader] = useState<BigBookReaderState | null>(null);
+  const [routineReaderBackScreen, setRoutineReaderBackScreen] =
+    useState<RoutineReaderBackScreen>("MORNING");
 
   const [meetingPlansByDate, setMeetingPlansByDate] = useState<MeetingPlansState>({});
   const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(__DEV__);
@@ -1713,11 +1719,15 @@ export default function App() {
   const dailyChecklistStatus = useMemo(() => {
     const morningEnabledRows = routinesStore.morningTemplate.items
       .filter((item) => item.enabled)
-      .map((item) => ({
-        id: `morning-${item.id}`,
-        label: `Morning: ${item.title}`,
-        complete: Boolean(morningRoutineDayState.completedByItemId[item.id]),
-      }));
+      .map((item) => {
+        const itemLabel =
+          item.id === ELEVENTH_STEP_PRAYER_ITEM_ID ? "11th Step AM Prayer" : item.title;
+        return {
+          id: `morning-${item.id}`,
+          label: `Morning: ${itemLabel}`,
+          complete: Boolean(morningRoutineDayState.completedByItemId[item.id]),
+        };
+      });
     const meetingAttendanceLabel =
       meetingsAttendedTodayCount === 1
         ? "1 meeting attended"
@@ -1738,9 +1748,18 @@ export default function App() {
       meetingAttendanceRow,
       {
         id: "nightly-inventory",
-        label: "Nightly inventory",
+        label: "Nightly routine",
         complete: Boolean(nightlyInventoryDayState.completedAt),
       },
+      ...(nightlyInventoryDayState.eleventhStepPrayerEnabled
+        ? [
+            {
+              id: "nightly-eleventh-step-prayer",
+              label: "Nightly: 11th Step Prayer",
+              complete: Boolean(nightlyInventoryDayState.eleventhStepPrayerCompletedAt),
+            },
+          ]
+        : []),
       {
         id: "nightly-got-on-knees",
         label: "Nightly: Got on knees",
@@ -1761,6 +1780,8 @@ export default function App() {
     meetingsAttendedTodayCount,
     todayDateKey,
     nightlyInventoryDayState.completedAt,
+    nightlyInventoryDayState.eleventhStepPrayerEnabled,
+    nightlyInventoryDayState.eleventhStepPrayerCompletedAt,
     nightlyInventoryDayState.gotOnKneesCompleted,
   ]);
 
@@ -2173,30 +2194,25 @@ export default function App() {
 
   const completeMorningItemForCurrentDayIfEnabled = useCallback(
     (itemId: string): "completed" | "disabled" | "already-complete" => {
-      let completionReason: "completed" | "disabled" | "already-complete" = "disabled";
-      updateRoutinesStore((store) => {
-        const currentDay = getMorningDayState(store, routineDateKey);
-        const completionResult = completeMorningItemIfEnabled(
-          currentDay,
-          store.morningTemplate.items,
-          itemId,
-          new Date().toISOString(),
-        );
-        completionReason = completionResult.reason;
-        if (!completionResult.changed) {
-          return store;
-        }
-        return {
+      const currentDay = getMorningDayState(routinesStore, routineDateKey);
+      const completionResult = completeMorningItemIfEnabled(
+        currentDay,
+        routinesStore.morningTemplate.items,
+        itemId,
+        new Date().toISOString(),
+      );
+      if (completionResult.changed) {
+        updateRoutinesStore((store) => ({
           ...store,
           morningByDate: {
             ...store.morningByDate,
             [routineDateKey]: completionResult.nextDayState,
           },
-        };
-      });
-      return completionReason;
+        }));
+      }
+      return completionResult.reason;
     },
-    [routineDateKey, updateRoutinesStore],
+    [routineDateKey, routinesStore, updateRoutinesStore],
   );
 
   useEffect(() => {
@@ -2316,29 +2332,113 @@ export default function App() {
     [morningRoutineDayState.audioRefs],
   );
 
-  const onListenThirdStepPrayer = useCallback(
-    (text: string) => {
-      speakRoutineText(text);
-      completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
-    },
-    [completeMorningItemForCurrentDayIfEnabled, speakRoutineText],
-  );
-
   const onReadThirdStepPrayer = useCallback(() => {
     completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
   }, [completeMorningItemForCurrentDayIfEnabled]);
 
+  const onListenThirdStepPrayer = useCallback(() => {
+    const completionReason = completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+    speakRoutineText("3rd Step Prayer");
+  }, [completeMorningItemForCurrentDayIfEnabled, speakRoutineText]);
+
+  const onReadSeventhStepPrayer = useCallback(() => {
+    const completionReason = completeMorningItemForCurrentDayIfEnabled(SEVENTH_STEP_PRAYER_ITEM_ID);
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+    setRoutineReaderBackScreen("MORNING");
+    setRoutineReader({
+      title: "7th Step Prayer",
+      url: null,
+      bodyText: SEVENTH_STEP_PRAYER_READ_TEXT,
+    });
+    setToolsScreen("READER");
+  }, [completeMorningItemForCurrentDayIfEnabled]);
+
+  const onReadMorningReady = useCallback(() => {
+    const completionReason = completeMorningItemForCurrentDayIfEnabled(MORNING_READY_ITEM_ID);
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+    setRoutineReaderBackScreen("MORNING");
+    setRoutineReader({
+      title: MORNING_READY_TITLE,
+      url: null,
+      bodyText: MORNING_READY_READ_TEXT,
+    });
+    setToolsScreen("READER");
+  }, [completeMorningItemForCurrentDayIfEnabled]);
+
+  const onReadEleventhStepPrayer = useCallback(() => {
+    const completionReason = completeMorningItemForCurrentDayIfEnabled(
+      ELEVENTH_STEP_PRAYER_ITEM_ID,
+    );
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+    setRoutineReaderBackScreen("MORNING");
+    setRoutineReader({
+      title: "11th Step AM Prayer",
+      url: null,
+      bodyText: ELEVENTH_STEP_AM_PRAYER_TEXT,
+    });
+    setToolsScreen("READER");
+  }, [completeMorningItemForCurrentDayIfEnabled]);
+
+  const onListenNightlyPrayer = useCallback(() => {
+    speakRoutineText(ELEVENTH_STEP_NIGHTLY_PRAYER_TEXT);
+  }, [speakRoutineText]);
+
+  const onReadNightlyPrayer = useCallback(() => {
+    if (!nightlyInventoryDayState.eleventhStepPrayerEnabled) {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+
+    updateNightlyDayState((day) => ({
+      ...day,
+      eleventhStepPrayerCompletedAt: day.eleventhStepPrayerCompletedAt ?? new Date().toISOString(),
+    }));
+    setRoutineReaderBackScreen("NIGHTLY");
+    setRoutineReader({
+      title: "11th Step Prayer",
+      url: null,
+      bodyText: ELEVENTH_STEP_NIGHTLY_PRAYER_TEXT,
+    });
+    setToolsScreen("READER");
+  }, [
+    nightlyInventoryDayState.eleventhStepPrayerEnabled,
+    setRoutinesStatus,
+    updateNightlyDayState,
+  ]);
+
   const openRoutineReader = useCallback(
     (itemId: string, title: string, url: string | null) => {
-      const bigBookConfig = BIG_BOOK_READINGS[itemId];
-      if (bigBookConfig) {
-        completeMorningItemForCurrentDayIfEnabled(itemId);
-        setBigBookReader(bigBookConfig);
-        setToolsScreen("BIGBOOK");
+      if (itemId === BIG_BOOK_86_88_ITEM_ID || itemId === BIG_BOOK_60_63_ITEM_ID) {
+        const completionReason = completeMorningItemForCurrentDayIfEnabled(itemId);
+        if (completionReason === "disabled") {
+          return;
+        }
+        const bigBookBodyText = BIG_BOOK_ROUTINE_TEXT[itemId] ?? "";
+        setRoutineReaderBackScreen("MORNING");
+        setRoutineReader({
+          title,
+          url: null,
+          bodyText: bigBookBodyText,
+        });
+        setToolsScreen("READER");
         return;
       }
 
-      setRoutineReader({ title, url });
+      setRoutineReaderBackScreen("MORNING");
+      setRoutineReader({ title, url, bodyText: null });
       setToolsScreen("READER");
     },
     [completeMorningItemForCurrentDayIfEnabled],
@@ -2430,7 +2530,7 @@ export default function App() {
         notes: dayState.notes,
         completedAt: dayState.completedAt,
       });
-      setRoutinesStatus(`Nightly inventory PDF exported: ${uri}`);
+      setRoutinesStatus(`Nightly routine PDF exported: ${uri}`);
     } catch (error) {
       setRoutinesStatus(`Nightly PDF export failed: ${formatError(error)}`);
     }
@@ -2447,7 +2547,7 @@ export default function App() {
     const summarize = (label: string, values: Array<{ text: string }>) =>
       `${label}: ${values.length > 0 ? values.map((entry) => entry.text).join("; ") : "None"}`;
     const body = [
-      `Nightly Inventory ${routineDateKey}`,
+      `Nightly Routine ${routineDateKey}`,
       `Got on knees: ${dayState.gotOnKneesCompleted ? "Yes" : "No"}`,
       summarize("Resentful", dayState.resentful),
       summarize("Selfish", dayState.selfish),
@@ -6169,7 +6269,7 @@ export default function App() {
 
               {homeScreen === "TOOLS" ? (
                 <>
-                  {routinesStatus ? (
+                  {routinesStatus && routinesStatus !== "Turn this checklist item on first." ? (
                     <GlassCard style={styles.card} strong>
                       <Text style={styles.sectionMeta}>{routinesStatus}</Text>
                     </GlassCard>
@@ -6304,6 +6404,9 @@ export default function App() {
                       onListenThirdStepPrayer={onListenThirdStepPrayer}
                       onPlayItem={(itemId) => void playRoutineItemAudio(itemId)}
                       onReadThirdStepPrayer={onReadThirdStepPrayer}
+                      onReadSeventhStepPrayer={onReadSeventhStepPrayer}
+                      onReadMorningReady={onReadMorningReady}
+                      onReadEleventhStepPrayer={onReadEleventhStepPrayer}
                       onAddCustomPrayer={() =>
                         updateMorningTemplate((template) => ({
                           ...template,
@@ -6393,13 +6496,21 @@ export default function App() {
                           gotOnKneesCompleted: !day.gotOnKneesCompleted,
                         }))
                       }
+                      onToggleEleventhStepPrayerEnabled={() =>
+                        updateNightlyDayState((day) => ({
+                          ...day,
+                          eleventhStepPrayerEnabled: !day.eleventhStepPrayerEnabled,
+                        }))
+                      }
+                      onListenEleventhStepPrayer={onListenNightlyPrayer}
+                      onReadEleventhStepPrayer={onReadNightlyPrayer}
                       onToggleCompleted={() =>
                         updateNightlyDayState(
                           (day) => ({
                             ...day,
                             completedAt: day.completedAt ? null : new Date().toISOString(),
                           }),
-                          "Nightly inventory saved.",
+                          "Nightly routine saved.",
                         )
                       }
                       onTextSponsor={() => void textNightlyToSponsor()}
@@ -6407,23 +6518,12 @@ export default function App() {
                     />
                   ) : null}
 
-                  {toolsScreen === "BIGBOOK" ? (
-                    <BigBookReaderScreen
-                      title={bigBookReader?.title ?? "Big Book"}
-                      subtitle={`Pages ${bigBookReader?.startPage ?? 60}-${bigBookReader?.endPage ?? 63}`}
-                      startPage={bigBookReader?.startPage ?? 60}
-                      endPage={bigBookReader?.endPage ?? 63}
-                      apiUrl={apiUrl}
-                      authHeader={authHeader}
-                      onBack={() => setToolsScreen("MORNING")}
-                    />
-                  ) : null}
-
                   {toolsScreen === "READER" ? (
                     <RoutineReaderScreen
                       title={routineReader?.title ?? "Routine Reader"}
                       url={routineReader?.url ?? null}
-                      onBack={() => setToolsScreen("MORNING")}
+                      bodyText={routineReader?.bodyText ?? null}
+                      onBack={() => setToolsScreen(routineReaderBackScreen)}
                       onOpenLink={(url) => void openRoutineReaderLink(url)}
                     />
                   ) : null}

@@ -324,7 +324,7 @@ export function Dashboard({
                   onOpenTools();
                 }}
               >
-                <Text style={styles.menuItemText}>Tools</Text>
+                <Text style={styles.menuItemText}>AM/PM Routine</Text>
               </Pressable>
               <Pressable
                 style={styles.menuItem}
@@ -605,7 +605,7 @@ export function Dashboard({
             onHoverIn={() => setTileHover("nightly-inventory", true)}
             onHoverOut={() => setTileHover("nightly-inventory", false)}
             accessibilityRole="button"
-            accessibilityLabel="Open nightly inventory"
+            accessibilityLabel="Open nightly routine"
           >
             <GlassCard
               strong
@@ -617,7 +617,7 @@ export function Dashboard({
               ]}
             >
               <View style={styles.upcomingHeader}>
-                <Text style={styles.metricHeading}>Nightly Inventory</Text>
+                <Text style={styles.metricHeading}>Nightly Routine</Text>
                 <View style={styles.upcomingMoreButton}>
                   <View style={styles.dotRow}>
                     <View style={styles.dot} />

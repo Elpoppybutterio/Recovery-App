@@ -43,23 +43,25 @@ export function RoutineChecklistItem({
           trackColor={{ false: "rgba(148,163,184,0.45)", true: "rgba(52,199,89,0.65)" }}
         />
       </View>
-      <View style={styles.actions}>
-        {onListen ? (
-          <Pressable style={styles.actionBtn} onPress={onListen} disabled={!enabled}>
-            <Text style={styles.actionText}>Listen</Text>
-          </Pressable>
-        ) : null}
-        {onPlay ? (
-          <Pressable style={styles.actionBtn} onPress={onPlay} disabled={!enabled}>
-            <Text style={styles.actionText}>Play</Text>
-          </Pressable>
-        ) : null}
-        {onOpenReader ? (
-          <Pressable style={styles.actionBtn} onPress={onOpenReader} disabled={!enabled}>
-            <Text style={styles.actionText}>Read</Text>
-          </Pressable>
-        ) : null}
-      </View>
+      {enabled && (onListen || onPlay || onOpenReader) ? (
+        <View style={styles.actions}>
+          {onListen ? (
+            <Pressable style={styles.actionBtn} onPress={onListen}>
+              <Text style={styles.actionText}>Listen</Text>
+            </Pressable>
+          ) : null}
+          {onPlay ? (
+            <Pressable style={styles.actionBtn} onPress={onPlay}>
+              <Text style={styles.actionText}>Play</Text>
+            </Pressable>
+          ) : null}
+          {onOpenReader ? (
+            <Pressable style={styles.actionBtn} onPress={onOpenReader}>
+              <Text style={styles.actionText}>Read</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
     </View>
   );
 }
