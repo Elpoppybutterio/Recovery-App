@@ -6,6 +6,8 @@ import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MapView, { Marker, type Region } from "react-native-maps";
 import {
+  AppState,
+  type AppStateStatus,
   Alert,
   GestureResponderEvent,
   KeyboardAvoidingView,
@@ -30,6 +32,13 @@ import { getInsightForDay } from "./lib/recoveryInsights";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
 import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
+import {
+  DAILY_REFLECTIONS_ITEM_ID,
+  DAILY_REFLECTIONS_URL,
+  buildPendingDailyReflectionsCompletion,
+  shouldCompletePendingDailyReflections,
+  type PendingDailyReflectionsCompletion,
+} from "./lib/routines/dailyReflections";
 import {
   dateKeyForRoutines,
   getMorningDayState,
@@ -1200,6 +1209,8 @@ export default function App() {
     createDefaultRoutinesStore,
   );
   const [routinesStatus, setRoutinesStatus] = useState<string | null>(null);
+  const [pendingDailyReflectionsCompletion, setPendingDailyReflectionsCompletion] =
+    useState<PendingDailyReflectionsCompletion | null>(null);
   const [routineReader, setRoutineReader] = useState<RoutineReaderState | null>(null);
   const [bigBookReader, setBigBookReader] = useState<BigBookReaderState | null>(null);
 
@@ -1225,6 +1236,7 @@ export default function App() {
     async () => false,
   );
   const playbackRef = useRef<any>(null);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
   const meetingsSearchOrigin = mapBoundaryCenter ?? currentLocation;
@@ -2187,6 +2199,37 @@ export default function App() {
     [routineDateKey, updateRoutinesStore],
   );
 
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const previousState = appStateRef.current;
+      appStateRef.current = nextState;
+      const didReturnToApp =
+        (previousState === "inactive" || previousState === "background") && nextState === "active";
+
+      if (!didReturnToApp) {
+        return;
+      }
+
+      setPendingDailyReflectionsCompletion((pending) => {
+        if (!pending) {
+          return null;
+        }
+
+        const todayDateKey = dateKeyForRoutines(new Date());
+        if (!shouldCompletePendingDailyReflections(pending, Date.now(), todayDateKey)) {
+          return null;
+        }
+
+        completeMorningItemForCurrentDayIfEnabled(DAILY_REFLECTIONS_ITEM_ID);
+        return null;
+      });
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [completeMorningItemForCurrentDayIfEnabled]);
+
   const speakRoutineText = useCallback((text: string) => {
     const nextText = text.trim();
     if (!nextText) {
@@ -2302,16 +2345,6 @@ export default function App() {
     [completeMorningItemForCurrentDayIfEnabled],
   );
 
-  const dailyReflectionsReadUrl = useMemo(() => {
-    const configuredLink = routinesStore.morningTemplate.dailyReflectionsLink.trim();
-    return configuredLink.length > 0 ? configuredLink : "https://www.aa.org/daily-reflections";
-  }, [routinesStore.morningTemplate.dailyReflectionsLink]);
-
-  const dailyReflectionsListenUrl = useMemo(
-    () => buildDailyReflectionsListenUrl(routineDateKey),
-    [routineDateKey],
-  );
-
   const openRoutineReaderLink = useCallback(async (url: string) => {
     try {
       await Linking.openURL(url);
@@ -2320,13 +2353,38 @@ export default function App() {
     }
   }, []);
 
-  const openDailyReflectionsRead = useCallback(() => {
-    openRoutineReader("daily-reflections", "Daily Reflections", dailyReflectionsReadUrl);
-  }, [dailyReflectionsReadUrl, openRoutineReader]);
+  const openDailyReflections = useCallback(
+    async (source: "read" | "listen") => {
+      const dailyReflectionsItem = routinesStore.morningTemplate.items.find(
+        (item) => item.id === DAILY_REFLECTIONS_ITEM_ID,
+      );
+      if (!dailyReflectionsItem?.enabled) {
+        setRoutinesStatus("Turn this checklist item on first.");
+        return;
+      }
 
-  const openDailyReflectionsListen = useCallback(async () => {
-    await openRoutineReaderLink(dailyReflectionsListenUrl);
-  }, [dailyReflectionsListenUrl, openRoutineReaderLink]);
+      const startedAtMs = Date.now();
+      setPendingDailyReflectionsCompletion(
+        buildPendingDailyReflectionsCompletion(source, startedAtMs),
+      );
+
+      try {
+        await Linking.openURL(DAILY_REFLECTIONS_URL);
+      } catch {
+        setPendingDailyReflectionsCompletion(null);
+        setRoutinesStatus("Unable to open Daily Reflections");
+      }
+    },
+    [routinesStore.morningTemplate.items],
+  );
+
+  const openDailyReflectionsRead = useCallback(() => {
+    void openDailyReflections("read");
+  }, [openDailyReflections]);
+
+  const openDailyReflectionsListen = useCallback(() => {
+    void openDailyReflections("listen");
+  }, [openDailyReflections]);
 
   const exportMorningRoutineForToday = useCallback(async () => {
     try {
