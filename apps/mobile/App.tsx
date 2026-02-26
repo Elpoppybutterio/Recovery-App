@@ -256,7 +256,7 @@ const MEETINGS_FORMAT_OPTIONS: Array<{ value: MeetingsFormatFilter; label: strin
   { value: "ONLINE", label: "Online" },
 ];
 const MEETINGS_TIME_OPTIONS: Array<{ value: MeetingsTimeFilter; label: string }> = [
-  { value: "ANY", label: "Any time" },
+  { value: "ANY", label: "Any" },
   { value: "MORNING", label: "Morning" },
   { value: "AFTERNOON", label: "Afternoon" },
   { value: "EVENING", label: "Evening" },
@@ -4196,6 +4196,8 @@ export default function App() {
         shouldShowAlert: true,
         shouldPlaySound: false,
         shouldSetBadge: false,
+        shouldShowBanner: true,
+        shouldShowList: true,
       }),
     });
 
@@ -5574,7 +5576,11 @@ export default function App() {
                           )
                         }
                       >
-                        <Text style={styles.filterDropdownValue}>
+                        <Text
+                          style={styles.filterDropdownValue}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
                           {selectedMeetingsFormatLabel}
                         </Text>
                         <Text style={styles.filterDropdownChevron}>
@@ -5599,6 +5605,8 @@ export default function App() {
                                     styles.filterDropdownOptionText,
                                     selected ? styles.filterDropdownOptionTextSelected : null,
                                   ]}
+                                  numberOfLines={1}
+                                  ellipsizeMode="tail"
                                 >
                                   {option.label}
                                 </Text>
@@ -5627,7 +5635,13 @@ export default function App() {
                           )
                         }
                       >
-                        <Text style={styles.filterDropdownValue}>{selectedMeetingsDayLabel}</Text>
+                        <Text
+                          style={styles.filterDropdownValue}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
+                          {selectedMeetingsDayLabel}
+                        </Text>
                         <Text style={styles.filterDropdownChevron}>
                           {openMeetingsFilterDropdown === "DAY" ? "▲" : "▼"}
                         </Text>
@@ -5650,6 +5664,8 @@ export default function App() {
                                     styles.filterDropdownOptionText,
                                     selected ? styles.filterDropdownOptionTextSelected : null,
                                   ]}
+                                  numberOfLines={1}
+                                  ellipsizeMode="tail"
                                 >
                                   {option.label}
                                 </Text>
@@ -5678,7 +5694,13 @@ export default function App() {
                           )
                         }
                       >
-                        <Text style={styles.filterDropdownValue}>{selectedMeetingsTimeLabel}</Text>
+                        <Text
+                          style={styles.filterDropdownValue}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
+                          {selectedMeetingsTimeLabel}
+                        </Text>
                         <Text style={styles.filterDropdownChevron}>
                           {openMeetingsFilterDropdown === "TIME" ? "▲" : "▼"}
                         </Text>
@@ -5701,6 +5723,8 @@ export default function App() {
                                     styles.filterDropdownOptionText,
                                     selected ? styles.filterDropdownOptionTextSelected : null,
                                   ]}
+                                  numberOfLines={1}
+                                  ellipsizeMode="tail"
                                 >
                                   {option.label}
                                 </Text>
@@ -5729,7 +5753,11 @@ export default function App() {
                           )
                         }
                       >
-                        <Text style={styles.filterDropdownValue}>
+                        <Text
+                          style={styles.filterDropdownValue}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
                           {selectedMeetingsLocationLabel}
                         </Text>
                         <Text style={styles.filterDropdownChevron}>
@@ -5759,6 +5787,8 @@ export default function App() {
                                     styles.filterDropdownOptionText,
                                     selected ? styles.filterDropdownOptionTextSelected : null,
                                   ]}
+                                  numberOfLines={1}
+                                  ellipsizeMode="tail"
                                 >
                                   {option.label}
                                 </Text>
@@ -7477,9 +7507,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-start",
     gap: 8,
+    flexWrap: "wrap",
   },
   meetingsFilterItem: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: 150,
     minWidth: 0,
     gap: 6,
   },
@@ -7529,6 +7561,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     flex: 1,
+    flexShrink: 1,
   },
   filterDropdownChevron: {
     color: colors.textPrimary,
@@ -7555,6 +7588,8 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 13,
     fontWeight: "600",
+    flex: 1,
+    flexShrink: 1,
   },
   filterDropdownOptionTextSelected: {
     color: colors.textPrimary,
