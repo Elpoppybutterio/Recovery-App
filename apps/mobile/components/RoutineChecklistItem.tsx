@@ -8,6 +8,8 @@ export function RoutineChecklistItem({
   checked,
   onToggle,
   onToggleEnabled,
+  customActionLabel,
+  onCustomAction,
   onListen,
   onPlay,
   onOpenReader,
@@ -18,6 +20,8 @@ export function RoutineChecklistItem({
   checked: boolean;
   onToggle: () => void;
   onToggleEnabled: () => void;
+  customActionLabel?: string;
+  onCustomAction?: () => void;
   onListen?: () => void;
   onPlay?: () => void;
   onOpenReader?: () => void;
@@ -43,8 +47,13 @@ export function RoutineChecklistItem({
           trackColor={{ false: "rgba(148,163,184,0.45)", true: "rgba(52,199,89,0.65)" }}
         />
       </View>
-      {enabled && (onListen || onPlay || onOpenReader) ? (
+      {enabled && (onCustomAction || onListen || onPlay || onOpenReader) ? (
         <View style={styles.actions}>
+          {onCustomAction ? (
+            <Pressable style={styles.actionBtn} onPress={onCustomAction}>
+              <Text style={styles.actionText}>{customActionLabel ?? "Action"}</Text>
+            </Pressable>
+          ) : null}
           {onListen ? (
             <Pressable style={styles.actionBtn} onPress={onListen}>
               <Text style={styles.actionText}>Listen</Text>

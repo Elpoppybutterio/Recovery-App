@@ -4,11 +4,6 @@ import type {
   NightlyInventoryDayState,
   RecoveryRoutinesStore,
 } from "./types";
-import {
-  MORNING_READY_ITEM_ID,
-  MORNING_READY_READ_TEXT,
-  MORNING_READY_TITLE,
-} from "./morningReady";
 
 export const DAILY_REFLECTIONS_URL = "https://www.aa.org/daily-reflections";
 
@@ -52,12 +47,6 @@ export function createDefaultMorningRoutineTemplate(): MorningRoutineTemplate {
         title: "7th Step Prayer",
         enabled: false,
         voiceText: "",
-      },
-      {
-        id: MORNING_READY_ITEM_ID,
-        title: MORNING_READY_TITLE,
-        enabled: false,
-        voiceText: MORNING_READY_READ_TEXT,
       },
       {
         id: "prayer-eleventh-step",
@@ -108,7 +97,7 @@ export function createEmptyMorningRoutineDayState(dateKey: string): MorningRouti
   return {
     dateKey,
     completedByItemId: {},
-    gotOnKneesCompleted: false,
+    prayerOnKneesByItemId: {},
     notes: "",
     audioRefs: {},
     completedAt: null,
@@ -123,6 +112,7 @@ export function createEmptyNightlyInventoryDayState(dateKey: string): NightlyInv
     eleventhStepPrayerEnabled: false,
     eleventhStepPrayerCompletedAt: null,
     resentful: [],
+    selfSeeking: [],
     selfish: [],
     dishonest: [],
     afraid: [],

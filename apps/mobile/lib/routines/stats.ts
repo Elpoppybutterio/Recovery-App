@@ -20,6 +20,7 @@ function issueCountForNightlyDay(
 ): number {
   return (
     day.resentful.length +
+    day.selfSeeking.length +
     day.selfish.length +
     day.dishonest.length +
     day.afraid.length +

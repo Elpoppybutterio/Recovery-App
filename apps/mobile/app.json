@@ -10,7 +10,9 @@
       "icon": "./assets/icon.png",
       "bundleIdentifier": "com.recovery.accountability",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Location is used to show nearby meetings and arrival prompts."
+        "NSLocationWhenInUseUsageDescription": "Location is used to show nearby meetings and arrival prompts.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Always location is used to auto-log meeting attendance when you arrive at a meeting geofence.",
+        "UIBackgroundModes": ["location"]
       }
     },
     "android": {
@@ -18,7 +20,12 @@
         "foregroundImage": "./assets/icon-foreground.png",
         "backgroundImage": "./assets/icon-background.png"
       },
-      "package": "com.recovery.accountability"
+      "package": "com.recovery.accountability",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION"
+      ]
     },
     "assetBundlePatterns": ["**/*"],
     "extra": {

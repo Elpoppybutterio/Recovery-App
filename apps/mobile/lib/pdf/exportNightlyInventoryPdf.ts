@@ -6,6 +6,7 @@ export type NightlyInventoryPdfPayload = {
   prompt: string;
   gotOnKneesCompleted: boolean;
   resentful: string[];
+  selfSeeking: string[];
   selfish: string[];
   dishonest: string[];
   afraid: string[];
@@ -110,6 +111,7 @@ function buildNightlyInventoryHtml(payload: NightlyInventoryPdfPayload): string 
 
     <div class=\"grid\">
       <div class=\"box\"><strong>Resentful</strong><ul>${listMarkup(payload.resentful)}</ul></div>
+      <div class=\"box\"><strong>Self-seeking</strong><ul>${listMarkup(payload.selfSeeking)}</ul></div>
       <div class=\"box\"><strong>Selfish</strong><ul>${listMarkup(payload.selfish)}</ul></div>
       <div class=\"box\"><strong>Dishonest</strong><ul>${listMarkup(payload.dishonest)}</ul></div>
       <div class=\"box\"><strong>Afraid</strong><ul>${listMarkup(payload.afraid)}</ul></div>

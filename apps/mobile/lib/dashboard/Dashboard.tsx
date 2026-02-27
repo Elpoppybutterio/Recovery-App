@@ -59,6 +59,7 @@ type DashboardProps = {
   onOpenRecoverySettings: () => void;
   onOpenMeetings: () => void;
   onOpenAttendance: () => void;
+  onOpenAttendanceToday: () => void;
   onOpenTools: () => void;
   onOpenSoberHousingSettings: () => void;
   onOpenProbationParoleSettings: () => void;
@@ -200,6 +201,7 @@ export function Dashboard({
   onOpenRecoverySettings,
   onOpenMeetings,
   onOpenAttendance,
+  onOpenAttendanceToday,
   onOpenTools,
   onOpenSoberHousingSettings,
   onOpenProbationParoleSettings,
@@ -444,7 +446,7 @@ export function Dashboard({
 
           <Pressable
             style={styles.metricTilePressable}
-            onPress={onOpenAttendance}
+            onPress={onOpenAttendanceToday}
             onHoverIn={() => setTileHover("meetings-attended", true)}
             onHoverOut={() => setTileHover("meetings-attended", false)}
             accessibilityRole="button"
