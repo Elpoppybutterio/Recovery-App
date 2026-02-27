@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { GlassCard } from "../ui/GlassCard";
 import { Design } from "../ui/design";
 import type { RecoveryInsight } from "../recoveryInsights";
+import { ChatTile } from "./ChatTile";
 
 type DashboardMeeting = {
   id: string;
@@ -21,6 +22,7 @@ type DashboardProps = {
   locationEnabled: boolean;
   nextMeetings: DashboardMeeting[];
   showingOnlineMeetingsFallback: boolean;
+  chatEnabled: boolean;
   sponsorEnabled: boolean;
   dailyChecklist: {
     rows: Array<{ id: string; label: string; complete: boolean; progress: number }>;
@@ -56,6 +58,7 @@ type DashboardProps = {
   onCallSponsor: () => void;
   onOpenMorningRoutine: () => void;
   onOpenNightlyInventory: () => void;
+  onOpenChat: () => void;
   onOpenRecoverySettings: () => void;
   onOpenMeetings: () => void;
   onOpenAttendance: () => void;
@@ -184,6 +187,7 @@ export function Dashboard({
   locationEnabled,
   nextMeetings,
   showingOnlineMeetingsFallback,
+  chatEnabled,
   sponsorEnabled,
   dailyChecklist,
   meetingsAttendedInNinetyDays,
@@ -198,6 +202,7 @@ export function Dashboard({
   onCallSponsor,
   onOpenMorningRoutine,
   onOpenNightlyInventory,
+  onOpenChat,
   onOpenRecoverySettings,
   onOpenMeetings,
   onOpenAttendance,
@@ -781,6 +786,14 @@ export function Dashboard({
             ) : null}
           </GlassCard>
         </Pressable>
+
+        <ChatTile
+          enabled={chatEnabled}
+          hovered={hoveredTileId === "chat"}
+          onPress={onOpenChat}
+          onHoverIn={() => setTileHover("chat", true)}
+          onHoverOut={() => setTileHover("chat", false)}
+        />
 
         <Pressable
           onHoverIn={() => setTileHover("physical-recovery", true)}

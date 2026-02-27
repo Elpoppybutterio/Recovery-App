@@ -32,6 +32,7 @@ import { exportMorningRoutinePdf } from "./lib/pdf/exportMorningRoutinePdf";
 import { exportNightlyInventoryPdf } from "./lib/pdf/exportNightlyInventoryPdf";
 import { getInsightForDay } from "./lib/recoveryInsights";
 import { Dashboard } from "./lib/dashboard/Dashboard";
+import { featureFlags } from "./lib/config/featureFlags";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
 import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
 import {
@@ -63,6 +64,7 @@ import { ui } from "./lib/ui/ui";
 import { colors } from "./lib/theme/tokens";
 import { MorningRoutineScreen } from "./screens/MorningRoutineScreen";
 import { NightlyInventoryScreen } from "./screens/NightlyInventoryScreen";
+import { ChatComingSoonScreen } from "./screens/ChatComingSoonScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
 
@@ -166,7 +168,7 @@ type MeetingListItem = MeetingRecord & {
 };
 
 type MeetingsViewMode = "LIST" | "MAP";
-type HomeScreen = "SETUP" | "DASHBOARD" | "MEETINGS" | "ATTENDANCE" | "SETTINGS" | "TOOLS";
+type HomeScreen = "SETUP" | "DASHBOARD" | "MEETINGS" | "ATTENDANCE" | "CHAT" | "SETTINGS" | "TOOLS";
 type SetupStep = 1 | 2 | 3 | 4 | 5 | 6;
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
@@ -1208,6 +1210,8 @@ export default function App() {
     typeof extra.meetingFeedUrl === "string" && extra.meetingFeedUrl.trim().length > 0
       ? extra.meetingFeedUrl
       : undefined;
+  const enableSponsorApiSync =
+    typeof extra.enableSponsorApiSync === "boolean" ? extra.enableSponsorApiSync : false;
   const defaultMeetingRadiusMiles =
     typeof extra.meetingRadiusMiles === "number" && Number.isFinite(extra.meetingRadiusMiles)
       ? extra.meetingRadiusMiles
@@ -1226,6 +1230,7 @@ export default function App() {
     [apiUrl, authHeader, meetingFeedUrl, defaultMeetingRadiusMiles],
   );
   const travelTimeProvider = useMemo(() => createTravelTimeProvider(25), []);
+  const chatEnabled = featureFlags.chatEnabled;
 
   const dayOptions = useMemo(() => createDayOptions(), []);
   const attendanceStorage = useMemo(() => attendanceStorageKey(devAuthUserId), [devAuthUserId]);
@@ -3200,6 +3205,13 @@ export default function App() {
     setToolsScreen("NIGHTLY");
   }, []);
 
+  const openChatComingSoon = useCallback(() => {
+    setHomeScreen("CHAT");
+    setToolsScreen("HOME");
+    setScreen("LIST");
+    setSelectedMeeting(null);
+  }, []);
+
   const openDashboard = useCallback(() => {
     setHomeScreen("DASHBOARD");
     setToolsScreen("HOME");
@@ -3463,6 +3475,10 @@ export default function App() {
 
   const fetchSponsorConfig = useCallback(async () => {
     try {
+      if (!enableSponsorApiSync) {
+        return;
+      }
+
       const response = await fetch(`${apiUrl}/v1/me/sponsor`, {
         headers: {
           Authorization: authHeader,
@@ -3510,7 +3526,7 @@ export default function App() {
     } catch {
       setSponsorStatus(formatApiErrorWithHint("Sponsor config load failed: network."));
     }
-  }, [apiUrl, authHeader, formatApiErrorWithHint]);
+  }, [apiUrl, authHeader, enableSponsorApiSync, formatApiErrorWithHint]);
 
   const openPhoneCall = useCallback(
     async (phoneE164?: string | null, source: "button" | "notification" = "button") => {
@@ -4118,23 +4134,25 @@ export default function App() {
 
       setSponsorSaving(true);
       try {
-        const response = await fetch(`${apiUrl}/v1/me/sponsor`, {
-          method: "PUT",
-          headers: {
-            Authorization: authHeader,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payload),
-        });
+        if (enableSponsorApiSync) {
+          const response = await fetch(`${apiUrl}/v1/me/sponsor`, {
+            method: "PUT",
+            headers: {
+              Authorization: authHeader,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+          });
 
-        if (!response.ok) {
-          setSponsorStatus(
-            formatApiErrorWithHint(`Sponsor config save failed: ${response.status}`),
-          );
-          return false;
+          if (!response.ok) {
+            setSponsorStatus(
+              formatApiErrorWithHint(`Sponsor config save failed: ${response.status}`),
+            );
+            return false;
+          }
         }
 
-        setSponsorStatus(null);
+        setSponsorStatus(enableSponsorApiSync ? null : "Sponsor settings saved locally.");
 
         const [storedEventFingerprint, storedAlertFingerprint] = await Promise.all([
           AsyncStorage.getItem(sponsorCalendarEventFingerprintStorage),
@@ -4193,6 +4211,7 @@ export default function App() {
       sponsorCallTimeLocalHhmm,
       apiUrl,
       authHeader,
+      enableSponsorApiSync,
       formatApiErrorWithHint,
       sponsorCalendarEventStorage,
       sponsorCalendarEventFingerprintStorage,
@@ -5190,7 +5209,7 @@ export default function App() {
 
     void (async () => {
       const position = await requestLocationPermission();
-      await Promise.all([refreshMeetings({ location: position }), fetchSponsorConfig()]);
+      await refreshMeetings({ location: position });
 
       try {
         const [
@@ -5267,6 +5286,7 @@ export default function App() {
           setSobrietyDateInput(formatIsoToDdMmYyyy(sobrietyDateRaw));
         }
 
+        let hasLocalSponsorProfile = false;
         if (profileRaw) {
           const parsedProfile = JSON.parse(profileRaw) as {
             radiusMiles?: number;
@@ -5274,6 +5294,16 @@ export default function App() {
             sponsorEnabledAtIso?: string | null;
             ninetyDayGoalTarget?: number;
             meetingSignatureRequired?: boolean;
+            sponsorName?: string;
+            sponsorPhoneDigits?: string;
+            sponsorHour12?: number;
+            sponsorMinute?: number;
+            sponsorMeridiem?: "AM" | "PM";
+            sponsorRepeatPreset?: RepeatPreset;
+            sponsorRepeatDays?: WeekdayCode[];
+            sponsorEnabled?: boolean;
+            sponsorActive?: boolean;
+            sponsorLeadMinutes?: SponsorLeadMinutes;
           };
           if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
             setMeetingRadiusMiles(parsedProfile.radiusMiles);
@@ -5306,6 +5336,66 @@ export default function App() {
             setMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
             setWizardMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
           }
+          if (typeof parsedProfile.sponsorName === "string") {
+            setSponsorName(parsedProfile.sponsorName);
+            hasLocalSponsorProfile =
+              hasLocalSponsorProfile || parsedProfile.sponsorName.trim().length > 0;
+          }
+          if (typeof parsedProfile.sponsorPhoneDigits === "string") {
+            const normalized = normalizePhoneDigits(parsedProfile.sponsorPhoneDigits);
+            setSponsorPhoneDigits(normalized);
+            hasLocalSponsorProfile = hasLocalSponsorProfile || normalized.length > 0;
+          }
+          if (
+            typeof parsedProfile.sponsorHour12 === "number" &&
+            Number.isFinite(parsedProfile.sponsorHour12) &&
+            parsedProfile.sponsorHour12 >= 1 &&
+            parsedProfile.sponsorHour12 <= 12
+          ) {
+            setSponsorHour12(Math.floor(parsedProfile.sponsorHour12));
+          }
+          if (
+            typeof parsedProfile.sponsorMinute === "number" &&
+            Number.isFinite(parsedProfile.sponsorMinute) &&
+            parsedProfile.sponsorMinute >= 0 &&
+            parsedProfile.sponsorMinute <= 59
+          ) {
+            setSponsorMinute(Math.floor(parsedProfile.sponsorMinute));
+          }
+          if (parsedProfile.sponsorMeridiem === "AM" || parsedProfile.sponsorMeridiem === "PM") {
+            setSponsorMeridiem(parsedProfile.sponsorMeridiem);
+          }
+          if (
+            parsedProfile.sponsorRepeatPreset === "WEEKLY" ||
+            parsedProfile.sponsorRepeatPreset === "BIWEEKLY" ||
+            parsedProfile.sponsorRepeatPreset === "MONTHLY"
+          ) {
+            setSponsorRepeatPreset(parsedProfile.sponsorRepeatPreset);
+          }
+          if (Array.isArray(parsedProfile.sponsorRepeatDays)) {
+            const safeDays = parsedProfile.sponsorRepeatDays.filter((day): day is WeekdayCode =>
+              WEEKDAY_CODES.includes(day),
+            );
+            if (safeDays.length > 0) {
+              setSponsorRepeatDays(sortWeekdays(safeDays));
+            }
+          }
+          if (typeof parsedProfile.sponsorEnabled === "boolean") {
+            setSponsorEnabled(parsedProfile.sponsorEnabled);
+          }
+          if (typeof parsedProfile.sponsorActive === "boolean") {
+            setSponsorActive(parsedProfile.sponsorActive);
+          }
+          if (
+            typeof parsedProfile.sponsorLeadMinutes === "number" &&
+            [0, 5, 10, 30].includes(parsedProfile.sponsorLeadMinutes)
+          ) {
+            setSponsorLeadMinutes(parsedProfile.sponsorLeadMinutes as SponsorLeadMinutes);
+          }
+        }
+
+        if (enableSponsorApiSync && !hasLocalSponsorProfile) {
+          await fetchSponsorConfig();
         }
 
         if (typeof ninetyDayGoalRaw === "string" && ninetyDayGoalRaw.trim().length > 0) {
@@ -5362,6 +5452,7 @@ export default function App() {
     sponsorEnabledAtStorage,
     meetingAttendanceLogStorage,
     devAuthUserId,
+    enableSponsorApiSync,
     fetchSponsorConfig,
     refreshMeetings,
     requestLocationPermission,
@@ -5486,6 +5577,16 @@ export default function App() {
         sponsorEnabledAtIso,
         ninetyDayGoalTarget,
         meetingSignatureRequired,
+        sponsorName,
+        sponsorPhoneDigits,
+        sponsorHour12,
+        sponsorMinute,
+        sponsorMeridiem,
+        sponsorRepeatPreset,
+        sponsorRepeatDays: sponsorRepeatDaysSorted,
+        sponsorEnabled,
+        sponsorActive,
+        sponsorLeadMinutes,
       }),
     );
   }, [
@@ -5494,6 +5595,16 @@ export default function App() {
     sponsorEnabledAtIso,
     ninetyDayGoalTarget,
     meetingSignatureRequired,
+    sponsorName,
+    sponsorPhoneDigits,
+    sponsorHour12,
+    sponsorMinute,
+    sponsorMeridiem,
+    sponsorRepeatPreset,
+    sponsorRepeatDaysSorted,
+    sponsorEnabled,
+    sponsorActive,
+    sponsorLeadMinutes,
     profileStorage,
     bootstrapped,
   ]);
@@ -6417,6 +6528,7 @@ export default function App() {
                   locationEnabled={locationPermission === "granted"}
                   nextMeetings={dashboardNextThreeMeetings}
                   showingOnlineMeetingsFallback={dashboardShowsOnlineFallback}
+                  chatEnabled={chatEnabled}
                   sponsorEnabled={sponsorEnabled}
                   dailyChecklist={dailyChecklistStatus}
                   homeGroupMeeting={
@@ -6467,6 +6579,7 @@ export default function App() {
                   }}
                   onOpenMorningRoutine={openMorningRoutine}
                   onOpenNightlyInventory={openNightlyInventory}
+                  onOpenChat={openChatComingSoon}
                   onOpenMeetings={openMeetingsHub}
                   onOpenRecoverySettings={openSettingsHub}
                   onOpenAttendance={openAttendanceHub}
@@ -6487,6 +6600,10 @@ export default function App() {
                   }}
                   onLearnMore={openSettingsHub}
                 />
+              ) : null}
+
+              {homeScreen === "CHAT" ? (
+                <ChatComingSoonScreen enabled={chatEnabled} onBack={openDashboard} />
               ) : null}
 
               {homeScreen === "MEETINGS" ? (
