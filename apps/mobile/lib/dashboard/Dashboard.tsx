@@ -23,7 +23,7 @@ type DashboardProps = {
   showingOnlineMeetingsFallback: boolean;
   sponsorEnabled: boolean;
   dailyChecklist: {
-    rows: Array<{ id: string; label: string; complete: boolean }>;
+    rows: Array<{ id: string; label: string; complete: boolean; progress: number }>;
     percent: number;
     summary: string;
   };
@@ -59,12 +59,12 @@ type DashboardProps = {
   onOpenRecoverySettings: () => void;
   onOpenMeetings: () => void;
   onOpenAttendance: () => void;
-  onOpenAttendanceToday: () => void;
   onOpenTools: () => void;
   onOpenSoberHousingSettings: () => void;
   onOpenProbationParoleSettings: () => void;
   onRefresh: () => void;
   onLogMeeting: (meetingId: string) => void;
+  onCaptureSignature: (meetingId: string) => void;
   onLearnMore: () => void;
 };
 
@@ -201,12 +201,12 @@ export function Dashboard({
   onOpenRecoverySettings,
   onOpenMeetings,
   onOpenAttendance,
-  onOpenAttendanceToday,
   onOpenTools,
   onOpenSoberHousingSettings,
   onOpenProbationParoleSettings,
   onRefresh,
   onLogMeeting,
+  onCaptureSignature,
 }: DashboardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [hoveredTileId, setHoveredTileId] = useState<string | null>(null);
@@ -446,7 +446,7 @@ export function Dashboard({
 
           <Pressable
             style={styles.metricTilePressable}
-            onPress={onOpenAttendanceToday}
+            onPress={onOpenAttendance}
             onHoverIn={() => setTileHover("meetings-attended", true)}
             onHoverOut={() => setTileHover("meetings-attended", false)}
             accessibilityRole="button"
@@ -526,12 +526,20 @@ export function Dashboard({
                     <View
                       style={[
                         styles.nightlyStatusDot,
-                        row.complete ? styles.nightlyStatusDotDone : null,
+                        row.complete
+                          ? styles.nightlyStatusDotDone
+                          : row.progress > 0
+                            ? styles.nightlyStatusDotPartial
+                            : null,
                       ]}
                     />
                     <Text style={styles.dailyChecklistLabel}>{row.label}</Text>
                     <Text style={styles.dailyChecklistStatus}>
-                      {row.complete ? "Done" : "Pending"}
+                      {row.progress === 100
+                        ? "Done"
+                        : row.progress > 0
+                          ? `${row.progress}%`
+                          : "Pending"}
                     </Text>
                   </View>
                 ))}
@@ -715,6 +723,14 @@ export function Dashboard({
                 No in-person meetings available for the rest of today. Showing online meetings.
               </Text>
             ) : null}
+            <Pressable
+              style={styles.meetingsAttendanceLogPill}
+              onPress={onOpenAttendance}
+              accessibilityRole="button"
+              accessibilityLabel="Open meetings attendance log page"
+            >
+              <Text style={styles.meetingsAttendanceLogPillText}>Meetings Attendance Log</Text>
+            </Pressable>
 
             {upcoming.map((meeting, index) => (
               <View key={meeting.id} style={styles.meetingItem}>
@@ -737,9 +753,20 @@ export function Dashboard({
                   </View>
                   <Text style={styles.meetingTime}>{toTwelveHour(meeting.startsAtLocal)}</Text>
                 </Pressable>
-                <Pressable style={styles.meetingLogButton} onPress={() => onLogMeeting(meeting.id)}>
-                  <Text style={styles.meetingLogButtonText}>Log</Text>
-                </Pressable>
+                <View style={styles.meetingActionsCol}>
+                  <Pressable
+                    style={styles.meetingLogButton}
+                    onPress={() => onCaptureSignature(meeting.id)}
+                  >
+                    <Text style={styles.meetingLogButtonText}>Signature</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.meetingLogButton}
+                    onPress={() => onLogMeeting(meeting.id)}
+                  >
+                    <Text style={styles.meetingLogButtonText}>Log</Text>
+                  </Pressable>
+                </View>
               </View>
             ))}
 
@@ -1229,6 +1256,9 @@ const styles = StyleSheet.create({
   nightlyStatusDotDone: {
     backgroundColor: "rgba(136,255,179,0.95)",
   },
+  nightlyStatusDotPartial: {
+    backgroundColor: "rgba(251,191,36,0.95)",
+  },
   trendBadge: {
     marginLeft: "auto",
     borderRadius: 999,
@@ -1402,6 +1432,21 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginBottom: 2,
   },
+  meetingsAttendanceLogPill: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.36)",
+    backgroundColor: "rgba(255,255,255,0.15)",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    marginBottom: 2,
+  },
+  meetingsAttendanceLogPillText: {
+    color: Design.color.textPrimary,
+    fontSize: 12,
+    fontWeight: "700",
+  },
   dot: {
     width: 7,
     height: 7,
@@ -1456,6 +1501,10 @@ const styles = StyleSheet.create({
     color: "#2F2380",
     fontSize: 16,
     fontWeight: "800",
+  },
+  meetingActionsCol: {
+    gap: 6,
+    alignItems: "stretch",
   },
   meetingLogButton: {
     borderRadius: 10,

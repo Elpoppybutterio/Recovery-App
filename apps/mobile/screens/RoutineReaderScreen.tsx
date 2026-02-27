@@ -74,7 +74,7 @@ export function RoutineReaderScreen({
               <View style={[styles.checkbox, gotOnKneesCompleted ? styles.checkboxChecked : null]}>
                 {gotOnKneesCompleted ? <Text style={styles.checkboxTick}>✓</Text> : null}
               </View>
-              <Text style={styles.checkboxLabel}>Got on knees</Text>
+              <Text style={styles.checkboxLabel}>On knees</Text>
             </Pressable>
           </View>
         ) : null}

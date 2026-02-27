@@ -121,9 +121,19 @@ export function getNightlyDayState(
   if (!saved) {
     return empty;
   }
+  const legacyPrompt =
+    "At night, we constructively review our day. Were we resentful, selfish, dishonest, or afraid?";
+  const normalizedPrompt =
+    typeof saved.prompt === "string" && saved.prompt.trim().length > 0
+      ? saved.prompt === legacyPrompt
+        ? empty.prompt
+        : saved.prompt
+      : empty.prompt;
+
   return {
     ...empty,
     ...saved,
+    prompt: normalizedPrompt,
     resentful: saved.resentful ?? [],
     selfSeeking: saved.selfSeeking ?? [],
     selfish: saved.selfish ?? [],

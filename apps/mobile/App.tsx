@@ -5,6 +5,7 @@ import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MapView, { Marker, type Region } from "react-native-maps";
+import Svg, { Path } from "react-native-svg";
 import {
   AppState,
   type AppStateStatus,
@@ -12,6 +13,7 @@ import {
   GestureResponderEvent,
   KeyboardAvoidingView,
   Linking,
+  Modal,
   NativeModules,
   Platform,
   Pressable,
@@ -91,6 +93,11 @@ const BIG_BOOK_ROUTINE_TEXT: Record<string, string> = {
   [BIG_BOOK_86_88_ITEM_ID]: BIG_BOOK_86_88_READ_TEXT,
   [BIG_BOOK_60_63_ITEM_ID]: BIG_BOOK_60_63_READ_TEXT,
 };
+const MORNING_PRAYER_ITEM_IDS = new Set<string>([
+  THIRD_STEP_PRAYER_ITEM_ID,
+  SEVENTH_STEP_PRAYER_ITEM_ID,
+  ELEVENTH_STEP_PRAYER_ITEM_ID,
+]);
 
 type RecoveryMode = "A" | "B" | "C";
 type AppScreen = "LIST" | "DETAIL" | "SESSION" | "SIGNATURE";
@@ -128,6 +135,10 @@ type AttendanceRecord = {
   meetingName: string;
   meetingAddress: string;
   scheduledStartsAtLocal?: string | null;
+  meetingLat?: number | null;
+  meetingLng?: number | null;
+  meetingFormat?: "IN_PERSON" | "ONLINE" | "HYBRID";
+  captureMethod?: "attend-log" | "signature";
   startAt: string;
   endAt: string | null;
   durationSeconds: number | null;
@@ -137,6 +148,7 @@ type AttendanceRecord = {
   endLat: number | null;
   endLng: number | null;
   endAccuracyM: number | null;
+  inactive?: boolean;
   signaturePngBase64: string | null;
   pdfUri: string | null;
 };
@@ -165,12 +177,18 @@ type RoutineReaderBackScreen = "MORNING" | "NIGHTLY";
 type AttendanceViewFilter = "ALL" | "TODAY";
 type RoutineInventoryCategory = keyof Pick<
   NightlyInventoryDayState,
-  "resentful" | "selfSeeking" | "selfish" | "dishonest" | "afraid" | "apology"
+  "resentful" | "selfSeeking" | "selfish" | "dishonest" | "apology"
 >;
 type RoutineReaderState = {
   title: string;
   url: string | null;
   bodyText?: string | null;
+  itemId?: string | null;
+};
+type SignaturePoint = {
+  x: number;
+  y: number;
+  isStrokeStart: boolean;
 };
 
 type MapBoundaryCenter = {
@@ -215,6 +233,11 @@ type DriveSchedulePreview = {
   departAt: Date;
   notifyAt: Date;
   usesServiceCommitment: boolean;
+};
+
+type AttendanceValidationResult = {
+  valid: boolean;
+  reason: string;
 };
 
 type LocationIssue = "permission_denied" | "position_unavailable" | "unavailable" | null;
@@ -420,6 +443,84 @@ function parseMinutesFromHhmm(value: string): number {
     return 0;
   }
   return Math.max(0, Math.min(23, hours)) * 60 + Math.max(0, Math.min(59, minutes));
+}
+
+function parseScheduledStartForAttendance(record: AttendanceRecord): number | null {
+  const scheduled = record.scheduledStartsAtLocal;
+  if (!scheduled) {
+    return null;
+  }
+  const match = scheduled.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const base = new Date(record.startAt);
+  if (Number.isNaN(base.getTime())) {
+    return null;
+  }
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) {
+    return null;
+  }
+  const scheduledDate = new Date(base);
+  scheduledDate.setHours(
+    Math.max(0, Math.min(23, hours)),
+    Math.max(0, Math.min(59, minutes)),
+    0,
+    0,
+  );
+  return scheduledDate.getTime();
+}
+
+function validateAttendanceRecord(
+  record: AttendanceRecord,
+  requiresSignature: boolean,
+): AttendanceValidationResult {
+  const startAtMs = new Date(record.startAt).getTime();
+  if (!Number.isFinite(startAtMs)) {
+    return { valid: false, reason: "Invalid start time" };
+  }
+
+  const meetingLat = typeof record.meetingLat === "number" ? record.meetingLat : null;
+  const meetingLng = typeof record.meetingLng === "number" ? record.meetingLng : null;
+  const startLat = typeof record.startLat === "number" ? record.startLat : null;
+  const startLng = typeof record.startLng === "number" ? record.startLng : null;
+  if (meetingLat === null || meetingLng === null || startLat === null || startLng === null) {
+    return { valid: false, reason: "Missing geofence location" };
+  }
+
+  const startDistance = distanceMetersBetween(startLat, startLng, meetingLat, meetingLng);
+  if (startDistance > ARRIVAL_RADIUS_METERS) {
+    return { valid: false, reason: "Not within geofence at check-in" };
+  }
+
+  const scheduledStartMs = parseScheduledStartForAttendance(record);
+  if (scheduledStartMs === null) {
+    return { valid: false, reason: "Missing scheduled meeting time" };
+  }
+  const checkInWindowMs = 10 * 60 * 1000;
+  if (startAtMs - scheduledStartMs > checkInWindowMs) {
+    return { valid: false, reason: "Check-in was more than 10 minutes late" };
+  }
+
+  if (!record.endAt) {
+    return { valid: false, reason: "Missing end time" };
+  }
+  const endAtMs = new Date(record.endAt).getTime();
+  if (!Number.isFinite(endAtMs)) {
+    return { valid: false, reason: "Invalid end time" };
+  }
+  const minDurationMs = 50 * 60 * 1000;
+  if (endAtMs - startAtMs < minDurationMs) {
+    return { valid: false, reason: "Duration must be at least 50 minutes" };
+  }
+
+  if (requiresSignature && !record.signaturePngBase64) {
+    return { valid: false, reason: "Signature required" };
+  }
+
+  return { valid: true, reason: "Valid meeting" };
 }
 
 function formatHhmmForDisplay(value: string | null | undefined): string {
@@ -670,7 +771,7 @@ function encodeBase64(value: string): string {
 }
 
 function buildSignatureSvgBase64(
-  points: Array<{ x: number; y: number }>,
+  points: SignaturePoint[],
   width: number,
   height: number,
 ): string | null {
@@ -679,7 +780,10 @@ function buildSignatureSvgBase64(
   }
 
   const path = points
-    .map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`)
+    .map(
+      (point, index) =>
+        `${index === 0 || point.isStrokeStart ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`,
+    )
     .join(" ");
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(width)}" height="${Math.round(height)}" viewBox="0 0 ${Math.round(width)} ${Math.round(height)}"><rect width="100%" height="100%" fill="white"/><path d="${path}" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -959,10 +1063,11 @@ function formatError(error: unknown): string {
 function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     const runtime = globalThis as { require?: (name: string) => unknown };
-    if (typeof runtime.require !== "function") {
+    const dynamicRequire = typeof require === "function" ? require : runtime.require;
+    if (typeof dynamicRequire !== "function") {
       return null;
     }
-    return runtime.require(moduleName) as T;
+    return dynamicRequire(moduleName) as T;
   } catch {
     return null;
   }
@@ -1049,6 +1154,39 @@ function emptyNotificationBuckets(): NotificationBuckets {
 
 function locationGroupKeyForMeeting(meeting: MeetingListItem): string {
   return `${meeting.lat?.toFixed(5)},${meeting.lng?.toFixed(5)}|${meeting.address.trim()}`;
+}
+
+function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
+  return meetings
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry, index) => {
+      const safeId =
+        typeof entry.id === "string" && entry.id.trim().length > 0 ? entry.id : `meeting-${index}`;
+      const safeName =
+        typeof entry.name === "string" && entry.name.trim().length > 0
+          ? entry.name
+          : "Recovery Meeting";
+      const safeAddress =
+        typeof entry.address === "string" && entry.address.trim().length > 0
+          ? entry.address
+          : "Address unavailable";
+      const safeStartsAtLocal =
+        typeof entry.startsAtLocal === "string" && entry.startsAtLocal.trim().length > 0
+          ? entry.startsAtLocal
+          : "19:00";
+      const safeDayOfWeek = Number.isFinite(entry.dayOfWeek)
+        ? Math.max(0, Math.min(6, Math.round(entry.dayOfWeek)))
+        : 0;
+
+      return {
+        ...entry,
+        id: safeId,
+        name: safeName,
+        address: safeAddress,
+        startsAtLocal: safeStartsAtLocal,
+        dayOfWeek: safeDayOfWeek,
+      };
+    });
 }
 
 export default function App() {
@@ -1186,10 +1324,24 @@ export default function App() {
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportingAttendanceSelectionPdf, setExportingAttendanceSelectionPdf] = useState(false);
   const [selectedAttendanceIds, setSelectedAttendanceIds] = useState<string[]>([]);
+  const [showInactiveAttendance, setShowInactiveAttendance] = useState(false);
   const [sessionNowMs, setSessionNowMs] = useState(Date.now());
+  const [signatureCaptureMeeting, setSignatureCaptureMeeting] = useState<MeetingRecord | null>(
+    null,
+  );
 
-  const [signaturePoints, setSignaturePoints] = useState<Array<{ x: number; y: number }>>([]);
+  const [signaturePoints, setSignaturePoints] = useState<SignaturePoint[]>([]);
   const [signatureCanvasSize, setSignatureCanvasSize] = useState({ width: 320, height: 180 });
+  const signaturePreviewPath = useMemo(
+    () =>
+      signaturePoints
+        .map(
+          (point, index) =>
+            `${index === 0 || point.isStrokeStart ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`,
+        )
+        .join(" "),
+    [signaturePoints],
+  );
 
   const [sponsorName, setSponsorName] = useState("");
   const [sponsorPhoneDigits, setSponsorPhoneDigits] = useState("");
@@ -1222,6 +1374,10 @@ export default function App() {
   const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
   const [wizardWantsReminders, setWizardWantsReminders] = useState<boolean | null>(null);
   const [wizardHasHomeGroup, setWizardHasHomeGroup] = useState<boolean | null>(null);
+  const [wizardMeetingSignatureRequired, setWizardMeetingSignatureRequired] = useState<
+    boolean | null
+  >(null);
+  const [meetingSignatureRequired, setMeetingSignatureRequired] = useState(false);
   const [homeGroupMeetingIds, setHomeGroupMeetingIds] = useState<string[]>([]);
   const [sponsorEnabledAtIso, setSponsorEnabledAtIso] = useState<string | null>(null);
   const [, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
@@ -1246,6 +1402,7 @@ export default function App() {
   const locationIssueRef = useRef<LocationIssue>(null);
   const locationPermissionAlertShownRef = useRef(false);
   const mapRef = useRef<any>(null);
+  const rootScrollRef = useRef<ScrollView | null>(null);
   const meetingsRequestInFlightRef = useRef(false);
   const lastMeetingsRequestKeyRef = useRef<string | null>(null);
   const meetingsAutoRefreshKeyRef = useRef<string | null>(null);
@@ -1512,19 +1669,36 @@ export default function App() {
   }, [allMeetings]);
 
   const attendanceRecordsForView = useMemo(() => {
-    if (attendanceViewFilter === "ALL") {
-      return attendanceRecords;
+    const byDate =
+      attendanceViewFilter === "ALL"
+        ? attendanceRecords
+        : attendanceRecords.filter(
+            (record) => dateKeyForRoutines(new Date(record.startAt)) === routineDateKey,
+          );
+    if (showInactiveAttendance) {
+      return byDate;
     }
-    return attendanceRecords.filter(
-      (record) => dateKeyForRoutines(new Date(record.startAt)) === routineDateKey,
-    );
-  }, [attendanceRecords, attendanceViewFilter, routineDateKey]);
+    return byDate.filter((record) => !record.inactive);
+  }, [attendanceRecords, attendanceViewFilter, routineDateKey, showInactiveAttendance]);
+
+  const inactiveAttendanceCount = useMemo(
+    () => attendanceRecords.filter((record) => Boolean(record.inactive)).length,
+    [attendanceRecords],
+  );
 
   const selectedAttendanceVisibleCount = useMemo(
     () =>
       attendanceRecordsForView.filter((record) => selectedAttendanceIds.includes(record.id)).length,
     [attendanceRecordsForView, selectedAttendanceIds],
   );
+
+  const attendanceValidationById = useMemo(() => {
+    const byId = new Map<string, AttendanceValidationResult>();
+    for (const record of attendanceRecordsForView) {
+      byId.set(record.id, validateAttendanceRecord(record, meetingSignatureRequired));
+    }
+    return byId;
+  }, [attendanceRecordsForView, meetingSignatureRequired]);
 
   const dashboardUpcomingInPerson = useMemo(
     () => meetingsTodayUpcoming.filter((meeting) => meeting.format !== "ONLINE"),
@@ -1759,12 +1933,27 @@ export default function App() {
     const morningEnabledRows = routinesStore.morningTemplate.items
       .filter((item) => item.enabled)
       .map((item) => {
+        const completed = Boolean(morningRoutineDayState.completedByItemId[item.id]);
+        const prayerUsesOnKnees = MORNING_PRAYER_ITEM_IDS.has(item.id);
+        const onKnees = Boolean(morningRoutineDayState.prayerOnKneesByItemId[item.id]);
+        const progress = prayerUsesOnKnees
+          ? completed
+            ? onKnees
+              ? 100
+              : 50
+            : 0
+          : completed
+            ? 100
+            : 0;
         const itemLabel =
           item.id === ELEVENTH_STEP_PRAYER_ITEM_ID ? "11th Step AM Prayer" : item.title;
+        const kneesSuffix =
+          prayerUsesOnKnees && completed ? (onKnees ? " -knees" : " -no knees") : "";
         return {
           id: `morning-${item.id}`,
-          label: `Morning: ${itemLabel}`,
-          complete: Boolean(morningRoutineDayState.completedByItemId[item.id]),
+          label: `Morning: ${itemLabel}${kneesSuffix}`,
+          complete: progress >= 100,
+          progress,
         };
       });
     const meetingAttendanceLabel =
@@ -1776,32 +1965,37 @@ export default function App() {
       id: "meeting-attended",
       label: meetingAttendanceLabel,
       complete: attendedMeetingToday,
+      progress: attendedMeetingToday ? 100 : 0,
     };
-    const rows: Array<{ id: string; label: string; complete: boolean }> = [
+    const rows: Array<{ id: string; label: string; complete: boolean; progress: number }> = [
       ...morningEnabledRows,
       meetingAttendanceRow,
       {
         id: "nightly-inventory",
         label: "Nightly routine",
         complete: Boolean(nightlyInventoryDayState.completedAt),
+        progress: nightlyInventoryDayState.completedAt ? 100 : 0,
       },
       ...(nightlyInventoryDayState.eleventhStepPrayerEnabled
         ? [
-            {
-              id: "nightly-eleventh-step-prayer",
-              label: "Nightly: 11th Step Prayer",
-              complete: Boolean(nightlyInventoryDayState.eleventhStepPrayerCompletedAt),
-            },
+            (() => {
+              const completed = Boolean(nightlyInventoryDayState.eleventhStepPrayerCompletedAt);
+              const onKnees = Boolean(nightlyInventoryDayState.gotOnKneesCompleted);
+              const progress = completed ? (onKnees ? 100 : 50) : 0;
+              const kneesSuffix = completed ? (onKnees ? " -knees" : " -no knees") : "";
+              return {
+                id: "nightly-eleventh-step-prayer",
+                label: `Nightly: 11th Step Prayer${kneesSuffix}`,
+                complete: progress >= 100,
+                progress,
+              };
+            })(),
           ]
         : []),
-      {
-        id: "nightly-got-on-knees",
-        label: "Nightly: Got on knees",
-        complete: Boolean(nightlyInventoryDayState.gotOnKneesCompleted),
-      },
     ];
-    const completedCount = rows.filter((row) => row.complete).length;
-    const percent = rows.length > 0 ? Math.round((completedCount / rows.length) * 100) : 0;
+    const progressTotal = rows.reduce((sum, row) => sum + row.progress, 0);
+    const completedCount = rows.filter((row) => row.progress >= 100).length;
+    const percent = rows.length > 0 ? Math.round(progressTotal / rows.length) : 0;
     return {
       rows,
       percent,
@@ -1810,6 +2004,7 @@ export default function App() {
   }, [
     routinesStore.morningTemplate.items,
     morningRoutineDayState.completedByItemId,
+    morningRoutineDayState.prayerOnKneesByItemId,
     meetingsAttendedTodayCount,
     todayDateKey,
     nightlyInventoryDayState.completedAt,
@@ -2478,6 +2673,7 @@ export default function App() {
       title: "3rd Step Prayer",
       url: null,
       bodyText: THIRD_STEP_PRAYER_READ_TEXT,
+      itemId: THIRD_STEP_PRAYER_ITEM_ID,
     });
     setToolsScreen("READER");
   }, [completeMorningItemForCurrentDayIfEnabled]);
@@ -2534,6 +2730,7 @@ export default function App() {
       title: "7th Step Prayer",
       url: null,
       bodyText: SEVENTH_STEP_PRAYER_READ_TEXT,
+      itemId: SEVENTH_STEP_PRAYER_ITEM_ID,
     });
     setToolsScreen("READER");
   }, [completeMorningItemForCurrentDayIfEnabled]);
@@ -2551,6 +2748,7 @@ export default function App() {
       title: "11th Step AM Prayer",
       url: null,
       bodyText: ELEVENTH_STEP_AM_PRAYER_TEXT,
+      itemId: ELEVENTH_STEP_PRAYER_ITEM_ID,
     });
     setToolsScreen("READER");
   }, [completeMorningItemForCurrentDayIfEnabled]);
@@ -2574,6 +2772,7 @@ export default function App() {
       title: "11th Step Prayer",
       url: null,
       bodyText: ELEVENTH_STEP_NIGHTLY_PRAYER_TEXT,
+      itemId: null,
     });
     setToolsScreen("READER");
   }, [
@@ -2595,13 +2794,14 @@ export default function App() {
           title,
           url: null,
           bodyText: bigBookBodyText,
+          itemId,
         });
         setToolsScreen("READER");
         return;
       }
 
       setRoutineReaderBackScreen("MORNING");
-      setRoutineReader({ title, url, bodyText: null });
+      setRoutineReader({ title, url, bodyText: null, itemId });
       setToolsScreen("READER");
     },
     [completeMorningItemForCurrentDayIfEnabled],
@@ -2614,6 +2814,68 @@ export default function App() {
       setRoutinesStatus("Unable to open this link.");
     }
   }, []);
+
+  const routineReaderMorningPrayerItemId = useMemo(() => {
+    if (routineReaderBackScreen !== "MORNING") {
+      return null;
+    }
+    const itemId = routineReader?.itemId ?? null;
+    if (!itemId || !MORNING_PRAYER_ITEM_IDS.has(itemId)) {
+      return null;
+    }
+    return itemId;
+  }, [routineReaderBackScreen, routineReader?.itemId]);
+
+  const routineReaderShowsNightlyOnKneesToggle = useMemo(
+    () =>
+      routineReaderBackScreen === "NIGHTLY" && (routineReader?.title ?? "") === "11th Step Prayer",
+    [routineReaderBackScreen, routineReader?.title],
+  );
+
+  const routineReaderShowsOnKneesToggle =
+    routineReaderShowsNightlyOnKneesToggle || routineReaderMorningPrayerItemId !== null;
+
+  const routineReaderOnKneesCompleted = useMemo(() => {
+    if (routineReaderShowsNightlyOnKneesToggle) {
+      return nightlyInventoryDayState.gotOnKneesCompleted;
+    }
+    if (routineReaderMorningPrayerItemId) {
+      return Boolean(
+        morningRoutineDayState.prayerOnKneesByItemId[routineReaderMorningPrayerItemId],
+      );
+    }
+    return false;
+  }, [
+    routineReaderShowsNightlyOnKneesToggle,
+    nightlyInventoryDayState.gotOnKneesCompleted,
+    routineReaderMorningPrayerItemId,
+    morningRoutineDayState.prayerOnKneesByItemId,
+  ]);
+
+  const onToggleRoutineReaderOnKnees = useCallback(() => {
+    if (routineReaderShowsNightlyOnKneesToggle) {
+      updateNightlyDayState((day) => ({
+        ...day,
+        gotOnKneesCompleted: !day.gotOnKneesCompleted,
+      }));
+      return;
+    }
+    if (routineReaderMorningPrayerItemId) {
+      updateMorningDayState((day) => ({
+        ...day,
+        prayerOnKneesByItemId: {
+          ...day.prayerOnKneesByItemId,
+          [routineReaderMorningPrayerItemId]:
+            !day.prayerOnKneesByItemId[routineReaderMorningPrayerItemId],
+        },
+      }));
+    }
+  }, [
+    routineReaderShowsNightlyOnKneesToggle,
+    routineReaderMorningPrayerItemId,
+    updateNightlyDayState,
+    updateMorningDayState,
+  ]);
 
   const openDailyReflections = useCallback(
     async (source: "read" | "listen") => {
@@ -2680,20 +2942,21 @@ export default function App() {
   const exportNightlyInventoryForToday = useCallback(async () => {
     try {
       const dayState = nightlyInventoryDayState;
+      const mapEntriesWithFear = (entries: Array<{ text: string; fear?: string | null }>) =>
+        entries.map((entry) =>
+          entry.fear && entry.fear.trim().length > 0
+            ? `${entry.text} (Fear: ${entry.fear})`
+            : entry.text,
+        );
       const uri = await exportNightlyInventoryPdf({
         userLabel: devUserDisplayName,
         dateKey: routineDateKey,
         prompt: dayState.prompt,
         gotOnKneesCompleted: dayState.gotOnKneesCompleted,
-        resentful: dayState.resentful.map((entry) =>
-          entry.fear && entry.fear.trim().length > 0
-            ? `${entry.text} (Fear: ${entry.fear})`
-            : entry.text,
-        ),
-        selfSeeking: dayState.selfSeeking.map((entry) => entry.text),
-        selfish: dayState.selfish.map((entry) => entry.text),
-        dishonest: dayState.dishonest.map((entry) => entry.text),
-        afraid: dayState.afraid.map((entry) => entry.text),
+        resentful: mapEntriesWithFear(dayState.resentful),
+        selfSeeking: mapEntriesWithFear(dayState.selfSeeking),
+        selfish: mapEntriesWithFear(dayState.selfish),
+        dishonest: mapEntriesWithFear(dayState.dishonest),
         apology: dayState.apology.map((entry) => entry.text),
         notes: dayState.notes,
         completedAt: dayState.completedAt,
@@ -2714,8 +2977,11 @@ export default function App() {
     const dayState = nightlyInventoryDayState;
     const summarize = (label: string, values: Array<{ text: string }>) =>
       `${label}: ${values.length > 0 ? values.map((entry) => entry.text).join("; ") : "None"}`;
-    const summarizeResentful = (values: Array<{ text: string; fear?: string | null }>) =>
-      `Resentful: ${
+    const summarizeWithFear = (
+      label: string,
+      values: Array<{ text: string; fear?: string | null }>,
+    ) =>
+      `${label}: ${
         values.length > 0
           ? values
               .map((entry) =>
@@ -2729,11 +2995,10 @@ export default function App() {
     const body = [
       `Nightly Routine ${routineDateKey}`,
       `Got on knees: ${dayState.gotOnKneesCompleted ? "Yes" : "No"}`,
-      summarizeResentful(dayState.resentful),
-      summarize("Self-seeking", dayState.selfSeeking),
-      summarize("Selfish", dayState.selfish),
-      summarize("Dishonest", dayState.dishonest),
-      summarize("Afraid", dayState.afraid),
+      summarizeWithFear("Resentful", dayState.resentful),
+      summarizeWithFear("Self-seeking", dayState.selfSeeking),
+      summarizeWithFear("Selfish", dayState.selfish),
+      summarizeWithFear("Dishonest", dayState.dishonest),
       summarize("Apology", dayState.apology),
       `Notes: ${dayState.notes || "None"}`,
     ].join("\n");
@@ -2816,6 +3081,9 @@ export default function App() {
           dayOfWeek: selectedDay.dayOfWeek,
           ...requestParams,
         });
+        const selectedDayMeetings = sanitizeMeetingRecords(
+          Array.isArray(selectedDayResult.meetings) ? selectedDayResult.meetings : [],
+        );
 
         const todayScopedResult =
           selectedDay.dayOfWeek === todayDayOfWeek
@@ -2824,27 +3092,33 @@ export default function App() {
                 dayOfWeek: todayDayOfWeek,
                 ...requestParams,
               });
+        const todayScopedMeetings = sanitizeMeetingRecords(
+          Array.isArray(todayScopedResult.meetings) ? todayScopedResult.meetings : [],
+        );
 
         // Always merge in an unscoped "today" fetch so setup can offer all meetings for today's
         // home-group selection, not only meetings inside the nearby radius.
         const todayUnscopedResult = await source.listMeetings({
           dayOfWeek: todayDayOfWeek,
         });
+        const todayUnscopedMeetings = sanitizeMeetingRecords(
+          Array.isArray(todayUnscopedResult.meetings) ? todayUnscopedResult.meetings : [],
+        );
         const todayById = new Map<string, MeetingRecord>();
-        for (const meeting of todayUnscopedResult.meetings) {
+        for (const meeting of todayUnscopedMeetings) {
           todayById.set(meeting.id, meeting);
         }
-        for (const meeting of todayScopedResult.meetings) {
+        for (const meeting of todayScopedMeetings) {
           todayById.set(meeting.id, meeting);
         }
         const todayResultMeetings = Array.from(todayById.values());
 
-        setMeetings(selectedDayResult.meetings);
+        setMeetings(selectedDayMeetings);
         setTodayNearbyMeetings(todayResultMeetings);
 
-        if (!meetingsShapeLoggedRef.current && selectedDayResult.meetings.length > 0) {
+        if (!meetingsShapeLoggedRef.current && selectedDayMeetings.length > 0) {
           meetingsShapeLoggedRef.current = true;
-          console.log("[meetings] normalized sample", selectedDayResult.meetings[0]);
+          console.log("[meetings] normalized sample", selectedDayMeetings[0]);
         }
 
         const warningSuffix = selectedDayResult.warning ? ` (${selectedDayResult.warning})` : "";
@@ -2901,22 +3175,13 @@ export default function App() {
   const openAttendanceHub = useCallback(() => {
     setHomeScreen("ATTENDANCE");
     setAttendanceViewFilter("ALL");
+    setShowInactiveAttendance(false);
     setSelectedAttendanceIds([]);
     setAttendanceStatus("Viewing all logged meetings.");
     setToolsScreen("HOME");
     setScreen("LIST");
     setSelectedMeeting(null);
   }, []);
-
-  const openAttendanceTodayHub = useCallback(() => {
-    setHomeScreen("ATTENDANCE");
-    setAttendanceViewFilter("TODAY");
-    setSelectedAttendanceIds([]);
-    setAttendanceStatus(`Viewing meetings logged for ${routineDateKey}.`);
-    setToolsScreen("HOME");
-    setScreen("LIST");
-    setSelectedMeeting(null);
-  }, [routineDateKey]);
 
   const openToolsHub = useCallback(() => {
     setHomeScreen("TOOLS");
@@ -2999,11 +3264,12 @@ export default function App() {
     setHomeScreen("SETUP");
     setSetupStep(1);
     setSetupError(null);
+    setWizardMeetingSignatureRequired(meetingSignatureRequired);
     setScreen("LIST");
     setSelectedMeeting(null);
     setSelectedDayOffset(0);
     void refreshMeetings();
-  }, [refreshMeetings]);
+  }, [refreshMeetings, meetingSignatureRequired]);
 
   const nextSetupStep = useCallback(async () => {
     setSetupError(null);
@@ -3096,6 +3362,10 @@ export default function App() {
         setSetupError("Select a home group meeting.");
         return;
       }
+      if (wizardMeetingSignatureRequired === null) {
+        setSetupError("Choose whether signatures are required at meetings.");
+        return;
+      }
       setSetupStep(6);
     }
   }, [
@@ -3110,6 +3380,7 @@ export default function App() {
     sponsorRepeatDaysSorted.length,
     wizardHasHomeGroup,
     homeGroupMeetingIds.length,
+    wizardMeetingSignatureRequired,
   ]);
 
   const previousSetupStep = useCallback(() => {
@@ -3969,10 +4240,16 @@ export default function App() {
       setSetupStep(5);
       return;
     }
+    if (wizardMeetingSignatureRequired === null) {
+      setSetupError("Choose whether signatures are required at meetings.");
+      setSetupStep(5);
+      return;
+    }
 
     setSobrietyDateIso(parsedDateIso);
     setNinetyDayGoalTarget(parsedGoal);
     setNinetyDayGoalInput(String(parsedGoal));
+    setMeetingSignatureRequired(wizardMeetingSignatureRequired);
     setSponsorEnabled(hasSponsor);
     setSponsorActive(wantsReminders);
     if (!hasSponsor) {
@@ -4013,6 +4290,7 @@ export default function App() {
     sponsorRepeatDaysSorted.length,
     wizardHasHomeGroup,
     homeGroupMeetingIds.length,
+    wizardMeetingSignatureRequired,
     cancelNotificationBucket,
     saveSponsorConfig,
     refreshMeetings,
@@ -4086,6 +4364,10 @@ export default function App() {
         meetingName: meeting.name,
         meetingAddress: meeting.address,
         scheduledStartsAtLocal: meeting.startsAtLocal ?? null,
+        meetingLat: meeting.lat ?? null,
+        meetingLng: meeting.lng ?? null,
+        meetingFormat: meeting.format,
+        captureMethod: "attend-log",
         startAt: nowIso,
         endAt: null,
         durationSeconds: null,
@@ -4095,11 +4377,13 @@ export default function App() {
         endLat: null,
         endLng: null,
         endAccuracyM: null,
+        inactive: false,
         signaturePngBase64: null,
         pdfUri: null,
       };
 
       setActiveAttendance(next);
+      setSignatureCaptureMeeting(null);
       upsertAttendanceRecord(next);
       setAttendanceStatus(`Attendance started at ${new Date(nowIso).toLocaleTimeString()}.`);
       setScreen("SESSION");
@@ -4140,9 +4424,29 @@ export default function App() {
     setScreen("SIGNATURE");
   }, [activeAttendance, readCurrentLocation, upsertAttendanceRecord, appendMeetingAttendanceLog]);
 
-  const saveSignature = useCallback(() => {
-    if (!activeAttendance || !activeAttendance.endAt) {
-      setAttendanceStatus("End attendance before saving signature.");
+  const openMeetingSignatureCapture = useCallback(
+    (meeting: MeetingRecord) => {
+      if (activeAttendance && !activeAttendance.endAt) {
+        setAttendanceStatus("End current attendance before capturing a meeting-only signature.");
+        return;
+      }
+      setSignatureCaptureMeeting(meeting);
+      setSignaturePoints([]);
+      setSelectedMeeting(meeting);
+      setHomeScreen("MEETINGS");
+      setMeetingsViewMode("LIST");
+      setScreen("SIGNATURE");
+      setAttendanceStatus(`Capture signature for ${meeting.name}.`);
+      setTimeout(() => {
+        rootScrollRef.current?.scrollTo({ y: 0, animated: true });
+      }, 0);
+    },
+    [activeAttendance],
+  );
+
+  const saveSignature = useCallback(async () => {
+    if (!activeAttendance && !signatureCaptureMeeting) {
+      setAttendanceStatus("Open signature capture from a meeting first.");
       return;
     }
 
@@ -4157,17 +4461,71 @@ export default function App() {
       return;
     }
 
-    const next: AttendanceRecord = {
-      ...activeAttendance,
+    if (activeAttendance && activeAttendance.endAt) {
+      const next: AttendanceRecord = {
+        ...activeAttendance,
+        signaturePngBase64: signatureSvgBase64,
+      };
+
+      setActiveAttendance(next);
+      upsertAttendanceRecord(next);
+      setSignaturePoints([]);
+      setAttendanceStatus("Signature saved.");
+      setScreen("SESSION");
+      return;
+    }
+
+    if (!signatureCaptureMeeting) {
+      setAttendanceStatus("End attendance before saving signature.");
+      return;
+    }
+
+    const location = await readCurrentLocation(false);
+    const nowIso = new Date().toISOString();
+    const signatureOnlyRecord: AttendanceRecord = {
+      id: createId("attendance"),
+      meetingId: signatureCaptureMeeting.id,
+      meetingName: signatureCaptureMeeting.name,
+      meetingAddress: signatureCaptureMeeting.address,
+      scheduledStartsAtLocal: signatureCaptureMeeting.startsAtLocal ?? null,
+      meetingLat: signatureCaptureMeeting.lat ?? null,
+      meetingLng: signatureCaptureMeeting.lng ?? null,
+      meetingFormat: signatureCaptureMeeting.format,
+      captureMethod: "signature",
+      startAt: nowIso,
+      endAt: nowIso,
+      durationSeconds: 0,
+      startLat: location?.lat ?? null,
+      startLng: location?.lng ?? null,
+      startAccuracyM: location?.accuracyM ?? null,
+      endLat: location?.lat ?? null,
+      endLng: location?.lng ?? null,
+      endAccuracyM: location?.accuracyM ?? null,
+      inactive: false,
       signaturePngBase64: signatureSvgBase64,
+      pdfUri: null,
     };
 
-    setActiveAttendance(next);
-    upsertAttendanceRecord(next);
+    upsertAttendanceRecord(signatureOnlyRecord);
+    appendMeetingAttendanceLog({
+      meetingId: signatureOnlyRecord.meetingId,
+      method: "manual",
+    });
     setSignaturePoints([]);
-    setAttendanceStatus("Signature saved.");
-    setScreen("SESSION");
-  }, [activeAttendance, signaturePoints, signatureCanvasSize, upsertAttendanceRecord]);
+    setSignatureCaptureMeeting(null);
+    setAttendanceStatus(
+      "Signature captured and meeting log saved (provisional red X until duration and location requirements are met).",
+    );
+    setScreen("LIST");
+  }, [
+    activeAttendance,
+    signatureCaptureMeeting,
+    signaturePoints,
+    signatureCanvasSize,
+    upsertAttendanceRecord,
+    appendMeetingAttendanceLog,
+    readCurrentLocation,
+  ]);
 
   const exportAttendance = useCallback(async () => {
     if (!activeAttendance || !activeAttendance.endAt || activeAttendance.durationSeconds === null) {
@@ -4340,13 +4698,29 @@ export default function App() {
           dialogTitle: fileName,
         });
       }
-      setAttendanceStatus(`Exported ${selectedRecords.length} meeting record(s).`);
+      const archivedIds = new Set(selectedRecords.map((record) => record.id));
+      setAttendanceRecords((previous) => {
+        const next = previous.map((record) =>
+          archivedIds.has(record.id) ? { ...record, inactive: true } : record,
+        );
+        void persistAttendanceRecords(next);
+        return next;
+      });
+      setSelectedAttendanceIds((current) => current.filter((id) => !archivedIds.has(id)));
+      setAttendanceStatus(
+        `Exported ${selectedRecords.length} meeting record(s) and hid them from active view.`,
+      );
     } catch (error) {
       setAttendanceStatus(`Failed to export selected attendance: ${formatError(error)}`);
     } finally {
       setExportingAttendanceSelectionPdf(false);
     }
-  }, [attendanceRecordsForView, selectedAttendanceIds, devUserDisplayName]);
+  }, [
+    attendanceRecordsForView,
+    selectedAttendanceIds,
+    devUserDisplayName,
+    persistAttendanceRecords,
+  ]);
 
   const shareSelectedAttendanceText = useCallback(async () => {
     const selectedRecords = attendanceRecordsForView.filter((record) =>
@@ -4581,6 +4955,18 @@ export default function App() {
       );
     },
     [activeAttendance, readCurrentLocation, resolveMeetingForLogging, startAttendance],
+  );
+
+  const captureMeetingSignatureFromDashboard = useCallback(
+    (meetingId: string) => {
+      const meeting = resolveMeetingForLogging(meetingId);
+      if (!meeting) {
+        Alert.alert("Meeting unavailable", "This meeting is no longer in the upcoming list.");
+        return;
+      }
+      openMeetingSignatureCapture(meeting);
+    },
+    [resolveMeetingForLogging, openMeetingSignatureCapture],
   );
 
   const scheduleDebugSponsorNotification = useCallback(async () => {
@@ -4855,7 +5241,12 @@ export default function App() {
         if (attendanceRaw) {
           const parsedAttendance = JSON.parse(attendanceRaw) as AttendanceRecord[];
           if (Array.isArray(parsedAttendance)) {
-            setAttendanceRecords(parsedAttendance);
+            setAttendanceRecords(
+              parsedAttendance.map((record) => ({
+                ...record,
+                inactive: Boolean(record.inactive),
+              })),
+            );
           }
         }
 
@@ -4882,6 +5273,7 @@ export default function App() {
             homeGroupMeetingIds?: string[];
             sponsorEnabledAtIso?: string | null;
             ninetyDayGoalTarget?: number;
+            meetingSignatureRequired?: boolean;
           };
           if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
             setMeetingRadiusMiles(parsedProfile.radiusMiles);
@@ -4909,6 +5301,10 @@ export default function App() {
             );
             setNinetyDayGoalTarget(nextGoal);
             setNinetyDayGoalInput(String(nextGoal));
+          }
+          if (typeof parsedProfile.meetingSignatureRequired === "boolean") {
+            setMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
+            setWizardMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
           }
         }
 
@@ -5089,6 +5485,7 @@ export default function App() {
         homeGroupMeetingIds,
         sponsorEnabledAtIso,
         ninetyDayGoalTarget,
+        meetingSignatureRequired,
       }),
     );
   }, [
@@ -5096,6 +5493,7 @@ export default function App() {
     homeGroupMeetingIds,
     sponsorEnabledAtIso,
     ninetyDayGoalTarget,
+    meetingSignatureRequired,
     profileStorage,
     bootstrapped,
   ]);
@@ -5429,11 +5827,42 @@ export default function App() {
     setSelectedDayOffset(option.offset);
   }
 
-  function addSignaturePoint(event: GestureResponderEvent) {
+  function addSignaturePoint(event: GestureResponderEvent, isStrokeStart = false) {
     const x = Math.max(0, Math.min(signatureCanvasSize.width, event.nativeEvent.locationX));
     const y = Math.max(0, Math.min(signatureCanvasSize.height, event.nativeEvent.locationY));
-    setSignaturePoints((previous) => [...previous, { x, y }]);
+    setSignaturePoints((previous) => {
+      if (previous.length === 0 || isStrokeStart) {
+        return [...previous, { x, y, isStrokeStart }];
+      }
+
+      const last = previous[previous.length - 1];
+      const deltaX = x - last.x;
+      const deltaY = y - last.y;
+      const distance = Math.hypot(deltaX, deltaY);
+      if (!Number.isFinite(distance) || distance < 0.8) {
+        return previous;
+      }
+
+      const sampleStep = 1.5;
+      const samples = Math.max(1, Math.ceil(distance / sampleStep));
+      const additions: SignaturePoint[] = [];
+      for (let index = 1; index <= samples; index += 1) {
+        const ratio = index / samples;
+        additions.push({
+          x: last.x + deltaX * ratio,
+          y: last.y + deltaY * ratio,
+          isStrokeStart: false,
+        });
+      }
+
+      return [...previous, ...additions];
+    });
   }
+
+  const isSignatureCaptureVisible =
+    homeScreen === "MEETINGS" &&
+    screen === "SIGNATURE" &&
+    (activeAttendance || signatureCaptureMeeting);
 
   const showFixedBottomMenu =
     mode === "A" &&
@@ -5442,9 +5871,7 @@ export default function App() {
       homeScreen === "MEETINGS" ||
       homeScreen === "ATTENDANCE" ||
       homeScreen === "TOOLS");
-  // Keep dashboard content scrollable from the parent container so users can reach
-  // the Upcoming Meetings tile reliably on all devices.
-  const shouldLockOuterScrollForDashboard = false;
+  const shouldLockOuterScroll = isSignatureCaptureVisible;
 
   return (
     <LiquidBackground>
@@ -5454,13 +5881,14 @@ export default function App() {
         keyboardVerticalOffset={24}
       >
         <ScrollView
+          ref={rootScrollRef}
           style={showFixedBottomMenu ? styles.scrollViewWithFooterNav : undefined}
           contentContainerStyle={[
             styles.contentContainer,
             showFixedBottomMenu ? styles.contentContainerWithFooterNav : null,
           ]}
-          pointerEvents={shouldLockOuterScrollForDashboard ? "box-none" : "auto"}
-          scrollEnabled={!shouldLockOuterScrollForDashboard}
+          pointerEvents={shouldLockOuterScroll ? "box-none" : "auto"}
+          scrollEnabled={!shouldLockOuterScroll}
           scrollIndicatorInsets={{ bottom: showFixedBottomMenu ? DASHBOARD_FOOTER_NAV_HEIGHT : 24 }}
           keyboardShouldPersistTaps="handled"
         >
@@ -5890,6 +6318,48 @@ export default function App() {
                           )}
                         </>
                       ) : null}
+
+                      <Text style={styles.label}>
+                        Are you required to obtain a signature at meetings?
+                      </Text>
+                      <View style={styles.chipRow}>
+                        <Pressable
+                          style={[
+                            styles.chip,
+                            wizardMeetingSignatureRequired === true ? styles.chipSelected : null,
+                          ]}
+                          onPress={() => setWizardMeetingSignatureRequired(true)}
+                        >
+                          <Text
+                            style={[
+                              styles.chipText,
+                              wizardMeetingSignatureRequired === true
+                                ? styles.chipTextSelected
+                                : null,
+                            ]}
+                          >
+                            Yes
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          style={[
+                            styles.chip,
+                            wizardMeetingSignatureRequired === false ? styles.chipSelected : null,
+                          ]}
+                          onPress={() => setWizardMeetingSignatureRequired(false)}
+                        >
+                          <Text
+                            style={[
+                              styles.chipText,
+                              wizardMeetingSignatureRequired === false
+                                ? styles.chipTextSelected
+                                : null,
+                            ]}
+                          >
+                            No
+                          </Text>
+                        </Pressable>
+                      </View>
                     </>
                   ) : null}
 
@@ -5913,6 +6383,9 @@ export default function App() {
                           ? (allMeetings.find((meeting) => meeting.id === homeGroupMeetingIds[0])
                               ?.name ?? "Selected")
                           : "Not selected"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Signature required: {wizardMeetingSignatureRequired ? "Yes" : "No"}
                       </Text>
                     </>
                   ) : null}
@@ -5997,7 +6470,6 @@ export default function App() {
                   onOpenMeetings={openMeetingsHub}
                   onOpenRecoverySettings={openSettingsHub}
                   onOpenAttendance={openAttendanceHub}
-                  onOpenAttendanceToday={openAttendanceTodayHub}
                   onOpenTools={openToolsHub}
                   onOpenSoberHousingSettings={openSoberHousingSettings}
                   onOpenProbationParoleSettings={openProbationParoleSettings}
@@ -6010,423 +6482,458 @@ export default function App() {
                   onLogMeeting={(meetingId) => {
                     void logUpcomingMeetingFromDashboard(meetingId);
                   }}
+                  onCaptureSignature={(meetingId) => {
+                    captureMeetingSignatureFromDashboard(meetingId);
+                  }}
                   onLearnMore={openSettingsHub}
                 />
               ) : null}
 
               {homeScreen === "MEETINGS" ? (
-                <GlassCard style={styles.card} strong>
-                  <View style={styles.inlineRow}>
-                    <Text style={styles.sectionTitle}>Meetings</Text>
-                    <GlassCard style={styles.meetingsBackPill} darken blurIntensity={14}>
-                      <Pressable onPress={openDashboard} style={styles.meetingsBackPillButton}>
-                        <Text style={styles.meetingsBackPillText}>Back to Dashboard</Text>
-                      </Pressable>
-                    </GlassCard>
-                  </View>
-
-                  <Text style={styles.sectionMeta}>
-                    Upcoming meetings for {selectedDay.label} within {meetingRadiusMiles} miles.
-                  </Text>
-                  <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
-                  {meetingsError ? <Text style={styles.errorText}>{meetingsError}</Text> : null}
-
-                  <View style={styles.meetingsFiltersRow}>
-                    <View style={styles.meetingsFilterItem}>
-                      <Text style={styles.meetingsFilterLabel}>Style</Text>
-                      <Pressable
-                        style={[
-                          styles.filterDropdownTrigger,
-                          openMeetingsFilterDropdown === "FORMAT"
-                            ? styles.filterDropdownTriggerOpen
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setOpenMeetingsFilterDropdown((current) =>
-                            current === "FORMAT" ? null : "FORMAT",
-                          )
-                        }
-                      >
-                        <Text
-                          style={styles.filterDropdownValue}
-                          numberOfLines={1}
-                          ellipsizeMode="tail"
-                        >
-                          {selectedMeetingsFormatLabel}
-                        </Text>
-                        <Text style={styles.filterDropdownChevron}>
-                          {openMeetingsFilterDropdown === "FORMAT" ? "▲" : "▼"}
-                        </Text>
-                      </Pressable>
-                      {openMeetingsFilterDropdown === "FORMAT" ? (
-                        <View style={styles.filterDropdownMenu}>
-                          {MEETINGS_FORMAT_OPTIONS.map((option) => {
-                            const selected = meetingsFormatFilter === option.value;
-                            return (
-                              <Pressable
-                                key={option.value}
-                                style={styles.filterDropdownOption}
-                                onPress={() => {
-                                  setMeetingsFormatFilter(option.value);
-                                  setOpenMeetingsFilterDropdown(null);
-                                }}
-                              >
-                                <Text
-                                  style={[
-                                    styles.filterDropdownOptionText,
-                                    selected ? styles.filterDropdownOptionTextSelected : null,
-                                  ]}
-                                  numberOfLines={1}
-                                  ellipsizeMode="tail"
-                                >
-                                  {option.label}
-                                </Text>
-                                {selected ? (
-                                  <Text style={styles.filterDropdownOptionCheck}>✓</Text>
-                                ) : null}
-                              </Pressable>
-                            );
-                          })}
-                        </View>
-                      ) : null}
+                <>
+                  <GlassCard style={styles.card} strong>
+                    <View style={styles.inlineRow}>
+                      <Text style={styles.sectionTitle}>Meetings</Text>
+                      <GlassCard style={styles.meetingsBackPill} darken blurIntensity={14}>
+                        <Pressable onPress={openDashboard} style={styles.meetingsBackPillButton}>
+                          <Text style={styles.meetingsBackPillText}>Back to Dashboard</Text>
+                        </Pressable>
+                      </GlassCard>
                     </View>
 
-                    <View style={styles.meetingsFilterItem}>
-                      <Text style={styles.meetingsFilterLabel}>Day</Text>
-                      <Pressable
-                        style={[
-                          styles.filterDropdownTrigger,
-                          openMeetingsFilterDropdown === "DAY"
-                            ? styles.filterDropdownTriggerOpen
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setOpenMeetingsFilterDropdown((current) =>
-                            current === "DAY" ? null : "DAY",
-                          )
-                        }
-                      >
-                        <Text
-                          style={styles.filterDropdownValue}
-                          numberOfLines={1}
-                          ellipsizeMode="tail"
-                        >
-                          {selectedMeetingsDayLabel}
-                        </Text>
-                        <Text style={styles.filterDropdownChevron}>
-                          {openMeetingsFilterDropdown === "DAY" ? "▲" : "▼"}
-                        </Text>
-                      </Pressable>
-                      {openMeetingsFilterDropdown === "DAY" ? (
-                        <View style={styles.filterDropdownMenu}>
-                          {dayOptions.map((option) => {
-                            const selected = selectedDayOffset === option.offset;
-                            return (
-                              <Pressable
-                                key={option.offset}
-                                style={styles.filterDropdownOption}
-                                onPress={() => {
-                                  onDayPress(option);
-                                  setOpenMeetingsFilterDropdown(null);
-                                }}
-                              >
-                                <Text
-                                  style={[
-                                    styles.filterDropdownOptionText,
-                                    selected ? styles.filterDropdownOptionTextSelected : null,
-                                  ]}
-                                  numberOfLines={1}
-                                  ellipsizeMode="tail"
-                                >
-                                  {option.label}
-                                </Text>
-                                {selected ? (
-                                  <Text style={styles.filterDropdownOptionCheck}>✓</Text>
-                                ) : null}
-                              </Pressable>
-                            );
-                          })}
-                        </View>
-                      ) : null}
-                    </View>
+                    <Text style={styles.sectionMeta}>
+                      Upcoming meetings for {selectedDay.label} within {meetingRadiusMiles} miles.
+                    </Text>
+                    <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
+                    {meetingsError ? <Text style={styles.errorText}>{meetingsError}</Text> : null}
 
-                    <View style={styles.meetingsFilterItem}>
-                      <Text style={styles.meetingsFilterLabel}>Time</Text>
-                      <Pressable
-                        style={[
-                          styles.filterDropdownTrigger,
-                          openMeetingsFilterDropdown === "TIME"
-                            ? styles.filterDropdownTriggerOpen
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setOpenMeetingsFilterDropdown((current) =>
-                            current === "TIME" ? null : "TIME",
-                          )
-                        }
-                      >
-                        <Text
-                          style={styles.filterDropdownValue}
-                          numberOfLines={1}
-                          ellipsizeMode="tail"
-                        >
-                          {selectedMeetingsTimeLabel}
-                        </Text>
-                        <Text style={styles.filterDropdownChevron}>
-                          {openMeetingsFilterDropdown === "TIME" ? "▲" : "▼"}
-                        </Text>
-                      </Pressable>
-                      {openMeetingsFilterDropdown === "TIME" ? (
-                        <View style={styles.filterDropdownMenu}>
-                          {MEETINGS_TIME_OPTIONS.map((option) => {
-                            const selected = meetingsTimeFilter === option.value;
-                            return (
-                              <Pressable
-                                key={option.value}
-                                style={styles.filterDropdownOption}
-                                onPress={() => {
-                                  setMeetingsTimeFilter(option.value);
-                                  setOpenMeetingsFilterDropdown(null);
-                                }}
-                              >
-                                <Text
-                                  style={[
-                                    styles.filterDropdownOptionText,
-                                    selected ? styles.filterDropdownOptionTextSelected : null,
-                                  ]}
-                                  numberOfLines={1}
-                                  ellipsizeMode="tail"
-                                >
-                                  {option.label}
-                                </Text>
-                                {selected ? (
-                                  <Text style={styles.filterDropdownOptionCheck}>✓</Text>
-                                ) : null}
-                              </Pressable>
-                            );
-                          })}
-                        </View>
-                      ) : null}
-                    </View>
-
-                    <View style={styles.meetingsFilterItem}>
-                      <Text style={styles.meetingsFilterLabel}>Location</Text>
-                      <Pressable
-                        style={[
-                          styles.filterDropdownTrigger,
-                          openMeetingsFilterDropdown === "LOCATION"
-                            ? styles.filterDropdownTriggerOpen
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setOpenMeetingsFilterDropdown((current) =>
-                            current === "LOCATION" ? null : "LOCATION",
-                          )
-                        }
-                      >
-                        <Text
-                          style={styles.filterDropdownValue}
-                          numberOfLines={1}
-                          ellipsizeMode="tail"
-                        >
-                          {selectedMeetingsLocationLabel}
-                        </Text>
-                        <Text style={styles.filterDropdownChevron}>
-                          {openMeetingsFilterDropdown === "LOCATION" ? "▲" : "▼"}
-                        </Text>
-                      </Pressable>
-                      {openMeetingsFilterDropdown === "LOCATION" ? (
-                        <View style={styles.filterDropdownMenu}>
-                          {MEETINGS_LOCATION_OPTIONS.map((option) => {
-                            const selected = meetingsLocationFilter === option.value;
-                            return (
-                              <Pressable
-                                key={option.value}
-                                style={styles.filterDropdownOption}
-                                onPress={() => {
-                                  const nextRadiusMiles = radiusMilesFromMeetingsLocationFilter(
-                                    option.value,
-                                    defaultMeetingRadiusMiles,
-                                  );
-                                  setMeetingsLocationFilter(option.value);
-                                  setMeetingRadiusMiles(nextRadiusMiles);
-                                  setOpenMeetingsFilterDropdown(null);
-                                }}
-                              >
-                                <Text
-                                  style={[
-                                    styles.filterDropdownOptionText,
-                                    selected ? styles.filterDropdownOptionTextSelected : null,
-                                  ]}
-                                  numberOfLines={1}
-                                  ellipsizeMode="tail"
-                                >
-                                  {option.label}
-                                </Text>
-                                {selected ? (
-                                  <Text style={styles.filterDropdownOptionCheck}>✓</Text>
-                                ) : null}
-                              </Pressable>
-                            );
-                          })}
-                        </View>
-                      ) : null}
-                    </View>
-                  </View>
-
-                  {loadingMeetings ? (
-                    <Text style={styles.sectionMeta}>Loading meetings...</Text>
-                  ) : null}
-
-                  {screen === "LIST" ? (
-                    <>
-                      {meetingsForMeetingsScreen.map((meeting) => (
-                        <View key={meeting.id} style={styles.meetingCard}>
-                          <Text style={styles.meetingName}>{meeting.name}</Text>
-                          <Text style={styles.sectionMeta}>
-                            {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
-                            {meeting.format || "Unknown"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            {meeting.format === "ONLINE"
-                              ? "Online"
-                              : meeting.address || "Unknown address"}{" "}
-                            • {formatDistance(meeting.distanceMeters)}
-                          </Text>
-
-                          <View style={styles.buttonRow}>
-                            <AppButton
-                              title="Attend & Log"
-                              onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
-                              variant="secondary"
-                            />
-                          </View>
-
-                          <Pressable
-                            style={styles.detailButton}
-                            onPress={() => {
-                              setSelectedMeeting(meeting);
-                              setScreen("DETAIL");
-                            }}
-                          >
-                            <Text style={styles.detailButtonText}>View details</Text>
-                          </Pressable>
-                        </View>
-                      ))}
-
-                      {!loadingMeetings && meetingsForMeetingsScreen.length === 0 ? (
-                        <Text style={styles.sectionMeta}>
-                          {selectedDayIsPast
-                            ? "No upcoming meetings for a past day."
-                            : selectedDayIsToday
-                              ? "No upcoming meetings remaining today."
-                              : "No upcoming meetings for this day."}
-                        </Text>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {screen === "DETAIL" && selectedMeeting ? (
-                    <View style={styles.meetingCard}>
-                      <Text style={styles.meetingName}>{selectedMeeting.name}</Text>
-                      <Text style={styles.sectionMeta}>
-                        {selectedMeeting.address || "Unknown address"}
-                      </Text>
-                      <Text style={styles.sectionMeta}>
-                        {formatHhmmForDisplay(selectedMeeting.startsAtLocal)} •{" "}
-                        {selectedMeeting.openness || "Unknown"} •{" "}
-                        {selectedMeeting.format || "Unknown"}
-                      </Text>
-
-                      <Pressable
-                        style={styles.checkboxRow}
-                        onPress={() => toggleHomeGroupMeeting(selectedMeeting.id)}
-                      >
-                        <View
+                    <View style={styles.meetingsFiltersRow}>
+                      <View style={styles.meetingsFilterItem}>
+                        <Text style={styles.meetingsFilterLabel}>Style</Text>
+                        <Pressable
                           style={[
-                            styles.checkbox,
-                            selectedMeetingIsHomeGroup ? styles.checkboxChecked : null,
+                            styles.filterDropdownTrigger,
+                            openMeetingsFilterDropdown === "FORMAT"
+                              ? styles.filterDropdownTriggerOpen
+                              : null,
                           ]}
+                          onPress={() =>
+                            setOpenMeetingsFilterDropdown((current) =>
+                              current === "FORMAT" ? null : "FORMAT",
+                            )
+                          }
                         >
-                          {selectedMeetingIsHomeGroup ? (
-                            <Text style={styles.checkboxTick}>✓</Text>
-                          ) : null}
-                        </View>
-                        <Text style={styles.label}>Home group</Text>
-                      </Pressable>
-
-                      <View style={styles.inlineRowGap}>
-                        <Text style={styles.sectionMeta}>Arrive early (mins)</Text>
-                        <TextInput
-                          style={styles.smallInput}
-                          value={String(selectedMeetingPlan.earlyMinutes)}
-                          keyboardType="number-pad"
-                          maxLength={2}
-                          onChangeText={(value) =>
-                            setMeetingEarlyMinutes(selectedMeeting.id, value)
-                          }
-                        />
+                          <Text
+                            style={styles.filterDropdownValue}
+                            numberOfLines={1}
+                            ellipsizeMode="tail"
+                          >
+                            {selectedMeetingsFormatLabel}
+                          </Text>
+                          <Text style={styles.filterDropdownChevron}>
+                            {openMeetingsFilterDropdown === "FORMAT" ? "▲" : "▼"}
+                          </Text>
+                        </Pressable>
+                        {openMeetingsFilterDropdown === "FORMAT" ? (
+                          <View style={styles.filterDropdownMenu}>
+                            {MEETINGS_FORMAT_OPTIONS.map((option) => {
+                              const selected = meetingsFormatFilter === option.value;
+                              return (
+                                <Pressable
+                                  key={option.value}
+                                  style={styles.filterDropdownOption}
+                                  onPress={() => {
+                                    setMeetingsFormatFilter(option.value);
+                                    setOpenMeetingsFilterDropdown(null);
+                                  }}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.filterDropdownOptionText,
+                                      selected ? styles.filterDropdownOptionTextSelected : null,
+                                    ]}
+                                    numberOfLines={1}
+                                    ellipsizeMode="tail"
+                                  >
+                                    {option.label}
+                                  </Text>
+                                  {selected ? (
+                                    <Text style={styles.filterDropdownOptionCheck}>✓</Text>
+                                  ) : null}
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                        ) : null}
                       </View>
 
-                      <View style={styles.inlineRowGap}>
-                        <Text style={styles.sectionMeta}>End meeting (mins)</Text>
-                        <TextInput
-                          style={styles.smallInput}
-                          value={String(
-                            selectedMeetingPlan.serviceCommitmentMinutes ??
-                              DEFAULT_SERVICE_COMMITMENT_MINUTES,
-                          )}
-                          keyboardType="number-pad"
-                          maxLength={2}
-                          editable={selectedMeetingIsHomeGroup}
-                          onChangeText={(value) =>
-                            setServiceCommitmentMinutes(selectedMeeting.id, value)
+                      <View style={styles.meetingsFilterItem}>
+                        <Text style={styles.meetingsFilterLabel}>Day</Text>
+                        <Pressable
+                          style={[
+                            styles.filterDropdownTrigger,
+                            openMeetingsFilterDropdown === "DAY"
+                              ? styles.filterDropdownTriggerOpen
+                              : null,
+                          ]}
+                          onPress={() =>
+                            setOpenMeetingsFilterDropdown((current) =>
+                              current === "DAY" ? null : "DAY",
+                            )
                           }
-                        />
+                        >
+                          <Text
+                            style={styles.filterDropdownValue}
+                            numberOfLines={1}
+                            ellipsizeMode="tail"
+                          >
+                            {selectedMeetingsDayLabel}
+                          </Text>
+                          <Text style={styles.filterDropdownChevron}>
+                            {openMeetingsFilterDropdown === "DAY" ? "▲" : "▼"}
+                          </Text>
+                        </Pressable>
+                        {openMeetingsFilterDropdown === "DAY" ? (
+                          <View style={styles.filterDropdownMenu}>
+                            {dayOptions.map((option) => {
+                              const selected = selectedDayOffset === option.offset;
+                              return (
+                                <Pressable
+                                  key={option.offset}
+                                  style={styles.filterDropdownOption}
+                                  onPress={() => {
+                                    onDayPress(option);
+                                    setOpenMeetingsFilterDropdown(null);
+                                  }}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.filterDropdownOptionText,
+                                      selected ? styles.filterDropdownOptionTextSelected : null,
+                                    ]}
+                                    numberOfLines={1}
+                                    ellipsizeMode="tail"
+                                  >
+                                    {option.label}
+                                  </Text>
+                                  {selected ? (
+                                    <Text style={styles.filterDropdownOptionCheck}>✓</Text>
+                                  ) : null}
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                        ) : null}
                       </View>
-                      {!selectedMeetingIsHomeGroup ? (
+
+                      <View style={styles.meetingsFilterItem}>
+                        <Text style={styles.meetingsFilterLabel}>Time</Text>
+                        <Pressable
+                          style={[
+                            styles.filterDropdownTrigger,
+                            openMeetingsFilterDropdown === "TIME"
+                              ? styles.filterDropdownTriggerOpen
+                              : null,
+                          ]}
+                          onPress={() =>
+                            setOpenMeetingsFilterDropdown((current) =>
+                              current === "TIME" ? null : "TIME",
+                            )
+                          }
+                        >
+                          <Text
+                            style={styles.filterDropdownValue}
+                            numberOfLines={1}
+                            ellipsizeMode="tail"
+                          >
+                            {selectedMeetingsTimeLabel}
+                          </Text>
+                          <Text style={styles.filterDropdownChevron}>
+                            {openMeetingsFilterDropdown === "TIME" ? "▲" : "▼"}
+                          </Text>
+                        </Pressable>
+                        {openMeetingsFilterDropdown === "TIME" ? (
+                          <View style={styles.filterDropdownMenu}>
+                            {MEETINGS_TIME_OPTIONS.map((option) => {
+                              const selected = meetingsTimeFilter === option.value;
+                              return (
+                                <Pressable
+                                  key={option.value}
+                                  style={styles.filterDropdownOption}
+                                  onPress={() => {
+                                    setMeetingsTimeFilter(option.value);
+                                    setOpenMeetingsFilterDropdown(null);
+                                  }}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.filterDropdownOptionText,
+                                      selected ? styles.filterDropdownOptionTextSelected : null,
+                                    ]}
+                                    numberOfLines={1}
+                                    ellipsizeMode="tail"
+                                  >
+                                    {option.label}
+                                  </Text>
+                                  {selected ? (
+                                    <Text style={styles.filterDropdownOptionCheck}>✓</Text>
+                                  ) : null}
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                        ) : null}
+                      </View>
+
+                      <View style={styles.meetingsFilterItem}>
+                        <Text style={styles.meetingsFilterLabel}>Location</Text>
+                        <Pressable
+                          style={[
+                            styles.filterDropdownTrigger,
+                            openMeetingsFilterDropdown === "LOCATION"
+                              ? styles.filterDropdownTriggerOpen
+                              : null,
+                          ]}
+                          onPress={() =>
+                            setOpenMeetingsFilterDropdown((current) =>
+                              current === "LOCATION" ? null : "LOCATION",
+                            )
+                          }
+                        >
+                          <Text
+                            style={styles.filterDropdownValue}
+                            numberOfLines={1}
+                            ellipsizeMode="tail"
+                          >
+                            {selectedMeetingsLocationLabel}
+                          </Text>
+                          <Text style={styles.filterDropdownChevron}>
+                            {openMeetingsFilterDropdown === "LOCATION" ? "▲" : "▼"}
+                          </Text>
+                        </Pressable>
+                        {openMeetingsFilterDropdown === "LOCATION" ? (
+                          <View style={styles.filterDropdownMenu}>
+                            {MEETINGS_LOCATION_OPTIONS.map((option) => {
+                              const selected = meetingsLocationFilter === option.value;
+                              return (
+                                <Pressable
+                                  key={option.value}
+                                  style={styles.filterDropdownOption}
+                                  onPress={() => {
+                                    const nextRadiusMiles = radiusMilesFromMeetingsLocationFilter(
+                                      option.value,
+                                      defaultMeetingRadiusMiles,
+                                    );
+                                    setMeetingsLocationFilter(option.value);
+                                    setMeetingRadiusMiles(nextRadiusMiles);
+                                    setOpenMeetingsFilterDropdown(null);
+                                  }}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.filterDropdownOptionText,
+                                      selected ? styles.filterDropdownOptionTextSelected : null,
+                                    ]}
+                                    numberOfLines={1}
+                                    ellipsizeMode="tail"
+                                  >
+                                    {option.label}
+                                  </Text>
+                                  {selected ? (
+                                    <Text style={styles.filterDropdownOptionCheck}>✓</Text>
+                                  ) : null}
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                        ) : null}
+                      </View>
+                    </View>
+
+                    {loadingMeetings ? (
+                      <Text style={styles.sectionMeta}>Loading meetings...</Text>
+                    ) : null}
+
+                    {screen === "LIST" ? (
+                      <>
+                        {meetingsForMeetingsScreen.map((meeting) => (
+                          <View key={meeting.id} style={styles.meetingCard}>
+                            <Text style={styles.meetingName}>{meeting.name}</Text>
+                            <Text style={styles.sectionMeta}>
+                              {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
+                              {meeting.format || "Unknown"}
+                            </Text>
+                            <Text style={styles.sectionMeta}>
+                              {meeting.format === "ONLINE"
+                                ? "Online"
+                                : meeting.address || "Unknown address"}{" "}
+                              • {formatDistance(meeting.distanceMeters)}
+                            </Text>
+
+                            <View style={styles.buttonRow}>
+                              <AppButton
+                                title="Attend & Log"
+                                onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
+                                variant="secondary"
+                              />
+                              <View style={styles.buttonSpacer} />
+                              <AppButton
+                                title="Signature"
+                                onPress={() => openMeetingSignatureCapture(meeting)}
+                                variant="secondary"
+                              />
+                            </View>
+
+                            <Pressable
+                              style={styles.detailButton}
+                              onPress={() => {
+                                setSelectedMeeting(meeting);
+                                setScreen("DETAIL");
+                              }}
+                            >
+                              <Text style={styles.detailButtonText}>View details</Text>
+                            </Pressable>
+                          </View>
+                        ))}
+
+                        {!loadingMeetings && meetingsForMeetingsScreen.length === 0 ? (
+                          <Text style={styles.sectionMeta}>
+                            {selectedDayIsPast
+                              ? "No upcoming meetings for a past day."
+                              : selectedDayIsToday
+                                ? "No upcoming meetings remaining today."
+                                : "No upcoming meetings for this day."}
+                          </Text>
+                        ) : null}
+                      </>
+                    ) : null}
+
+                    {screen === "DETAIL" && selectedMeeting ? (
+                      <View style={styles.meetingCard}>
+                        <Text style={styles.meetingName}>{selectedMeeting.name}</Text>
                         <Text style={styles.sectionMeta}>
-                          Select home group to edit end meeting minutes.
+                          {selectedMeeting.address || "Unknown address"}
                         </Text>
-                      ) : null}
+                        <Text style={styles.sectionMeta}>
+                          {formatHhmmForDisplay(selectedMeeting.startsAtLocal)} •{" "}
+                          {selectedMeeting.openness || "Unknown"} •{" "}
+                          {selectedMeeting.format || "Unknown"}
+                        </Text>
 
-                      <View style={styles.buttonRow}>
-                        <AppButton title="Back to list" onPress={() => setScreen("LIST")} />
-                        <View style={styles.buttonSpacer} />
-                        <AppButton
-                          title="Drive now"
-                          onPress={() => void openMeetingDestination(selectedMeeting)}
-                          variant="secondary"
-                        />
-                      </View>
+                        <Pressable
+                          style={styles.checkboxRow}
+                          onPress={() => toggleHomeGroupMeeting(selectedMeeting.id)}
+                        >
+                          <View
+                            style={[
+                              styles.checkbox,
+                              selectedMeetingIsHomeGroup ? styles.checkboxChecked : null,
+                            ]}
+                          >
+                            {selectedMeetingIsHomeGroup ? (
+                              <Text style={styles.checkboxTick}>✓</Text>
+                            ) : null}
+                          </View>
+                          <Text style={styles.label}>Home group</Text>
+                        </Pressable>
 
-                      {selectedMeeting.onlineUrl ? (
-                        <View style={styles.buttonRow}>
-                          <AppButton
-                            title="Open meeting link"
-                            onPress={() =>
-                              void Linking.openURL(selectedMeeting.onlineUrl as string)
+                        <View style={styles.inlineRowGap}>
+                          <Text style={styles.sectionMeta}>Arrive early (mins)</Text>
+                          <TextInput
+                            style={styles.smallInput}
+                            value={String(selectedMeetingPlan.earlyMinutes)}
+                            keyboardType="number-pad"
+                            maxLength={2}
+                            onChangeText={(value) =>
+                              setMeetingEarlyMinutes(selectedMeeting.id, value)
                             }
+                          />
+                        </View>
+
+                        <View style={styles.inlineRowGap}>
+                          <Text style={styles.sectionMeta}>End meeting (mins)</Text>
+                          <TextInput
+                            style={styles.smallInput}
+                            value={String(
+                              selectedMeetingPlan.serviceCommitmentMinutes ??
+                                DEFAULT_SERVICE_COMMITMENT_MINUTES,
+                            )}
+                            keyboardType="number-pad"
+                            maxLength={2}
+                            editable={selectedMeetingIsHomeGroup}
+                            onChangeText={(value) =>
+                              setServiceCommitmentMinutes(selectedMeeting.id, value)
+                            }
+                          />
+                        </View>
+                        {!selectedMeetingIsHomeGroup ? (
+                          <Text style={styles.sectionMeta}>
+                            Select home group to edit end meeting minutes.
+                          </Text>
+                        ) : null}
+
+                        <View style={styles.buttonRow}>
+                          <AppButton title="Back to list" onPress={() => setScreen("LIST")} />
+                          <View style={styles.buttonSpacer} />
+                          <AppButton
+                            title="Drive now"
+                            onPress={() => void openMeetingDestination(selectedMeeting)}
                             variant="secondary"
                           />
                         </View>
-                      ) : null}
-                    </View>
-                  ) : null}
-                </GlassCard>
+
+                        {selectedMeeting.onlineUrl ? (
+                          <View style={styles.buttonRow}>
+                            <AppButton
+                              title="Open meeting link"
+                              onPress={() =>
+                                void Linking.openURL(selectedMeeting.onlineUrl as string)
+                              }
+                              variant="secondary"
+                            />
+                          </View>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </GlassCard>
+                </>
               ) : null}
 
               {homeScreen === "ATTENDANCE" ? (
                 <GlassCard style={styles.card} strong>
-                  <View style={styles.inlineRow}>
+                  <View style={styles.attendanceHeaderRow}>
                     <Text style={styles.sectionTitle}>Meetings Logged</Text>
-                    <AppButton
-                      title="Back to Dashboard"
-                      onPress={openDashboard}
-                      variant="secondary"
-                    />
+                    <View style={styles.attendanceHeaderActions}>
+                      <GlassCard style={styles.meetingsBackPill} darken blurIntensity={14}>
+                        <Pressable
+                          onPress={openMeetingsHub}
+                          style={styles.meetingsBackPillButton}
+                          accessibilityRole="button"
+                          accessibilityLabel="Back to upcoming meetings"
+                        >
+                          <Text style={styles.meetingsBackPillText}>Back to Upcoming Meetings</Text>
+                        </Pressable>
+                      </GlassCard>
+                      <GlassCard style={styles.meetingsBackPill} darken blurIntensity={14}>
+                        <Pressable
+                          onPress={openDashboard}
+                          style={styles.meetingsBackPillButton}
+                          accessibilityRole="button"
+                          accessibilityLabel="Back to dashboard"
+                        >
+                          <Text style={styles.meetingsBackPillText}>Back to Dashboard</Text>
+                        </Pressable>
+                      </GlassCard>
+                    </View>
                   </View>
                   <Text style={styles.sectionMeta}>{attendanceStatus}</Text>
+                  <View style={styles.inlineRow}>
+                    <Text style={styles.label}>Show inactive ({inactiveAttendanceCount})</Text>
+                    <Switch
+                      value={showInactiveAttendance}
+                      onValueChange={setShowInactiveAttendance}
+                    />
+                  </View>
 
                   <View style={styles.buttonRow}>
                     <AppButton
@@ -6447,31 +6954,53 @@ export default function App() {
                       title={
                         exportingAttendanceSelectionPdf
                           ? "Exporting..."
-                          : `Export selected (${selectedAttendanceIds.length})`
+                          : `Export selected (${selectedAttendanceVisibleCount})`
                       }
                       onPress={() => void exportSelectedAttendance()}
                       disabled={exportingAttendanceSelectionPdf}
                     />
                     <View style={styles.buttonSpacer} />
                     <AppButton
-                      title={`Text selected (${selectedAttendanceIds.length})`}
+                      title={`Text selected (${selectedAttendanceVisibleCount})`}
                       onPress={() => void shareSelectedAttendanceText()}
                       variant="secondary"
                     />
                   </View>
 
-                  {attendanceRecords.length === 0 ? (
-                    <Text style={styles.sectionMeta}>No attendance records yet.</Text>
+                  {attendanceRecordsForView.length === 0 ? (
+                    <Text style={styles.sectionMeta}>
+                      {showInactiveAttendance
+                        ? "No attendance records yet."
+                        : inactiveAttendanceCount > 0
+                          ? "No active attendance records. Turn on Show inactive to view archived logs."
+                          : "No attendance records yet."}
+                    </Text>
                   ) : (
-                    attendanceRecords.map((record) => {
+                    attendanceRecordsForView.map((record) => {
                       const selected = selectedAttendanceIds.includes(record.id);
+                      const validation = attendanceValidationById.get(record.id) ?? {
+                        valid: false,
+                        reason: "Validation unavailable",
+                      };
                       return (
                         <Pressable
                           key={record.id}
                           style={[styles.historyCard, selected ? styles.chipSelected : null]}
                           onPress={() => toggleAttendanceSelection(record.id)}
                         >
-                          <Text style={styles.meetingName}>{record.meetingName}</Text>
+                          <View style={styles.inlineRow}>
+                            <Text style={styles.meetingName}>{record.meetingName}</Text>
+                            <Text
+                              style={[
+                                styles.validationBadge,
+                                validation.valid
+                                  ? styles.validationBadgeValid
+                                  : styles.validationBadgeInvalid,
+                              ]}
+                            >
+                              {validation.valid ? "✓" : "✕"}
+                            </Text>
+                          </View>
                           <Text style={styles.sectionMeta}>
                             Start: {new Date(record.startAt).toLocaleString()}
                           </Text>
@@ -6480,9 +7009,15 @@ export default function App() {
                             {record.endAt ? new Date(record.endAt).toLocaleString() : "In progress"}
                           </Text>
                           <Text style={styles.sectionMeta}>
+                            Status: {validation.valid ? "Valid" : "Invalid"} • {validation.reason}
+                          </Text>
+                          <Text style={styles.sectionMeta}>
                             Duration: {formatDuration(record.durationSeconds)} • Signature:{" "}
                             {record.signaturePngBase64 ? "Yes" : "No"}
                           </Text>
+                          {record.inactive ? (
+                            <Text style={styles.sectionMeta}>Archived after export</Text>
+                          ) : null}
                           <Text style={styles.sectionMeta}>
                             {selected ? "Selected for export" : "Tap to select for export"}
                           </Text>
@@ -6615,15 +7150,6 @@ export default function App() {
                           ),
                         }))
                       }
-                      onTogglePrayerOnKnees={(itemId) =>
-                        updateMorningDayState((day) => ({
-                          ...day,
-                          prayerOnKneesByItemId: {
-                            ...day.prayerOnKneesByItemId,
-                            [itemId]: !day.prayerOnKneesByItemId[itemId],
-                          },
-                        }))
-                      }
                       onOpenReader={openRoutineReader}
                       onReadDailyReflections={openDailyReflectionsRead}
                       onListenDailyReflections={() => {
@@ -6700,7 +7226,10 @@ export default function App() {
                           ...day,
                           [category]: [
                             ...day[category],
-                            category === "resentful"
+                            category === "resentful" ||
+                            category === "selfSeeking" ||
+                            category === "selfish" ||
+                            category === "dishonest"
                               ? { id: createId(`nightly-${category}`), text: "", fear: null }
                               : { id: createId(`nightly-${category}`), text: "" },
                           ],
@@ -6715,10 +7244,10 @@ export default function App() {
                           [category]: day[category].filter((entry) => entry.id !== id),
                         }))
                       }
-                      onUpdateResentfulFear={(id, fear) =>
+                      onUpdateEntryFear={(category, id, fear) =>
                         updateNightlyDayState((day) => ({
                           ...day,
-                          resentful: day.resentful.map((entry) =>
+                          [category]: day[category].map((entry) =>
                             entry.id === id ? { ...entry, fear } : entry,
                           ),
                         }))
@@ -6756,17 +7285,9 @@ export default function App() {
                       title={routineReader?.title ?? "Routine Reader"}
                       url={routineReader?.url ?? null}
                       bodyText={routineReader?.bodyText ?? null}
-                      showGotOnKneesToggle={
-                        routineReaderBackScreen === "NIGHTLY" &&
-                        (routineReader?.title ?? "") === "11th Step Prayer"
-                      }
-                      gotOnKneesCompleted={nightlyInventoryDayState.gotOnKneesCompleted}
-                      onToggleGotOnKnees={() =>
-                        updateNightlyDayState((day) => ({
-                          ...day,
-                          gotOnKneesCompleted: !day.gotOnKneesCompleted,
-                        }))
-                      }
+                      showGotOnKneesToggle={routineReaderShowsOnKneesToggle}
+                      gotOnKneesCompleted={routineReaderOnKneesCompleted}
+                      onToggleGotOnKnees={onToggleRoutineReaderOnKnees}
                       onBack={() => setToolsScreen(routineReaderBackScreen)}
                       onOpenLink={(url) => void openRoutineReaderLink(url)}
                     />
@@ -7389,6 +7910,12 @@ export default function App() {
                                   onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
                                   variant="secondary"
                                 />
+                                <View style={styles.buttonSpacer} />
+                                <AppButton
+                                  title="Signature"
+                                  onPress={() => openMeetingSignatureCapture(meeting)}
+                                  variant="secondary"
+                                />
                               </View>
 
                               <Pressable
@@ -7527,6 +8054,12 @@ export default function App() {
                             onPress={() => markMeetingAttended(selectedMeeting)}
                             variant="secondary"
                           />
+                          <View style={styles.buttonSpacer} />
+                          <AppButton
+                            title="Signature"
+                            onPress={() => openMeetingSignatureCapture(selectedMeeting)}
+                            variant="secondary"
+                          />
                         </View>
 
                         <Text style={styles.sectionMeta}>
@@ -7591,50 +8124,6 @@ export default function App() {
                     </GlassCard>
                   ) : null}
 
-                  {screen === "SIGNATURE" && activeAttendance ? (
-                    <GlassCard style={styles.card} strong>
-                      <Text style={styles.sectionTitle}>Signature Capture</Text>
-                      <Text style={styles.sectionMeta}>
-                        Draw chairperson signature with finger.
-                      </Text>
-
-                      <View
-                        style={styles.signatureCanvas}
-                        onLayout={(event) => {
-                          setSignatureCanvasSize({
-                            width: event.nativeEvent.layout.width,
-                            height: event.nativeEvent.layout.height,
-                          });
-                        }}
-                        onStartShouldSetResponder={() => true}
-                        onMoveShouldSetResponder={() => true}
-                        onResponderGrant={addSignaturePoint}
-                        onResponderMove={addSignaturePoint}
-                      >
-                        {signaturePoints.map((point, index) => (
-                          <View
-                            key={`${point.x}-${point.y}-${index}`}
-                            style={[
-                              styles.signaturePoint,
-                              {
-                                left: point.x,
-                                top: point.y,
-                              },
-                            ]}
-                          />
-                        ))}
-                      </View>
-
-                      <View style={styles.buttonRow}>
-                        <AppButton title="Back" onPress={() => setScreen("SESSION")} />
-                        <View style={styles.buttonSpacer} />
-                        <AppButton title="Clear" onPress={() => setSignaturePoints([])} />
-                        <View style={styles.buttonSpacer} />
-                        <AppButton title="Save" onPress={saveSignature} />
-                      </View>
-                    </GlassCard>
-                  ) : null}
-
                   <GlassCard style={styles.card} strong>
                     <Text style={styles.sectionTitle}>Recent Attendance</Text>
                     {attendanceRecords.slice(0, 5).map((record) => (
@@ -7692,15 +8181,6 @@ export default function App() {
             </>
           ) : null}
         </ScrollView>
-
-        {shouldLockOuterScrollForDashboard ? (
-          <View pointerEvents="none" style={styles.dashboardScrollFadeWrap}>
-            <View style={[styles.dashboardScrollFadeBand, styles.dashboardScrollFadeBand1]} />
-            <View style={[styles.dashboardScrollFadeBand, styles.dashboardScrollFadeBand2]} />
-            <View style={[styles.dashboardScrollFadeBand, styles.dashboardScrollFadeBand3]} />
-            <View style={[styles.dashboardScrollFadeBand, styles.dashboardScrollFadeBand4]} />
-          </View>
-        ) : null}
 
         {showFixedBottomMenu ? (
           <View style={styles.dashboardBottomMenuWrap} pointerEvents="box-none">
@@ -7772,6 +8252,76 @@ export default function App() {
         ) : null}
 
         <StatusBar style="light" />
+
+        <Modal
+          visible={Boolean(isSignatureCaptureVisible)}
+          animationType="slide"
+          presentationStyle="fullScreen"
+          onRequestClose={() => setScreen(activeAttendance ? "SESSION" : "LIST")}
+          supportedOrientations={["landscape-left", "landscape-right"]}
+        >
+          <View style={styles.signatureModalRoot}>
+            <View style={styles.signatureModalHeader}>
+              <Text style={styles.sectionTitle}>Signature Capture</Text>
+              <Text style={styles.sectionMeta}>
+                Draw chairperson signature with finger for{" "}
+                {activeAttendance?.meetingName ?? signatureCaptureMeeting?.name ?? "meeting"}.
+              </Text>
+              {!activeAttendance ? (
+                <Text style={styles.sectionMeta}>
+                  Saving logs this meeting now. It will show with a red X until duration and
+                  location requirements are met.
+                </Text>
+              ) : null}
+            </View>
+
+            <View style={styles.signatureModalCanvasWrap}>
+              <View
+                style={[styles.signatureCanvas, styles.signatureCanvasLandscape]}
+                onLayout={(event) => {
+                  setSignatureCanvasSize({
+                    width: event.nativeEvent.layout.width,
+                    height: event.nativeEvent.layout.height,
+                  });
+                }}
+                onStartShouldSetResponder={() => true}
+                onMoveShouldSetResponder={() => true}
+                onResponderGrant={(event) => addSignaturePoint(event, true)}
+                onResponderMove={addSignaturePoint}
+              >
+                <Svg
+                  pointerEvents="none"
+                  width="100%"
+                  height="100%"
+                  viewBox={`0 0 ${Math.max(1, signatureCanvasSize.width)} ${Math.max(1, signatureCanvasSize.height)}`}
+                  style={styles.signatureSvgOverlay}
+                >
+                  {signaturePreviewPath.length > 0 ? (
+                    <Path
+                      d={signaturePreviewPath}
+                      fill="none"
+                      stroke="#ffffff"
+                      strokeWidth={2.5}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  ) : null}
+                </Svg>
+              </View>
+            </View>
+
+            <View style={styles.signatureModalButtons}>
+              <AppButton
+                title="Back"
+                onPress={() => setScreen(activeAttendance ? "SESSION" : "LIST")}
+              />
+              <View style={styles.buttonSpacer} />
+              <AppButton title="Clear" onPress={() => setSignaturePoints([])} />
+              <View style={styles.buttonSpacer} />
+              <AppButton title="Save" onPress={() => void saveSignature()} />
+            </View>
+          </View>
+        </Modal>
       </KeyboardAvoidingView>
     </LiquidBackground>
   );
@@ -8039,18 +8589,20 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderColor: "rgba(196,181,253,0.42)",
     backgroundColor: "rgba(24,14,52,0.64)",
+    maxWidth: "100%",
   },
   meetingsBackPillButton: {
-    minHeight: 40,
-    paddingHorizontal: Design.spacing.md,
-    paddingVertical: Design.spacing.sm,
+    minHeight: 36,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     alignItems: "center",
     justifyContent: "center",
   },
   meetingsBackPillText: {
     color: colors.textPrimary,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "600",
+    flexShrink: 1,
   },
   filterDropdownTrigger: {
     borderWidth: 2,
@@ -8116,6 +8668,17 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+  },
+  attendanceHeaderRow: {
+    gap: 8,
+  },
+  attendanceHeaderActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    flexWrap: "wrap",
+    gap: 8,
+    width: "100%",
   },
   inlineRowGap: {
     flexDirection: "row",
@@ -8347,12 +8910,56 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     position: "relative",
   },
-  signaturePoint: {
+  signatureSvgOverlay: {
     position: "absolute",
-    width: 3,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: "#ffffff",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  signatureModalRoot: {
+    flex: 1,
+    backgroundColor: "rgba(11,6,26,0.98)",
+    paddingHorizontal: 16,
+    paddingTop: 32,
+    paddingBottom: 20,
+    gap: 12,
+  },
+  signatureModalHeader: {
+    gap: 6,
+  },
+  signatureModalCanvasWrap: {
+    flex: 1,
+  },
+  signatureCanvasLandscape: {
+    height: "100%",
+    minHeight: 260,
+  },
+  signatureModalButtons: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  validationBadge: {
+    minWidth: 24,
+    textAlign: "center",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    fontSize: 14,
+    fontWeight: "800",
+    overflow: "hidden",
+  },
+  validationBadgeValid: {
+    color: "#bbf7d0",
+    backgroundColor: "rgba(34,197,94,0.25)",
+    borderWidth: 1,
+    borderColor: "rgba(34,197,94,0.6)",
+  },
+  validationBadgeInvalid: {
+    color: "#fecaca",
+    backgroundColor: "rgba(239,68,68,0.25)",
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.6)",
   },
   historyCard: {
     borderTopWidth: 1,
