@@ -6,12 +6,18 @@ export function RoutineReaderScreen({
   title,
   url,
   bodyText,
+  showGotOnKneesToggle = false,
+  gotOnKneesCompleted = false,
+  onToggleGotOnKnees,
   onBack,
   onOpenLink,
 }: {
   title: string;
   url: string | null;
   bodyText?: string | null;
+  showGotOnKneesToggle?: boolean;
+  gotOnKneesCompleted?: boolean;
+  onToggleGotOnKnees?: () => void;
   onBack: () => void;
   onOpenLink: (url: string) => void;
 }) {
@@ -24,7 +30,13 @@ export function RoutineReaderScreen({
     : [];
 
   return (
-    <View style={styles.wrap}>
+    <ScrollView
+      style={styles.wrap}
+      contentContainerStyle={styles.wrapContent}
+      nestedScrollEnabled
+      showsVerticalScrollIndicator
+      keyboardShouldPersistTaps="handled"
+    >
       <LiquidGlassCard style={styles.card}>
         <View style={styles.headerRow}>
           <Text style={styles.title}>{title}</Text>
@@ -38,7 +50,7 @@ export function RoutineReaderScreen({
             : "Use your licensed source link. Full copyrighted text is not bundled in-app."}
         </Text>
         {hasBodyText ? (
-          <ScrollView style={styles.bodyScroll} contentContainerStyle={styles.bodyScrollContent}>
+          <View style={styles.bodyContainer}>
             {paragraphs.map((paragraph, index) => (
               <Text
                 key={`paragraph-${index}`}
@@ -47,7 +59,7 @@ export function RoutineReaderScreen({
                 {paragraph}
               </Text>
             ))}
-          </ScrollView>
+          </View>
         ) : url ? (
           <Pressable style={styles.openBtn} onPress={() => onOpenLink(url)}>
             <Text style={styles.openText}>Open Link</Text>
@@ -55,14 +67,29 @@ export function RoutineReaderScreen({
         ) : (
           <Text style={styles.placeholder}>No source link configured yet.</Text>
         )}
+        {showGotOnKneesToggle && onToggleGotOnKnees ? (
+          <View style={styles.checklistWrap}>
+            <Text style={styles.checklistTitle}>Daily Checklist</Text>
+            <Pressable style={styles.checkboxRow} onPress={onToggleGotOnKnees}>
+              <View style={[styles.checkbox, gotOnKneesCompleted ? styles.checkboxChecked : null]}>
+                {gotOnKneesCompleted ? <Text style={styles.checkboxTick}>✓</Text> : null}
+              </View>
+              <Text style={styles.checkboxLabel}>Got on knees</Text>
+            </Pressable>
+          </View>
+        ) : null}
       </LiquidGlassCard>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   wrap: {
+    flex: 1,
+  },
+  wrapContent: {
     gap: 12,
+    paddingBottom: 20,
   },
   card: {
     padding: 14,
@@ -85,15 +112,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
   },
-  bodyScroll: {
-    minHeight: 420,
-    maxHeight: 620,
+  bodyContainer: {
     borderRadius: 12,
     borderWidth: 1,
     borderColor: routineTheme.colors.cardStroke,
     backgroundColor: "rgba(15,23,42,0.28)",
-  },
-  bodyScrollContent: {
     paddingHorizontal: 14,
     paddingVertical: 14,
   },
@@ -137,5 +160,46 @@ const styles = StyleSheet.create({
     color: routineTheme.colors.textPrimary,
     fontSize: 13,
     fontWeight: "800",
+  },
+  checklistWrap: {
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.12)",
+    paddingTop: 10,
+    gap: 8,
+  },
+  checklistTitle: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  checkboxRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 4,
+  },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  checkboxChecked: {
+    backgroundColor: "rgba(52,199,89,0.4)",
+    borderColor: "rgba(126,255,170,0.75)",
+  },
+  checkboxTick: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  checkboxLabel: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 14,
+    fontWeight: "700",
   },
 });

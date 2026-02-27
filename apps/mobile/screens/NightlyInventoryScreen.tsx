@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { CrudListEditor } from "../components/CrudListEditor";
 import { LiquidGlassCard } from "../components/LiquidGlassCard";
@@ -8,6 +9,24 @@ function asEditorItems(items: Array<{ id: string; text: string }>) {
   return items;
 }
 
+const COMMON_ALCOHOLIC_FEARS = [
+  "Fear of people",
+  "Fear of rejection",
+  "Fear of abandonment",
+  "Fear of not being enough",
+  "Fear of failure",
+  "Fear of success",
+  "Fear of financial insecurity",
+  "Fear of losing what I have",
+  "Fear of not getting what I want",
+  "Fear of being alone",
+  "Fear of intimacy",
+  "Fear of conflict",
+  "Fear of authority",
+  "Fear of judgment",
+  "Fear of uncertainty",
+] as const;
+
 export function NightlyInventoryScreen({
   dayState,
   dateLabel,
@@ -15,8 +34,8 @@ export function NightlyInventoryScreen({
   onAddEntry,
   onUpdateEntry,
   onRemoveEntry,
+  onUpdateResentfulFear,
   onSetNotes,
-  onToggleGotOnKnees,
   onToggleEleventhStepPrayerEnabled,
   onListenEleventhStepPrayer,
   onReadEleventhStepPrayer,
@@ -30,13 +49,13 @@ export function NightlyInventoryScreen({
   onAddEntry: (
     category: keyof Pick<
       NightlyInventoryDayState,
-      "resentful" | "selfish" | "dishonest" | "afraid" | "apology"
+      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "afraid" | "apology"
     >,
   ) => void;
   onUpdateEntry: (
     category: keyof Pick<
       NightlyInventoryDayState,
-      "resentful" | "selfish" | "dishonest" | "afraid" | "apology"
+      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "afraid" | "apology"
     >,
     id: string,
     value: string,
@@ -44,12 +63,12 @@ export function NightlyInventoryScreen({
   onRemoveEntry: (
     category: keyof Pick<
       NightlyInventoryDayState,
-      "resentful" | "selfish" | "dishonest" | "afraid" | "apology"
+      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "afraid" | "apology"
     >,
     id: string,
   ) => void;
+  onUpdateResentfulFear: (id: string, fear: string | null) => void;
   onSetNotes: (value: string) => void;
-  onToggleGotOnKnees: () => void;
   onToggleEleventhStepPrayerEnabled: () => void;
   onListenEleventhStepPrayer: () => void;
   onReadEleventhStepPrayer: () => void;
@@ -57,6 +76,8 @@ export function NightlyInventoryScreen({
   onTextSponsor: () => void;
   onExportPdf: () => void;
 }) {
+  const [openFearForEntryId, setOpenFearForEntryId] = useState<string | null>(null);
+
   return (
     <ScrollView contentContainerStyle={styles.wrap}>
       <LiquidGlassCard style={styles.card}>
@@ -67,6 +88,11 @@ export function NightlyInventoryScreen({
           </Pressable>
         </View>
         <Text style={styles.meta}>{dateLabel}</Text>
+      </LiquidGlassCard>
+
+      <LiquidGlassCard style={styles.card}>
+        <Text style={styles.promptTitle}>Step 10 Prompt</Text>
+        <Text style={styles.promptText}>{dayState.prompt}</Text>
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -104,18 +130,79 @@ export function NightlyInventoryScreen({
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
-        <Text style={styles.promptTitle}>Step 10 Prompt</Text>
-        <Text style={styles.promptText}>{dayState.prompt}</Text>
-      </LiquidGlassCard>
-
-      <LiquidGlassCard style={styles.card}>
+        <View style={styles.editorHeader}>
+          <Text style={styles.promptTitle}>Resentful (Who/What + Note)</Text>
+          <Pressable style={styles.addBtn} onPress={() => onAddEntry("resentful")}>
+            <Text style={styles.addText}>+ Add</Text>
+          </Pressable>
+        </View>
+        {dayState.resentful.map((entry) => (
+          <View key={entry.id} style={styles.rowWrap}>
+            <TextInput
+              style={styles.input}
+              value={entry.text}
+              onChangeText={(value) => onUpdateEntry("resentful", entry.id, value)}
+              placeholder="Who/what + note..."
+              placeholderTextColor="rgba(245,243,255,0.45)"
+              multiline
+            />
+            <Pressable
+              style={styles.fearDropdownTrigger}
+              onPress={() =>
+                setOpenFearForEntryId((current) => (current === entry.id ? null : entry.id))
+              }
+            >
+              <Text style={styles.fearDropdownTriggerText}>
+                {entry.fear && entry.fear.length > 0 ? entry.fear : "What fear caused the action?"}
+              </Text>
+              <Text style={styles.fearDropdownChevron}>
+                {openFearForEntryId === entry.id ? "▲" : "▼"}
+              </Text>
+            </Pressable>
+            {openFearForEntryId === entry.id ? (
+              <View style={styles.fearDropdownMenu}>
+                <Pressable
+                  style={styles.fearDropdownOption}
+                  onPress={() => {
+                    onUpdateResentfulFear(entry.id, null);
+                    setOpenFearForEntryId(null);
+                  }}
+                >
+                  <Text style={styles.fearDropdownOptionText}>None selected</Text>
+                </Pressable>
+                {COMMON_ALCOHOLIC_FEARS.map((fear) => (
+                  <Pressable
+                    key={`${entry.id}-${fear}`}
+                    style={styles.fearDropdownOption}
+                    onPress={() => {
+                      onUpdateResentfulFear(entry.id, fear);
+                      setOpenFearForEntryId(null);
+                    }}
+                  >
+                    <Text style={styles.fearDropdownOptionText}>{fear}</Text>
+                    {entry.fear === fear ? (
+                      <Text style={styles.fearDropdownOptionCheck}>✓</Text>
+                    ) : null}
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+            <Pressable
+              style={styles.removeBtn}
+              onPress={() => onRemoveEntry("resentful", entry.id)}
+            >
+              <Text style={styles.removeText}>Remove</Text>
+            </Pressable>
+          </View>
+        ))}
+        {dayState.resentful.length === 0 ? <Text style={styles.empty}>No items yet.</Text> : null}
         <CrudListEditor
-          title="Resentful (Who/What + Note)"
-          items={asEditorItems(dayState.resentful)}
-          onAdd={() => onAddEntry("resentful")}
-          onChange={(id, value) => onUpdateEntry("resentful", id, value)}
-          onRemove={(id) => onRemoveEntry("resentful", id)}
-          placeholder="Example: coworker - short note"
+          title="Self-seeking"
+          items={asEditorItems(dayState.selfSeeking)}
+          onAdd={() => onAddEntry("selfSeeking")}
+          onChange={(id, value) => onUpdateEntry("selfSeeking", id, value)}
+          onRemove={(id) => onRemoveEntry("selfSeeking", id)}
+          placeholder="Entry..."
         />
         <CrudListEditor
           title="Selfish"
@@ -149,18 +236,6 @@ export function NightlyInventoryScreen({
           onRemove={(id) => onRemoveEntry("apology", id)}
           placeholder="Who + message draft..."
         />
-      </LiquidGlassCard>
-
-      <LiquidGlassCard style={styles.card}>
-        <Text style={styles.promptTitle}>Daily Checklist</Text>
-        <Pressable style={styles.checkboxRow} onPress={onToggleGotOnKnees}>
-          <View
-            style={[styles.checkbox, dayState.gotOnKneesCompleted ? styles.checkboxChecked : null]}
-          >
-            {dayState.gotOnKneesCompleted ? <Text style={styles.checkboxTick}>✓</Text> : null}
-          </View>
-          <Text style={styles.checkboxLabel}>Got on knees</Text>
-        </Pressable>
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -244,35 +319,96 @@ const styles = StyleSheet.create({
     fontSize: 14,
     backgroundColor: "rgba(255,255,255,0.07)",
   },
-  checkboxRow: {
+  editorHeader: {
+    marginTop: 8,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    paddingVertical: 4,
+    justifyContent: "space-between",
+    gap: 8,
   },
-  checkbox: {
-    width: 22,
-    height: 22,
-    borderRadius: 6,
+  addBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: routineTheme.radii.pill,
     borderWidth: 1,
     borderColor: routineTheme.colors.cardStroke,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    alignItems: "center",
-    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
-  checkboxChecked: {
-    backgroundColor: "rgba(52,199,89,0.4)",
-    borderColor: "rgba(126,255,170,0.75)",
-  },
-  checkboxTick: {
+  addText: {
     color: routineTheme.colors.textPrimary,
     fontSize: 12,
+    fontWeight: "700",
+  },
+  rowWrap: {
+    gap: 8,
+    marginTop: 8,
+  },
+  fearDropdownTrigger: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    backgroundColor: "rgba(255,255,255,0.07)",
+  },
+  fearDropdownTriggerText: {
+    flex: 1,
+    color: routineTheme.colors.textPrimary,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  fearDropdownChevron: {
+    color: routineTheme.colors.textSecondary,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  fearDropdownMenu: {
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    borderRadius: 12,
+    backgroundColor: "rgba(15,23,42,0.88)",
+    overflow: "hidden",
+  },
+  fearDropdownOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+  },
+  fearDropdownOptionText: {
+    flex: 1,
+    color: routineTheme.colors.textPrimary,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  fearDropdownOptionCheck: {
+    color: "#bbf7d0",
+    fontSize: 13,
     fontWeight: "800",
   },
-  checkboxLabel: {
-    color: routineTheme.colors.textPrimary,
-    fontSize: 14,
+  removeBtn: {
+    alignSelf: "flex-end",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: routineTheme.radii.pill,
+    backgroundColor: "rgba(239,68,68,0.18)",
+  },
+  removeText: {
+    color: "#fecaca",
+    fontSize: 11,
     fontWeight: "700",
+  },
+  empty: {
+    color: routineTheme.colors.textSecondary,
+    fontSize: 12,
   },
   multiline: {
     minHeight: 88,

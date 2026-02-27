@@ -39,11 +39,6 @@ import {
   shouldCompletePendingDailyReflections,
   type PendingDailyReflectionsCompletion,
 } from "./lib/routines/dailyReflections";
-import {
-  MORNING_READY_ITEM_ID,
-  MORNING_READY_READ_TEXT,
-  MORNING_READY_TITLE,
-} from "./lib/routines/morningReady";
 import { BIG_BOOK_60_63_READ_TEXT, BIG_BOOK_86_88_READ_TEXT } from "./lib/routines/bigBookTexts";
 import {
   dateKeyForRoutines,
@@ -73,7 +68,8 @@ const MapViewCompat: any = MapView;
 const MarkerCompat: any = Marker;
 const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
 const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
-const THIRD_STEP_PRAYER_READ_TEXT = "3rd Step Prayer";
+const THIRD_STEP_PRAYER_READ_TEXT =
+  "God, I offer myself to Thee—to build with me and to do with me as Thou wilt. Relieve me of the bondage of self, that I may better do Thy will. Take away my difficulties, that victory over them may bear witness to those I would help of Thy Power, Thy Love, and Thy Way of life. May I do Thy will always! Amen.";
 const BIG_BOOK_86_88_ITEM_ID = "bb-86-88";
 const BIG_BOOK_60_63_ITEM_ID = "bb-60-63";
 const SEVENTH_STEP_PRAYER_ITEM_ID = "prayer-seventh-step";
@@ -131,6 +127,7 @@ type AttendanceRecord = {
   meetingId: string;
   meetingName: string;
   meetingAddress: string;
+  scheduledStartsAtLocal?: string | null;
   startAt: string;
   endAt: string | null;
   durationSeconds: number | null;
@@ -165,9 +162,10 @@ type MeetingsLocationFilter = "CURRENT" | "MILES_50" | "MILES_100";
 type MeetingsFilterDropdown = "FORMAT" | "DAY" | "TIME" | "LOCATION";
 type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER";
 type RoutineReaderBackScreen = "MORNING" | "NIGHTLY";
+type AttendanceViewFilter = "ALL" | "TODAY";
 type RoutineInventoryCategory = keyof Pick<
   NightlyInventoryDayState,
-  "resentful" | "selfish" | "dishonest" | "afraid" | "apology"
+  "resentful" | "selfSeeking" | "selfish" | "dishonest" | "afraid" | "apology"
 >;
 type RoutineReaderState = {
   title: string;
@@ -341,6 +339,11 @@ const RECOVERY_MODE_OPTIONS: Array<{ value: RecoveryMode; title: string; impleme
   { value: "C", title: "Probation/Parole", implemented: false },
 ];
 
+const locationCompat = Location as unknown as {
+  getBackgroundPermissionsAsync?: () => Promise<{ granted: boolean; canAskAgain?: boolean }>;
+  requestBackgroundPermissionsAsync?: () => Promise<{ granted: boolean; canAskAgain?: boolean }>;
+};
+
 const EMPTY_DAY_PLAN: DayPlanState = {
   homeGroupMeetingId: null,
   plans: {},
@@ -397,6 +400,16 @@ function formatDistance(distanceMeters: number | null): string {
 
 function formatCoordinate(value: number): string {
   return value.toFixed(5);
+}
+
+function toLocationPermissionState(permission: {
+  granted: boolean;
+  canAskAgain?: boolean;
+}): LocationPermissionState {
+  if (permission.granted) {
+    return "granted";
+  }
+  return permission.canAskAgain === false ? "denied" : "unknown";
 }
 
 function parseMinutesFromHhmm(value: string): number {
@@ -1138,6 +1151,8 @@ export default function App() {
   const [meetingsViewMode, setMeetingsViewMode] = useState<MeetingsViewMode>("LIST");
 
   const [locationPermission, setLocationPermission] = useState<LocationPermissionState>("unknown");
+  const [locationAlwaysPermission, setLocationAlwaysPermission] =
+    useState<LocationPermissionState>("unknown");
   const [currentLocation, setCurrentLocation] = useState<LocationStamp | null>(null);
   const [mapCenter, setMapCenter] = useState<MapBoundaryCenter | null>(null);
   const [mapRegion, setMapRegion] = useState<Region | null>(null);
@@ -1165,6 +1180,7 @@ export default function App() {
   const [clockTickMs, setClockTickMs] = useState(Date.now());
 
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
+  const [attendanceViewFilter, setAttendanceViewFilter] = useState<AttendanceViewFilter>("ALL");
   const [activeAttendance, setActiveAttendance] = useState<AttendanceRecord | null>(null);
   const [attendanceStatus, setAttendanceStatus] = useState("No active attendance session.");
   const [exportingPdf, setExportingPdf] = useState(false);
@@ -1221,7 +1237,7 @@ export default function App() {
     useState<RoutineReaderBackScreen>("MORNING");
 
   const [meetingPlansByDate, setMeetingPlansByDate] = useState<MeetingPlansState>({});
-  const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(__DEV__);
+  const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
 
   const arrivalPromptedMeetingRef = useRef<string | null>(null);
@@ -1487,6 +1503,29 @@ export default function App() {
     return Array.from(byId.values());
   }, [meetings, todayNearbyMeetings]);
 
+  const meetingStartTimeById = useMemo(() => {
+    const byId = new Map<string, string | null>();
+    for (const meeting of allMeetings) {
+      byId.set(meeting.id, meeting.startsAtLocal ?? null);
+    }
+    return byId;
+  }, [allMeetings]);
+
+  const attendanceRecordsForView = useMemo(() => {
+    if (attendanceViewFilter === "ALL") {
+      return attendanceRecords;
+    }
+    return attendanceRecords.filter(
+      (record) => dateKeyForRoutines(new Date(record.startAt)) === routineDateKey,
+    );
+  }, [attendanceRecords, attendanceViewFilter, routineDateKey]);
+
+  const selectedAttendanceVisibleCount = useMemo(
+    () =>
+      attendanceRecordsForView.filter((record) => selectedAttendanceIds.includes(record.id)).length,
+    [attendanceRecordsForView, selectedAttendanceIds],
+  );
+
   const dashboardUpcomingInPerson = useMemo(
     () => meetingsTodayUpcoming.filter((meeting) => meeting.format !== "ONLINE"),
     [meetingsTodayUpcoming],
@@ -1740,11 +1779,6 @@ export default function App() {
     };
     const rows: Array<{ id: string; label: string; complete: boolean }> = [
       ...morningEnabledRows,
-      {
-        id: "morning-got-on-knees",
-        label: "Morning: Got on knees",
-        complete: Boolean(morningRoutineDayState.gotOnKneesCompleted),
-      },
       meetingAttendanceRow,
       {
         id: "nightly-inventory",
@@ -1776,7 +1810,6 @@ export default function App() {
   }, [
     routinesStore.morningTemplate.items,
     morningRoutineDayState.completedByItemId,
-    morningRoutineDayState.gotOnKneesCompleted,
     meetingsAttendedTodayCount,
     todayDateKey,
     nightlyInventoryDayState.completedAt,
@@ -1810,6 +1843,20 @@ export default function App() {
     );
   }, [activeAttendance, sessionNowMs]);
 
+  const getBackgroundLocationPermission = useCallback(async () => {
+    if (typeof locationCompat.getBackgroundPermissionsAsync === "function") {
+      return locationCompat.getBackgroundPermissionsAsync();
+    }
+    return null;
+  }, []);
+
+  const requestBackgroundLocationPermission = useCallback(async () => {
+    if (typeof locationCompat.requestBackgroundPermissionsAsync === "function") {
+      return locationCompat.requestBackgroundPermissionsAsync();
+    }
+    return null;
+  }, []);
+
   const readCurrentLocation = useCallback(
     async (requestPermission: boolean): Promise<LocationStamp | null> => {
       try {
@@ -1821,12 +1868,16 @@ export default function App() {
             : currentPermission;
 
         if (!permission.granted) {
-          setLocationPermission("denied");
+          setLocationPermission(toLocationPermissionState(permission));
           locationIssueRef.current = "permission_denied";
           return null;
         }
 
         setLocationPermission("granted");
+        const backgroundPermission = await getBackgroundLocationPermission();
+        setLocationAlwaysPermission(
+          backgroundPermission ? toLocationPermissionState(backgroundPermission) : "unknown",
+        );
 
         const position = await Location.getCurrentPositionAsync({
           accuracy: Location.Accuracy.Balanced,
@@ -1845,17 +1896,36 @@ export default function App() {
           /location provider|unavailable|timeout/i.test(error.message)
         ) {
           setLocationPermission("granted");
+          const backgroundPermission = await getBackgroundLocationPermission();
+          setLocationAlwaysPermission(
+            backgroundPermission ? toLocationPermissionState(backgroundPermission) : "unknown",
+          );
           locationIssueRef.current = "position_unavailable";
           return null;
         }
 
         setLocationPermission("unavailable");
+        setLocationAlwaysPermission("unavailable");
         locationIssueRef.current = "unavailable";
         return null;
       }
     },
-    [],
+    [getBackgroundLocationPermission],
   );
+
+  const refreshLocationPermissionStates = useCallback(async () => {
+    try {
+      const foregroundPermission = await Location.getForegroundPermissionsAsync();
+      setLocationPermission(toLocationPermissionState(foregroundPermission));
+      const backgroundPermission = await getBackgroundLocationPermission();
+      setLocationAlwaysPermission(
+        backgroundPermission ? toLocationPermissionState(backgroundPermission) : "unknown",
+      );
+    } catch {
+      setLocationPermission("unavailable");
+      setLocationAlwaysPermission("unavailable");
+    }
+  }, [getBackgroundLocationPermission]);
 
   const formatApiErrorWithHint = useCallback(
     (baseMessage: string): string => {
@@ -1896,15 +1966,15 @@ export default function App() {
   }, []);
 
   const applyScheduleTime = useCallback(
-    (target: Date): Date => {
+    (target: Date): Date | null => {
       const now = Date.now();
       const diffMs = target.getTime() - now;
       if (debugTimeCompressionEnabled) {
         const compressedDelay = Math.max(5000, Math.floor(Math.max(diffMs, 0) / 12));
         return new Date(now + compressedDelay);
       }
-      if (diffMs <= 2000) {
-        return new Date(now + 5000);
+      if (diffMs <= 0) {
+        return null;
       }
       return target;
     },
@@ -1969,6 +2039,27 @@ export default function App() {
     [],
   );
 
+  const cancelScheduledNotificationsByType = useCallback(async (type: "sponsor" | "drive") => {
+    try {
+      const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+      await Promise.all(
+        scheduled.map(async (request) => {
+          const data = request.content.data as { type?: string } | undefined;
+          if (data?.type !== type) {
+            return;
+          }
+          try {
+            await Notifications.cancelScheduledNotificationAsync(request.identifier);
+          } catch {
+            // ignore stale ids
+          }
+        }),
+      );
+    } catch {
+      // ignore lookup failures
+    }
+  }, []);
+
   const requestLocationPermission = useCallback(async (): Promise<LocationStamp | null> => {
     const position = await readCurrentLocation(true);
     if (position) {
@@ -1986,6 +2077,50 @@ export default function App() {
     setMeetingsStatus("Location is unavailable on this device.");
     return null;
   }, [readCurrentLocation]);
+
+  const requestAlwaysLocationPermission = useCallback(async (): Promise<boolean> => {
+    try {
+      const currentForegroundPermission = await Location.getForegroundPermissionsAsync();
+      const foregroundPermission = currentForegroundPermission.granted
+        ? currentForegroundPermission
+        : await Location.requestForegroundPermissionsAsync();
+      setLocationPermission(toLocationPermissionState(foregroundPermission));
+
+      if (!foregroundPermission.granted) {
+        locationIssueRef.current = "permission_denied";
+        setMeetingsStatus("Location permission denied. Enable While Using the App first.");
+        return false;
+      }
+
+      const currentBackgroundPermission = await getBackgroundLocationPermission();
+      if (!currentBackgroundPermission) {
+        setLocationAlwaysPermission("unavailable");
+        setMeetingsStatus("Always location option is unavailable in this build.");
+        return false;
+      }
+      const backgroundPermission = currentBackgroundPermission.granted
+        ? currentBackgroundPermission
+        : await requestBackgroundLocationPermission();
+      if (!backgroundPermission) {
+        setLocationAlwaysPermission("unavailable");
+        setMeetingsStatus("Always location option is unavailable in this build.");
+        return false;
+      }
+      setLocationAlwaysPermission(toLocationPermissionState(backgroundPermission));
+
+      if (backgroundPermission.granted) {
+        setMeetingsStatus("Always location enabled for automatic meeting logging.");
+        return true;
+      }
+
+      setMeetingsStatus("Always location not enabled. Choose Always in device Location Settings.");
+      return false;
+    } catch {
+      setLocationAlwaysPermission("unavailable");
+      setMeetingsStatus("Always location is unavailable on this device.");
+      return false;
+    }
+  }, [getBackgroundLocationPermission, requestBackgroundLocationPermission]);
 
   const persistAttendanceRecords = useCallback(
     async (nextRecords: AttendanceRecord[]) => {
@@ -2333,7 +2468,18 @@ export default function App() {
   );
 
   const onReadThirdStepPrayer = useCallback(() => {
-    completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
+    const completionReason = completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+    setRoutineReaderBackScreen("MORNING");
+    setRoutineReader({
+      title: "3rd Step Prayer",
+      url: null,
+      bodyText: THIRD_STEP_PRAYER_READ_TEXT,
+    });
+    setToolsScreen("READER");
   }, [completeMorningItemForCurrentDayIfEnabled]);
 
   const onListenThirdStepPrayer = useCallback(() => {
@@ -2344,6 +2490,38 @@ export default function App() {
     }
     speakRoutineText("3rd Step Prayer");
   }, [completeMorningItemForCurrentDayIfEnabled, speakRoutineText]);
+
+  const sendMorningSponsorTextNow = useCallback(async () => {
+    const completionReason = completeMorningItemForCurrentDayIfEnabled("sponsor-check-in");
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+
+    const digits = normalizePhoneDigits(sponsorPhoneDigits);
+    if (!digits) {
+      setRoutinesStatus("Sponsor phone not set. Configure sponsor in Recovery Settings.");
+      return;
+    }
+
+    const recipient = sponsorPhoneE164 ?? digits;
+    const candidateUrls =
+      Platform.OS === "ios"
+        ? [`sms:${recipient}`, `sms:${recipient}&body=`, `sms:${recipient}?body=`]
+        : [`sms:${recipient}`, `smsto:${recipient}`];
+
+    for (const url of candidateUrls) {
+      try {
+        await Linking.openURL(url);
+        setRoutinesStatus("Opened SMS draft for sponsor.");
+        return;
+      } catch {
+        // try next URL shape
+      }
+    }
+
+    setRoutinesStatus("Unable to open SMS on this device.");
+  }, [completeMorningItemForCurrentDayIfEnabled, sponsorPhoneDigits, sponsorPhoneE164]);
 
   const onReadSeventhStepPrayer = useCallback(() => {
     const completionReason = completeMorningItemForCurrentDayIfEnabled(SEVENTH_STEP_PRAYER_ITEM_ID);
@@ -2356,21 +2534,6 @@ export default function App() {
       title: "7th Step Prayer",
       url: null,
       bodyText: SEVENTH_STEP_PRAYER_READ_TEXT,
-    });
-    setToolsScreen("READER");
-  }, [completeMorningItemForCurrentDayIfEnabled]);
-
-  const onReadMorningReady = useCallback(() => {
-    const completionReason = completeMorningItemForCurrentDayIfEnabled(MORNING_READY_ITEM_ID);
-    if (completionReason === "disabled") {
-      setRoutinesStatus("Turn this checklist item on first.");
-      return;
-    }
-    setRoutineReaderBackScreen("MORNING");
-    setRoutineReader({
-      title: MORNING_READY_TITLE,
-      url: null,
-      bodyText: MORNING_READY_READ_TEXT,
     });
     setToolsScreen("READER");
   }, [completeMorningItemForCurrentDayIfEnabled]);
@@ -2522,7 +2685,12 @@ export default function App() {
         dateKey: routineDateKey,
         prompt: dayState.prompt,
         gotOnKneesCompleted: dayState.gotOnKneesCompleted,
-        resentful: dayState.resentful.map((entry) => entry.text),
+        resentful: dayState.resentful.map((entry) =>
+          entry.fear && entry.fear.trim().length > 0
+            ? `${entry.text} (Fear: ${entry.fear})`
+            : entry.text,
+        ),
+        selfSeeking: dayState.selfSeeking.map((entry) => entry.text),
         selfish: dayState.selfish.map((entry) => entry.text),
         dishonest: dayState.dishonest.map((entry) => entry.text),
         afraid: dayState.afraid.map((entry) => entry.text),
@@ -2546,10 +2714,23 @@ export default function App() {
     const dayState = nightlyInventoryDayState;
     const summarize = (label: string, values: Array<{ text: string }>) =>
       `${label}: ${values.length > 0 ? values.map((entry) => entry.text).join("; ") : "None"}`;
+    const summarizeResentful = (values: Array<{ text: string; fear?: string | null }>) =>
+      `Resentful: ${
+        values.length > 0
+          ? values
+              .map((entry) =>
+                entry.fear && entry.fear.trim().length > 0
+                  ? `${entry.text} (Fear: ${entry.fear})`
+                  : entry.text,
+              )
+              .join("; ")
+          : "None"
+      }`;
     const body = [
       `Nightly Routine ${routineDateKey}`,
       `Got on knees: ${dayState.gotOnKneesCompleted ? "Yes" : "No"}`,
-      summarize("Resentful", dayState.resentful),
+      summarizeResentful(dayState.resentful),
+      summarize("Self-seeking", dayState.selfSeeking),
       summarize("Selfish", dayState.selfish),
       summarize("Dishonest", dayState.dishonest),
       summarize("Afraid", dayState.afraid),
@@ -2719,10 +2900,23 @@ export default function App() {
 
   const openAttendanceHub = useCallback(() => {
     setHomeScreen("ATTENDANCE");
+    setAttendanceViewFilter("ALL");
+    setSelectedAttendanceIds([]);
+    setAttendanceStatus("Viewing all logged meetings.");
     setToolsScreen("HOME");
     setScreen("LIST");
     setSelectedMeeting(null);
   }, []);
+
+  const openAttendanceTodayHub = useCallback(() => {
+    setHomeScreen("ATTENDANCE");
+    setAttendanceViewFilter("TODAY");
+    setSelectedAttendanceIds([]);
+    setAttendanceStatus(`Viewing meetings logged for ${routineDateKey}.`);
+    setToolsScreen("HOME");
+    setScreen("LIST");
+    setSelectedMeeting(null);
+  }, [routineDateKey]);
 
   const openToolsHub = useCallback(() => {
     setHomeScreen("TOOLS");
@@ -3373,6 +3567,7 @@ export default function App() {
   const rescheduleSponsorNotifications = useCallback(
     async (reason: string) => {
       await cancelNotificationBucket("sponsor");
+      await cancelScheduledNotificationsByType("sponsor");
 
       if (!sponsorEnabled) {
         await AsyncStorage.setItem(sponsorAlertFingerprintStorage, sponsorAlertFingerprint);
@@ -3420,31 +3615,35 @@ export default function App() {
       if (sponsorLeadMinutes > 0) {
         const leadTimeTarget = new Date(nextCall.getTime() - sponsorLeadMinutes * 60_000);
         const leadFireAt = applyScheduleTime(leadTimeTarget);
-        const leadId = await scheduleAt(leadFireAt, {
-          title: "Sponsor Call upcoming",
-          body: `Call now? ${sponsorPhoneDisplay}`,
+        if (leadFireAt) {
+          const leadId = await scheduleAt(leadFireAt, {
+            title: "Sponsor Call upcoming",
+            body: `Call now? ${sponsorPhoneDisplay}`,
+            categoryIdentifier: SPONSOR_NOTIFICATION_CATEGORY_ID,
+            data: {
+              type: "sponsor",
+              phoneE164: sponsorPhoneE164,
+              reason: "lead",
+            },
+          });
+          scheduledIds.push(leadId);
+        }
+      }
+
+      const callFireAt = applyScheduleTime(nextCall);
+      if (callFireAt) {
+        const atTimeId = await scheduleAt(callFireAt, {
+          title: `Call ${normalizedSponsorName} now`,
+          body: sponsorPhoneDisplay,
           categoryIdentifier: SPONSOR_NOTIFICATION_CATEGORY_ID,
           data: {
             type: "sponsor",
             phoneE164: sponsorPhoneE164,
-            reason: "lead",
+            reason: "at-time",
           },
         });
-        scheduledIds.push(leadId);
+        scheduledIds.push(atTimeId);
       }
-
-      const callFireAt = applyScheduleTime(nextCall);
-      const atTimeId = await scheduleAt(callFireAt, {
-        title: `Call ${normalizedSponsorName} now`,
-        body: sponsorPhoneDisplay,
-        categoryIdentifier: SPONSOR_NOTIFICATION_CATEGORY_ID,
-        data: {
-          type: "sponsor",
-          phoneE164: sponsorPhoneE164,
-          reason: "at-time",
-        },
-      });
-      scheduledIds.push(atTimeId);
 
       nextBuckets.sponsor = scheduledIds;
       await saveNotificationBuckets(nextBuckets);
@@ -3463,6 +3662,7 @@ export default function App() {
     },
     [
       cancelNotificationBucket,
+      cancelScheduledNotificationsByType,
       sponsorEnabled,
       sponsorActive,
       normalizedSponsorName,
@@ -3520,6 +3720,9 @@ export default function App() {
         }
 
         const fireAt = applyScheduleTime(standardPreview.notifyAt);
+        if (!fireAt) {
+          continue;
+        }
         const id = await scheduleAt(fireAt, {
           title: `Leave in 10 minutes for ${meeting.name}`,
           body: `${standardPreview.travelMinutes}m travel • depart ${standardPreview.departAt.toLocaleTimeString()}`,
@@ -3553,6 +3756,9 @@ export default function App() {
           });
           if (servicePreview) {
             const serviceFireAt = applyScheduleTime(servicePreview.notifyAt);
+            if (!serviceFireAt) {
+              continue;
+            }
             const serviceId = await scheduleAt(serviceFireAt, {
               title: `Service commitment: leave in 10 minutes for ${meeting.name}`,
               body: `${servicePreview.travelMinutes}m travel • depart ${servicePreview.departAt.toLocaleTimeString()}`,
@@ -3879,6 +4085,7 @@ export default function App() {
         meetingId: meeting.id,
         meetingName: meeting.name,
         meetingAddress: meeting.address,
+        scheduledStartsAtLocal: meeting.startsAtLocal ?? null,
         startAt: nowIso,
         endAt: null,
         durationSeconds: null,
@@ -4013,15 +4220,15 @@ export default function App() {
   }, []);
 
   const selectAllAttendance = useCallback(() => {
-    setSelectedAttendanceIds(attendanceRecords.map((record) => record.id));
-  }, [attendanceRecords]);
+    setSelectedAttendanceIds(attendanceRecordsForView.map((record) => record.id));
+  }, [attendanceRecordsForView]);
 
   const clearAttendanceSelection = useCallback(() => {
     setSelectedAttendanceIds([]);
   }, []);
 
   const exportSelectedAttendance = useCallback(async () => {
-    const selectedRecords = attendanceRecords.filter((record) =>
+    const selectedRecords = attendanceRecordsForView.filter((record) =>
       selectedAttendanceIds.includes(record.id),
     );
     if (selectedRecords.length === 0) {
@@ -4139,10 +4346,10 @@ export default function App() {
     } finally {
       setExportingAttendanceSelectionPdf(false);
     }
-  }, [attendanceRecords, selectedAttendanceIds, devUserDisplayName]);
+  }, [attendanceRecordsForView, selectedAttendanceIds, devUserDisplayName]);
 
   const shareSelectedAttendanceText = useCallback(async () => {
-    const selectedRecords = attendanceRecords.filter((record) =>
+    const selectedRecords = attendanceRecordsForView.filter((record) =>
       selectedAttendanceIds.includes(record.id),
     );
     if (selectedRecords.length === 0) {
@@ -4155,6 +4362,7 @@ export default function App() {
       const ended = record.endAt ? new Date(record.endAt) : null;
       return [
         `• ${record.meetingName}`,
+        `  Meeting time: ${formatHhmmForDisplay(record.scheduledStartsAtLocal)}`,
         `  Start: ${Number.isNaN(started.getTime()) ? record.startAt : started.toLocaleString()}`,
         `  End: ${ended ? ended.toLocaleString() : "In progress"}`,
         `  Duration: ${formatDuration(record.durationSeconds)}`,
@@ -4169,7 +4377,7 @@ export default function App() {
     } catch (error) {
       setAttendanceStatus(`Failed to share selected attendance text: ${formatError(error)}`);
     }
-  }, [attendanceRecords, selectedAttendanceIds]);
+  }, [attendanceRecordsForView, selectedAttendanceIds]);
 
   const updateSelectedDayPlan = useCallback(
     (updater: (current: DayPlanState) => DayPlanState, callback?: (next: DayPlanState) => void) => {
@@ -4336,43 +4544,40 @@ export default function App() {
         return;
       }
 
-      if (
-        meeting.format === "ONLINE" ||
-        meeting.lat === null ||
-        meeting.lng === null ||
-        !Number.isFinite(meeting.lat) ||
-        !Number.isFinite(meeting.lng)
-      ) {
-        Alert.alert(
-          "Geofence unavailable",
-          "This meeting does not have a valid in-person geofence location.",
-        );
-        return;
-      }
+      const hasValidGeofence =
+        meeting.format !== "ONLINE" &&
+        meeting.lat !== null &&
+        meeting.lng !== null &&
+        Number.isFinite(meeting.lat) &&
+        Number.isFinite(meeting.lng);
 
       const location = await readCurrentLocation(true);
-      if (location) {
-        const distance = distanceMetersBetween(
-          location.lat,
-          location.lng,
-          meeting.lat,
-          meeting.lng,
-        );
+      if (location && hasValidGeofence) {
+        const meetingLat = meeting.lat as number;
+        const meetingLng = meeting.lng as number;
+        const distance = distanceMetersBetween(location.lat, location.lng, meetingLat, meetingLng);
         if (distance <= ARRIVAL_RADIUS_METERS) {
           setPendingGeofenceLogMeetingId(null);
           setSelectedMeeting(meeting);
           setHomeScreen("MEETINGS");
           await startAttendance(meeting);
+          const startedAtLabel = new Date().toLocaleTimeString();
+          Alert.alert(
+            "Meeting log started",
+            `${meeting.name} start time logged at ${startedAtLabel}.`,
+          );
           return;
         }
       }
 
       setPendingGeofenceLogMeetingId(meeting.id);
       setSelectedMeeting(meeting);
-      setAttendanceStatus(`Queued ${meeting.name}. Logging starts automatically at arrival.`);
+      setAttendanceStatus(`Queued ${meeting.name}. Logging starts automatically when you arrive.`);
       Alert.alert(
-        "Outside meeting geofence",
-        `${meeting.name} will be logged once you are at the meeting location (~200 ft geofence).`,
+        "Meeting queued",
+        hasValidGeofence
+          ? `${meeting.name} will be logged once you are at the meeting location (~200 ft geofence).`
+          : `${meeting.name} is queued. Once a valid meeting location is available and you are within range, attendance will auto-log.`,
       );
     },
     [activeAttendance, readCurrentLocation, resolveMeetingForLogging, startAttendance],
@@ -4575,6 +4780,21 @@ export default function App() {
       updateMapCenter(fallback);
     }
   }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter, updateMapCenter]);
+
+  useEffect(() => {
+    void refreshLocationPermissionStates();
+  }, [refreshLocationPermissionStates]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        void refreshLocationPermissionStates();
+      }
+    });
+    return () => {
+      subscription.remove();
+    };
+  }, [refreshLocationPermissionStates]);
 
   useEffect(() => {
     if (bootstrapStartedRef.current) {
@@ -4979,18 +5199,19 @@ export default function App() {
     if (!bootstrapped || !sponsorEnabled || !sponsorActive) {
       return;
     }
-    void rescheduleSponsorNotifications("lead-change");
+    void rescheduleSponsorNotifications("lead-or-debug-change");
   }, [
     bootstrapped,
     sponsorEnabled,
     sponsorLeadMinutes,
     sponsorActive,
+    debugTimeCompressionEnabled,
     rescheduleSponsorNotifications,
   ]);
 
   useEffect(() => {
-    void rescheduleDriveNotifications("plan-change");
-  }, [rescheduleDriveNotifications]);
+    void rescheduleDriveNotifications("plan-or-debug-change");
+  }, [rescheduleDriveNotifications, debugTimeCompressionEnabled]);
 
   useEffect(() => {
     if (!activeAttendance || activeAttendance.endAt) {
@@ -5104,7 +5325,7 @@ export default function App() {
         !Number.isFinite(meeting.lat) ||
         !Number.isFinite(meeting.lng)
       ) {
-        setPendingGeofenceLogMeetingId(null);
+        // Keep pending queue alive; geofence coordinates may appear after refresh.
         return;
       }
 
@@ -5123,7 +5344,11 @@ export default function App() {
       setHomeScreen("MEETINGS");
       await startAttendance(meeting);
       if (!cancelled) {
-        Alert.alert("Meeting log started", `${meeting.name} attendance logging has started.`);
+        const startedAtLabel = new Date().toLocaleTimeString();
+        Alert.alert(
+          "Meeting log started",
+          `${meeting.name} start time logged at ${startedAtLabel}.`,
+        );
       }
     };
 
@@ -5772,6 +5997,7 @@ export default function App() {
                   onOpenMeetings={openMeetingsHub}
                   onOpenRecoverySettings={openSettingsHub}
                   onOpenAttendance={openAttendanceHub}
+                  onOpenAttendanceToday={openAttendanceTodayHub}
                   onOpenTools={openToolsHub}
                   onOpenSoberHousingSettings={openSoberHousingSettings}
                   onOpenProbationParoleSettings={openProbationParoleSettings}
@@ -6389,10 +6615,13 @@ export default function App() {
                           ),
                         }))
                       }
-                      onToggleGotOnKnees={() =>
+                      onTogglePrayerOnKnees={(itemId) =>
                         updateMorningDayState((day) => ({
                           ...day,
-                          gotOnKneesCompleted: !day.gotOnKneesCompleted,
+                          prayerOnKneesByItemId: {
+                            ...day.prayerOnKneesByItemId,
+                            [itemId]: !day.prayerOnKneesByItemId[itemId],
+                          },
                         }))
                       }
                       onOpenReader={openRoutineReader}
@@ -6400,12 +6629,12 @@ export default function App() {
                       onListenDailyReflections={() => {
                         void openDailyReflectionsListen();
                       }}
+                      onSendAmTextSponsor={() => void sendMorningSponsorTextNow()}
                       onListenText={speakRoutineText}
                       onListenThirdStepPrayer={onListenThirdStepPrayer}
                       onPlayItem={(itemId) => void playRoutineItemAudio(itemId)}
                       onReadThirdStepPrayer={onReadThirdStepPrayer}
                       onReadSeventhStepPrayer={onReadSeventhStepPrayer}
-                      onReadMorningReady={onReadMorningReady}
                       onReadEleventhStepPrayer={onReadEleventhStepPrayer}
                       onAddCustomPrayer={() =>
                         updateMorningTemplate((template) => ({
@@ -6471,7 +6700,9 @@ export default function App() {
                           ...day,
                           [category]: [
                             ...day[category],
-                            { id: createId(`nightly-${category}`), text: "" },
+                            category === "resentful"
+                              ? { id: createId(`nightly-${category}`), text: "", fear: null }
+                              : { id: createId(`nightly-${category}`), text: "" },
                           ],
                         }))
                       }
@@ -6484,16 +6715,18 @@ export default function App() {
                           [category]: day[category].filter((entry) => entry.id !== id),
                         }))
                       }
+                      onUpdateResentfulFear={(id, fear) =>
+                        updateNightlyDayState((day) => ({
+                          ...day,
+                          resentful: day.resentful.map((entry) =>
+                            entry.id === id ? { ...entry, fear } : entry,
+                          ),
+                        }))
+                      }
                       onSetNotes={(value) =>
                         updateNightlyDayState((day) => ({
                           ...day,
                           notes: value,
-                        }))
-                      }
-                      onToggleGotOnKnees={() =>
-                        updateNightlyDayState((day) => ({
-                          ...day,
-                          gotOnKneesCompleted: !day.gotOnKneesCompleted,
                         }))
                       }
                       onToggleEleventhStepPrayerEnabled={() =>
@@ -6523,6 +6756,17 @@ export default function App() {
                       title={routineReader?.title ?? "Routine Reader"}
                       url={routineReader?.url ?? null}
                       bodyText={routineReader?.bodyText ?? null}
+                      showGotOnKneesToggle={
+                        routineReaderBackScreen === "NIGHTLY" &&
+                        (routineReader?.title ?? "") === "11th Step Prayer"
+                      }
+                      gotOnKneesCompleted={nightlyInventoryDayState.gotOnKneesCompleted}
+                      onToggleGotOnKnees={() =>
+                        updateNightlyDayState((day) => ({
+                          ...day,
+                          gotOnKneesCompleted: !day.gotOnKneesCompleted,
+                        }))
+                      }
                       onBack={() => setToolsScreen(routineReaderBackScreen)}
                       onOpenLink={(url) => void openRoutineReaderLink(url)}
                     />
@@ -6866,9 +7110,18 @@ export default function App() {
                     <Text style={styles.sectionMeta}>
                       Location: {locationPermission === "granted" ? "Enabled" : "Not enabled"}
                     </Text>
+                    <Text style={styles.sectionMeta}>
+                      Location Always:{" "}
+                      {locationAlwaysPermission === "granted" ? "Enabled" : "Not enabled"}
+                    </Text>
                     {locationPermission === "denied" ? (
                       <Text style={styles.errorText}>
                         Location disabled - enable to see meetings near you.
+                      </Text>
+                    ) : null}
+                    {locationAlwaysPermission === "denied" ? (
+                      <Text style={styles.errorText}>
+                        Always location denied - enable Always in device settings for auto-log.
                       </Text>
                     ) : null}
                     <Text style={styles.sectionMeta}>
@@ -6893,6 +7146,14 @@ export default function App() {
                             const position = await requestLocationPermission();
                             await refreshMeetings({ location: position });
                           })();
+                        }}
+                        variant="secondary"
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title="Enable always location"
+                        onPress={() => {
+                          void requestAlwaysLocationPermission();
                         }}
                         variant="secondary"
                       />

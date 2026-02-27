@@ -107,6 +107,7 @@ export function getMorningDayState(
     ...empty,
     ...saved,
     completedByItemId: saved.completedByItemId ?? {},
+    prayerOnKneesByItemId: saved.prayerOnKneesByItemId ?? {},
     audioRefs: saved.audioRefs ?? {},
   };
 }
@@ -124,6 +125,7 @@ export function getNightlyDayState(
     ...empty,
     ...saved,
     resentful: saved.resentful ?? [],
+    selfSeeking: saved.selfSeeking ?? [],
     selfish: saved.selfish ?? [],
     dishonest: saved.dishonest ?? [],
     afraid: saved.afraid ?? [],

@@ -11,7 +11,7 @@ function createDayState(): MorningRoutineDayState {
   return {
     dateKey: "2026-02-26",
     completedByItemId: {},
-    gotOnKneesCompleted: false,
+    prayerOnKneesByItemId: {},
     notes: "",
     audioRefs: {},
     completedAt: null,

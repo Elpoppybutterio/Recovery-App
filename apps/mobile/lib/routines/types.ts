@@ -32,7 +32,7 @@ export type MorningRoutineTemplate = {
 export type MorningRoutineDayState = {
   dateKey: string;
   completedByItemId: Record<string, string>;
-  gotOnKneesCompleted: boolean;
+  prayerOnKneesByItemId: Record<string, boolean>;
   notes: string;
   audioRefs: Record<string, string>;
   completedAt: string | null;
@@ -41,6 +41,7 @@ export type MorningRoutineDayState = {
 export type NightlyInventoryEntry = {
   id: string;
   text: string;
+  fear?: string | null;
 };
 
 export type NightlyInventoryDayState = {
@@ -50,6 +51,7 @@ export type NightlyInventoryDayState = {
   eleventhStepPrayerEnabled: boolean;
   eleventhStepPrayerCompletedAt: string | null;
   resentful: NightlyInventoryEntry[];
+  selfSeeking: NightlyInventoryEntry[];
   selfish: NightlyInventoryEntry[];
   dishonest: NightlyInventoryEntry[];
   afraid: NightlyInventoryEntry[];
