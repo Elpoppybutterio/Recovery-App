@@ -264,6 +264,8 @@ type MeetingAttendanceLog = {
 
 const ARRIVAL_RADIUS_METERS = 61;
 const EARTH_RADIUS_METERS = 6371000;
+const MAX_SIGNATURE_POINTS_FOR_STORAGE = 1400;
+const MAX_SIGNATURE_BASE64_CHARS_IN_MULTI_EXPORT = 50000;
 const ATTENDANCE_STORAGE_KEY_PREFIX = "recovery:verifiedAttendance:";
 const MEETING_PLAN_STORAGE_KEY_PREFIX = "recovery:meetingPlans:";
 const NOTIFICATION_STORAGE_KEY_PREFIX = "recovery:notificationIds:";
@@ -781,7 +783,20 @@ function buildSignatureSvgBase64(
     return null;
   }
 
-  const path = points
+  const reducePoints = (input: SignaturePoint[], maxPoints: number): SignaturePoint[] => {
+    if (input.length <= maxPoints) {
+      return input;
+    }
+    const step = Math.max(1, Math.ceil(input.length / maxPoints));
+    return input.filter(
+      (point, index) =>
+        point.isStrokeStart || index === 0 || index === input.length - 1 || index % step === 0,
+    );
+  };
+
+  const normalizedPoints = reducePoints(points, MAX_SIGNATURE_POINTS_FOR_STORAGE);
+
+  const path = normalizedPoints
     .map(
       (point, index) =>
         `${index === 0 || point.isStrokeStart ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`,
@@ -4709,7 +4724,9 @@ export default function App() {
 
     const buildRecordHtml = (record: AttendanceRecord): string => {
       const signatureMarkup = record.signaturePngBase64
-        ? `<img alt="Signature" src="data:image/svg+xml;base64,${record.signaturePngBase64}" style="width: 100%; max-width: 340px; border: 1px solid #d0d5dd; border-radius: 8px;" />`
+        ? record.signaturePngBase64.length <= MAX_SIGNATURE_BASE64_CHARS_IN_MULTI_EXPORT
+          ? `<img alt="Signature" src="data:image/svg+xml;base64,${record.signaturePngBase64}" style="width: 100%; max-width: 340px; border: 1px solid #d0d5dd; border-radius: 8px;" />`
+          : '<p style="color:#6b7280;">Signature captured (omitted in this export to keep PDF generation stable).</p>'
         : '<p style="color:#6b7280;">No signature captured.</p>';
       return `<section style="margin-bottom: 20px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px;">
         <h3 style="margin:0 0 6px 0;">${escapeHtml(record.meetingName)}</h3>
