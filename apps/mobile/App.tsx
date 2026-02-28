@@ -6788,6 +6788,7 @@ export default function App() {
                   onOpenMeetings={openMeetingsHub}
                   onOpenRecoverySettings={openSettingsHub}
                   onOpenAttendance={openAttendanceHub}
+                  onOpenAttendanceToday={openAttendanceHub}
                   onOpenTools={openToolsHub}
                   onOpenSoberHousingSettings={openSoberHousingSettings}
                   onOpenProbationParoleSettings={openProbationParoleSettings}

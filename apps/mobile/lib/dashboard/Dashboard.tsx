@@ -195,6 +195,7 @@ export function Dashboard({
   ninetyDayGoalTarget,
   ninetyDayProgressPct,
   meetingsAttendedToday,
+  meetingBarsLast7,
   morningRoutine,
   nightlyInventory,
   routineInsights,
@@ -256,7 +257,6 @@ export function Dashboard({
     meetingsTodayCount === 1
       ? "1 meeting attended today"
       : `${meetingsTodayCount} meetings attended today`;
-  const meetingsWeekLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const meetingsWeekBars = meetingBarsLast7.length === 7 ? meetingBarsLast7 : [0, 0, 0, 0, 0, 0, 0];
   const meetingsWeekMax = Math.max(1, ...meetingsWeekBars);
   const meetingsWeekTotal = meetingsWeekBars.reduce((sum, value) => sum + value, 0);
@@ -509,10 +509,7 @@ export function Dashboard({
                 {meetingsWeekBars.map((count, index) => {
                   const heightPct = Math.max(8, Math.round((count / meetingsWeekMax) * 100));
                   return (
-                    <View
-                      key={`meetings-week-${meetingsWeekLabels[index]}`}
-                      style={styles.weeklyBarCol}
-                    >
+                    <View key={`meetings-week-${index}`} style={styles.weeklyBarCol}>
                       <View style={styles.weeklyBarTrack}>
                         <View
                           style={[
@@ -525,7 +522,6 @@ export function Dashboard({
                         />
                       </View>
                       <Text style={styles.weeklyBarCount}>{count}</Text>
-                      <Text style={styles.weeklyBarLabel}>{meetingsWeekLabels[index]}</Text>
                     </View>
                   );
                 })}
@@ -1140,11 +1136,6 @@ const styles = StyleSheet.create({
     color: Design.color.textPrimary,
     fontSize: 10,
     fontWeight: "800",
-  },
-  weeklyBarLabel: {
-    color: Design.color.textSecondary,
-    fontSize: 9,
-    fontWeight: "700",
   },
   successText: {
     color: Design.color.textPrimary,
