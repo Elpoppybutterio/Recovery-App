@@ -1416,6 +1416,7 @@ export default function App() {
   >(null);
   const bootstrapStartedRef = useRef(false);
   const setupStep4RefreshLocationKeyRef = useRef<string | null>(null);
+  const departurePromptedAttendanceRef = useRef<string | null>(null);
   const saveSponsorConfigRef = useRef<(overrides?: SaveSponsorConfigOverrides) => Promise<boolean>>(
     async () => false,
   );
@@ -3182,11 +3183,15 @@ export default function App() {
     setAttendanceViewFilter("ALL");
     setShowInactiveAttendance(false);
     setSelectedAttendanceIds([]);
-    setAttendanceStatus("Viewing all logged meetings.");
+    setAttendanceStatus(
+      activeAttendance && !activeAttendance.endAt
+        ? `Attendance in progress for ${activeAttendance.meetingName}.`
+        : "Viewing all logged meetings.",
+    );
     setToolsScreen("HOME");
     setScreen("LIST");
     setSelectedMeeting(null);
-  }, []);
+  }, [activeAttendance]);
 
   const openToolsHub = useCallback(() => {
     setHomeScreen("TOOLS");
@@ -3224,10 +3229,10 @@ export default function App() {
   const openMeetingsHub = useCallback(() => {
     setHomeScreen("MEETINGS");
     setToolsScreen("HOME");
-    setScreen("LIST");
+    setScreen(activeAttendance && !activeAttendance.endAt ? "SESSION" : "LIST");
     setSelectedMeeting(null);
     setSelectedDayOffset(0);
-  }, []);
+  }, [activeAttendance]);
 
   const openSoberHousingSettings = useCallback(() => {
     setMode("B");
@@ -4410,38 +4415,88 @@ export default function App() {
     [readCurrentLocation, upsertAttendanceRecord],
   );
 
+  const endAttendanceByRecordId = useCallback(
+    async (recordId: string) => {
+      const baseRecord =
+        (activeAttendance && activeAttendance.id === recordId ? activeAttendance : null) ??
+        attendanceRecords.find((record) => record.id === recordId) ??
+        null;
+      if (!baseRecord || baseRecord.endAt) {
+        return;
+      }
+
+      const location = await readCurrentLocation(false);
+      const nowIso = new Date().toISOString();
+      const durationSeconds = Math.max(
+        0,
+        Math.floor((new Date(nowIso).getTime() - new Date(baseRecord.startAt).getTime()) / 1000),
+      );
+
+      const next: AttendanceRecord = {
+        ...baseRecord,
+        endAt: nowIso,
+        durationSeconds,
+        endLat: location?.lat ?? null,
+        endLng: location?.lng ?? null,
+        endAccuracyM: location?.accuracyM ?? null,
+      };
+
+      setActiveAttendance(next);
+      upsertAttendanceRecord(next);
+      appendMeetingAttendanceLog({
+        meetingId: baseRecord.meetingId,
+        method: "verified",
+      });
+      departurePromptedAttendanceRef.current = null;
+      setAttendanceStatus("Attendance ended. Capture chairperson signature to complete the log.");
+      if (homeScreen === "MEETINGS") {
+        setScreen("SIGNATURE");
+      }
+    },
+    [
+      activeAttendance,
+      attendanceRecords,
+      readCurrentLocation,
+      upsertAttendanceRecord,
+      appendMeetingAttendanceLog,
+      homeScreen,
+    ],
+  );
+
   const endAttendance = useCallback(async () => {
     if (!activeAttendance || activeAttendance.endAt) {
       return;
     }
+    await endAttendanceByRecordId(activeAttendance.id);
+  }, [activeAttendance, endAttendanceByRecordId]);
 
-    const location = await readCurrentLocation(false);
-    const nowIso = new Date().toISOString();
-    const durationSeconds = Math.max(
-      0,
-      Math.floor(
-        (new Date(nowIso).getTime() - new Date(activeAttendance.startAt).getTime()) / 1000,
-      ),
-    );
-
-    const next: AttendanceRecord = {
-      ...activeAttendance,
-      endAt: nowIso,
-      durationSeconds,
-      endLat: location?.lat ?? null,
-      endLng: location?.lng ?? null,
-      endAccuracyM: location?.accuracyM ?? null,
-    };
-
-    setActiveAttendance(next);
-    upsertAttendanceRecord(next);
-    appendMeetingAttendanceLog({
-      meetingId: activeAttendance.meetingId,
-      method: "verified",
-    });
-    setAttendanceStatus("Attendance ended. Capture chairperson signature to complete the log.");
-    setScreen("SIGNATURE");
-  }, [activeAttendance, readCurrentLocation, upsertAttendanceRecord, appendMeetingAttendanceLog]);
+  const openAttendanceRecordSignatureCapture = useCallback(
+    (recordId: string) => {
+      const record = attendanceRecords.find((entry) => entry.id === recordId) ?? null;
+      if (!record) {
+        setAttendanceStatus("Attendance record unavailable.");
+        return;
+      }
+      if (!record.endAt) {
+        setAttendanceStatus("End attendance before saving signature.");
+        return;
+      }
+      if (activeAttendance && !activeAttendance.endAt && activeAttendance.id !== record.id) {
+        setAttendanceStatus("End current attendance before capturing another signature.");
+        return;
+      }
+      setActiveAttendance(record);
+      setSignatureCaptureMeeting(null);
+      setSignaturePoints([]);
+      setHomeScreen("MEETINGS");
+      setScreen("SIGNATURE");
+      setAttendanceStatus(`Capture signature for ${record.meetingName}.`);
+      setTimeout(() => {
+        rootScrollRef.current?.scrollTo({ y: 0, animated: true });
+      }, 0);
+    },
+    [attendanceRecords, activeAttendance],
+  );
 
   const openMeetingSignatureCapture = useCallback(
     (meeting: MeetingRecord) => {
@@ -4603,6 +4658,29 @@ export default function App() {
   const clearAttendanceSelection = useCallback(() => {
     setSelectedAttendanceIds([]);
   }, []);
+
+  const makeSelectedAttendanceInactive = useCallback(() => {
+    const selectedRecords = attendanceRecordsForView.filter((record) =>
+      selectedAttendanceIds.includes(record.id),
+    );
+    if (selectedRecords.length === 0) {
+      setAttendanceStatus("Select at least one attendance record to make inactive.");
+      return;
+    }
+
+    const archivedIds = new Set(selectedRecords.map((record) => record.id));
+    setAttendanceRecords((previous) => {
+      const next = previous.map((record) =>
+        archivedIds.has(record.id) ? { ...record, inactive: true } : record,
+      );
+      void persistAttendanceRecords(next);
+      return next;
+    });
+    setSelectedAttendanceIds((current) => current.filter((id) => !archivedIds.has(id)));
+    setAttendanceStatus(
+      `Marked ${selectedRecords.length} meeting record(s) inactive. Turn on Show inactive to view them.`,
+    );
+  }, [attendanceRecordsForView, selectedAttendanceIds, persistAttendanceRecords]);
 
   const exportSelectedAttendance = useCallback(async () => {
     const selectedRecords = attendanceRecordsForView.filter((record) =>
@@ -5260,12 +5338,23 @@ export default function App() {
         if (attendanceRaw) {
           const parsedAttendance = JSON.parse(attendanceRaw) as AttendanceRecord[];
           if (Array.isArray(parsedAttendance)) {
-            setAttendanceRecords(
-              parsedAttendance.map((record) => ({
+            const normalizedAttendance = parsedAttendance
+              .map((record) => ({
                 ...record,
                 inactive: Boolean(record.inactive),
-              })),
-            );
+              }))
+              .sort(
+                (left, right) =>
+                  new Date(right.startAt).getTime() - new Date(left.startAt).getTime(),
+              );
+            setAttendanceRecords(normalizedAttendance);
+            const latestOpenRecord = normalizedAttendance.find((record) => !record.endAt) ?? null;
+            if (latestOpenRecord) {
+              setActiveAttendance(latestOpenRecord);
+              setAttendanceStatus(
+                `Attendance in progress for ${latestOpenRecord.meetingName}. End meeting when complete.`,
+              );
+            }
           }
         }
 
@@ -5735,6 +5824,73 @@ export default function App() {
       clearInterval(timer);
     };
   }, [activeAttendance]);
+
+  useEffect(() => {
+    departurePromptedAttendanceRef.current = null;
+  }, [activeAttendance?.id]);
+
+  useEffect(() => {
+    if (
+      !activeAttendance ||
+      activeAttendance.endAt ||
+      activeAttendance.meetingLat === null ||
+      activeAttendance.meetingLng === null ||
+      !Number.isFinite(activeAttendance.meetingLat) ||
+      !Number.isFinite(activeAttendance.meetingLng)
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const checkDeparture = async () => {
+      if (cancelled) {
+        return;
+      }
+
+      const location = await readCurrentLocation(false);
+      if (!location || cancelled) {
+        return;
+      }
+
+      const distance = distanceMetersBetween(
+        location.lat,
+        location.lng,
+        activeAttendance.meetingLat as number,
+        activeAttendance.meetingLng as number,
+      );
+      if (distance <= ARRIVAL_RADIUS_METERS) {
+        return;
+      }
+      if (departurePromptedAttendanceRef.current === activeAttendance.id) {
+        return;
+      }
+
+      departurePromptedAttendanceRef.current = activeAttendance.id;
+      Alert.alert("Left meeting geofence", "You left the meeting area. End this meeting now?", [
+        { text: "Keep in progress", style: "cancel" },
+        {
+          text: "End meeting",
+          onPress: () => {
+            void endAttendanceByRecordId(activeAttendance.id);
+          },
+        },
+      ]);
+    };
+
+    void checkDeparture();
+    timer = setInterval(() => {
+      void checkDeparture();
+    }, 20_000);
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, [activeAttendance, readCurrentLocation, endAttendanceByRecordId]);
 
   useEffect(() => {
     arrivalPromptedMeetingRef.current = null;
@@ -7084,6 +7240,16 @@ export default function App() {
                     />
                   </View>
 
+                  {selectedAttendanceVisibleCount > 0 ? (
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title={`Make inactive (${selectedAttendanceVisibleCount})`}
+                        onPress={makeSelectedAttendanceInactive}
+                        variant="secondary"
+                      />
+                    </View>
+                  ) : null}
+
                   {attendanceRecordsForView.length === 0 ? (
                     <Text style={styles.sectionMeta}>
                       {showInactiveAttendance
@@ -7138,6 +7304,24 @@ export default function App() {
                           <Text style={styles.sectionMeta}>
                             {selected ? "Selected for export" : "Tap to select for export"}
                           </Text>
+                          {!record.endAt ? (
+                            <View style={styles.buttonRow}>
+                              <AppButton
+                                title="End meeting"
+                                onPress={() => void endAttendanceByRecordId(record.id)}
+                              />
+                            </View>
+                          ) : (
+                            <View style={styles.buttonRow}>
+                              <AppButton
+                                title={
+                                  record.signaturePngBase64 ? "Update signature" : "Add signature"
+                                }
+                                onPress={() => openAttendanceRecordSignatureCapture(record.id)}
+                                variant="secondary"
+                              />
+                            </View>
+                          )}
                         </Pressable>
                       );
                     })
@@ -8186,7 +8370,8 @@ export default function App() {
                     ) : null}
                   </GlassCard>
 
-                  {(screen === "SESSION" || screen === "SIGNATURE") && activeAttendance ? (
+                  {activeAttendance &&
+                  (!activeAttendance.endAt || screen === "SESSION" || screen === "SIGNATURE") ? (
                     <GlassCard style={styles.card} strong>
                       <Text style={styles.sectionTitle}>Verified Attendance</Text>
                       <Text style={styles.sectionMeta}>{attendanceStatus}</Text>
@@ -8375,7 +8560,6 @@ export default function App() {
           animationType="slide"
           presentationStyle="fullScreen"
           onRequestClose={() => setScreen(activeAttendance ? "SESSION" : "LIST")}
-          supportedOrientations={["landscape-left", "landscape-right"]}
         >
           <View style={styles.signatureModalRoot}>
             <View style={styles.signatureModalHeader}>
