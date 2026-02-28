@@ -18,13 +18,13 @@ function getDayWindow(date: Date, days: number): string[] {
 function issueCountForNightlyDay(
   day: ReturnType<typeof createEmptyNightlyInventoryDayState>,
 ): number {
+  const safeLength = (value: unknown): number => (Array.isArray(value) ? value.length : 0);
   return (
-    day.resentful.length +
-    day.selfSeeking.length +
-    day.selfish.length +
-    day.dishonest.length +
-    day.afraid.length +
-    day.apology.length
+    safeLength(day.resentful) +
+    safeLength(day.selfSeeking) +
+    safeLength(day.selfish) +
+    safeLength(day.dishonest) +
+    safeLength(day.apology)
   );
 }
 

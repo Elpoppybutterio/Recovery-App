@@ -21,7 +21,6 @@ export function MorningRoutineScreen({
   onSetDailyReflectionsText,
   onSetNotes,
   onSetItemDetail,
-  onTogglePrayerOnKnees,
   onOpenReader,
   onReadDailyReflections,
   onListenDailyReflections,
@@ -51,7 +50,6 @@ export function MorningRoutineScreen({
   onSetDailyReflectionsText: (value: string) => void;
   onSetNotes: (value: string) => void;
   onSetItemDetail: (itemId: string, detail: string) => void;
-  onTogglePrayerOnKnees: (itemId: string) => void;
   onOpenReader: (itemId: string, title: string, url: string | null) => void;
   onReadDailyReflections: () => void;
   onListenDailyReflections: () => void;
@@ -94,7 +92,6 @@ export function MorningRoutineScreen({
           const isThirdStepPrayer = item.id === "prayer-third-step";
           const isSeventhStepPrayer = item.id === "prayer-seventh-step";
           const isEleventhStepPrayer = item.id === "prayer-eleventh-step";
-          const isPrayerItem = isThirdStepPrayer || isSeventhStepPrayer || isEleventhStepPrayer;
           const displayTitle = isEleventhStepPrayer ? "11th Step AM Prayer" : item.title;
           const listenText =
             item.voiceText !== undefined && item.voiceText.trim().length > 0
@@ -144,24 +141,6 @@ export function MorningRoutineScreen({
                             : undefined
                 }
               />
-              {isPrayerItem && item.enabled ? (
-                <Pressable
-                  style={styles.prayerCheckboxRow}
-                  onPress={() => onTogglePrayerOnKnees(item.id)}
-                >
-                  <View
-                    style={[
-                      styles.checkbox,
-                      dayState.prayerOnKneesByItemId[item.id] ? styles.checkboxChecked : null,
-                    ]}
-                  >
-                    {dayState.prayerOnKneesByItemId[item.id] ? (
-                      <Text style={styles.checkboxTick}>✓</Text>
-                    ) : null}
-                  </View>
-                  <Text style={styles.checkboxLabel}>On knees</Text>
-                </Pressable>
-              ) : null}
               {isAdditionalSuggestions ? (
                 <TextInput
                   style={[styles.input, styles.multiline]}
@@ -320,43 +299,6 @@ const styles = StyleSheet.create({
   },
   rowWrap: {
     gap: 8,
-  },
-  prayerCheckboxRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingTop: 4,
-    paddingBottom: 10,
-  },
-  checkboxRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingVertical: 4,
-  },
-  checkbox: {
-    width: 22,
-    height: 22,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: routineTheme.colors.cardStroke,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  checkboxChecked: {
-    backgroundColor: "rgba(52,199,89,0.4)",
-    borderColor: "rgba(126,255,170,0.75)",
-  },
-  checkboxTick: {
-    color: routineTheme.colors.textPrimary,
-    fontSize: 12,
-    fontWeight: "800",
-  },
-  checkboxLabel: {
-    color: routineTheme.colors.textPrimary,
-    fontSize: 14,
-    fontWeight: "700",
   },
   removeBtn: {
     alignSelf: "flex-end",

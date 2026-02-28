@@ -12,7 +12,7 @@ function createId(prefix: string): string {
 }
 
 export const DEFAULT_NIGHTLY_PROMPT =
-  "At night, we constructively review our day. Were we resentful, selfish, dishonest, or afraid?";
+  "At night, we constructively review our day. Were we resentful, selfish, self-seeking, dishonest, or afraid?";
 
 export function createDefaultMorningRoutineTemplate(): MorningRoutineTemplate {
   return {
@@ -23,15 +23,15 @@ export function createDefaultMorningRoutineTemplate(): MorningRoutineTemplate {
         enabled: false,
       },
       {
-        id: "bb-86-88",
-        title: "Big Book Reading #1: 86-88",
+        id: "bb-60-63",
+        title: "Big Book Reading #2: 60-63",
         enabled: false,
         readerLabel: "Read",
         readerUrl: null,
       },
       {
-        id: "bb-60-63",
-        title: "Big Book Reading #2: 60-63",
+        id: "bb-86-88",
+        title: "Big Book Reading #1: 86-88",
         enabled: false,
         readerLabel: "Read",
         readerUrl: null,
