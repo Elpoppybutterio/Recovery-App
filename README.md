@@ -34,6 +34,23 @@ pnpm --filter @recovery/mobile dev
 pnpm --filter @recovery/worker dev
 ```
 
+## Mobile development build workflow (recommended)
+
+- Daily mobile development now targets Expo Development Build:
+
+```bash
+pnpm --filter @recovery/mobile start:dev-client
+```
+
+- Temporary Expo Go fallback during migration:
+
+```bash
+pnpm --filter @recovery/mobile start:go
+```
+
+- Full setup, build, and tester install steps:
+  - [`docs/DEV_BUILD.md`](docs/DEV_BUILD.md)
+
 ## Local Dev
 
 ### Required stack (API + Mobile)
@@ -127,6 +144,7 @@ Migrations live in `/apps/api/migrations`.
   - `GET /v1/supervisor/attendance`
 - Supervisor list rule: supervisors only see assigned users; filtering on an unassigned `userId` is denied.
 - Mobile dev wiring uses `apps/mobile/app.json`:
+  - environment-aware config in `apps/mobile/app.config.ts`
   - `expo.extra.devAuthUserId`
   - `expo.extra.apiUrl`
   - `EXPO_PUBLIC_API_URL` (preferred override for local/preview/prod API URL)

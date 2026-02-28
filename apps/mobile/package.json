@@ -5,9 +5,11 @@
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
+    "start:go": "expo start",
+    "start:dev-client": "expo start --dev-client --tunnel",
     "ios": "expo run:ios",
     "android": "expo run:android",
-    "dev": "expo start",
+    "dev": "expo start --dev-client --tunnel",
     "build": "expo export --platform web",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -31,6 +33,7 @@
     "react": "19.1.0",
     "react-native": "0.81.5",
     "react-native-maps": "1.20.1",
+    "react-native-safe-area-context": "~5.6.0",
     "react-native-svg": "15.12.1"
   },
   "devDependencies": {
