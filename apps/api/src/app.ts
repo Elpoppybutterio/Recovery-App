@@ -23,6 +23,7 @@ import {
 } from "./meeting-guide-ingest";
 import { mapTypeCodesToLabels } from "./meeting-guide";
 import { requirePermission, requireRole, requireSupervisorAssignment } from "./rbac";
+import { getDailyWisdomQuote, wisdomDailyQuerySchema } from "./wisdom";
 
 const logger = createLogger("api");
 
@@ -380,6 +381,30 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       ts: new Date().toISOString(),
     };
   });
+
+  app.get(
+    "/api/wisdom/daily",
+    {
+      preHandler: [
+        authenticateRequest,
+        requireRole(Role.END_USER, Role.SUPERVISOR, Role.ADMIN, Role.MEETING_VERIFIER),
+      ],
+    },
+    async (request, reply) => {
+      const parsedQuery = wisdomDailyQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid wisdom daily query",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      const { date, tz } = parsedQuery.data;
+      return getDailyWisdomQuote(date, tz);
+    },
+  );
 
   app.get(
     "/v1/literature/bigbook/pages",

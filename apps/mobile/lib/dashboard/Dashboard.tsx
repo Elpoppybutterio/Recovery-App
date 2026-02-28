@@ -24,6 +24,7 @@ type DashboardProps = {
   showingOnlineMeetingsFallback: boolean;
   chatEnabled: boolean;
   sponsorEnabled: boolean;
+  wisdomText?: string | null;
   dailyChecklist: {
     rows: Array<{ id: string; label: string; complete: boolean; progress: number }>;
     percent: number;
@@ -38,6 +39,7 @@ type DashboardProps = {
     goal: number;
   };
   meetingBarsLast7: number[];
+  meetingPrimaryActionLabels: Record<string, string>;
   morningRoutine: {
     streakDays: number;
     last30CompletionPct: number;
@@ -190,12 +192,14 @@ export function Dashboard({
   showingOnlineMeetingsFallback,
   chatEnabled,
   sponsorEnabled,
+  wisdomText,
   dailyChecklist,
   meetingsAttendedInNinetyDays,
   ninetyDayGoalTarget,
   ninetyDayProgressPct,
   meetingsAttendedToday,
   meetingBarsLast7,
+  meetingPrimaryActionLabels,
   morningRoutine,
   nightlyInventory,
   routineInsights,
@@ -283,6 +287,10 @@ export function Dashboard({
       return current === tileId ? null : current;
     });
   };
+  const sponsorWisdomText =
+    typeof wisdomText === "string" && wisdomText.trim().length > 0
+      ? wisdomText
+      : SPONSOR_WISDOM_TEXT;
 
   return (
     <View style={styles.root}>
@@ -398,7 +406,7 @@ export function Dashboard({
               nestedScrollEnabled
               showsVerticalScrollIndicator
             >
-              <Text style={styles.factText}>{SPONSOR_WISDOM_TEXT}</Text>
+              <Text style={styles.factText}>{sponsorWisdomText}</Text>
             </ScrollView>
           </GlassCard>
         </Pressable>
@@ -793,15 +801,17 @@ export function Dashboard({
                 <View style={styles.meetingActionsCol}>
                   <Pressable
                     style={styles.meetingLogButton}
-                    onPress={() => onCaptureSignature(meeting.id)}
+                    onPress={() => onLogMeeting(meeting.id)}
                   >
-                    <Text style={styles.meetingLogButtonText}>Signature</Text>
+                    <Text style={styles.meetingLogButtonText}>
+                      {meetingPrimaryActionLabels[meeting.id] ?? "Attend"}
+                    </Text>
                   </Pressable>
                   <Pressable
                     style={styles.meetingLogButton}
-                    onPress={() => onLogMeeting(meeting.id)}
+                    onPress={() => onCaptureSignature(meeting.id)}
                   >
-                    <Text style={styles.meetingLogButtonText}>Log</Text>
+                    <Text style={styles.meetingLogButtonText}>Signature</Text>
                   </Pressable>
                 </View>
               </View>

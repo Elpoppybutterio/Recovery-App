@@ -67,6 +67,11 @@ import { NightlyInventoryScreen } from "./screens/NightlyInventoryScreen";
 import { ChatComingSoonScreen } from "./screens/ChatComingSoonScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
+import {
+  getLocalDailyWisdomQuote,
+  getWisdomCacheKey,
+  type DailyWisdomPayload,
+} from "./lib/wisdom/daily";
 
 const MapViewCompat: any = MapView;
 const MarkerCompat: any = Marker;
@@ -264,6 +269,7 @@ type MeetingAttendanceLog = {
 
 const ARRIVAL_RADIUS_METERS = 61;
 const EARTH_RADIUS_METERS = 6371000;
+const MIN_VALID_MEETING_MINUTES = 45;
 const MAX_SIGNATURE_POINTS_FOR_STORAGE = 1400;
 const MAX_SIGNATURE_BASE64_CHARS_IN_MULTI_EXPORT = 50000;
 const ATTENDANCE_STORAGE_KEY_PREFIX = "recovery:verifiedAttendance:";
@@ -515,9 +521,12 @@ function validateAttendanceRecord(
   if (!Number.isFinite(endAtMs)) {
     return { valid: false, reason: "Invalid end time" };
   }
-  const minDurationMs = 50 * 60 * 1000;
+  const minDurationMs = MIN_VALID_MEETING_MINUTES * 60 * 1000;
   if (endAtMs - startAtMs < minDurationMs) {
-    return { valid: false, reason: "Duration must be at least 50 minutes" };
+    return {
+      valid: false,
+      reason: `Duration must be at least ${MIN_VALID_MEETING_MINUTES} minutes`,
+    };
   }
 
   if (requiresSignature && !record.signaturePngBase64) {
@@ -575,6 +584,61 @@ function toE164FromUsTenDigit(phoneDigits: string): string | null {
 
 function dateKeyForDate(value: Date): string {
   return value.toISOString().slice(0, 10);
+}
+
+function resolveDeviceTimeZone(): string {
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (typeof timeZone === "string" && timeZone.trim().length > 0) {
+      return timeZone;
+    }
+  } catch {
+    // fall through to UTC
+  }
+  return "UTC";
+}
+
+function dateKeyForTimeZone(value: Date, timeZone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(value);
+    const year = parts.find((entry) => entry.type === "year")?.value;
+    const month = parts.find((entry) => entry.type === "month")?.value;
+    const day = parts.find((entry) => entry.type === "day")?.value;
+    if (year && month && day) {
+      return `${year}-${month}-${day}`;
+    }
+  } catch {
+    // fall through to UTC date key
+  }
+  return dateKeyForDate(value);
+}
+
+function parseDailyWisdomPayload(value: unknown): DailyWisdomPayload | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  const id = typeof entry.id === "string" ? entry.id : null;
+  const date = typeof entry.date === "string" ? entry.date : null;
+  const tz = typeof entry.tz === "string" ? entry.tz : null;
+  const index =
+    typeof entry.index === "number" && Number.isFinite(entry.index) ? entry.index : null;
+  const text = typeof entry.text === "string" ? entry.text : null;
+  if (!id || !date || !tz || index === null || !text || text.trim().length === 0) {
+    return null;
+  }
+  return {
+    id,
+    date,
+    tz,
+    index,
+    text: text.trim(),
+  };
 }
 
 function createDayOptions(): DayOption[] {
@@ -1331,6 +1395,7 @@ export default function App() {
   const [loadingMeetings, setLoadingMeetings] = useState(false);
   const [meetingsStatus, setMeetingsStatus] = useState("Meetings not loaded yet.");
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
+  const [dailyWisdomText, setDailyWisdomText] = useState<string | null>(null);
   const [selectedMeeting, setSelectedMeeting] = useState<MeetingRecord | null>(null);
   const [pendingGeofenceLogMeetingId, setPendingGeofenceLogMeetingId] = useState<string | null>(
     null,
@@ -1427,8 +1492,11 @@ export default function App() {
   const lastMeetingsRequestKeyRef = useRef<string | null>(null);
   const meetingsAutoRefreshKeyRef = useRef<string | null>(null);
   const refreshMeetingsRef = useRef<
-    ((options?: { location?: LocationStamp | null }) => Promise<void>) | null
+    ((options?: { location?: LocationStamp | null; radiusMiles?: number }) => Promise<void>) | null
   >(null);
+  const requestLocationPermissionRef = useRef<(() => Promise<LocationStamp | null>) | null>(null);
+  const currentLocationRef = useRef<LocationStamp | null>(null);
+  const dailyWisdomFetchKeyRef = useRef<string | null>(null);
   const bootstrapStartedRef = useRef(false);
   const setupStep4RefreshLocationKeyRef = useRef<string | null>(null);
   const departurePromptedAttendanceRef = useRef<string | null>(null);
@@ -1516,6 +1584,11 @@ export default function App() {
   const selectedMeetingIsHomeGroup =
     selectedMeeting !== null && selectedDayPlan.homeGroupMeetingId === selectedMeeting.id;
   const todayDateKey = useMemo(() => dateKeyForDate(new Date(clockTickMs)), [clockTickMs]);
+  const dashboardWisdomTimeZone = useMemo(() => resolveDeviceTimeZone(), []);
+  const dashboardWisdomDateKey = useMemo(
+    () => dateKeyForTimeZone(new Date(clockTickMs), dashboardWisdomTimeZone),
+    [clockTickMs, dashboardWisdomTimeZone],
+  );
   const selectedDayIsToday = selectedDay.dateKey === todayDateKey;
   const selectedDayIsPast = selectedDay.date.getTime() < new Date(todayDateKey).getTime();
 
@@ -1748,6 +1821,21 @@ export default function App() {
 
     return dashboardUpcomingOnline.slice(0, 3);
   }, [dashboardUpcomingInPerson, dashboardUpcomingOnline]);
+  const dashboardMeetingPrimaryActionLabels = useMemo(() => {
+    const labels: Record<string, string> = {};
+    for (const meeting of dashboardNextThreeMeetings) {
+      labels[meeting.id] = "Attend";
+    }
+    if (activeAttendance && !activeAttendance.endAt) {
+      const elapsedSeconds = Math.max(
+        0,
+        Math.floor((sessionNowMs - new Date(activeAttendance.startAt).getTime()) / 1000),
+      );
+      labels[activeAttendance.meetingId] =
+        elapsedSeconds >= MIN_VALID_MEETING_MINUTES * 60 ? "End meeting" : "In progress";
+    }
+    return labels;
+  }, [dashboardNextThreeMeetings, activeAttendance, sessionNowMs]);
   const dashboardShowsOnlineFallback = useMemo(
     () => dashboardUpcomingInPerson.length === 0 && dashboardUpcomingOnline.length > 0,
     [dashboardUpcomingInPerson, dashboardUpcomingOnline],
@@ -3097,16 +3185,17 @@ export default function App() {
   );
 
   const refreshMeetings = useCallback(
-    async (options?: { location?: LocationStamp | null }) => {
+    async (options?: { location?: LocationStamp | null; radiusMiles?: number }) => {
       try {
         let location: LocationStamp | null = options?.location ?? null;
+        const effectiveRadiusMiles = options?.radiusMiles ?? meetingRadiusMiles;
         if (options?.location === undefined && locationPermission === "granted") {
           location = await readCurrentLocation(false);
         }
 
         const requestKey = [
           selectedDay.dayOfWeek,
-          meetingRadiusMiles,
+          effectiveRadiusMiles,
           location ? location.lat.toFixed(4) : "na",
           location ? location.lng.toFixed(4) : "na",
         ].join("|");
@@ -3127,7 +3216,7 @@ export default function App() {
         const requestParams = {
           lat: location?.lat,
           lng: location?.lng,
-          radiusMiles: meetingRadiusMiles,
+          radiusMiles: effectiveRadiusMiles,
         };
 
         const selectedDayResult = await source.listMeetings({
@@ -3197,6 +3286,14 @@ export default function App() {
   useEffect(() => {
     refreshMeetingsRef.current = refreshMeetings;
   }, [refreshMeetings]);
+
+  useEffect(() => {
+    requestLocationPermissionRef.current = requestLocationPermission;
+  }, [requestLocationPermission]);
+
+  useEffect(() => {
+    currentLocationRef.current = currentLocation;
+  }, [currentLocation]);
 
   const handleModeSelect = useCallback(
     (nextMode: RecoveryMode) => {
@@ -4463,7 +4560,13 @@ export default function App() {
   );
 
   const endAttendanceByRecordId = useCallback(
-    async (recordId: string) => {
+    async (
+      recordId: string,
+      options?: {
+        skipDurationGuard?: boolean;
+        skipSignaturePrompt?: boolean;
+      },
+    ) => {
       const baseRecord =
         (activeAttendance && activeAttendance.id === recordId ? activeAttendance : null) ??
         attendanceRecords.find((record) => record.id === recordId) ??
@@ -4488,6 +4591,30 @@ export default function App() {
         endAccuracyM: location?.accuracyM ?? null,
       };
 
+      if (
+        durationSeconds < MIN_VALID_MEETING_MINUTES * 60 &&
+        !options?.skipDurationGuard &&
+        !options?.skipSignaturePrompt
+      ) {
+        Alert.alert(
+          "Meeting may be invalid",
+          `This meeting is under ${MIN_VALID_MEETING_MINUTES} minutes and will be marked invalid. End anyway?`,
+          [
+            { text: "Keep in progress", style: "cancel" },
+            {
+              text: "End anyway",
+              style: "destructive",
+              onPress: () => {
+                void endAttendanceByRecordId(recordId, {
+                  skipDurationGuard: true,
+                });
+              },
+            },
+          ],
+        );
+        return;
+      }
+
       setActiveAttendance(next);
       upsertAttendanceRecord(next);
       appendMeetingAttendanceLog({
@@ -4495,10 +4622,52 @@ export default function App() {
         method: "verified",
       });
       departurePromptedAttendanceRef.current = null;
-      setAttendanceStatus("Attendance ended. Capture chairperson signature to complete the log.");
-      if (homeScreen === "MEETINGS") {
-        setScreen("SIGNATURE");
+
+      if (options?.skipSignaturePrompt) {
+        setAttendanceStatus("Meeting canceled and logged as invalid.");
+        if (homeScreen === "MEETINGS") {
+          setScreen("LIST");
+        }
+        return;
       }
+
+      if (meetingSignatureRequired) {
+        setAttendanceStatus("Attendance ended. Signature is required to complete the log.");
+        Alert.alert(
+          "Signature required",
+          "Capture chairperson signature to complete this meeting log.",
+          [
+            {
+              text: "Capture signature",
+              onPress: () => {
+                setHomeScreen("MEETINGS");
+                setScreen("SIGNATURE");
+              },
+            },
+          ],
+        );
+        return;
+      }
+
+      setAttendanceStatus("Attendance ended.");
+      Alert.alert("Add signature?", "Do you want to capture a chairperson signature?", [
+        {
+          text: "No",
+          style: "cancel",
+          onPress: () => {
+            if (homeScreen === "MEETINGS") {
+              setScreen("LIST");
+            }
+          },
+        },
+        {
+          text: "Yes",
+          onPress: () => {
+            setHomeScreen("MEETINGS");
+            setScreen("SIGNATURE");
+          },
+        },
+      ]);
     },
     [
       activeAttendance,
@@ -4507,6 +4676,7 @@ export default function App() {
       upsertAttendanceRecord,
       appendMeetingAttendanceLog,
       homeScreen,
+      meetingSignatureRequired,
     ],
   );
 
@@ -4516,6 +4686,16 @@ export default function App() {
     }
     await endAttendanceByRecordId(activeAttendance.id);
   }, [activeAttendance, endAttendanceByRecordId]);
+
+  const cancelAttendanceByRecordId = useCallback(
+    async (recordId: string) => {
+      await endAttendanceByRecordId(recordId, {
+        skipDurationGuard: true,
+        skipSignaturePrompt: true,
+      });
+    },
+    [endAttendanceByRecordId],
+  );
 
   const openAttendanceRecordSignatureCapture = useCallback(
     (recordId: string) => {
@@ -5103,6 +5283,46 @@ export default function App() {
     [activeAttendance, readCurrentLocation, resolveMeetingForLogging, startAttendance],
   );
 
+  const handleDashboardMeetingPrimaryAction = useCallback(
+    async (meetingId: string) => {
+      if (activeAttendance && !activeAttendance.endAt && activeAttendance.meetingId === meetingId) {
+        const elapsedSeconds = Math.max(
+          0,
+          Math.floor((Date.now() - new Date(activeAttendance.startAt).getTime()) / 1000),
+        );
+
+        if (elapsedSeconds >= MIN_VALID_MEETING_MINUTES * 60) {
+          await endAttendanceByRecordId(activeAttendance.id);
+          return;
+        }
+
+        Alert.alert(
+          "Meeting in progress",
+          "Do you want to cancel this meeting? It will be logged as invalid.",
+          [
+            { text: "Resume", style: "cancel" },
+            {
+              text: "Cancel meeting",
+              style: "destructive",
+              onPress: () => {
+                void cancelAttendanceByRecordId(activeAttendance.id);
+              },
+            },
+          ],
+        );
+        return;
+      }
+
+      await logUpcomingMeetingFromDashboard(meetingId);
+    },
+    [
+      activeAttendance,
+      endAttendanceByRecordId,
+      cancelAttendanceByRecordId,
+      logUpcomingMeetingFromDashboard,
+    ],
+  );
+
   const captureMeetingSignatureFromDashboard = useCallback(
     (meetingId: string) => {
       const meeting = resolveMeetingForLogging(meetingId);
@@ -5597,7 +5817,7 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!bootstrapped) {
+    if (!bootstrapped || homeScreen !== "DASHBOARD") {
       return;
     }
     void AsyncStorage.setItem(modeStorage, mode);
@@ -5760,20 +5980,19 @@ export default function App() {
       return;
     }
 
-    const locationKey = currentLocation
-      ? `${currentLocation.lat.toFixed(4)}|${currentLocation.lng.toFixed(4)}`
-      : "none";
+    const location = currentLocationRef.current;
+    const locationKey = location ? `${location.lat.toFixed(4)}|${location.lng.toFixed(4)}` : "none";
     if (setupStep4RefreshLocationKeyRef.current === locationKey) {
       return;
     }
     setupStep4RefreshLocationKeyRef.current = locationKey;
 
-    if (currentLocation) {
-      void refreshMeetings({ location: currentLocation });
+    if (location) {
+      void refreshMeetingsRef.current?.({ location });
       return;
     }
-    void refreshMeetings();
-  }, [bootstrapped, homeScreen, setupStep, refreshMeetings, currentLocation]);
+    void refreshMeetingsRef.current?.();
+  }, [bootstrapped, homeScreen, setupStep]);
 
   useEffect(() => {
     if (homeScreen !== "MEETINGS") {
@@ -5800,19 +6019,103 @@ export default function App() {
     meetingsAutoRefreshKeyRef.current = nextKey;
 
     void (async () => {
-      const location = currentLocation ?? (await requestLocationPermission());
+      const location =
+        currentLocationRef.current ?? (await requestLocationPermissionRef.current?.());
       await refreshMeetingsRef.current?.({ location });
     })();
   }, [
     bootstrapped,
     homeScreen,
-    currentLocation,
-    requestLocationPermission,
     selectedDay.dayOfWeek,
     meetingsFormatFilter,
     meetingsTimeFilter,
     meetingsLocationFilter,
     meetingRadiusMiles,
+  ]);
+
+  useEffect(() => {
+    if (!bootstrapped) {
+      return;
+    }
+
+    const fetchKey = getWisdomCacheKey(dashboardWisdomDateKey, dashboardWisdomTimeZone);
+    if (dailyWisdomFetchKeyRef.current === fetchKey) {
+      return;
+    }
+    dailyWisdomFetchKeyRef.current = fetchKey;
+
+    let cancelled = false;
+    void (async () => {
+      const localFallback = getLocalDailyWisdomQuote(
+        dashboardWisdomDateKey,
+        dashboardWisdomTimeZone,
+      );
+      let cachedPayload: DailyWisdomPayload | null = null;
+
+      try {
+        const cachedRaw = await AsyncStorage.getItem(fetchKey);
+        if (cachedRaw) {
+          const parsed = parseDailyWisdomPayload(JSON.parse(cachedRaw));
+          if (parsed) {
+            cachedPayload = parsed;
+            if (!cancelled) {
+              setDailyWisdomText(parsed.text);
+            }
+          }
+        }
+      } catch {
+        // ignore cache read errors and proceed
+      }
+
+      try {
+        const query = new URLSearchParams({
+          date: dashboardWisdomDateKey,
+          tz: dashboardWisdomTimeZone,
+        });
+        const response = await fetch(`${apiUrl}/api/wisdom/daily?${query.toString()}`, {
+          headers: {
+            Authorization: authHeader,
+          },
+        });
+        if (!response.ok) {
+          throw new Error(`wisdom fetch failed: ${response.status}`);
+        }
+        const payload = parseDailyWisdomPayload(await response.json());
+        if (!payload) {
+          throw new Error("wisdom payload invalid");
+        }
+        if (!cancelled) {
+          setDailyWisdomText(payload.text);
+        }
+        try {
+          await AsyncStorage.setItem(fetchKey, JSON.stringify(payload));
+        } catch {
+          // cache writes are best effort
+        }
+      } catch {
+        if (!cancelled && !cachedPayload) {
+          setDailyWisdomText(localFallback.text);
+        }
+        if (!cachedPayload) {
+          try {
+            await AsyncStorage.setItem(fetchKey, JSON.stringify(localFallback));
+          } catch {
+            // cache writes are best effort
+          }
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    bootstrapped,
+    homeScreen,
+    dashboardWisdomDateKey,
+    dashboardWisdomTimeZone,
+    apiUrl,
+    authHeader,
   ]);
 
   useEffect(() => {
@@ -6735,6 +7038,7 @@ export default function App() {
                   showingOnlineMeetingsFallback={dashboardShowsOnlineFallback}
                   chatEnabled={chatEnabled}
                   sponsorEnabled={sponsorEnabled}
+                  wisdomText={dailyWisdomText}
                   dailyChecklist={dailyChecklistStatus}
                   homeGroupMeeting={
                     homeGroupUpcoming
@@ -6762,6 +7066,7 @@ export default function App() {
                     goal: DEFAULT_DAILY_MEETINGS_GOAL_TARGET,
                   }}
                   meetingBarsLast7={meetingsWeekBarsMonSun}
+                  meetingPrimaryActionLabels={dashboardMeetingPrimaryActionLabels}
                   morningRoutine={morningRoutineStats}
                   nightlyInventory={nightlyInventoryStats}
                   routineInsights={routineInsights}
@@ -6799,7 +7104,7 @@ export default function App() {
                     })();
                   }}
                   onLogMeeting={(meetingId) => {
-                    void logUpcomingMeetingFromDashboard(meetingId);
+                    void handleDashboardMeetingPrimaryAction(meetingId);
                   }}
                   onCaptureSignature={(meetingId) => {
                     captureMeetingSignatureFromDashboard(meetingId);
@@ -7050,6 +7355,10 @@ export default function App() {
                                     setMeetingsLocationFilter(option.value);
                                     setMeetingRadiusMiles(nextRadiusMiles);
                                     setOpenMeetingsFilterDropdown(null);
+                                    void refreshMeetings({
+                                      location: currentLocation,
+                                      radiusMiles: nextRadiusMiles,
+                                    });
                                   }}
                                 >
                                   <Text
