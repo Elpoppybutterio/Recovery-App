@@ -13,7 +13,7 @@ import { auditResponseIfNeeded, createAuditLogger } from "./audit";
 import { buildAuthenticateRequest } from "./auth";
 import type { DbPool } from "./db/client";
 import { createPostgresPool } from "./db/postgres";
-import { createRepositories } from "./db/repositories";
+import { createRepositories, SignatureWindowError } from "./db/repositories";
 import { AccessDeniedError, createTenantRepositories } from "./db/tenantRepositories";
 import { loadApiEnv, type ApiEnv } from "./env";
 import { bigBookPagesQuerySchema, getBigBookPagesForRange } from "./literature/bigbook";
@@ -23,6 +23,7 @@ import {
 } from "./meeting-guide-ingest";
 import { mapTypeCodesToLabels } from "./meeting-guide";
 import { requirePermission, requireRole, requireSupervisorAssignment } from "./rbac";
+import { getDailyWisdomQuote, wisdomDailyQuerySchema } from "./wisdom";
 
 const logger = createLogger("api");
 
@@ -380,6 +381,30 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       ts: new Date().toISOString(),
     };
   });
+
+  app.get(
+    "/api/wisdom/daily",
+    {
+      preHandler: [
+        authenticateRequest,
+        requireRole(Role.END_USER, Role.SUPERVISOR, Role.ADMIN, Role.MEETING_VERIFIER),
+      ],
+    },
+    async (request, reply) => {
+      const parsedQuery = wisdomDailyQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid wisdom daily query",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      const { date, tz } = parsedQuery.data;
+      return getDailyWisdomQuote(date, tz);
+    },
+  );
 
   app.get(
     "/v1/literature/bigbook/pages",
@@ -1718,12 +1743,28 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         return;
       }
 
-      const result = await tenantRepositories.signatures.sign(
-        actor,
-        parsedParams.data.attendanceId,
-        parsedBody.data.signatureBlob,
-        now(),
-      );
+      let result: Awaited<ReturnType<typeof tenantRepositories.signatures.sign>>;
+      try {
+        result = await tenantRepositories.signatures.sign(
+          actor,
+          parsedParams.data.attendanceId,
+          parsedBody.data.signatureBlob,
+          now(),
+        );
+      } catch (error) {
+        if (error instanceof SignatureWindowError) {
+          reply.code(422).send({
+            error: "signature_window_closed",
+            message: error.message,
+            details: {
+              checkInAt: error.checkInAtIso,
+              windowEndsAt: error.windowEndsAtIso,
+            },
+          });
+          return;
+        }
+        throw error;
+      }
       if (!result) {
         reply.code(404).send({ error: "not_found", message: "Attendance record not found" });
         return;

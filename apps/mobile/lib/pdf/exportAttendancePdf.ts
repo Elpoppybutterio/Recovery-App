@@ -1,4 +1,5 @@
 export const ATTENDANCE_PDF_FILE_NAME = "AA-NA Meeting Attendance Sheet.pdf";
+const MAX_SIGNATURE_BASE64_CHARS_IN_ATTENDANCE_PDF = 70000;
 
 type LocationStamp = {
   lat: number | null;
@@ -83,7 +84,9 @@ function formatLocation(value: LocationStamp): string {
 
 function buildAttendanceHtml(payload: AttendancePdfPayload): string {
   const signatureMarkup = payload.signatureSvgBase64
-    ? `<img alt="Signature" src="data:image/svg+xml;base64,${payload.signatureSvgBase64}" style="width: 100%; max-width: 420px; border: 1px solid #d0d5dd; border-radius: 8px;" />`
+    ? payload.signatureSvgBase64.length <= MAX_SIGNATURE_BASE64_CHARS_IN_ATTENDANCE_PDF
+      ? `<img alt="Signature" src="data:image/svg+xml;base64,${payload.signatureSvgBase64}" style="width: 100%; max-width: 420px; border: 1px solid #d0d5dd; border-radius: 8px;" />`
+      : `<p style="color:#667085;">Signature captured (omitted in PDF to keep generation stable).</p>`
     : `<p style="color:#667085;">No signature captured.</p>`;
 
   return `<!doctype html>

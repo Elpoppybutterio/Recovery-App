@@ -94,6 +94,18 @@ export interface SignAttendanceResult {
   alreadySigned: boolean;
 }
 
+export class SignatureWindowError extends Error {
+  readonly checkInAtIso: string;
+  readonly windowEndsAtIso: string;
+
+  constructor(checkInAtIso: string, windowEndsAtIso: string) {
+    super("Signature is available from meeting start until 90 minutes after start.");
+    this.name = "SignatureWindowError";
+    this.checkInAtIso = checkInAtIso;
+    this.windowEndsAtIso = windowEndsAtIso;
+  }
+}
+
 export type ExclusionZoneType = "CIRCLE" | "POLYGON";
 
 export interface ExclusionZoneRow {
@@ -269,6 +281,8 @@ export interface SupervisorIncidentFilters {
 }
 
 const CHECK_OUT_DWELL_THRESHOLD_SECONDS = 3600;
+const SIGNATURE_WINDOW_MINUTES = 90;
+const SIGNATURE_WINDOW_MS = SIGNATURE_WINDOW_MINUTES * 60 * 1000;
 
 function toRole(role: string): Role | null {
   return Object.values(Role).includes(role as Role) ? (role as Role) : null;
@@ -1413,6 +1427,15 @@ export function createRepositories(db: DbClient) {
       );
       if (!attendance.rows[0]) {
         return null;
+      }
+      const checkInAtIso = attendance.rows[0].check_in_at;
+      const checkInAtMs = Date.parse(checkInAtIso);
+      if (!Number.isNaN(checkInAtMs)) {
+        const windowEndsAtMs = checkInAtMs + SIGNATURE_WINDOW_MS;
+        const nowMs = now.getTime();
+        if (nowMs < checkInAtMs || nowMs > windowEndsAtMs) {
+          throw new SignatureWindowError(checkInAtIso, new Date(windowEndsAtMs).toISOString());
+        }
       }
 
       const existingSignature = await db.query<SignatureRow>(

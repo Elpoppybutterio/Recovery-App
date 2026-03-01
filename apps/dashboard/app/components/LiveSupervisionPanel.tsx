@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { JSX } from "react";
 
 type LiveSupervisionItem = {
   userId: string;
@@ -40,7 +41,7 @@ function formatRelativeTime(isoTimestamp: string, nowMs: number): string {
   return `updated ${hours}h ago`;
 }
 
-export function LiveSupervisionPanel({ devUserId }: { devUserId: string }) {
+export function LiveSupervisionPanel({ devUserId }: { devUserId: string }): JSX.Element {
   const [items, setItems] = useState<LiveSupervisionItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);

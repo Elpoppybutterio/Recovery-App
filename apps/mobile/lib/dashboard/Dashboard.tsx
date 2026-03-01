@@ -1,8 +1,9 @@
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useEffect, useState } from "react";
 import { GlassCard } from "../ui/GlassCard";
 import { Design } from "../ui/design";
 import type { RecoveryInsight } from "../recoveryInsights";
+import { ChatTile } from "./ChatTile";
 
 type DashboardMeeting = {
   id: string;
@@ -21,9 +22,11 @@ type DashboardProps = {
   locationEnabled: boolean;
   nextMeetings: DashboardMeeting[];
   showingOnlineMeetingsFallback: boolean;
+  chatEnabled: boolean;
   sponsorEnabled: boolean;
+  wisdomText?: string | null;
   dailyChecklist: {
-    rows: Array<{ id: string; label: string; complete: boolean }>;
+    rows: Array<{ id: string; label: string; complete: boolean; progress: number }>;
     percent: number;
     summary: string;
   };
@@ -36,6 +39,7 @@ type DashboardProps = {
     goal: number;
   };
   meetingBarsLast7: number[];
+  meetingPrimaryActionLabels: Record<string, string>;
   morningRoutine: {
     streakDays: number;
     last30CompletionPct: number;
@@ -56,6 +60,7 @@ type DashboardProps = {
   onCallSponsor: () => void;
   onOpenMorningRoutine: () => void;
   onOpenNightlyInventory: () => void;
+  onOpenChat: () => void;
   onOpenRecoverySettings: () => void;
   onOpenMeetings: () => void;
   onOpenAttendance: () => void;
@@ -65,6 +70,7 @@ type DashboardProps = {
   onOpenProbationParoleSettings: () => void;
   onRefresh: () => void;
   onLogMeeting: (meetingId: string) => void;
+  onCaptureSignature: (meetingId: string) => void;
   onLearnMore: () => void;
 };
 
@@ -184,12 +190,16 @@ export function Dashboard({
   locationEnabled,
   nextMeetings,
   showingOnlineMeetingsFallback,
+  chatEnabled,
   sponsorEnabled,
+  wisdomText,
   dailyChecklist,
   meetingsAttendedInNinetyDays,
   ninetyDayGoalTarget,
   ninetyDayProgressPct,
   meetingsAttendedToday,
+  meetingBarsLast7,
+  meetingPrimaryActionLabels,
   morningRoutine,
   nightlyInventory,
   routineInsights,
@@ -198,6 +208,7 @@ export function Dashboard({
   onCallSponsor,
   onOpenMorningRoutine,
   onOpenNightlyInventory,
+  onOpenChat,
   onOpenRecoverySettings,
   onOpenMeetings,
   onOpenAttendance,
@@ -207,6 +218,7 @@ export function Dashboard({
   onOpenProbationParoleSettings,
   onRefresh,
   onLogMeeting,
+  onCaptureSignature,
 }: DashboardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [hoveredTileId, setHoveredTileId] = useState<string | null>(null);
@@ -249,6 +261,9 @@ export function Dashboard({
     meetingsTodayCount === 1
       ? "1 meeting attended today"
       : `${meetingsTodayCount} meetings attended today`;
+  const meetingsWeekBars = meetingBarsLast7.length === 7 ? meetingBarsLast7 : [0, 0, 0, 0, 0, 0, 0];
+  const meetingsWeekMax = Math.max(1, ...meetingsWeekBars);
+  const meetingsWeekTotal = meetingsWeekBars.reduce((sum, value) => sum + value, 0);
 
   const issuesOnMorningDone = Math.max(0, routineInsights.averageIssuesOnMorningCompleteDays);
   const issuesOnMorningMissed = Math.max(0, routineInsights.averageIssuesOnMorningIncompleteDays);
@@ -272,10 +287,14 @@ export function Dashboard({
       return current === tileId ? null : current;
     });
   };
+  const sponsorWisdomText =
+    typeof wisdomText === "string" && wisdomText.trim().length > 0
+      ? wisdomText
+      : SPONSOR_WISDOM_TEXT;
 
   return (
     <View style={styles.root}>
-      <SafeAreaView style={styles.topSafeArea}>
+      <View style={styles.topSafeArea}>
         <View style={styles.topBar}>
           <Pressable onPress={() => setMenuOpen((current) => !current)} style={styles.iconButton}>
             <Text style={styles.iconText}>☰</Text>
@@ -349,7 +368,7 @@ export function Dashboard({
             </GlassCard>
           </View>
         ) : null}
-      </SafeAreaView>
+      </View>
 
       <View style={styles.wave} />
 
@@ -387,7 +406,7 @@ export function Dashboard({
               nestedScrollEnabled
               showsVerticalScrollIndicator
             >
-              <Text style={styles.factText}>{SPONSOR_WISDOM_TEXT}</Text>
+              <Text style={styles.factText}>{sponsorWisdomText}</Text>
             </ScrollView>
           </GlassCard>
         </Pressable>
@@ -400,9 +419,11 @@ export function Dashboard({
         <View style={styles.metricsRow}>
           <Pressable
             style={styles.metricTilePressable}
+            onPress={onOpenAttendance}
             onHoverIn={() => setTileHover("ninety-day", true)}
             onHoverOut={() => setTileHover("ninety-day", false)}
-            accessible={false}
+            accessibilityRole="button"
+            accessibilityLabel="Open meetings logged page"
           >
             <GlassCard
               strong
@@ -489,6 +510,32 @@ export function Dashboard({
                 <Text style={styles.fuelGaugeScaleText}>F</Text>
               </View>
               <Text style={styles.streakLabel}>{meetingsTodaySummary}</Text>
+              <View style={styles.separator} />
+              <View style={styles.weeklyHeaderRow}>
+                <Text style={styles.metricMeta}>This Week</Text>
+                <Text style={styles.metricMeta}>{meetingsWeekTotal} meetings</Text>
+              </View>
+              <View style={styles.weeklyBarsRow}>
+                {meetingsWeekBars.map((count, index) => {
+                  const heightPct = Math.max(8, Math.round((count / meetingsWeekMax) * 100));
+                  return (
+                    <View key={`meetings-week-${index}`} style={styles.weeklyBarCol}>
+                      <View style={styles.weeklyBarTrack}>
+                        <View
+                          style={[
+                            styles.weeklyBarFill,
+                            {
+                              height: `${heightPct}%`,
+                              opacity: count > 0 ? 0.96 : 0.3,
+                            },
+                          ]}
+                        />
+                      </View>
+                      <Text style={styles.weeklyBarCount}>{count}</Text>
+                    </View>
+                  );
+                })}
+              </View>
             </GlassCard>
           </Pressable>
         </View>
@@ -526,12 +573,20 @@ export function Dashboard({
                     <View
                       style={[
                         styles.nightlyStatusDot,
-                        row.complete ? styles.nightlyStatusDotDone : null,
+                        row.complete
+                          ? styles.nightlyStatusDotDone
+                          : row.progress > 0
+                            ? styles.nightlyStatusDotPartial
+                            : null,
                       ]}
                     />
                     <Text style={styles.dailyChecklistLabel}>{row.label}</Text>
                     <Text style={styles.dailyChecklistStatus}>
-                      {row.complete ? "Done" : "Pending"}
+                      {row.progress === 100
+                        ? "Done"
+                        : row.progress > 0
+                          ? `${row.progress}%`
+                          : "Pending"}
                     </Text>
                   </View>
                 ))}
@@ -655,14 +710,18 @@ export function Dashboard({
                     <View style={[styles.nightlyBarFillToday, { height: `${nightlyTodayPct}%` }]} />
                   </View>
                   <Text style={styles.nightlyBarValue}>{nightlyTodayIssues.toFixed(1)}</Text>
-                  <Text style={styles.nightlyBarLabel}>Today</Text>
+                  <Text style={styles.nightlyBarLabel} numberOfLines={1}>
+                    Tdy
+                  </Text>
                 </View>
                 <View style={styles.nightlyBarCol}>
                   <View style={styles.nightlyBarTrack}>
                     <View style={[styles.nightlyBarFillDone, { height: `${nightlyDonePct}%` }]} />
                   </View>
                   <Text style={styles.nightlyBarValue}>{issuesOnMorningDone.toFixed(1)}</Text>
-                  <Text style={styles.nightlyBarLabel}>Done</Text>
+                  <Text style={styles.nightlyBarLabel} numberOfLines={1}>
+                    Done
+                  </Text>
                 </View>
                 <View style={styles.nightlyBarCol}>
                   <View style={styles.nightlyBarTrack}>
@@ -671,7 +730,9 @@ export function Dashboard({
                     />
                   </View>
                   <Text style={styles.nightlyBarValue}>{issuesOnMorningMissed.toFixed(1)}</Text>
-                  <Text style={styles.nightlyBarLabel}>Missed</Text>
+                  <Text style={styles.nightlyBarLabel} numberOfLines={1}>
+                    Miss
+                  </Text>
                 </View>
               </View>
               <View style={styles.nightlyRiskTrack}>
@@ -715,6 +776,14 @@ export function Dashboard({
                 No in-person meetings available for the rest of today. Showing online meetings.
               </Text>
             ) : null}
+            <Pressable
+              style={styles.meetingsAttendanceLogPill}
+              onPress={onOpenAttendance}
+              accessibilityRole="button"
+              accessibilityLabel="Open meetings attendance log page"
+            >
+              <Text style={styles.meetingsAttendanceLogPillText}>Meetings Attendance Log</Text>
+            </Pressable>
 
             {upcoming.map((meeting, index) => (
               <View key={meeting.id} style={styles.meetingItem}>
@@ -737,9 +806,22 @@ export function Dashboard({
                   </View>
                   <Text style={styles.meetingTime}>{toTwelveHour(meeting.startsAtLocal)}</Text>
                 </Pressable>
-                <Pressable style={styles.meetingLogButton} onPress={() => onLogMeeting(meeting.id)}>
-                  <Text style={styles.meetingLogButtonText}>Log</Text>
-                </Pressable>
+                <View style={styles.meetingActionsCol}>
+                  <Pressable
+                    style={styles.meetingLogButton}
+                    onPress={() => onLogMeeting(meeting.id)}
+                  >
+                    <Text style={styles.meetingLogButtonText}>
+                      {meetingPrimaryActionLabels[meeting.id] ?? "Attend"}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.meetingLogButton}
+                    onPress={() => onCaptureSignature(meeting.id)}
+                  >
+                    <Text style={styles.meetingLogButtonText}>Signature</Text>
+                  </Pressable>
+                </View>
               </View>
             ))}
 
@@ -754,6 +836,14 @@ export function Dashboard({
             ) : null}
           </GlassCard>
         </Pressable>
+
+        <ChatTile
+          enabled={chatEnabled}
+          hovered={hoveredTileId === "chat"}
+          onPress={onOpenChat}
+          onHoverIn={() => setTileHover("chat", true)}
+          onHoverOut={() => setTileHover("chat", false)}
+        />
 
         <Pressable
           onHoverIn={() => setTileHover("physical-recovery", true)}
@@ -1028,6 +1118,43 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
   },
+  weeklyHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  weeklyBarsRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    gap: 5,
+  },
+  weeklyBarCol: {
+    flex: 1,
+    alignItems: "center",
+    gap: 2,
+  },
+  weeklyBarTrack: {
+    width: "100%",
+    height: 42,
+    borderRadius: 8,
+    justifyContent: "flex-end",
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.26)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  weeklyBarFill: {
+    width: "100%",
+    minHeight: 3,
+    borderRadius: 8,
+    backgroundColor: "rgba(136,255,179,0.95)",
+  },
+  weeklyBarCount: {
+    color: Design.color.textPrimary,
+    fontSize: 10,
+    fontWeight: "800",
+  },
   successText: {
     color: Design.color.textPrimary,
     fontSize: 16,
@@ -1229,6 +1356,9 @@ const styles = StyleSheet.create({
   nightlyStatusDotDone: {
     backgroundColor: "rgba(136,255,179,0.95)",
   },
+  nightlyStatusDotPartial: {
+    backgroundColor: "rgba(251,191,36,0.95)",
+  },
   trendBadge: {
     marginLeft: "auto",
     borderRadius: 999,
@@ -1402,6 +1532,21 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginBottom: 2,
   },
+  meetingsAttendanceLogPill: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.36)",
+    backgroundColor: "rgba(255,255,255,0.15)",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    marginBottom: 2,
+  },
+  meetingsAttendanceLogPillText: {
+    color: Design.color.textPrimary,
+    fontSize: 12,
+    fontWeight: "700",
+  },
   dot: {
     width: 7,
     height: 7,
@@ -1456,6 +1601,10 @@ const styles = StyleSheet.create({
     color: "#2F2380",
     fontSize: 16,
     fontWeight: "800",
+  },
+  meetingActionsCol: {
+    gap: 6,
+    alignItems: "stretch",
   },
   meetingLogButton: {
     borderRadius: 10,

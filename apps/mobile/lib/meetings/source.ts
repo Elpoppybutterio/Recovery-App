@@ -413,9 +413,12 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           const nearbyResponse = await fetch(nearbyUrl, { headers });
 
           if (nearbyResponse.ok) {
-            const nearbyPayload = (await nearbyResponse.json()) as { meetings?: unknown[] };
+            const nearbyPayload = asObject((await nearbyResponse.json()) as unknown);
+            const nearbyMeetingsRaw = Array.isArray(nearbyPayload?.meetings)
+              ? nearbyPayload.meetings
+              : [];
             nearbyMeetings = dedupeMeetings(
-              (nearbyPayload.meetings ?? [])
+              nearbyMeetingsRaw
                 .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
                 .filter((entry): entry is MeetingRecord => entry !== null),
             );
@@ -445,9 +448,10 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         throw new Error(`Meetings API failed (${response.status})`);
       }
 
-      const payload = (await response.json()) as { meetings?: unknown[] };
+      const payload = asObject((await response.json()) as unknown);
+      const meetingsRaw = Array.isArray(payload?.meetings) ? payload.meetings : [];
       const allMeetingsForDay = dedupeMeetings(
-        (payload.meetings ?? [])
+        meetingsRaw
           .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
           .filter((entry): entry is MeetingRecord => entry !== null),
       );

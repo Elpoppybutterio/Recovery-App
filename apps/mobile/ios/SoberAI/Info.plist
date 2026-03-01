@@ -27,7 +27,7 @@
       <dict>
         <key>CFBundleURLSchemes</key>
         <array>
-          <string>com.recovery.accountability</string>
+          <string>soberai</string>
         </array>
       </dict>
     </array>

@@ -34,7 +34,11 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - User features: sponsor contact config, sponsor enable toggle + reminder toggle restructuring, single-source sponsor status hygiene, simulator-safe call-now handling, reliable location enable messaging, and meeting drive reminder planning.
 - Recovery UX v2: setup wizard flow, dashboard-first home experience, purple liquid-glass cards, and local recovery analytics (days sober, 90-day progress, sponsor adherence).
 - Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
+- Dashboard: add a dormant `Intranet / Group Chat` tile directly below Upcoming Meetings, feature-flagged with a Coming Soon placeholder flow.
+- Dashboard: Wisdom tile uses server-driven daily rotation (`/api/wisdom/daily`) with one quote per day, pronoun normalization (`I/you -> we`), plus local cache and deterministic fallback.
 - Mobile dev correctness: API URL alignment (`localhost:3031`), no hardcoded SF map origin defaults, nearby-meetings request diagnostics, and map search-origin visibility.
+- Build readiness: Development Build workflow implemented (EAS `development` / `preview` / `production` profiles, environment-driven bundle identifiers, stable deep-link scheme, and dev-client runbook in `docs/DEV_BUILD.md`).
+- Preview pipeline: internal preview build profile + TestFlight-ready store preview profile documented and validated in `docs/PREVIEW_BUILD.md`.
 - API dev tooling: DEV-auth-gated meeting ingest trigger (`POST /v1/dev/meetings/refresh`) with cooldown guard for local workflows.
 - API endpoints: `GET /v1/me/sponsor`, `PUT /v1/me/sponsor`, `POST /v1/dev/meetings/refresh`.
 - Data tables: `sponsor_config`.
@@ -46,3 +50,4 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - [ ] Meeting Guide distributed feed ingest + tenant-scoped `/v1/meetings/nearby` search (20-mile default) with map/list toggle UX.
 - [ ] Dashboard + Setup Wizard + upcoming-meetings logic hardening across timezones and tenant policy controls.
 - [ ] Tools: AM routine + Nightly inventory + insights (local-first storage, optional API sync later).
+- [ ] Enable provider-backed Intranet / Group Chat (contact invites, push notifications, deep links, moderation controls).

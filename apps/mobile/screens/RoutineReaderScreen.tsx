@@ -1,4 +1,4 @@
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { LiquidGlassCard } from "../components/LiquidGlassCard";
 import { routineTheme } from "../theme/tokens";
 
@@ -22,6 +22,8 @@ export function RoutineReaderScreen({
   onOpenLink: (url: string) => void;
 }) {
   const hasBodyText = Boolean(bodyText && bodyText.trim().length > 0);
+  const { height: windowHeight } = useWindowDimensions();
+  const bodyScrollMaxHeight = Math.max(260, Math.min(windowHeight * 0.62, 560));
   const paragraphs = hasBodyText
     ? bodyText!
         .split(/\n\s*\n/)
@@ -50,7 +52,12 @@ export function RoutineReaderScreen({
             : "Use your licensed source link. Full copyrighted text is not bundled in-app."}
         </Text>
         {hasBodyText ? (
-          <View style={styles.bodyContainer}>
+          <ScrollView
+            style={[styles.bodyContainer, { maxHeight: bodyScrollMaxHeight }]}
+            contentContainerStyle={styles.bodyContainerContent}
+            nestedScrollEnabled
+            showsVerticalScrollIndicator
+          >
             {paragraphs.map((paragraph, index) => (
               <Text
                 key={`paragraph-${index}`}
@@ -59,7 +66,7 @@ export function RoutineReaderScreen({
                 {paragraph}
               </Text>
             ))}
-          </View>
+          </ScrollView>
         ) : url ? (
           <Pressable style={styles.openBtn} onPress={() => onOpenLink(url)}>
             <Text style={styles.openText}>Open Link</Text>
@@ -74,7 +81,7 @@ export function RoutineReaderScreen({
               <View style={[styles.checkbox, gotOnKneesCompleted ? styles.checkboxChecked : null]}>
                 {gotOnKneesCompleted ? <Text style={styles.checkboxTick}>✓</Text> : null}
               </View>
-              <Text style={styles.checkboxLabel}>Got on knees</Text>
+              <Text style={styles.checkboxLabel}>On knees</Text>
             </Pressable>
           </View>
         ) : null}
@@ -117,6 +124,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: routineTheme.colors.cardStroke,
     backgroundColor: "rgba(15,23,42,0.28)",
+  },
+  bodyContainerContent: {
     paddingHorizontal: 14,
     paddingVertical: 14,
   },

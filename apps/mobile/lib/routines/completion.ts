@@ -8,7 +8,7 @@ export type MorningCompletionResult = {
 
 export function computeMorningCompletedAt(
   items: RoutineChecklistItem[],
-  completedByItemId: Record<string, string>,
+  completedByItemId: Record<string, string> | null | undefined,
   previousCompletedAt: string | null,
   nowIso: string,
 ): string | null {
@@ -16,7 +16,9 @@ export function computeMorningCompletedAt(
   if (enabledItemIds.size === 0) {
     return null;
   }
-  const completedEnabledCount = Object.keys(completedByItemId).filter((itemId) =>
+  const safeCompletedByItemId =
+    completedByItemId && typeof completedByItemId === "object" ? completedByItemId : {};
+  const completedEnabledCount = Object.keys(safeCompletedByItemId).filter((itemId) =>
     enabledItemIds.has(itemId),
   ).length;
   if (completedEnabledCount >= enabledItemIds.size) {
@@ -31,6 +33,10 @@ export function completeMorningItemIfEnabled(
   itemId: string,
   nowIso: string,
 ): MorningCompletionResult {
+  const existingCompletedByItemId =
+    dayState.completedByItemId && typeof dayState.completedByItemId === "object"
+      ? dayState.completedByItemId
+      : {};
   const item = items.find((candidate) => candidate.id === itemId);
   if (!item?.enabled) {
     return {
@@ -40,7 +46,7 @@ export function completeMorningItemIfEnabled(
     };
   }
 
-  if (dayState.completedByItemId[itemId]) {
+  if (existingCompletedByItemId[itemId]) {
     return {
       nextDayState: dayState,
       changed: false,
@@ -49,7 +55,7 @@ export function completeMorningItemIfEnabled(
   }
 
   const completedByItemId = {
-    ...dayState.completedByItemId,
+    ...existingCompletedByItemId,
     [itemId]: nowIso,
   };
   return {

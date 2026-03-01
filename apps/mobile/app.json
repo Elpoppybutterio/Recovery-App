@@ -8,24 +8,31 @@
     "userInterfaceStyle": "light",
     "ios": {
       "icon": "./assets/icon.png",
-      "bundleIdentifier": "com.recovery.accountability",
+      "bundleIdentifier": "com.sober.ai.dev",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Location is used to show nearby meetings and arrival prompts.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Always location is used to auto-log meeting attendance when you arrive at a meeting geofence.",
-        "UIBackgroundModes": ["location"]
-      }
+        "UIBackgroundModes": ["location", "location"],
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "buildNumber": "1",
+      "runtimeVersion": "1.0.0"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon-foreground.png",
         "backgroundImage": "./assets/icon-background.png"
       },
-      "package": "com.recovery.accountability",
+      "package": "com.sober.ai.dev",
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION"
-      ]
+      ],
+      "versionCode": 1
     },
     "assetBundlePatterns": ["**/*"],
     "extra": {
@@ -33,7 +40,17 @@
       "devAuthUserId": "enduser-a1",
       "devUserDisplayName": "DEV User",
       "meetingFeedUrl": "",
-      "supervisionEnabled": false
+      "supervisionEnabled": false,
+      "enableSponsorApiSync": false,
+      "appEnv": "development",
+      "appScheme": "soberai",
+      "appBundleIdentifier": "com.sober.ai.dev",
+      "eas": {
+        "projectId": "b4ee8eed-aaa7-4aa9-870a-e796c31c8f51"
+      }
+    },
+    "updates": {
+      "url": "https://u.expo.dev/b4ee8eed-aaa7-4aa9-870a-e796c31c8f51"
     }
   }
 }

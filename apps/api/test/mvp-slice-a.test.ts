@@ -223,6 +223,62 @@ describe("MVP Slice A: meetings + attendance + signature", () => {
     await db.end?.();
   });
 
+  it("rejects signature attempts outside 90 minutes from meeting start", async () => {
+    const clock = buildClock("2026-01-03T08:00:00.000Z");
+    const app = createTestApp(db, { now: clock.now });
+
+    const meetingCreate = await app.inject({
+      method: "POST",
+      url: "/v1/meetings",
+      headers: { authorization: "Bearer DEV_admin-a" },
+      payload: {
+        name: "Late Signature Meeting",
+        address: "500 Elm",
+        lat: 40,
+        lng: -105,
+        radiusM: 100,
+      },
+    });
+    const meetingId = (meetingCreate.json() as { id: string }).id;
+
+    const checkIn = await app.inject({
+      method: "POST",
+      url: "/v1/attendance/check-in",
+      headers: { authorization: "Bearer DEV_enduser-a1" },
+      payload: { meetingId },
+    });
+    const attendanceId = (checkIn.json() as { attendance: { id: string } }).attendance.id;
+
+    clock.set("2026-01-03T08:45:00.000Z");
+    await app.inject({
+      method: "POST",
+      url: "/v1/attendance/check-out",
+      headers: { authorization: "Bearer DEV_enduser-a1" },
+      payload: { attendanceId },
+    });
+
+    clock.set("2026-01-03T09:31:00.000Z");
+    const signLate = await app.inject({
+      method: "POST",
+      url: `/v1/attendance/${attendanceId}/sign`,
+      headers: { authorization: "Bearer DEV_verifier-a" },
+      payload: { signatureBlob: "base64:signature" },
+    });
+    expect(signLate.statusCode).toBe(422);
+    expect(
+      signLate.json() as { error: string; message: string; details?: { checkInAt?: string } },
+    ).toMatchObject({
+      error: "signature_window_closed",
+      message: "Signature is available from meeting start until 90 minutes after start.",
+      details: {
+        checkInAt: "2026-01-03T08:00:00.000Z",
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
+
   it("limits supervisor list to assigned users and denies unassigned filtered access", async () => {
     const clock = buildClock("2026-01-04T10:00:00.000Z");
     const app = createTestApp(db, { now: clock.now });

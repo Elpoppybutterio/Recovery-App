@@ -5,6 +5,11 @@ import { LiquidGlassCard } from "../components/LiquidGlassCard";
 import type { NightlyInventoryDayState } from "../lib/routines/types";
 import { routineTheme } from "../theme/tokens";
 
+type NightlyFearCategory = keyof Pick<
+  NightlyInventoryDayState,
+  "resentful" | "selfSeeking" | "selfish" | "dishonest"
+>;
+
 function asEditorItems(items: Array<{ id: string; text: string }>) {
   return items;
 }
@@ -34,7 +39,7 @@ export function NightlyInventoryScreen({
   onAddEntry,
   onUpdateEntry,
   onRemoveEntry,
-  onUpdateResentfulFear,
+  onUpdateEntryFear,
   onSetNotes,
   onToggleEleventhStepPrayerEnabled,
   onListenEleventhStepPrayer,
@@ -49,13 +54,13 @@ export function NightlyInventoryScreen({
   onAddEntry: (
     category: keyof Pick<
       NightlyInventoryDayState,
-      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "afraid" | "apology"
+      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "apology"
     >,
   ) => void;
   onUpdateEntry: (
     category: keyof Pick<
       NightlyInventoryDayState,
-      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "afraid" | "apology"
+      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "apology"
     >,
     id: string,
     value: string,
@@ -63,11 +68,11 @@ export function NightlyInventoryScreen({
   onRemoveEntry: (
     category: keyof Pick<
       NightlyInventoryDayState,
-      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "afraid" | "apology"
+      "resentful" | "selfSeeking" | "selfish" | "dishonest" | "apology"
     >,
     id: string,
   ) => void;
-  onUpdateResentfulFear: (id: string, fear: string | null) => void;
+  onUpdateEntryFear: (category: NightlyFearCategory, id: string, fear: string | null) => void;
   onSetNotes: (value: string) => void;
   onToggleEleventhStepPrayerEnabled: () => void;
   onListenEleventhStepPrayer: () => void;
@@ -77,6 +82,112 @@ export function NightlyInventoryScreen({
   onExportPdf: () => void;
 }) {
   const [openFearForEntryId, setOpenFearForEntryId] = useState<string | null>(null);
+  const [customFearDraftByEntryId, setCustomFearDraftByEntryId] = useState<Record<string, string>>(
+    {},
+  );
+  const renderFearSection = (category: NightlyFearCategory, title: string, placeholder: string) => {
+    const entries = dayState[category];
+    return (
+      <View style={styles.sectionWrap}>
+        <View style={styles.editorHeader}>
+          <Text style={[styles.promptTitle, styles.editorTitle]} numberOfLines={2}>
+            {title}
+          </Text>
+          <Pressable style={styles.addBtn} onPress={() => onAddEntry(category)}>
+            <Text style={styles.addText}>+ Add</Text>
+          </Pressable>
+        </View>
+        {entries.map((entry) => (
+          <View key={entry.id} style={styles.rowWrap}>
+            <TextInput
+              style={styles.input}
+              value={entry.text}
+              onChangeText={(value) => onUpdateEntry(category, entry.id, value)}
+              placeholder={placeholder}
+              placeholderTextColor="rgba(245,243,255,0.45)"
+              multiline
+            />
+            <Pressable
+              style={styles.fearDropdownTrigger}
+              onPress={() =>
+                setOpenFearForEntryId((current) => (current === entry.id ? null : entry.id))
+              }
+            >
+              <Text style={styles.fearDropdownTriggerText}>
+                {entry.fear && entry.fear.length > 0 ? entry.fear : "What fear caused the action?"}
+              </Text>
+              <Text style={styles.fearDropdownChevron}>
+                {openFearForEntryId === entry.id ? "▲" : "▼"}
+              </Text>
+            </Pressable>
+            {openFearForEntryId === entry.id ? (
+              <View style={styles.fearDropdownMenu}>
+                <Pressable
+                  style={styles.fearDropdownOption}
+                  onPress={() => {
+                    onUpdateEntryFear(category, entry.id, null);
+                    setOpenFearForEntryId(null);
+                  }}
+                >
+                  <Text style={styles.fearDropdownOptionText}>None selected</Text>
+                </Pressable>
+                {COMMON_ALCOHOLIC_FEARS.map((fear) => (
+                  <Pressable
+                    key={`${entry.id}-${fear}`}
+                    style={styles.fearDropdownOption}
+                    onPress={() => {
+                      onUpdateEntryFear(category, entry.id, fear);
+                      setOpenFearForEntryId(null);
+                    }}
+                  >
+                    <Text style={styles.fearDropdownOptionText}>{fear}</Text>
+                    {entry.fear === fear ? (
+                      <Text style={styles.fearDropdownOptionCheck}>✓</Text>
+                    ) : null}
+                  </Pressable>
+                ))}
+                <View style={styles.customFearRow}>
+                  <TextInput
+                    style={styles.customFearInput}
+                    value={customFearDraftByEntryId[entry.id] ?? ""}
+                    onChangeText={(value) =>
+                      setCustomFearDraftByEntryId((current) => ({
+                        ...current,
+                        [entry.id]: value,
+                      }))
+                    }
+                    placeholder="Add custom fear..."
+                    placeholderTextColor="rgba(245,243,255,0.45)"
+                  />
+                  <Pressable
+                    style={styles.customFearAddBtn}
+                    onPress={() => {
+                      const draft = (customFearDraftByEntryId[entry.id] ?? "").trim();
+                      if (!draft) {
+                        return;
+                      }
+                      onUpdateEntryFear(category, entry.id, draft);
+                      setCustomFearDraftByEntryId((current) => ({
+                        ...current,
+                        [entry.id]: "",
+                      }));
+                      setOpenFearForEntryId(null);
+                    }}
+                  >
+                    <Text style={styles.customFearAddText}>Add</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+            <Pressable style={styles.removeBtn} onPress={() => onRemoveEntry(category, entry.id)}>
+              <Text style={styles.removeText}>Remove</Text>
+            </Pressable>
+          </View>
+        ))}
+        {entries.length === 0 ? <Text style={styles.empty}>No items yet.</Text> : null}
+      </View>
+    );
+  };
 
   return (
     <ScrollView contentContainerStyle={styles.wrap}>
@@ -93,6 +204,21 @@ export function NightlyInventoryScreen({
       <LiquidGlassCard style={styles.card}>
         <Text style={styles.promptTitle}>Step 10 Prompt</Text>
         <Text style={styles.promptText}>{dayState.prompt}</Text>
+      </LiquidGlassCard>
+
+      <LiquidGlassCard style={styles.card}>
+        {renderFearSection("resentful", "Resentful (Who/What + Note)", "Who/what + note...")}
+        {renderFearSection("selfSeeking", "Self-seeking", "Entry...")}
+        {renderFearSection("selfish", "Selfish", "Entry...")}
+        {renderFearSection("dishonest", "Dishonest", "Entry...")}
+        <CrudListEditor
+          title="Owe An Apology?"
+          items={asEditorItems(dayState.apology)}
+          onAdd={() => onAddEntry("apology")}
+          onChange={(id, value) => onUpdateEntry("apology", id, value)}
+          onRemove={(id) => onRemoveEntry("apology", id)}
+          placeholder="Who + message draft..."
+        />
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -127,115 +253,6 @@ export function NightlyInventoryScreen({
             <Text style={styles.primaryText}>Read</Text>
           </Pressable>
         </View>
-      </LiquidGlassCard>
-
-      <LiquidGlassCard style={styles.card}>
-        <View style={styles.editorHeader}>
-          <Text style={styles.promptTitle}>Resentful (Who/What + Note)</Text>
-          <Pressable style={styles.addBtn} onPress={() => onAddEntry("resentful")}>
-            <Text style={styles.addText}>+ Add</Text>
-          </Pressable>
-        </View>
-        {dayState.resentful.map((entry) => (
-          <View key={entry.id} style={styles.rowWrap}>
-            <TextInput
-              style={styles.input}
-              value={entry.text}
-              onChangeText={(value) => onUpdateEntry("resentful", entry.id, value)}
-              placeholder="Who/what + note..."
-              placeholderTextColor="rgba(245,243,255,0.45)"
-              multiline
-            />
-            <Pressable
-              style={styles.fearDropdownTrigger}
-              onPress={() =>
-                setOpenFearForEntryId((current) => (current === entry.id ? null : entry.id))
-              }
-            >
-              <Text style={styles.fearDropdownTriggerText}>
-                {entry.fear && entry.fear.length > 0 ? entry.fear : "What fear caused the action?"}
-              </Text>
-              <Text style={styles.fearDropdownChevron}>
-                {openFearForEntryId === entry.id ? "▲" : "▼"}
-              </Text>
-            </Pressable>
-            {openFearForEntryId === entry.id ? (
-              <View style={styles.fearDropdownMenu}>
-                <Pressable
-                  style={styles.fearDropdownOption}
-                  onPress={() => {
-                    onUpdateResentfulFear(entry.id, null);
-                    setOpenFearForEntryId(null);
-                  }}
-                >
-                  <Text style={styles.fearDropdownOptionText}>None selected</Text>
-                </Pressable>
-                {COMMON_ALCOHOLIC_FEARS.map((fear) => (
-                  <Pressable
-                    key={`${entry.id}-${fear}`}
-                    style={styles.fearDropdownOption}
-                    onPress={() => {
-                      onUpdateResentfulFear(entry.id, fear);
-                      setOpenFearForEntryId(null);
-                    }}
-                  >
-                    <Text style={styles.fearDropdownOptionText}>{fear}</Text>
-                    {entry.fear === fear ? (
-                      <Text style={styles.fearDropdownOptionCheck}>✓</Text>
-                    ) : null}
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
-            <Pressable
-              style={styles.removeBtn}
-              onPress={() => onRemoveEntry("resentful", entry.id)}
-            >
-              <Text style={styles.removeText}>Remove</Text>
-            </Pressable>
-          </View>
-        ))}
-        {dayState.resentful.length === 0 ? <Text style={styles.empty}>No items yet.</Text> : null}
-        <CrudListEditor
-          title="Self-seeking"
-          items={asEditorItems(dayState.selfSeeking)}
-          onAdd={() => onAddEntry("selfSeeking")}
-          onChange={(id, value) => onUpdateEntry("selfSeeking", id, value)}
-          onRemove={(id) => onRemoveEntry("selfSeeking", id)}
-          placeholder="Entry..."
-        />
-        <CrudListEditor
-          title="Selfish"
-          items={asEditorItems(dayState.selfish)}
-          onAdd={() => onAddEntry("selfish")}
-          onChange={(id, value) => onUpdateEntry("selfish", id, value)}
-          onRemove={(id) => onRemoveEntry("selfish", id)}
-          placeholder="Entry..."
-        />
-        <CrudListEditor
-          title="Dishonest"
-          items={asEditorItems(dayState.dishonest)}
-          onAdd={() => onAddEntry("dishonest")}
-          onChange={(id, value) => onUpdateEntry("dishonest", id, value)}
-          onRemove={(id) => onRemoveEntry("dishonest", id)}
-          placeholder="Entry..."
-        />
-        <CrudListEditor
-          title="Afraid"
-          items={asEditorItems(dayState.afraid)}
-          onAdd={() => onAddEntry("afraid")}
-          onChange={(id, value) => onUpdateEntry("afraid", id, value)}
-          onRemove={(id) => onRemoveEntry("afraid", id)}
-          placeholder="Entry..."
-        />
-        <CrudListEditor
-          title="Owe An Apology?"
-          items={asEditorItems(dayState.apology)}
-          onAdd={() => onAddEntry("apology")}
-          onChange={(id, value) => onUpdateEntry("apology", id, value)}
-          onRemove={(id) => onRemoveEntry("apology", id)}
-          placeholder="Who + message draft..."
-        />
       </LiquidGlassCard>
 
       <LiquidGlassCard style={styles.card}>
@@ -319,14 +336,24 @@ const styles = StyleSheet.create({
     fontSize: 14,
     backgroundColor: "rgba(255,255,255,0.07)",
   },
-  editorHeader: {
+  sectionWrap: {
     marginTop: 8,
+    gap: 2,
+  },
+  editorHeader: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 8,
   },
+  editorTitle: {
+    flex: 1,
+    flexShrink: 1,
+    paddingRight: 6,
+  },
   addBtn: {
+    flexShrink: 0,
+    alignSelf: "flex-start",
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: routineTheme.radii.pill,
@@ -392,6 +419,37 @@ const styles = StyleSheet.create({
   fearDropdownOptionCheck: {
     color: "#bbf7d0",
     fontSize: 13,
+    fontWeight: "800",
+  },
+  customFearRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  customFearInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    color: routineTheme.colors.textPrimary,
+    fontSize: 13,
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  customFearAddBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: routineTheme.radii.pill,
+    borderWidth: 1,
+    borderColor: routineTheme.colors.cardStroke,
+    backgroundColor: "rgba(124,58,237,0.4)",
+  },
+  customFearAddText: {
+    color: routineTheme.colors.textPrimary,
+    fontSize: 12,
     fontWeight: "800",
   },
   removeBtn: {
