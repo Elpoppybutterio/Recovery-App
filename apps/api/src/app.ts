@@ -22,6 +22,7 @@ import {
   parseConfiguredMeetingGuideFeeds,
 } from "./meeting-guide-ingest";
 import { mapTypeCodesToLabels } from "./meeting-guide";
+import { buildGeocodeQuery, geocodeWithOpenStreetMap, normalizeAddressParts } from "./meeting-geo";
 import { requirePermission, requireRole, requireSupervisorAssignment } from "./rbac";
 import { getDailyWisdomQuote, wisdomDailyQuerySchema } from "./wisdom";
 
@@ -81,6 +82,9 @@ const meetingsIngestStatusQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90).default(45.7833),
   lng: z.coerce.number().min(-180).max(180).default(-108.5007),
   radiusMiles: z.coerce.number().positive().max(200).default(20),
+});
+const geocodeAddressQuerySchema = z.object({
+  address: z.string().min(3).max(240),
 });
 const attendanceCheckInBodySchema = z.object({
   meetingId: z.string().min(1),
@@ -970,6 +974,70 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         createdAt: meeting.created_at,
         createdByUserId: meeting.created_by_user_id,
       });
+    },
+  );
+
+  app.get(
+    "/v1/geo/geocode",
+    {
+      preHandler: [
+        authenticateRequest,
+        requireRole(Role.END_USER, Role.SUPERVISOR, Role.ADMIN, Role.MEETING_VERIFIER),
+      ],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = geocodeAddressQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid geocode query",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      const normalized = normalizeAddressParts({
+        formattedAddress: parsedQuery.data.address,
+        address: parsedQuery.data.address,
+        city: null,
+        state: null,
+        postalCode: null,
+        country: "US",
+      });
+      const geocodeQuery = buildGeocodeQuery(normalized);
+      if (!geocodeQuery) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Address unavailable for geocoding",
+        });
+        return;
+      }
+
+      const result = await geocodeWithOpenStreetMap({
+        query: geocodeQuery,
+        fetchImpl: (input, init) => fetch(input, init),
+        userAgent: env.MEETING_GUIDE_GEOCODE_USER_AGENT,
+      });
+
+      if (!result.coords) {
+        reply.code(404).send({
+          error: "not_found",
+          message: "Unable to geocode address",
+          reason: result.reason ?? "unknown",
+        });
+        return;
+      }
+
+      return {
+        query: geocodeQuery,
+        coords: result.coords,
+      };
     },
   );
 

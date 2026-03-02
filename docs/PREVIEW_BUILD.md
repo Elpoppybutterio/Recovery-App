@@ -28,15 +28,24 @@ From repo root:
 
 ```bash
 pnpm dlx eas-cli build --profile preview --platform ios
+pnpm dlx eas-cli build --profile preview --platform android
+```
+
+Equivalent workspace scripts:
+
+```bash
+pnpm mobile:build:preview:ios
+pnpm mobile:build:preview:android
 ```
 
 Optional TestFlight-style store build:
 
 ```bash
 pnpm dlx eas-cli build --profile preview_store --platform ios
+pnpm dlx eas-cli build --profile preview_store --platform android
 ```
 
-Submit (store profile only):
+Submit (store profile only, iOS):
 
 ```bash
 pnpm dlx eas-cli submit --profile preview_store --platform ios

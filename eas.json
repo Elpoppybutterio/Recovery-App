@@ -13,6 +13,9 @@
       },
       "ios": {
         "simulator": false
+      },
+      "android": {
+        "buildType": "apk"
       }
     },
     "preview": {
@@ -25,6 +28,9 @@
       },
       "ios": {
         "simulator": false
+      },
+      "android": {
+        "buildType": "apk"
       }
     },
     "preview_store": {

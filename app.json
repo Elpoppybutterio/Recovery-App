@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "e69f5c5e-c6d1-4677-8810-f4240741a3f0"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "com.sober.ai",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    }
+  }
+}

@@ -19,7 +19,7 @@
     <key>CFBundlePackageType</key>
     <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.9.4</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleURLTypes</key>
@@ -49,9 +49,9 @@
     <key>NSCalendarsUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your calendars</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-    <string>Allow $(PRODUCT_NAME) to access your location</string>
+    <string>Always location is used to verify meeting attendance distance and geofence events.</string>
     <key>NSLocationAlwaysUsageDescription</key>
-    <string>Allow $(PRODUCT_NAME) to access your location</string>
+    <string>Always location is used to verify meeting attendance distance and geofence events.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Location is used to show nearby meetings and arrival prompts.</string>
     <key>NSMicrophoneUsageDescription</key>
@@ -67,6 +67,10 @@
     <key>UIRequiredDeviceCapabilities</key>
     <array>
       <string>arm64</string>
+    </array>
+    <key>UIBackgroundModes</key>
+    <array>
+      <string>location</string>
     </array>
     <key>UIRequiresFullScreen</key>
     <false/>

@@ -1,6 +1,6 @@
 {
   "name": "recovery-accountability-app",
-  "version": "0.1.0",
+  "version": "0.9.4",
   "private": true,
   "packageManager": "pnpm@10.6.1",
   "scripts": {
@@ -14,6 +14,14 @@
     "dev:all": "pnpm dev:ports:kill && turbo run dev --parallel --filter=@recovery/api --filter=@recovery/dashboard --filter=@recovery/worker --filter=@recovery/mobile",
     "dev:clean": "turbo run clean --parallel || true",
     "dev:mobile:clear": "pnpm dev:ports:kill && pnpm --filter @recovery/mobile dev -- --clear",
+    "mobile:build:dev:ios": "pnpm dlx eas-cli build --profile development --platform ios",
+    "mobile:build:dev:android": "pnpm dlx eas-cli build --profile development --platform android",
+    "mobile:build:preview:ios": "pnpm dlx eas-cli build --profile preview --platform ios",
+    "mobile:build:preview:android": "pnpm dlx eas-cli build --profile preview --platform android",
+    "mobile:build:preview:all": "pnpm mobile:build:preview:ios && pnpm mobile:build:preview:android",
+    "mobile:build:preview-store:ios": "pnpm dlx eas-cli build --profile preview_store --platform ios",
+    "mobile:build:preview-store:android": "pnpm dlx eas-cli build --profile preview_store --platform android",
+    "soberai": "pnpm mobile:build:preview:all",
     "build": "turbo run build",
     "lint": "turbo run lint",
     "lint:all": "pnpm -r --workspace-concurrency=1 lint",

@@ -52,6 +52,15 @@ pnpm --filter @recovery/mobile start:go
   - [`docs/DEV_BUILD.md`](docs/DEV_BUILD.md)
   - [`docs/PREVIEW_BUILD.md`](docs/PREVIEW_BUILD.md)
 
+- Quick EAS build commands:
+
+```bash
+pnpm mobile:build:dev:ios
+pnpm mobile:build:dev:android
+pnpm mobile:build:preview:ios
+pnpm mobile:build:preview:android
+```
+
 ## Local Dev
 
 ### Required stack (API + Mobile)
