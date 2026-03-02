@@ -11,6 +11,7 @@ import {
   type AppStateStatus,
   Alert,
   GestureResponderEvent,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -339,6 +340,29 @@ const DASHBOARD_NEARBY_RADIUS_METERS = DASHBOARD_NEARBY_RADIUS_MILES * 1609.344;
 const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for simulator/device.";
 const DEFAULT_MAP_LATITUDE_DELTA = 0.22;
 const DEFAULT_MAP_LONGITUDE_DELTA = 0.22;
+const METERS_PER_MILE = 1609.344;
+const DEBUG_SUSPICIOUS_DISTANCE_MILES = 75;
+const DEBUG_DISTANCE_MISMATCH_MILES = 15;
+const DEV_MEETING_DEBUG_MAX_KEYS = 300;
+const devMeetingDebugKeys = new Set<string>();
+
+function logDevMeetingDebugOnce(
+  key: string,
+  event: string,
+  payload: Record<string, unknown>,
+): void {
+  if (!__DEV__) {
+    return;
+  }
+  if (devMeetingDebugKeys.has(key)) {
+    return;
+  }
+  if (devMeetingDebugKeys.size >= DEV_MEETING_DEBUG_MAX_KEYS) {
+    return;
+  }
+  devMeetingDebugKeys.add(key);
+  console.log(`[meetings][debug] ${event}`, payload);
+}
 
 const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }> = [
   { code: "MON", label: "Mon", jsDay: 1 },
@@ -545,7 +569,11 @@ function getSignatureWindowForAttendance(
 } {
   const scheduledStartMs = parseScheduledStartForAttendance(record);
   const checkInMs = new Date(record.startAt).getTime();
-  const windowStartMs = scheduledStartMs ?? (Number.isFinite(checkInMs) ? checkInMs : null);
+  const safeCheckInMs = Number.isFinite(checkInMs) ? checkInMs : null;
+  const windowStartMs =
+    scheduledStartMs !== null && safeCheckInMs !== null
+      ? Math.max(scheduledStartMs, safeCheckInMs)
+      : (scheduledStartMs ?? safeCheckInMs);
   if (windowStartMs === null) {
     return {
       eligible: false,
@@ -1323,11 +1351,48 @@ function locationGroupKeyForMeeting(meeting: MeetingListItem): string {
   return `${meeting.lat?.toFixed(5)},${meeting.lng?.toFixed(5)}|${meeting.address.trim()}`;
 }
 
-function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
+function normalizeMeetingCoordinatesForOrigin(
+  coords: { lat: number; lng: number },
+  origin: LocationStamp | null,
+): { lat: number; lng: number } {
+  if (!origin || origin.lng >= 0 || coords.lng <= 0) {
+    return coords;
+  }
+
+  const directDistanceMeters = distanceMetersBetween(
+    origin.lat,
+    origin.lng,
+    coords.lat,
+    coords.lng,
+  );
+  const mirroredLng = -coords.lng;
+  if (mirroredLng < -180 || mirroredLng > 180) {
+    return coords;
+  }
+  const mirroredDistanceMeters = distanceMetersBetween(
+    origin.lat,
+    origin.lng,
+    coords.lat,
+    mirroredLng,
+  );
+  const maxMirroredDistanceMeters = 500 * 1609.344;
+  const shouldMirror =
+    mirroredDistanceMeters <= maxMirroredDistanceMeters &&
+    mirroredDistanceMeters < directDistanceMeters * 0.35;
+
+  return shouldMirror ? { lat: coords.lat, lng: mirroredLng } : coords;
+}
+
+function sanitizeMeetingRecords(
+  meetings: MeetingRecord[],
+  origin: LocationStamp | null = null,
+  sourceLabel = "unknown",
+): MeetingRecord[] {
   return meetings
     .filter((entry) => entry && typeof entry === "object")
     .map((entry, index) => {
       const coords = normalizeCoordinates({ lat: entry.lat, lng: entry.lng });
+      const normalizedCoords = coords ? normalizeMeetingCoordinatesForOrigin(coords, origin) : null;
       const parsedDistance = asFiniteNumber(entry.distanceMeters);
       const safeId =
         typeof entry.id === "string" && entry.id.trim().length > 0 ? entry.id : `meeting-${index}`;
@@ -1346,6 +1411,69 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
       const safeDayOfWeek = Number.isFinite(entry.dayOfWeek)
         ? Math.max(0, Math.min(6, Math.round(entry.dayOfWeek)))
         : 0;
+      const computedDistanceMeters =
+        origin && normalizedCoords
+          ? distanceMetersBetween(
+              origin.lat,
+              origin.lng,
+              normalizedCoords.lat,
+              normalizedCoords.lng,
+            )
+          : null;
+      const mirroredLongitude =
+        coords !== null &&
+        normalizedCoords !== null &&
+        Math.abs(coords.lng - normalizedCoords.lng) > 0.0000001;
+
+      if (mirroredLongitude) {
+        logDevMeetingDebugOnce(`mirror:${safeId}`, "longitude mirrored from origin heuristic", {
+          sourceLabel,
+          meetingId: safeId,
+          name: safeName,
+          originalLng: coords?.lng ?? null,
+          correctedLng: normalizedCoords?.lng ?? null,
+          originLat: origin?.lat ?? null,
+          originLng: origin?.lng ?? null,
+        });
+      }
+
+      if (
+        computedDistanceMeters !== null &&
+        computedDistanceMeters > DEBUG_SUSPICIOUS_DISTANCE_MILES * METERS_PER_MILE
+      ) {
+        logDevMeetingDebugOnce(`far:${safeId}`, "suspiciously far computed distance", {
+          sourceLabel,
+          meetingId: safeId,
+          name: safeName,
+          distanceMiles: Number((computedDistanceMeters / METERS_PER_MILE).toFixed(1)),
+          lat: normalizedCoords?.lat ?? null,
+          lng: normalizedCoords?.lng ?? null,
+          address: safeAddress,
+        });
+      }
+
+      if (
+        computedDistanceMeters !== null &&
+        typeof parsedDistance === "number" &&
+        Number.isFinite(parsedDistance) &&
+        Math.abs(parsedDistance - computedDistanceMeters) >
+          DEBUG_DISTANCE_MISMATCH_MILES * METERS_PER_MILE
+      ) {
+        logDevMeetingDebugOnce(
+          `mismatch:${safeId}`,
+          "api distance differs from coordinate distance",
+          {
+            sourceLabel,
+            meetingId: safeId,
+            name: safeName,
+            apiDistanceMiles: Number((parsedDistance / METERS_PER_MILE).toFixed(1)),
+            computedDistanceMiles: Number((computedDistanceMeters / METERS_PER_MILE).toFixed(1)),
+            lat: normalizedCoords?.lat ?? null,
+            lng: normalizedCoords?.lng ?? null,
+            address: safeAddress,
+          },
+        );
+      }
 
       return {
         ...entry,
@@ -1354,8 +1482,8 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
         address: safeAddress,
         startsAtLocal: safeStartsAtLocal,
         dayOfWeek: safeDayOfWeek,
-        lat: coords?.lat ?? null,
-        lng: coords?.lng ?? null,
+        lat: normalizedCoords?.lat ?? null,
+        lng: normalizedCoords?.lng ?? null,
         distanceMeters:
           typeof parsedDistance === "number" && Number.isFinite(parsedDistance)
             ? Math.max(0, parsedDistance)
@@ -2615,6 +2743,12 @@ export default function App() {
       const MAX_GEOCODE_LOOKUPS_PER_REFRESH = 20;
       let lookups = 0;
       let resolved = 0;
+      let rejectedAsTooFar = 0;
+      const referenceLocation = currentLocation;
+      const maxReasonableDistanceMeters = Math.max(
+        (meetingRadiusMiles + 25) * METERS_PER_MILE,
+        250 * METERS_PER_MILE,
+      );
 
       const buildAddressCandidates = (meeting: MeetingRecord): string[] => {
         const raw = meeting.address.trim().replace(/\s+/g, " ");
@@ -2629,7 +2763,10 @@ export default function App() {
             ? "Billings"
             : "Billings";
         const withMontana = hasStateOrZip ? raw : `${raw}, ${hintedCity}, MT`;
-        return Array.from(new Set([raw, withMontana, `${withMontana}, USA`]));
+        if (hasStateOrZip) {
+          return Array.from(new Set([raw, `${raw}, USA`]));
+        }
+        return Array.from(new Set([withMontana, `${withMontana}, USA`, raw]));
       };
 
       const geocodeFromNetwork = async (candidate: string) => {
@@ -2695,25 +2832,15 @@ export default function App() {
           continue;
         }
 
-        let cached: { lat: number; lng: number } | null | undefined;
-        let cacheKey = "";
+        const resolvedCandidates: Array<{ lat: number; lng: number }> = [];
         for (const candidate of addressCandidates) {
           const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
-          const entry = geocodedAddressCacheRef.current[candidateKey];
-          if (entry !== undefined) {
-            cacheKey = candidateKey;
-            cached = entry;
-            break;
-          }
-        }
-        if (cached === undefined) {
-          if (lookups >= MAX_GEOCODE_LOOKUPS_PER_REFRESH) {
-            break;
-          }
-          lookups += 1;
-          for (const candidate of addressCandidates) {
-            const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
-            cacheKey = candidateKey;
+          let entry = geocodedAddressCacheRef.current[candidateKey];
+          if (entry === undefined) {
+            if (lookups >= MAX_GEOCODE_LOOKUPS_PER_REFRESH) {
+              continue;
+            }
+            lookups += 1;
             try {
               const geocoded = await geocodeAsync(candidate);
               const first = geocoded[0];
@@ -2721,23 +2848,77 @@ export default function App() {
                 lat: first?.latitude ?? null,
                 lng: first?.longitude ?? null,
               });
-              cached = coords ? { lat: coords.lat, lng: coords.lng } : null;
+              entry = coords ? { lat: coords.lat, lng: coords.lng } : null;
             } catch {
-              cached = await geocodeFromNetwork(candidate);
+              entry = await geocodeFromNetwork(candidate);
             }
-            geocodedAddressCacheRef.current[candidateKey] = cached ?? null;
-            if (cached) {
-              break;
-            }
+            geocodedAddressCacheRef.current[candidateKey] = entry ?? null;
+          }
+
+          if (entry) {
+            resolvedCandidates.push(entry);
           }
         }
 
-        if (!cached) {
-          if (cacheKey.length === 0) {
-            const fallbackKey = addressCandidates[0]?.toLowerCase().replace(/\s+/g, " ").trim();
-            if (fallbackKey) {
-              geocodedAddressCacheRef.current[fallbackKey] = null;
+        let selectedCoords: { lat: number; lng: number } | null =
+          resolvedCandidates.length > 0 ? resolvedCandidates[0] : null;
+        let nearestDistanceMeters: number | null = null;
+        if (selectedCoords && referenceLocation) {
+          let bestCoords = normalizeMeetingCoordinatesForOrigin(selectedCoords, referenceLocation);
+          let bestDistance = distanceMetersBetween(
+            referenceLocation.lat,
+            referenceLocation.lng,
+            bestCoords.lat,
+            bestCoords.lng,
+          );
+          for (
+            let candidateIndex = 1;
+            candidateIndex < resolvedCandidates.length;
+            candidateIndex += 1
+          ) {
+            const normalizedCandidate = normalizeMeetingCoordinatesForOrigin(
+              resolvedCandidates[candidateIndex],
+              referenceLocation,
+            );
+            const candidateDistance = distanceMetersBetween(
+              referenceLocation.lat,
+              referenceLocation.lng,
+              normalizedCandidate.lat,
+              normalizedCandidate.lng,
+            );
+            if (candidateDistance < bestDistance) {
+              bestDistance = candidateDistance;
+              bestCoords = normalizedCandidate;
             }
+          }
+          nearestDistanceMeters = bestDistance;
+
+          if (bestDistance <= maxReasonableDistanceMeters) {
+            selectedCoords = bestCoords;
+          } else {
+            selectedCoords = null;
+            rejectedAsTooFar += 1;
+          }
+        }
+
+        if (!selectedCoords) {
+          if (referenceLocation && nearestDistanceMeters !== null) {
+            logDevMeetingDebugOnce(
+              `geocode-reject:${meeting.id}`,
+              "geocode candidate rejected as too far",
+              {
+                meetingId: meeting.id,
+                name: meeting.name,
+                address: meeting.address,
+                nearestCandidateMiles: Number((nearestDistanceMeters / METERS_PER_MILE).toFixed(1)),
+                maxReasonableMiles: Number(
+                  (maxReasonableDistanceMeters / METERS_PER_MILE).toFixed(1),
+                ),
+                candidateCount: resolvedCandidates.length,
+                referenceLat: referenceLocation.lat,
+                referenceLng: referenceLocation.lng,
+              },
+            );
           }
           continue;
         }
@@ -2745,24 +2926,25 @@ export default function App() {
         resolved += 1;
         next[index] = {
           ...meeting,
-          lat: cached.lat,
-          lng: cached.lng,
+          lat: selectedCoords.lat,
+          lng: selectedCoords.lng,
           geoStatus: "ok",
           geoReason: null,
           geoUpdatedAt: new Date().toISOString(),
         };
       }
 
-      if (__DEV__ && resolved > 0) {
+      if (__DEV__ && (resolved > 0 || rejectedAsTooFar > 0)) {
         console.log("[meetings] geocode fallback resolved", {
           resolved,
           lookups,
+          rejectedAsTooFar,
         });
       }
 
       return next;
     },
-    [apiUrl, authHeader],
+    [apiUrl, authHeader, currentLocation, meetingRadiusMiles],
   );
 
   const persistAttendanceRecords = useCallback(
@@ -3532,6 +3714,8 @@ export default function App() {
         });
         const selectedDayMeetings = sanitizeMeetingRecords(
           Array.isArray(selectedDayResult.meetings) ? selectedDayResult.meetings : [],
+          location,
+          "selected-day",
         );
 
         const todayScopedResult =
@@ -3543,6 +3727,8 @@ export default function App() {
               });
         const todayScopedMeetings = sanitizeMeetingRecords(
           Array.isArray(todayScopedResult.meetings) ? todayScopedResult.meetings : [],
+          location,
+          "today-scoped",
         );
 
         // Always merge in an unscoped "today" fetch so setup can offer all meetings for today's
@@ -3552,6 +3738,8 @@ export default function App() {
         });
         const todayUnscopedMeetings = sanitizeMeetingRecords(
           Array.isArray(todayUnscopedResult.meetings) ? todayUnscopedResult.meetings : [],
+          location,
+          "today-unscoped",
         );
         const todayById = new Map<string, MeetingRecord>();
         for (const meeting of todayUnscopedMeetings) {
@@ -3580,10 +3768,14 @@ export default function App() {
             });
             const scopedMeetings = sanitizeMeetingRecords(
               Array.isArray(scopedResult.meetings) ? scopedResult.meetings : [],
+              location,
+              `fallback-day-${dayOfWeek}-scoped`,
             );
             const unscopedResult = await source.listMeetings({ dayOfWeek });
             const unscopedMeetings = sanitizeMeetingRecords(
               Array.isArray(unscopedResult.meetings) ? unscopedResult.meetings : [],
+              location,
+              `fallback-day-${dayOfWeek}-unscoped`,
             );
             const byId = new Map<string, MeetingRecord>();
             for (const meeting of unscopedMeetings) {
@@ -3606,6 +3798,105 @@ export default function App() {
         const todayResultMeetingsWithGeo =
           await geocodeMeetingsMissingCoordinates(todayResultMeetings);
         const nextDayMeetingsWithGeo = await geocodeMeetingsMissingCoordinates(nextDayMeetings);
+
+        if (__DEV__ && location) {
+          const selectedRows = selectedDayMeetingsWithGeo
+            .filter((meeting) => meeting.format !== "ONLINE")
+            .map((meeting) => {
+              const hasCoords = meeting.lat !== null && meeting.lng !== null;
+              const computedDistanceMeters = hasCoords
+                ? distanceMetersBetween(
+                    location.lat,
+                    location.lng,
+                    meeting.lat as number,
+                    meeting.lng as number,
+                  )
+                : null;
+              const apiDistanceMeters =
+                typeof meeting.distanceMeters === "number" &&
+                Number.isFinite(meeting.distanceMeters)
+                  ? meeting.distanceMeters
+                  : null;
+              return {
+                id: meeting.id,
+                name: meeting.name,
+                address: meeting.address,
+                hasCoords,
+                computedDistanceMeters,
+                apiDistanceMeters,
+                lat: meeting.lat,
+                lng: meeting.lng,
+                geoStatus: meeting.geoStatus ?? "unknown",
+                geoReason: meeting.geoReason ?? null,
+              };
+            });
+
+          const suspiciousFar = selectedRows
+            .filter(
+              (row) =>
+                row.computedDistanceMeters !== null &&
+                row.computedDistanceMeters > DEBUG_SUSPICIOUS_DISTANCE_MILES * METERS_PER_MILE,
+            )
+            .slice(0, 8)
+            .map((row) => ({
+              id: row.id,
+              name: row.name,
+              miles: Number(((row.computedDistanceMeters ?? 0) / METERS_PER_MILE).toFixed(1)),
+              lat: row.lat,
+              lng: row.lng,
+            }));
+          const apiMismatch = selectedRows
+            .filter(
+              (row) =>
+                row.computedDistanceMeters !== null &&
+                row.apiDistanceMeters !== null &&
+                Math.abs(row.computedDistanceMeters - row.apiDistanceMeters) >
+                  DEBUG_DISTANCE_MISMATCH_MILES * METERS_PER_MILE,
+            )
+            .slice(0, 8)
+            .map((row) => ({
+              id: row.id,
+              name: row.name,
+              computedMiles: Number(
+                ((row.computedDistanceMeters ?? 0) / METERS_PER_MILE).toFixed(1),
+              ),
+              apiMiles: Number(((row.apiDistanceMeters ?? 0) / METERS_PER_MILE).toFixed(1)),
+              lat: row.lat,
+              lng: row.lng,
+            }));
+          const missingCoords = selectedRows
+            .filter((row) => !row.hasCoords)
+            .slice(0, 8)
+            .map((row) => ({
+              id: row.id,
+              name: row.name,
+              geoStatus: row.geoStatus,
+              geoReason: row.geoReason,
+            }));
+
+          if (suspiciousFar.length > 0 || apiMismatch.length > 0 || missingCoords.length > 0) {
+            console.log("[meetings][debug] refresh distance summary", {
+              dayOfWeek: selectedDay.dayOfWeek,
+              radiusMiles: effectiveRadiusMiles,
+              location: {
+                lat: Number(location.lat.toFixed(5)),
+                lng: Number(location.lng.toFixed(5)),
+              },
+              totals: {
+                selectedDayMeetings: selectedDayMeetingsWithGeo.length,
+                inPersonMeetings: selectedRows.length,
+                suspiciousFar: suspiciousFar.length,
+                apiMismatch: apiMismatch.length,
+                missingCoords: missingCoords.length,
+              },
+              samples: {
+                suspiciousFar,
+                apiMismatch,
+                missingCoords,
+              },
+            });
+          }
+        }
 
         setMeetings(selectedDayMeetingsWithGeo);
         setTodayNearbyMeetings(todayResultMeetingsWithGeo);
@@ -4939,12 +5230,13 @@ export default function App() {
   }, []);
 
   const attachCalendarEventToAttendance = useCallback(
-    async (recordId: string): Promise<boolean> => {
+    async (recordId: string, fallbackRecord?: AttendanceRecord): Promise<boolean> => {
       const sourceRecord =
         (activeAttendanceRef.current && activeAttendanceRef.current.id === recordId
           ? activeAttendanceRef.current
           : null) ??
         attendanceRecordsRef.current.find((record) => record.id === recordId) ??
+        (fallbackRecord && fallbackRecord.id === recordId ? fallbackRecord : null) ??
         null;
       if (!sourceRecord) {
         setAttendanceStatus("Attendance record unavailable for calendar sync.");
@@ -5020,22 +5312,21 @@ export default function App() {
   );
 
   const promptCalendarAddOnAttend = useCallback(
-    (recordId: string) => {
-      Alert.alert(
-        "Add to calendar?",
-        meetingAutoAddToCalendar
-          ? "Auto-add is enabled. Add this meeting to your calendar?"
-          : "Add this meeting to your calendar?",
-        [
-          { text: "Not now", style: "cancel" },
-          {
-            text: "Add",
-            onPress: () => {
-              void attachCalendarEventToAttendance(recordId);
-            },
+    (record: AttendanceRecord) => {
+      if (meetingAutoAddToCalendar) {
+        void attachCalendarEventToAttendance(record.id, record);
+        return;
+      }
+
+      Alert.alert("Add to calendar?", "Add this meeting to your calendar?", [
+        { text: "Not now", style: "cancel" },
+        {
+          text: "Add",
+          onPress: () => {
+            void attachCalendarEventToAttendance(record.id, record);
           },
-        ],
-      );
+        },
+      ]);
     },
     [attachCalendarEventToAttendance, meetingAutoAddToCalendar],
   );
@@ -5098,7 +5389,7 @@ export default function App() {
         upsertAttendanceRecord(next);
         setAttendanceStatus(`Attendance started at ${new Date(nowIso).toLocaleTimeString()}.`);
         setScreen("SESSION");
-        promptCalendarAddOnAttend(next.id);
+        promptCalendarAddOnAttend(next);
       } finally {
         startAttendanceInFlightRef.current = false;
       }
@@ -5379,7 +5670,9 @@ export default function App() {
     if (activeAttendance) {
       const signatureWindow = getSignatureWindowForAttendance(activeAttendance);
       if (!signatureWindow.eligible) {
-        setAttendanceStatus(signatureWindow.reason ?? SIGNATURE_WINDOW_HELP_TEXT);
+        const reason = signatureWindow.reason ?? SIGNATURE_WINDOW_HELP_TEXT;
+        setAttendanceStatus(reason);
+        Alert.alert("Signature unavailable", reason);
         return;
       }
       const nowIso = new Date().toISOString();
@@ -9951,12 +10244,18 @@ export default function App() {
                 value={signatureChairNameInput}
                 onChangeText={setSignatureChairNameInput}
                 placeholder="Chair printed name (optional)"
+                returnKeyType="done"
+                blurOnSubmit
+                onSubmitEditing={() => Keyboard.dismiss()}
               />
               <TextInput
                 style={styles.input}
                 value={signatureChairRoleInput}
                 onChangeText={setSignatureChairRoleInput}
                 placeholder="Role: Chair / Secretary (optional)"
+                returnKeyType="done"
+                blurOnSubmit
+                onSubmitEditing={() => Keyboard.dismiss()}
               />
             </View>
 
@@ -9998,12 +10297,21 @@ export default function App() {
             <View style={styles.signatureModalButtons}>
               <AppButton
                 title="Back"
-                onPress={() => setScreen(activeAttendance ? "SESSION" : "LIST")}
+                onPress={() => {
+                  Keyboard.dismiss();
+                  setScreen(activeAttendance ? "SESSION" : "LIST");
+                }}
               />
               <View style={styles.buttonSpacer} />
               <AppButton title="Clear" onPress={() => setSignaturePoints([])} />
               <View style={styles.buttonSpacer} />
-              <AppButton title="Save" onPress={() => void saveSignature()} />
+              <AppButton
+                title="Done"
+                onPress={() => {
+                  Keyboard.dismiss();
+                  void saveSignature();
+                }}
+              />
             </View>
           </View>
         </Modal>

@@ -71,8 +71,33 @@ function asNumber(value: unknown): number | null {
     return value;
   }
   if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
+    const trimmed = value.trim();
+    const directional = trimmed.match(/^([+-]?\d+(?:[.,]\d+)?)([NSEW])$/i);
+    if (directional) {
+      const base = Number(directional[1].replace(",", "."));
+      if (Number.isFinite(base)) {
+        const suffix = directional[2].toUpperCase();
+        if (suffix === "S" || suffix === "W") {
+          return -Math.abs(base);
+        }
+        return Math.abs(base);
+      }
+    }
+
+    const decimalComma = /^[-+]?\d+,\d+$/.test(trimmed) && !trimmed.includes(".");
+    const normalized = decimalComma
+      ? trimmed.replace(",", ".")
+      : trimmed.replace(/,/g, "").replace(/\s+/g, "");
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+
+    const firstNumeric = normalized.match(/[-+]?\d+(?:\.\d+)?/);
+    if (firstNumeric) {
+      const extracted = Number(firstNumeric[0]);
+      return Number.isFinite(extracted) ? extracted : null;
+    }
   }
   return null;
 }
