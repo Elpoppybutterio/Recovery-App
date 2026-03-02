@@ -269,7 +269,12 @@ type AttendanceValidationResult = {
   reason: string;
 };
 
-type LocationIssue = "permission_denied" | "position_unavailable" | "unavailable" | null;
+type LocationIssue =
+  | "permission_denied"
+  | "services_disabled"
+  | "position_unavailable"
+  | "unavailable"
+  | null;
 
 const DASHBOARD_FOOTER_NAV_HEIGHT = Platform.OS === "ios" ? 74 : 66;
 const DASHBOARD_SCROLL_FADE_HEIGHT = 34;
@@ -453,12 +458,16 @@ function meetingDistanceLabel(
   meeting: Pick<MeetingRecord, "lat" | "lng">,
   distanceMeters: number | null,
   permission: LocationPermissionState,
+  issue: LocationIssue,
 ): string {
   const hasCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng }) !== null;
   if (!hasCoords) {
     return "Location unavailable";
   }
   if (distanceMeters === null || !Number.isFinite(distanceMeters)) {
+    if (issue === "services_disabled") {
+      return "Turn on Location Services";
+    }
     return permission === "granted" ? "Distance unavailable" : "Enable location to see distance";
   }
   return formatDistance(distanceMeters);
@@ -1545,8 +1554,9 @@ export default function App() {
   const arrivalPromptedMeetingRef = useRef<string | null>(null);
   const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
   const meetingsShapeLoggedRef = useRef(false);
+  const [locationIssue, setLocationIssue] = useState<LocationIssue>(null);
   const locationIssueRef = useRef<LocationIssue>(null);
-  const locationPermissionAlertShownRef = useRef(false);
+  const locationPermissionAlertShownRef = useRef<LocationIssue>(null);
   const mapRef = useRef<any>(null);
   const rootScrollRef = useRef<ScrollView | null>(null);
   const meetingsRequestInFlightRef = useRef(false);
@@ -2298,31 +2308,44 @@ export default function App() {
 
       if (result.coords) {
         locationIssueRef.current = null;
+        setLocationIssue(null);
         setCurrentLocation(result.coords);
         return result.coords;
       }
 
-      if (result.permissionStatus === "denied" || result.permissionStatus === "unknown") {
-        locationIssueRef.current = "permission_denied";
+      setCurrentLocation(null);
+
+      if (result.failureReason === "services_disabled" || result.servicesEnabled === false) {
+        locationIssueRef.current = "services_disabled";
+        setLocationIssue("services_disabled");
         return null;
       }
 
-      if (result.permissionStatus === "granted" && result.timedOut) {
+      if (
+        result.failureReason === "permission_denied" ||
+        result.permissionStatus === "denied" ||
+        result.permissionStatus === "unknown"
+      ) {
+        locationIssueRef.current = "permission_denied";
+        setLocationIssue("permission_denied");
+        return null;
+      }
+
+      if (
+        result.failureReason === "position_unavailable" ||
+        (result.permissionStatus === "granted" && result.timedOut)
+      ) {
         locationIssueRef.current = "position_unavailable";
+        setLocationIssue("position_unavailable");
         return null;
       }
 
       locationIssueRef.current = "unavailable";
+      setLocationIssue("unavailable");
       return null;
     },
     [],
   );
-
-  const refreshLocationPermissionStates = useCallback(async () => {
-    const permissionState = await readLocationPermissionStates();
-    setLocationPermission(permissionState.permissionStatus);
-    setLocationAlwaysPermission(permissionState.alwaysPermissionStatus);
-  }, []);
 
   const formatApiErrorWithHint = useCallback(
     (baseMessage: string): string => {
@@ -2464,8 +2487,12 @@ export default function App() {
       setMeetingsStatus("Location enabled for distance and arrival detection.");
       return position;
     }
+    if (locationIssueRef.current === "services_disabled") {
+      setMeetingsStatus("Turn on Location Services to resolve meeting distance and geofence.");
+      return null;
+    }
     if (locationIssueRef.current === "position_unavailable") {
-      setMeetingsStatus("Location enabled, but no simulated location is set.");
+      setMeetingsStatus("Location enabled, but current GPS position is unavailable.");
       return null;
     }
     if (locationIssueRef.current === "permission_denied") {
@@ -2483,11 +2510,14 @@ export default function App() {
 
     if (result.permissionStatus !== "granted") {
       locationIssueRef.current = "permission_denied";
+      setLocationIssue("permission_denied");
       setMeetingsStatus("Location permission denied. Enable While Using the App first.");
       return false;
     }
 
     if (result.alwaysPermissionStatus === "granted") {
+      locationIssueRef.current = null;
+      setLocationIssue(null);
       setMeetingsStatus("Always location enabled for automatic meeting logging.");
       return true;
     }
@@ -2519,132 +2549,184 @@ export default function App() {
     return false;
   }, []);
 
-  const geocodeMeetingsMissingCoordinates = useCallback(async (records: MeetingRecord[]) => {
-    const MAX_GEOCODE_LOOKUPS_PER_REFRESH = 20;
-    let lookups = 0;
-    let resolved = 0;
+  const refreshDeviceLocationOnFocus = useCallback(async (): Promise<LocationStamp | null> => {
+    const permissionState = await readLocationPermissionStates();
+    setLocationPermission(permissionState.permissionStatus);
+    setLocationAlwaysPermission(permissionState.alwaysPermissionStatus);
 
-    const buildAddressCandidates = (meeting: MeetingRecord): string[] => {
-      const raw = meeting.address.trim().replace(/\s+/g, " ");
-      if (raw.length === 0 || raw.toLowerCase() === "address unavailable") {
-        return [];
+    if (permissionState.permissionStatus !== "granted") {
+      if (
+        permissionState.permissionStatus === "denied" ||
+        permissionState.permissionStatus === "unknown"
+      ) {
+        locationIssueRef.current = "permission_denied";
+        setLocationIssue("permission_denied");
       }
-      const hasStateOrZip = /\b[A-Z]{2}\b/.test(raw) || /\b\d{5}(?:-\d{4})?\b/.test(raw);
-      const lowerName = meeting.name.toLowerCase();
-      const hintedCity = lowerName.includes("laurel")
-        ? "Laurel"
-        : lowerName.includes("billings")
-          ? "Billings"
-          : "Billings";
-      const withMontana = hasStateOrZip ? raw : `${raw}, ${hintedCity}, MT`;
-      return Array.from(new Set([raw, withMontana, `${withMontana}, USA`]));
-    };
+      setCurrentLocation(null);
+      return null;
+    }
 
-    const geocodeFromNetwork = async (candidate: string) => {
-      try {
-        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(candidate)}`;
-        const response = await fetch(url, {
-          headers: {
-            accept: "application/json",
-          },
-        });
-        if (!response.ok) {
+    const position = await readCurrentLocation(false);
+    if (position) {
+      await refreshMeetingsRef.current?.({ location: position });
+    }
+    return position;
+  }, [readCurrentLocation]);
+
+  const geocodeMeetingsMissingCoordinates = useCallback(
+    async (records: MeetingRecord[]) => {
+      const MAX_GEOCODE_LOOKUPS_PER_REFRESH = 20;
+      let lookups = 0;
+      let resolved = 0;
+
+      const buildAddressCandidates = (meeting: MeetingRecord): string[] => {
+        const raw = meeting.address.trim().replace(/\s+/g, " ");
+        if (raw.length === 0 || raw.toLowerCase() === "address unavailable") {
+          return [];
+        }
+        const hasStateOrZip = /\b[A-Z]{2}\b/.test(raw) || /\b\d{5}(?:-\d{4})?\b/.test(raw);
+        const lowerName = meeting.name.toLowerCase();
+        const hintedCity = lowerName.includes("laurel")
+          ? "Laurel"
+          : lowerName.includes("billings")
+            ? "Billings"
+            : "Billings";
+        const withMontana = hasStateOrZip ? raw : `${raw}, ${hintedCity}, MT`;
+        return Array.from(new Set([raw, withMontana, `${withMontana}, USA`]));
+      };
+
+      const geocodeFromNetwork = async (candidate: string) => {
+        try {
+          const apiResponse = await fetch(
+            `${apiUrl}/v1/geo/geocode?address=${encodeURIComponent(candidate)}`,
+            {
+              headers: {
+                Authorization: authHeader,
+              },
+            },
+          );
+          if (apiResponse.ok) {
+            const payload = (await apiResponse.json()) as {
+              coords?: { lat?: number; lng?: number };
+            };
+            const coords = normalizeCoordinates({
+              lat: payload?.coords?.lat ?? null,
+              lng: payload?.coords?.lng ?? null,
+            });
+            if (coords) {
+              return { lat: coords.lat, lng: coords.lng };
+            }
+          }
+        } catch {
+          // fall through to direct provider lookup
+        }
+
+        try {
+          const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(candidate)}`;
+          const response = await fetch(url, {
+            headers: {
+              accept: "application/json",
+            },
+          });
+          if (!response.ok) {
+            return null;
+          }
+          const payload = (await response.json()) as Array<{ lat?: string; lon?: string }>;
+          const first = payload[0];
+          const coords = normalizeCoordinates({
+            lat: first?.lat ?? null,
+            lng: first?.lon ?? null,
+          });
+          return coords ? { lat: coords.lat, lng: coords.lng } : null;
+        } catch {
           return null;
         }
-        const payload = (await response.json()) as Array<{ lat?: string; lon?: string }>;
-        const first = payload[0];
-        const coords = normalizeCoordinates({
-          lat: first?.lat ?? null,
-          lng: first?.lon ?? null,
-        });
-        return coords ? { lat: coords.lat, lng: coords.lng } : null;
-      } catch {
-        return null;
-      }
-    };
+      };
 
-    const next = [...records];
-    for (let index = 0; index < next.length; index += 1) {
-      const meeting = next[index];
-      if (!meeting || meeting.format === "ONLINE") {
-        continue;
-      }
-      if (meeting.lat !== null && meeting.lng !== null) {
-        continue;
-      }
-
-      const addressCandidates = buildAddressCandidates(meeting);
-      if (addressCandidates.length === 0) {
-        continue;
-      }
-
-      let cached: { lat: number; lng: number } | null | undefined;
-      let cacheKey = "";
-      for (const candidate of addressCandidates) {
-        const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
-        const entry = geocodedAddressCacheRef.current[candidateKey];
-        if (entry !== undefined) {
-          cacheKey = candidateKey;
-          cached = entry;
-          break;
+      const next = [...records];
+      for (let index = 0; index < next.length; index += 1) {
+        const meeting = next[index];
+        if (!meeting || meeting.format === "ONLINE") {
+          continue;
         }
-      }
-      if (cached === undefined) {
-        if (lookups >= MAX_GEOCODE_LOOKUPS_PER_REFRESH) {
-          break;
+        if (meeting.lat !== null && meeting.lng !== null) {
+          continue;
         }
-        lookups += 1;
+
+        const addressCandidates = buildAddressCandidates(meeting);
+        if (addressCandidates.length === 0) {
+          continue;
+        }
+
+        let cached: { lat: number; lng: number } | null | undefined;
+        let cacheKey = "";
         for (const candidate of addressCandidates) {
           const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
-          cacheKey = candidateKey;
-          try {
-            const geocoded = await geocodeAsync(candidate);
-            const first = geocoded[0];
-            const coords = normalizeCoordinates({
-              lat: first?.latitude ?? null,
-              lng: first?.longitude ?? null,
-            });
-            cached = coords ? { lat: coords.lat, lng: coords.lng } : null;
-          } catch {
-            cached = await geocodeFromNetwork(candidate);
-          }
-          geocodedAddressCacheRef.current[candidateKey] = cached ?? null;
-          if (cached) {
+          const entry = geocodedAddressCacheRef.current[candidateKey];
+          if (entry !== undefined) {
+            cacheKey = candidateKey;
+            cached = entry;
             break;
           }
         }
-      }
-
-      if (!cached) {
-        if (cacheKey.length === 0) {
-          const fallbackKey = addressCandidates[0]?.toLowerCase().replace(/\s+/g, " ").trim();
-          if (fallbackKey) {
-            geocodedAddressCacheRef.current[fallbackKey] = null;
+        if (cached === undefined) {
+          if (lookups >= MAX_GEOCODE_LOOKUPS_PER_REFRESH) {
+            break;
+          }
+          lookups += 1;
+          for (const candidate of addressCandidates) {
+            const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
+            cacheKey = candidateKey;
+            try {
+              const geocoded = await geocodeAsync(candidate);
+              const first = geocoded[0];
+              const coords = normalizeCoordinates({
+                lat: first?.latitude ?? null,
+                lng: first?.longitude ?? null,
+              });
+              cached = coords ? { lat: coords.lat, lng: coords.lng } : null;
+            } catch {
+              cached = await geocodeFromNetwork(candidate);
+            }
+            geocodedAddressCacheRef.current[candidateKey] = cached ?? null;
+            if (cached) {
+              break;
+            }
           }
         }
-        continue;
+
+        if (!cached) {
+          if (cacheKey.length === 0) {
+            const fallbackKey = addressCandidates[0]?.toLowerCase().replace(/\s+/g, " ").trim();
+            if (fallbackKey) {
+              geocodedAddressCacheRef.current[fallbackKey] = null;
+            }
+          }
+          continue;
+        }
+
+        resolved += 1;
+        next[index] = {
+          ...meeting,
+          lat: cached.lat,
+          lng: cached.lng,
+          geoStatus: "ok",
+          geoReason: null,
+          geoUpdatedAt: new Date().toISOString(),
+        };
       }
 
-      resolved += 1;
-      next[index] = {
-        ...meeting,
-        lat: cached.lat,
-        lng: cached.lng,
-        geoStatus: "ok",
-        geoReason: null,
-        geoUpdatedAt: new Date().toISOString(),
-      };
-    }
+      if (__DEV__ && resolved > 0) {
+        console.log("[meetings] geocode fallback resolved", {
+          resolved,
+          lookups,
+        });
+      }
 
-    if (__DEV__ && resolved > 0) {
-      console.log("[meetings] geocode fallback resolved", {
-        resolved,
-        lookups,
-      });
-    }
-
-    return next;
-  }, []);
+      return next;
+    },
+    [apiUrl, authHeader],
+  );
 
   const persistAttendanceRecords = useCallback(
     async (nextRecords: AttendanceRecord[]) => {
@@ -5961,15 +6043,28 @@ export default function App() {
   }, [openMeetingDestination, openPhoneCall]);
 
   useEffect(() => {
-    if (locationIssueRef.current !== "permission_denied") {
-      locationPermissionAlertShownRef.current = false;
+    if (
+      !locationIssue ||
+      locationIssue === "position_unavailable" ||
+      locationIssue === "unavailable"
+    ) {
+      locationPermissionAlertShownRef.current = null;
       return;
     }
 
-    if (locationPermissionAlertShownRef.current) {
+    if (locationPermissionAlertShownRef.current === locationIssue) {
       return;
     }
-    locationPermissionAlertShownRef.current = true;
+    locationPermissionAlertShownRef.current = locationIssue;
+
+    if (locationIssue === "services_disabled") {
+      Alert.alert(
+        "Turn On Location Services",
+        "Location Services are turned off on this device. Turn them on to resolve meeting distance and geofence features.",
+        [{ text: "OK" }],
+      );
+      return;
+    }
 
     Alert.alert(
       "Location Permission Needed",
@@ -5986,7 +6081,7 @@ export default function App() {
         },
       ],
     );
-  }, [locationPermission]);
+  }, [locationIssue]);
 
   useEffect(() => {
     const mapping: Record<string, MeetingRecord> = {};
@@ -6048,19 +6143,19 @@ export default function App() {
   }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter, updateMapCenter]);
 
   useEffect(() => {
-    void refreshLocationPermissionStates();
-  }, [refreshLocationPermissionStates]);
+    void refreshDeviceLocationOnFocus();
+  }, [refreshDeviceLocationOnFocus]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
-        void refreshLocationPermissionStates();
+        void refreshDeviceLocationOnFocus();
       }
     });
     return () => {
       subscription.remove();
     };
-  }, [refreshLocationPermissionStates]);
+  }, [refreshDeviceLocationOnFocus]);
 
   useEffect(() => {
     if (bootstrapStartedRef.current) {
@@ -7527,6 +7622,7 @@ export default function App() {
                                         meeting,
                                         meeting.distanceMeters,
                                         locationPermission,
+                                        locationIssue,
                                       )}
                                     </Text>
                                     <Text style={styles.sectionMeta}>
@@ -8014,6 +8110,7 @@ export default function App() {
                                   meeting,
                                   meeting.distanceMeters,
                                   locationPermission,
+                                  locationIssue,
                                 )}
                               </Text>
                               {leaveBy ? (
@@ -8084,6 +8181,7 @@ export default function App() {
                             selectedMeeting,
                             resolveMeetingDistanceMeters(selectedMeeting, currentLocation),
                             locationPermission,
+                            locationIssue,
                           )}
                         </Text>
                         {(() => {
@@ -9016,6 +9114,11 @@ export default function App() {
                         Location disabled - enable to see meetings near you.
                       </Text>
                     ) : null}
+                    {locationIssue === "services_disabled" ? (
+                      <Text style={styles.errorText}>
+                        Turn on Location Services to resolve meeting distance and geofence.
+                      </Text>
+                    ) : null}
                     {locationAlwaysPermission === "denied" ? (
                       <Text style={styles.errorText}>
                         Always location denied - enable Always in device settings for auto-log.
@@ -9235,6 +9338,7 @@ export default function App() {
                                   meeting,
                                   meeting.distanceMeters,
                                   locationPermission,
+                                  locationIssue,
                                 )}
                               </Text>
                               {leaveBy ? (
@@ -9405,6 +9509,7 @@ export default function App() {
                             selectedMeeting,
                             resolveMeetingDistanceMeters(selectedMeeting, currentLocation),
                             locationPermission,
+                            locationIssue,
                           )}
                         </Text>
                         {(() => {

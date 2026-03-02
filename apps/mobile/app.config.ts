@@ -91,7 +91,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     name: resolveAppName(appEnv),
     slug: "sober-ai",
     icon: "./assets/icon.png",
-    version: "0.1.0",
+    version: "0.9.5",
     orientation: "portrait",
     scheme: APP_SCHEME,
     userInterfaceStyle: "light",
@@ -103,10 +103,11 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       infoPlist: {
         ...config.ios?.infoPlist,
         ITSAppUsesNonExemptEncryption: false,
-        NSLocationWhenInUseUsageDescription:
-          "Location is used to show nearby meetings and arrival prompts.",
+        NSLocationWhenInUseUsageDescription: "We use your location to show distance to meetings.",
         NSLocationAlwaysAndWhenInUseUsageDescription:
-          "Always location is used to auto-log meeting attendance when you arrive at a meeting geofence.",
+          "We use your location to show distance to meetings and enable geofence features if you turn them on.",
+        NSLocationAlwaysUsageDescription:
+          "We use your location to show distance to meetings and enable geofence features if you turn them on.",
         UIBackgroundModes: ["location"],
       },
     },

@@ -36,15 +36,37 @@ Expo Go fallback (temporary during migration):
 pnpm --filter @recovery/mobile start:go
 ```
 
-## Build and install (iOS first)
+## Build and install (iOS + Android)
 
 From repo root:
 
 ```bash
 pnpm dlx eas-cli build --profile development --platform ios
+pnpm dlx eas-cli build --profile development --platform android
+```
+
+Equivalent workspace scripts:
+
+```bash
+pnpm mobile:build:dev:ios
+pnpm mobile:build:dev:android
 ```
 
 After build completion, share the install URL from EAS with testers.
+
+### Native permission changes require reinstall
+
+If you change iOS location keys in `app.config.ts` / `app.json` (`NSLocation*UsageDescription`,
+`UIBackgroundModes`), you must rebuild and reinstall the iOS dev client. OTA reloads do not apply
+Info.plist changes.
+
+Recommended sequence:
+
+```bash
+pnpm mobile:build:dev:ios
+```
+
+Then install the new build from EAS, remove the prior dev client if needed, and launch again.
 
 For release-like preview/tester distribution, use:
 
