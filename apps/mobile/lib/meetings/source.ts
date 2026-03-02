@@ -511,6 +511,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
 
           const payload = asObject((await response.json()) as unknown);
           const meetingsRaw = Array.isArray(payload?.meetings) ? payload.meetings : [];
+          const apiResponseWarning = asString(payload?.warning);
           const allMeetingsForDay = dedupeMeetings(
             meetingsRaw
               .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
@@ -544,6 +545,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
             source: "api",
             warning:
               warning ??
+              apiResponseWarning ??
               (apiBaseUrl !== config.apiUrl
                 ? `Meetings loaded from fallback API (${apiBaseUrl}).${apiWarning ? ` ${apiWarning}` : ""}`
                 : apiWarning),
@@ -556,7 +558,15 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
       }
 
       const failureSummary = failures.length > 0 ? ` — ${failures.join(" | ")}` : "";
-      throw new Error(`Meetings API failed${failureSummary}`);
+      const hardFailureWarning = `Meetings API failed${failureSummary}`;
+      if (__DEV__) {
+        console.log("[meetings] api failure fallback", { failures });
+      }
+      return {
+        meetings: [],
+        source: "api",
+        warning: warning ? `${warning}. ${hardFailureWarning}` : hardFailureWarning,
+      };
     },
   };
 }

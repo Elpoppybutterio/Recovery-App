@@ -1000,13 +1000,22 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
 
       const query = parsedQuery.data;
       const requestedDayOfWeek = query.dayOfWeek ?? query.day;
-      const [manualMeetings, meetingGuideMeetings] = await Promise.all([
-        tenantRepositories.meetings.list(actor),
-        tenantRepositories.meetingGuide.list(actor, {
+      const manualMeetings = await tenantRepositories.meetings.list(actor);
+      let meetingGuideMeetings: Awaited<ReturnType<typeof tenantRepositories.meetingGuide.list>> =
+        [];
+      let meetingGuideWarning: string | null = null;
+      try {
+        meetingGuideMeetings = await tenantRepositories.meetingGuide.list(actor, {
           dayOfWeek: requestedDayOfWeek,
           limit: 1000,
-        }),
-      ]);
+        });
+      } catch (error) {
+        meetingGuideWarning = "Meeting Guide data temporarily unavailable";
+        logger.error("meetings.list.meeting_guide_failed", {
+          tenantId: actor.tenantId,
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+      }
       const resolvedRadiusMiles = query.radiusMiles ?? env.MEETING_IMPORT_RADIUS_MILES;
       const resolvedRadiusMeters = resolvedRadiusMiles * MILES_TO_METERS;
       const hasLocationFilter = typeof query.lat === "number" && typeof query.lng === "number";
@@ -1116,6 +1125,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           radiusMiles: resolvedRadiusMiles,
           locationScoped: hasLocationFilter,
         },
+        warning: meetingGuideWarning,
       };
     },
   );
@@ -1152,22 +1162,32 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
             .filter((entry) => entry.length > 0)
         : [];
 
-      const meetings = await tenantRepositories.meetingGuide.nearby(
-        actor,
-        {
-          lat: parsedQuery.data.lat,
-          lng: parsedQuery.data.lng,
-          radiusMiles: parsedQuery.data.radiusMiles,
-        },
-        {
-          format: parsedQuery.data.format,
-          dayOfWeek: parsedQuery.data.dayOfWeek,
-          types: typeFilters,
-          timeFrom: parsedQuery.data.timeFrom,
-          timeTo: parsedQuery.data.timeTo,
-          limit: parsedQuery.data.limit,
-        },
-      );
+      let meetings: Awaited<ReturnType<typeof tenantRepositories.meetingGuide.nearby>> = [];
+      let nearbyWarning: string | null = null;
+      try {
+        meetings = await tenantRepositories.meetingGuide.nearby(
+          actor,
+          {
+            lat: parsedQuery.data.lat,
+            lng: parsedQuery.data.lng,
+            radiusMiles: parsedQuery.data.radiusMiles,
+          },
+          {
+            format: parsedQuery.data.format,
+            dayOfWeek: parsedQuery.data.dayOfWeek,
+            types: typeFilters,
+            timeFrom: parsedQuery.data.timeFrom,
+            timeTo: parsedQuery.data.timeTo,
+            limit: parsedQuery.data.limit,
+          },
+        );
+      } catch (error) {
+        nearbyWarning = "Nearby Meeting Guide data temporarily unavailable";
+        logger.error("meetings.nearby.meeting_guide_failed", {
+          tenantId: actor.tenantId,
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+      }
 
       let scopedMeetings = meetings;
       if (
@@ -1272,6 +1292,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           geoReason: meeting.geo_reason,
           geoUpdatedAt: meeting.geo_updated_at,
         })),
+        warning: nearbyWarning,
       };
     },
   );
