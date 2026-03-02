@@ -11,6 +11,21 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Slice C: DONE
 - Slice D: IN PROGRESS
 
+## Release v0.9.4 (Meetings Liftoff)
+
+- Geo distance reliability: normalized meeting coordinates, shared haversine utility, and cached location service for on-device distance rendering in meeting + home-group lists.
+- Permission UX: explicit `While Using App` and `Always (recommended)` location actions with in-app denied-state guidance and settings deep links.
+- Attend + signature flow: in-progress meetings now actionable with `Happening now` treatment, strict signature-before-end behavior, and one-time chair-signature prompt per attendance instance.
+- Export hardening: replaced brittle export path with multi-page AA/NA Attendance Slip PDF generation and share flow.
+- Calendar integration: attend flow now prompts `Add to calendar`, creates meeting event metadata, and stores `calendarEventId` on attendance records to prevent duplicates.
+
+## Release v0.9.5 (iOS Device Location Restore)
+
+- iOS native permission config hardened for dev/client and production parity (`NSLocationWhenInUseUsageDescription`, `NSLocationAlwaysAndWhenInUseUsageDescription`, `NSLocationAlwaysUsageDescription`, and `UIBackgroundModes`).
+- Device location fetch made deterministic with explicit service checks (`hasServicesEnabledAsync`), robust foreground permission handling, timeout behavior, and last-known location fallback.
+- Meetings refresh now re-checks permission and current location on app focus/return, restoring distance rendering after Settings changes without reinstall.
+- Location-state UX now differentiates denied permission vs. disabled Location Services vs. missing meeting coordinates, preventing false generic `Location unavailable` states.
+
 ## Slice A (DONE)
 
 - User features: meetings directory, attendance check-in/check-out, verifier signature, supervisor attendance list.
