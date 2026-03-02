@@ -317,6 +317,13 @@ function inferGeoReasonFromCoordinates(lat: number | null, lng: number | null): 
   return lat === null ? "missing_latitude" : "missing_longitude";
 }
 
+function inferLegacyGeoStatusFromCoordinates(
+  lat: number | null,
+  lng: number | null,
+): "present" | "missing" {
+  return lat !== null && lng !== null ? "present" : "missing";
+}
+
 type DbErrorShape = {
   code?: string;
   message?: string;
@@ -337,6 +344,21 @@ function isMissingMeetingGuideGeoColumnsError(error: unknown): boolean {
     (message.includes("geo_status") ||
       message.includes("geo_reason") ||
       message.includes("geo_updated_at"))
+  );
+}
+
+function isLegacyMeetingGuideGeoStatusConstraintError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as DbErrorShape;
+  if (candidate.code !== "23514") {
+    return false;
+  }
+  const message = String(candidate.message ?? "").toLowerCase();
+  return (
+    message.includes("meeting_guide_meetings_geo_status_check") ||
+    (message.includes("meeting_guide_meetings") && message.includes("geo_status"))
   );
 }
 
@@ -1048,134 +1070,241 @@ export function createRepositories(db: DbClient) {
         let upserted = 0;
         for (const meeting of meetings) {
           const stableId = `${tenantId}:${sourceFeedId}:${meeting.slug}`;
-          await db.query(
-            `
-            INSERT INTO meeting_guide_meetings (
-              id,
-              tenant_id,
-              source_feed_id,
-              slug,
-              name,
-              day,
-              time,
-              end_time,
-              timezone,
-              formatted_address,
-              address,
-              city,
-              state,
-              postal_code,
-              country,
-              region,
-              location,
-              notes,
-              types_json,
-              conference_url,
-              conference_phone,
-              lat,
-              lng,
-              geo_status,
-              geo_reason,
-              geo_updated_at,
-              updated_at_source,
-              last_ingested_at
-            )
-            VALUES (
-              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20,
-              $21, $22, $23, $24, $25, $26, $27, $28
-            )
-            ON CONFLICT (tenant_id, source_feed_id, slug)
-            DO UPDATE SET
-              name = EXCLUDED.name,
-              day = EXCLUDED.day,
-              time = EXCLUDED.time,
-              end_time = EXCLUDED.end_time,
-              timezone = EXCLUDED.timezone,
-              formatted_address = EXCLUDED.formatted_address,
-              address = EXCLUDED.address,
-              city = EXCLUDED.city,
-              state = EXCLUDED.state,
-              postal_code = EXCLUDED.postal_code,
-              country = EXCLUDED.country,
-              region = EXCLUDED.region,
-              location = EXCLUDED.location,
-              notes = EXCLUDED.notes,
-              types_json = EXCLUDED.types_json,
-              conference_url = EXCLUDED.conference_url,
-              conference_phone = EXCLUDED.conference_phone,
-              lat = CASE
-                WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.lat
-                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.lat
-                ELSE EXCLUDED.lat
-              END,
-              lng = CASE
-                WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.lng
-                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.lng
-                ELSE EXCLUDED.lng
-              END,
-              geo_status = CASE
-                WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_status
-                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_status
-                ELSE EXCLUDED.geo_status
-              END,
-              geo_reason = CASE
-                WHEN EXCLUDED.geo_status = 'ok' THEN NULL
-                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_reason
-                ELSE EXCLUDED.geo_reason
-              END,
-              geo_updated_at = CASE
-                WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_updated_at
-                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_updated_at
-                ELSE EXCLUDED.geo_updated_at
-              END,
-              updated_at_source = EXCLUDED.updated_at_source,
-              last_ingested_at = EXCLUDED.last_ingested_at,
-              updated_at = NOW()
-          `,
-            [
-              stableId,
-              tenantId,
-              sourceFeedId,
-              meeting.slug,
-              meeting.name,
-              meeting.day,
-              meeting.time,
-              meeting.endTime,
-              meeting.timezone,
-              meeting.formattedAddress,
-              meeting.address,
-              meeting.city,
-              meeting.state,
-              meeting.postalCode,
-              meeting.country,
-              meeting.region,
-              meeting.location,
-              meeting.notes,
-              toJsonParam(meeting.types),
-              meeting.conferenceUrl,
-              meeting.conferencePhone,
-              meeting.lat,
-              meeting.lng,
-              meeting.geoStatus ??
-                (meeting.lat !== null && meeting.lng !== null
-                  ? "ok"
-                  : meeting.lat === null && meeting.lng === null
-                    ? "missing"
-                    : "partial"),
-              meeting.geoReason ??
-                (meeting.lat !== null && meeting.lng !== null
-                  ? null
-                  : meeting.lat === null && meeting.lng === null
-                    ? "missing_coordinates"
-                    : meeting.lat === null
-                      ? "missing_latitude"
-                      : "missing_longitude"),
-              meeting.geoUpdatedAt ?? now.toISOString(),
-              meeting.updatedAtSource,
-              now.toISOString(),
-            ],
-          );
+          const resolvedGeoStatus =
+            meeting.geoStatus ?? inferGeoStatusFromCoordinates(meeting.lat, meeting.lng);
+          const resolvedGeoReason =
+            meeting.geoReason ?? inferGeoReasonFromCoordinates(meeting.lat, meeting.lng);
+          const resolvedGeoUpdatedAt = meeting.geoUpdatedAt ?? now.toISOString();
+
+          try {
+            await db.query(
+              `
+              INSERT INTO meeting_guide_meetings (
+                id,
+                tenant_id,
+                source_feed_id,
+                slug,
+                name,
+                day,
+                time,
+                end_time,
+                timezone,
+                formatted_address,
+                address,
+                city,
+                state,
+                postal_code,
+                country,
+                region,
+                location,
+                notes,
+                types_json,
+                conference_url,
+                conference_phone,
+                lat,
+                lng,
+                geo_status,
+                geo_reason,
+                geo_updated_at,
+                updated_at_source,
+                last_ingested_at
+              )
+              VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20,
+                $21, $22, $23, $24, $25, $26, $27, $28
+              )
+              ON CONFLICT (tenant_id, source_feed_id, slug)
+              DO UPDATE SET
+                name = EXCLUDED.name,
+                day = EXCLUDED.day,
+                time = EXCLUDED.time,
+                end_time = EXCLUDED.end_time,
+                timezone = EXCLUDED.timezone,
+                formatted_address = EXCLUDED.formatted_address,
+                address = EXCLUDED.address,
+                city = EXCLUDED.city,
+                state = EXCLUDED.state,
+                postal_code = EXCLUDED.postal_code,
+                country = EXCLUDED.country,
+                region = EXCLUDED.region,
+                location = EXCLUDED.location,
+                notes = EXCLUDED.notes,
+                types_json = EXCLUDED.types_json,
+                conference_url = EXCLUDED.conference_url,
+                conference_phone = EXCLUDED.conference_phone,
+                lat = CASE
+                  WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.lat
+                  WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.lat
+                  ELSE EXCLUDED.lat
+                END,
+                lng = CASE
+                  WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.lng
+                  WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.lng
+                  ELSE EXCLUDED.lng
+                END,
+                geo_status = CASE
+                  WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_status
+                  WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_status
+                  ELSE EXCLUDED.geo_status
+                END,
+                geo_reason = CASE
+                  WHEN EXCLUDED.geo_status = 'ok' THEN NULL
+                  WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_reason
+                  ELSE EXCLUDED.geo_reason
+                END,
+                geo_updated_at = CASE
+                  WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_updated_at
+                  WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_updated_at
+                  ELSE EXCLUDED.geo_updated_at
+                END,
+                updated_at_source = EXCLUDED.updated_at_source,
+                last_ingested_at = EXCLUDED.last_ingested_at,
+                updated_at = NOW()
+            `,
+              [
+                stableId,
+                tenantId,
+                sourceFeedId,
+                meeting.slug,
+                meeting.name,
+                meeting.day,
+                meeting.time,
+                meeting.endTime,
+                meeting.timezone,
+                meeting.formattedAddress,
+                meeting.address,
+                meeting.city,
+                meeting.state,
+                meeting.postalCode,
+                meeting.country,
+                meeting.region,
+                meeting.location,
+                meeting.notes,
+                toJsonParam(meeting.types),
+                meeting.conferenceUrl,
+                meeting.conferencePhone,
+                meeting.lat,
+                meeting.lng,
+                resolvedGeoStatus,
+                resolvedGeoReason,
+                resolvedGeoUpdatedAt,
+                meeting.updatedAtSource,
+                now.toISOString(),
+              ],
+            );
+          } catch (error) {
+            if (
+              !isMissingMeetingGuideGeoColumnsError(error) &&
+              !isLegacyMeetingGuideGeoStatusConstraintError(error)
+            ) {
+              throw error;
+            }
+
+            const legacyGeoStatus = inferLegacyGeoStatusFromCoordinates(meeting.lat, meeting.lng);
+            await db.query(
+              `
+              INSERT INTO meeting_guide_meetings (
+                id,
+                tenant_id,
+                source_feed_id,
+                slug,
+                name,
+                day,
+                time,
+                end_time,
+                timezone,
+                formatted_address,
+                address,
+                city,
+                state,
+                postal_code,
+                country,
+                region,
+                location,
+                notes,
+                types_json,
+                conference_url,
+                conference_phone,
+                lat,
+                lng,
+                geo_status,
+                updated_at_source,
+                last_ingested_at
+              )
+              VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20,
+                $21, $22, $23, $24, $25, $26
+              )
+              ON CONFLICT (tenant_id, source_feed_id, slug)
+              DO UPDATE SET
+                name = EXCLUDED.name,
+                day = EXCLUDED.day,
+                time = EXCLUDED.time,
+                end_time = EXCLUDED.end_time,
+                timezone = EXCLUDED.timezone,
+                formatted_address = EXCLUDED.formatted_address,
+                address = EXCLUDED.address,
+                city = EXCLUDED.city,
+                state = EXCLUDED.state,
+                postal_code = EXCLUDED.postal_code,
+                country = EXCLUDED.country,
+                region = EXCLUDED.region,
+                location = EXCLUDED.location,
+                notes = EXCLUDED.notes,
+                types_json = EXCLUDED.types_json,
+                conference_url = EXCLUDED.conference_url,
+                conference_phone = EXCLUDED.conference_phone,
+                lat = CASE
+                  WHEN EXCLUDED.geo_status = 'present' THEN EXCLUDED.lat
+                  WHEN meeting_guide_meetings.geo_status = 'present' THEN meeting_guide_meetings.lat
+                  ELSE EXCLUDED.lat
+                END,
+                lng = CASE
+                  WHEN EXCLUDED.geo_status = 'present' THEN EXCLUDED.lng
+                  WHEN meeting_guide_meetings.geo_status = 'present' THEN meeting_guide_meetings.lng
+                  ELSE EXCLUDED.lng
+                END,
+                geo_status = CASE
+                  WHEN EXCLUDED.geo_status = 'present' THEN EXCLUDED.geo_status
+                  WHEN meeting_guide_meetings.geo_status = 'present' THEN meeting_guide_meetings.geo_status
+                  ELSE EXCLUDED.geo_status
+                END,
+                updated_at_source = EXCLUDED.updated_at_source,
+                last_ingested_at = EXCLUDED.last_ingested_at,
+                updated_at = NOW()
+            `,
+              [
+                stableId,
+                tenantId,
+                sourceFeedId,
+                meeting.slug,
+                meeting.name,
+                meeting.day,
+                meeting.time,
+                meeting.endTime,
+                meeting.timezone,
+                meeting.formattedAddress,
+                meeting.address,
+                meeting.city,
+                meeting.state,
+                meeting.postalCode,
+                meeting.country,
+                meeting.region,
+                meeting.location,
+                meeting.notes,
+                toJsonParam(meeting.types),
+                meeting.conferenceUrl,
+                meeting.conferencePhone,
+                meeting.lat,
+                meeting.lng,
+                legacyGeoStatus,
+                meeting.updatedAtSource,
+                now.toISOString(),
+              ],
+            );
+          }
           upserted += 1;
         }
         return upserted;
