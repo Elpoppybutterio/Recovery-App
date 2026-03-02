@@ -278,6 +278,7 @@ type LocationIssue =
 
 const DASHBOARD_FOOTER_NAV_HEIGHT = Platform.OS === "ios" ? 74 : 66;
 const DASHBOARD_SCROLL_FADE_HEIGHT = 34;
+const DEFAULT_REMOTE_API_URL = "https://sober-ai-api.onrender.com";
 
 type SponsorCallLog = {
   id: string;
@@ -1208,6 +1209,32 @@ function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+function isLocalNetworkHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(normalized)) {
+    return true;
+  }
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized)) {
+    const [a, b] = normalized.split(".").map((part) => Number(part));
+    if (a === 10) {
+      return true;
+    }
+    if (a === 127) {
+      return true;
+    }
+    if (a === 192 && b === 168) {
+      return true;
+    }
+    if (a === 172 && b >= 16 && b <= 31) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function resolveApiBaseUrl(fromEnv: string, fromConfig: string): string {
   const preferred = fromEnv || fromConfig;
   if (preferred) {
@@ -1220,7 +1247,7 @@ function resolveApiBaseUrl(fromEnv: string, fromConfig: string): string {
     try {
       const parsed = new URL(scriptUrl);
       const host = parsed.hostname;
-      if (host && !["localhost", "127.0.0.1", "0.0.0.0"].includes(host)) {
+      if (host && isLocalNetworkHost(host)) {
         return `http://${host}:3031`;
       }
     } catch {
@@ -1228,7 +1255,16 @@ function resolveApiBaseUrl(fromEnv: string, fromConfig: string): string {
     }
   }
 
-  return "http://localhost:3031";
+  return DEFAULT_REMOTE_API_URL;
+}
+
+function resolveFallbackApiUrls(primaryApiUrl: string): string[] {
+  const normalizedPrimary = trimTrailingSlashes(primaryApiUrl.trim());
+  const fallback = trimTrailingSlashes(DEFAULT_REMOTE_API_URL);
+  if (!normalizedPrimary || normalizedPrimary === fallback) {
+    return [];
+  }
+  return [fallback];
 }
 
 function getDaysSober(dateIso: string | null, nowMs: number): number {
@@ -1361,6 +1397,7 @@ export default function App() {
       createMeetingsSource({
         feedUrl: meetingFeedUrl,
         apiUrl,
+        fallbackApiUrls: resolveFallbackApiUrls(apiUrl),
         authHeader,
         radiusMiles: defaultMeetingRadiusMiles,
       }),

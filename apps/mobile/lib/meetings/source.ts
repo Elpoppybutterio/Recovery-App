@@ -40,6 +40,7 @@ export type MeetingsSource = {
 type SourceConfig = {
   feedUrl?: string;
   apiUrl: string;
+  fallbackApiUrls?: string[];
   authHeader: string;
   radiusMiles?: number;
 };
@@ -412,6 +413,13 @@ function extractFeedMeetings(rawPayload: unknown, fallbackDay: number): MeetingR
 
 export function createMeetingsSource(config: SourceConfig): MeetingsSource {
   const normalizedFeedUrl = config.feedUrl?.trim();
+  const candidateApiUrls = Array.from(
+    new Set(
+      [config.apiUrl, ...(config.fallbackApiUrls ?? [])]
+        .map((value) => value.trim().replace(/\/+$/, ""))
+        .filter((value) => value.length > 0),
+    ),
+  );
 
   return {
     async listMeetings(params: ListMeetingsParams): Promise<ListMeetingsResult> {
@@ -441,103 +449,114 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
       const meetingsQuery = new URLSearchParams();
       meetingsQuery.set("day", String(params.dayOfWeek));
 
-      let nearbyMeetings: MeetingRecord[] = [];
-      let meetings: MeetingRecord[] = [];
-      let apiWarning: string | undefined;
       const hasLocation = typeof params.lat === "number" && typeof params.lng === "number";
+      const failures: string[] = [];
 
-      if (hasLocation) {
-        const nearbyQuery = new URLSearchParams();
-        nearbyQuery.set("lat", String(params.lat));
-        nearbyQuery.set("lng", String(params.lng));
-        nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
-        nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
-        nearbyQuery.set("when", "all");
+      for (const apiBaseUrl of candidateApiUrls) {
+        let nearbyMeetings: MeetingRecord[] = [];
+        let apiWarning: string | undefined;
 
-        const nearbyUrl = `${config.apiUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
-        if (__DEV__) {
-          console.log("[meetings] nearby request", {
-            url: nearbyUrl,
-            lat: params.lat,
-            lng: params.lng,
-            radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
-          });
-        }
+        if (hasLocation) {
+          const nearbyQuery = new URLSearchParams();
+          nearbyQuery.set("lat", String(params.lat));
+          nearbyQuery.set("lng", String(params.lng));
+          nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
+          nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
+          nearbyQuery.set("when", "all");
 
-        try {
-          const nearbyResponse = await fetch(nearbyUrl, { headers });
+          const nearbyUrl = `${apiBaseUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
+          if (__DEV__) {
+            console.log("[meetings] nearby request", {
+              url: nearbyUrl,
+              lat: params.lat,
+              lng: params.lng,
+              radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
+            });
+          }
 
-          if (nearbyResponse.ok) {
-            const nearbyPayload = asObject((await nearbyResponse.json()) as unknown);
-            const nearbyMeetingsRaw = Array.isArray(nearbyPayload?.meetings)
-              ? nearbyPayload.meetings
-              : [];
-            nearbyMeetings = dedupeMeetings(
-              nearbyMeetingsRaw
-                .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
-                .filter((entry): entry is MeetingRecord => entry !== null),
-            );
-          } else {
-            apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
+          try {
+            const nearbyResponse = await fetch(nearbyUrl, { headers });
+            if (nearbyResponse.ok) {
+              const nearbyPayload = asObject((await nearbyResponse.json()) as unknown);
+              const nearbyMeetingsRaw = Array.isArray(nearbyPayload?.meetings)
+                ? nearbyPayload.meetings
+                : [];
+              nearbyMeetings = dedupeMeetings(
+                nearbyMeetingsRaw
+                  .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+                  .filter((entry): entry is MeetingRecord => entry !== null),
+              );
+            } else {
+              apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
+            }
+          } catch (error) {
+            apiWarning = "Nearby meetings unavailable; falling back to tenant meetings";
             if (__DEV__) {
               console.log("[meetings] nearby fallback", {
-                status: nearbyResponse.status,
-                reason: "non-ok response",
+                apiBaseUrl,
+                reason: "request failed",
+                error: error instanceof Error ? error.message : "unknown",
               });
             }
           }
-        } catch (error) {
-          apiWarning = "Nearby meetings unavailable; falling back to tenant meetings";
-          if (__DEV__) {
-            console.log("[meetings] nearby fallback", {
-              reason: "request failed",
-              error: error instanceof Error ? error.message : "unknown",
-            });
+        }
+
+        const url = `${apiBaseUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
+        try {
+          const response = await fetch(url, { headers });
+          if (!response.ok) {
+            failures.push(`${apiBaseUrl}: ${response.status}`);
+            continue;
           }
+
+          const payload = asObject((await response.json()) as unknown);
+          const meetingsRaw = Array.isArray(payload?.meetings) ? payload.meetings : [];
+          const allMeetingsForDay = dedupeMeetings(
+            meetingsRaw
+              .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
+              .filter((entry): entry is MeetingRecord => entry !== null),
+          );
+
+          const meetings = hasLocation
+            ? dedupeMeetings([...nearbyMeetings, ...allMeetingsForDay])
+            : allMeetingsForDay;
+
+          if (__DEV__) {
+            const missingGeo = meetings
+              .filter((meeting) => meeting.lat === null || meeting.lng === null)
+              .slice(0, 8)
+              .map((meeting) => ({
+                id: meeting.id,
+                name: meeting.name,
+                geoStatus: meeting.geoStatus ?? "missing",
+                geoReason: meeting.geoReason ?? "unknown",
+              }));
+            if (missingGeo.length > 0) {
+              console.log("[meetings] location unavailable", {
+                count: missingGeo.length,
+                sample: missingGeo,
+              });
+            }
+          }
+
+          return {
+            meetings,
+            source: "api",
+            warning:
+              warning ??
+              (apiBaseUrl !== config.apiUrl
+                ? `Meetings loaded from fallback API (${apiBaseUrl}).${apiWarning ? ` ${apiWarning}` : ""}`
+                : apiWarning),
+          };
+        } catch (error) {
+          failures.push(
+            `${apiBaseUrl}: ${error instanceof Error && error.message ? error.message : "request_failed"}`,
+          );
         }
       }
 
-      const url = `${config.apiUrl}/v1/meetings${meetingsQuery.size > 0 ? `?${meetingsQuery.toString()}` : ""}`;
-      const response = await fetch(url, { headers });
-      if (!response.ok) {
-        throw new Error(`Meetings API failed (${response.status})`);
-      }
-
-      const payload = asObject((await response.json()) as unknown);
-      const meetingsRaw = Array.isArray(payload?.meetings) ? payload.meetings : [];
-      const allMeetingsForDay = dedupeMeetings(
-        meetingsRaw
-          .map((entry) => normalizeApiMeeting(entry, params.dayOfWeek))
-          .filter((entry): entry is MeetingRecord => entry !== null),
-      );
-
-      meetings = hasLocation
-        ? dedupeMeetings([...nearbyMeetings, ...allMeetingsForDay])
-        : allMeetingsForDay;
-
-      if (__DEV__) {
-        const missingGeo = meetings
-          .filter((meeting) => meeting.lat === null || meeting.lng === null)
-          .slice(0, 8)
-          .map((meeting) => ({
-            id: meeting.id,
-            name: meeting.name,
-            geoStatus: meeting.geoStatus ?? "missing",
-            geoReason: meeting.geoReason ?? "unknown",
-          }));
-        if (missingGeo.length > 0) {
-          console.log("[meetings] location unavailable", {
-            count: missingGeo.length,
-            sample: missingGeo,
-          });
-        }
-      }
-
-      return {
-        meetings,
-        source: "api",
-        warning: warning ?? apiWarning,
-      };
+      const failureSummary = failures.length > 0 ? ` — ${failures.join(" | ")}` : "";
+      throw new Error(`Meetings API failed${failureSummary}`);
     },
   };
 }
