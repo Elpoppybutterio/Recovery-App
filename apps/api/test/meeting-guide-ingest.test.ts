@@ -241,4 +241,90 @@ describe("meeting-guide ingest", () => {
       ]),
     );
   });
+
+  it("geocodes missing coordinates and stores geo status/reason", async () => {
+    const repositories = {
+      meetingFeeds: {
+        upsert: vi.fn().mockResolvedValue(undefined),
+        listActive: vi.fn().mockResolvedValue([
+          {
+            id: "feed-geo",
+            url: "https://example.org/geo.json",
+            etag: null,
+            last_modified: null,
+          },
+        ]),
+        markFetchResult: vi.fn().mockResolvedValue(undefined),
+      },
+      meetingGuideMeetings: {
+        upsertForFeed: vi.fn().mockResolvedValue(1),
+      },
+    } as const;
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () =>
+          JSON.stringify([
+            {
+              slug: "missing-coords",
+              name: "Missing Coordinates Meeting",
+              day: 2,
+              time: "19:00",
+              formatted_address: "510 Cook Ave, Billings, MT 59101",
+              city: "Billings",
+              state: "MT",
+              postal_code: "59101",
+              country: "US",
+            },
+          ]),
+        json: async () => [],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => [{ lat: "45.7895", lon: "-108.4928" }],
+        text: async () => "",
+      });
+
+    const result = await ingestMeetingGuideFeedsForTenant({
+      repositories: repositories as never,
+      tenantId: "tenant-a",
+      configuredFeeds: [{ name: "Geo feed", url: "https://example.org/geo.json" }],
+      fetchImpl,
+      now: () => new Date("2026-02-20T12:00:00.000Z"),
+      geocodeMissingCoordinates: true,
+      geocodeUserAgent: "Recovery-Test/1.0",
+    });
+
+    expect(result).toEqual({
+      feedsAttempted: 1,
+      feedsFailed: 0,
+      meetingsFetched: 1,
+      meetingsImported: 1,
+      meetingsSkipped: 0,
+      meetingsWithCoordinates: 1,
+      meetingsWithoutCoordinates: 0,
+    });
+
+    const meetingsArg = repositories.meetingGuideMeetings.upsertForFeed.mock.calls[0]?.[2] as
+      | Array<{
+          lat: number | null;
+          lng: number | null;
+          geoStatus?: string;
+          geoReason?: string | null;
+        }>
+      | undefined;
+    expect(meetingsArg?.[0]).toMatchObject({
+      lat: 45.7895,
+      lng: -108.4928,
+      geoStatus: "ok",
+      geoReason: null,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
 });

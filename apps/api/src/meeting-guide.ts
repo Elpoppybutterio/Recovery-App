@@ -1,3 +1,5 @@
+import type { MeetingGeoStatus } from "./meeting-geo";
+
 export type MeetingGuideFeedConfig = {
   name: string;
   url: string;
@@ -27,6 +29,9 @@ export type NormalizedMeetingGuideMeeting = {
   conferencePhone: string | null;
   lat: number | null;
   lng: number | null;
+  geoStatus?: MeetingGeoStatus;
+  geoReason?: string | null;
+  geoUpdatedAt?: string | null;
   updatedAtSource: string | null;
 };
 

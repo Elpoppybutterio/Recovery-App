@@ -205,7 +205,9 @@ type MeetingGuideMeeting = {
   conference_phone: string | null;
   lat: number | null;
   lng: number | null;
-  geo_status: "present" | "missing";
+  geo_status: "ok" | "missing" | "invalid" | "partial";
+  geo_reason: string | null;
+  geo_updated_at: string | null;
   updated_at_source: string | null;
   last_ingested_at: string;
   updated_at: string;
@@ -737,6 +739,8 @@ export class InMemoryDb implements DbPool {
         lat,
         lng,
         geoStatus,
+        geoReason,
+        geoUpdatedAt,
         updatedAtSource,
         lastIngestedAt,
       ] = params as [
@@ -763,7 +767,9 @@ export class InMemoryDb implements DbPool {
         string | null,
         number | null,
         number | null,
-        "present" | "missing",
+        "ok" | "missing" | "invalid" | "partial",
+        string | null,
+        string | null,
         string | null,
         string,
       ];
@@ -778,6 +784,7 @@ export class InMemoryDb implements DbPool {
       );
 
       if (existing) {
+        const preserveExistingGeo = existing.geo_status === "ok" && geoStatus !== "ok";
         existing.id = id;
         existing.name = name;
         existing.day = day;
@@ -796,9 +803,15 @@ export class InMemoryDb implements DbPool {
         existing.types_json = parsedTypes;
         existing.conference_url = conferenceUrl;
         existing.conference_phone = conferencePhone;
-        existing.lat = lat;
-        existing.lng = lng;
-        existing.geo_status = geoStatus;
+        existing.lat = preserveExistingGeo ? existing.lat : lat;
+        existing.lng = preserveExistingGeo ? existing.lng : lng;
+        existing.geo_status = preserveExistingGeo ? existing.geo_status : geoStatus;
+        existing.geo_reason = preserveExistingGeo
+          ? existing.geo_reason
+          : geoStatus === "ok"
+            ? null
+            : geoReason;
+        existing.geo_updated_at = preserveExistingGeo ? existing.geo_updated_at : geoUpdatedAt;
         existing.updated_at_source = updatedAtSource;
         existing.last_ingested_at = lastIngestedAt;
         existing.updated_at = nowIso;
@@ -830,6 +843,8 @@ export class InMemoryDb implements DbPool {
         lat,
         lng,
         geo_status: geoStatus,
+        geo_reason: geoReason,
+        geo_updated_at: geoUpdatedAt,
         updated_at_source: updatedAtSource,
         last_ingested_at: lastIngestedAt,
         updated_at: nowIso,
@@ -873,7 +888,7 @@ export class InMemoryDb implements DbPool {
 
     if (
       normalized.includes("from meeting_guide_meetings") &&
-      normalized.includes("geo_status = 'present'") &&
+      normalized.includes("geo_status = 'ok'") &&
       normalized.includes("lat between $5 and $6 and lng between $7 and $8") &&
       normalized.includes("limit $9")
     ) {
@@ -892,7 +907,7 @@ export class InMemoryDb implements DbPool {
 
       const rows = this.meetingGuideMeetings
         .filter((entry) => entry.tenant_id === tenantId)
-        .filter((entry) => entry.geo_status === "present")
+        .filter((entry) => entry.geo_status === "ok")
         .filter((entry) => dayOfWeek === null || entry.day === dayOfWeek)
         .filter((entry) => !timeFrom || (entry.time !== null && entry.time >= timeFrom))
         .filter((entry) => !timeTo || (entry.time !== null && entry.time <= timeTo))
@@ -925,6 +940,10 @@ export class InMemoryDb implements DbPool {
         (entry) => entry.lat !== null && entry.lng !== null,
       ).length;
       const withoutCoordinates = scoped.length - withCoordinates;
+      const geoOk = scoped.filter((entry) => entry.geo_status === "ok").length;
+      const geoMissing = scoped.filter((entry) => entry.geo_status === "missing").length;
+      const geoPartial = scoped.filter((entry) => entry.geo_status === "partial").length;
+      const geoInvalid = scoped.filter((entry) => entry.geo_status === "invalid").length;
       return {
         rowCount: 1,
         rows: [
@@ -932,6 +951,10 @@ export class InMemoryDb implements DbPool {
             total_meetings: scoped.length,
             meetings_with_coordinates: withCoordinates,
             meetings_without_coordinates: withoutCoordinates,
+            meetings_geo_ok: geoOk,
+            meetings_geo_missing: geoMissing,
+            meetings_geo_partial: geoPartial,
+            meetings_geo_invalid: geoInvalid,
           } as Row,
         ],
       };

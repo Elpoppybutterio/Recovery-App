@@ -1,6 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Calendar from "expo-calendar";
-import * as Location from "expo-location";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -27,9 +26,24 @@ import {
 } from "react-native";
 import appJson from "./app.json";
 import { createMeetingsSource, MeetingRecord } from "./lib/meetings/source";
-import { ATTENDANCE_PDF_FILE_NAME, exportAttendancePdf } from "./lib/pdf/exportAttendancePdf";
+import {
+  ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
+  generateAttendanceSlipPdf,
+  shareAttendanceSlipPdf,
+} from "./lib/pdf/attendanceSlipPdf";
 import { exportMorningRoutinePdf } from "./lib/pdf/exportMorningRoutinePdf";
 import { exportNightlyInventoryPdf } from "./lib/pdf/exportNightlyInventoryPdf";
+import {
+  asFiniteNumber,
+  formatDistanceMiles,
+  haversineDistanceMeters,
+  normalizeCoordinates,
+} from "./lib/meetings/distance";
+import {
+  getCurrentLocation as getCurrentLocationFromService,
+  refreshLocationPermissionStates as readLocationPermissionStates,
+  requestAlwaysLocationPermission as requestAlwaysLocationPermissionFromService,
+} from "./lib/services/locationService";
 import { getInsightForDay } from "./lib/recoveryInsights";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import { featureFlags } from "./lib/config/featureFlags";
@@ -157,6 +171,11 @@ type AttendanceRecord = {
   endLng: number | null;
   endAccuracyM: number | null;
   inactive?: boolean;
+  signaturePromptShown?: boolean;
+  chairName?: string | null;
+  chairRole?: string | null;
+  signatureCapturedAtIso?: string | null;
+  calendarEventId?: string | null;
   signaturePngBase64: string | null;
   pdfUri: string | null;
 };
@@ -270,14 +289,15 @@ type MeetingAttendanceLog = {
 };
 
 const ARRIVAL_RADIUS_METERS = 61;
-const EARTH_RADIUS_METERS = 6371000;
 const MIN_VALID_MEETING_MINUTES = 45;
+const DEFAULT_MEETING_DURATION_MINUTES = 60;
 const SIGNATURE_WINDOW_MINUTES = 90;
 const SIGNATURE_WINDOW_MS = SIGNATURE_WINDOW_MINUTES * 60 * 1000;
+const SIGNATURE_PROMPT_AFTER_MINUTES = 20;
+const SIGNATURE_PROMPT_AFTER_MS = SIGNATURE_PROMPT_AFTER_MINUTES * 60 * 1000;
 const SIGNATURE_WINDOW_HELP_TEXT =
   "Signature is available from meeting start until 90 minutes after start.";
 const MAX_SIGNATURE_POINTS_FOR_STORAGE = 1400;
-const MAX_SIGNATURE_BASE64_CHARS_IN_MULTI_EXPORT = 50000;
 const ATTENDANCE_STORAGE_KEY_PREFIX = "recovery:verifiedAttendance:";
 const MEETING_PLAN_STORAGE_KEY_PREFIX = "recovery:meetingPlans:";
 const NOTIFICATION_STORAGE_KEY_PREFIX = "recovery:notificationIds:";
@@ -361,11 +381,6 @@ const RECOVERY_MODE_OPTIONS: Array<{ value: RecoveryMode; title: string; impleme
   { value: "C", title: "Probation/Parole", implemented: false },
 ];
 
-const locationCompat = Location as unknown as {
-  getBackgroundPermissionsAsync?: () => Promise<{ granted: boolean; canAskAgain?: boolean }>;
-  requestBackgroundPermissionsAsync?: () => Promise<{ granted: boolean; canAskAgain?: boolean }>;
-};
-
 const EMPTY_DAY_PLAN: DayPlanState = {
   homeGroupMeetingId: null,
   plans: {},
@@ -385,21 +400,26 @@ function createTravelTimeProvider(assumedSpeedMph = 25): TravelTimeProvider {
   };
 }
 
-function toRadians(value: number): number {
-  return (value * Math.PI) / 180;
+function distanceMetersBetween(latA: number, lngA: number, latB: number, lngB: number): number {
+  return haversineDistanceMeters({ lat: latA, lng: lngA }, { lat: latB, lng: lngB });
 }
 
-function distanceMetersBetween(latA: number, lngA: number, latB: number, lngB: number): number {
-  const latDelta = toRadians(latB - latA);
-  const lngDelta = toRadians(lngB - lngA);
-  const latAInRadians = toRadians(latA);
-  const latBInRadians = toRadians(latB);
-
-  const a =
-    Math.sin(latDelta / 2) ** 2 +
-    Math.cos(latAInRadians) * Math.cos(latBInRadians) * Math.sin(lngDelta / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return EARTH_RADIUS_METERS * c;
+function resolveMeetingDistanceMeters(
+  meeting: Pick<MeetingRecord, "lat" | "lng" | "distanceMeters">,
+  currentLocation: LocationStamp | null,
+): number | null {
+  if (currentLocation && meeting.lat !== null && meeting.lng !== null) {
+    return distanceMetersBetween(
+      currentLocation.lat,
+      currentLocation.lng,
+      meeting.lat,
+      meeting.lng,
+    );
+  }
+  if (typeof meeting.distanceMeters === "number" && Number.isFinite(meeting.distanceMeters)) {
+    return Math.max(0, meeting.distanceMeters);
+  }
+  return null;
 }
 
 function coordinatesEqual(
@@ -413,25 +433,56 @@ function coordinatesEqual(
 }
 
 function formatDistance(distanceMeters: number | null): string {
-  if (distanceMeters === null) {
-    return "Distance unavailable";
+  return formatDistanceMiles(distanceMeters);
+}
+
+function isMeetingInProgress(startsAtLocal: string, nowMinutes: number): boolean {
+  const startMinutes = parseMinutesFromHhmm(startsAtLocal);
+  const endMinutes = startMinutes + DEFAULT_MEETING_DURATION_MINUTES;
+  return nowMinutes >= startMinutes && nowMinutes < endMinutes;
+}
+
+function isMeetingActionableToday(startsAtLocal: string, nowMinutes: number): boolean {
+  const startMinutes = parseMinutesFromHhmm(startsAtLocal);
+  const endMinutes = startMinutes + DEFAULT_MEETING_DURATION_MINUTES;
+  return endMinutes > nowMinutes;
+}
+
+function meetingDistanceLabel(
+  meeting: Pick<MeetingRecord, "lat" | "lng">,
+  distanceMeters: number | null,
+  permission: LocationPermissionState,
+): string {
+  const hasCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng }) !== null;
+  if (!hasCoords) {
+    return "Location unavailable";
   }
-  const miles = distanceMeters / 1609.344;
-  return `${miles.toFixed(1)} mi`;
+  if (distanceMeters === null || !Number.isFinite(distanceMeters)) {
+    return permission === "granted" ? "Distance unavailable" : "Enable location to see distance";
+  }
+  return formatDistance(distanceMeters);
+}
+
+function leaveByLabel(
+  meetingDate: Date,
+  startsAtLocal: string,
+  distanceMeters: number | null,
+  travelTimeProvider: TravelTimeProvider,
+): string | null {
+  if (distanceMeters === null || !Number.isFinite(distanceMeters)) {
+    return null;
+  }
+  const meetingStart = combineDateWithHhmm(meetingDate, startsAtLocal);
+  const travelMinutes = travelTimeProvider.estimateMinutes(distanceMeters);
+  const leaveBy = new Date(meetingStart.getTime() - travelMinutes * 60_000);
+  if (Number.isNaN(leaveBy.getTime())) {
+    return null;
+  }
+  return leaveBy.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function formatCoordinate(value: number): string {
   return value.toFixed(5);
-}
-
-function toLocationPermissionState(permission: {
-  granted: boolean;
-  canAskAgain?: boolean;
-}): LocationPermissionState {
-  if (permission.granted) {
-    return "granted";
-  }
-  return permission.canAskAgain === false ? "denied" : "unknown";
 }
 
 function parseMinutesFromHhmm(value: string): number {
@@ -1230,6 +1281,8 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
   return meetings
     .filter((entry) => entry && typeof entry === "object")
     .map((entry, index) => {
+      const coords = normalizeCoordinates({ lat: entry.lat, lng: entry.lng });
+      const parsedDistance = asFiniteNumber(entry.distanceMeters);
       const safeId =
         typeof entry.id === "string" && entry.id.trim().length > 0 ? entry.id : `meeting-${index}`;
       const safeName =
@@ -1255,6 +1308,12 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
         address: safeAddress,
         startsAtLocal: safeStartsAtLocal,
         dayOfWeek: safeDayOfWeek,
+        lat: coords?.lat ?? null,
+        lng: coords?.lng ?? null,
+        distanceMeters:
+          typeof parsedDistance === "number" && Number.isFinite(parsedDistance)
+            ? Math.max(0, parsedDistance)
+            : null,
       };
     });
 }
@@ -1381,7 +1440,8 @@ export default function App() {
     useState<MeetingsFilterDropdown | null>(null);
   const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
   const [todayNearbyMeetings, setTodayNearbyMeetings] = useState<MeetingRecord[]>([]);
-  const [tomorrowNearbyMeetings, setTomorrowNearbyMeetings] = useState<MeetingRecord[]>([]);
+  const [homeGroupFallbackMeetings, setHomeGroupFallbackMeetings] = useState<MeetingRecord[]>([]);
+  const [homeGroupFallbackDayOffset, setHomeGroupFallbackDayOffset] = useState(1);
   const [loadingMeetings, setLoadingMeetings] = useState(false);
   const [meetingsStatus, setMeetingsStatus] = useState("Meetings not loaded yet.");
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
@@ -1402,12 +1462,16 @@ export default function App() {
   const [exportingAttendanceSelectionPdf, setExportingAttendanceSelectionPdf] = useState(false);
   const [selectedAttendanceIds, setSelectedAttendanceIds] = useState<string[]>([]);
   const [showInactiveAttendance, setShowInactiveAttendance] = useState(false);
+  const [attendanceExportStartDateInput, setAttendanceExportStartDateInput] = useState("");
+  const [attendanceExportEndDateInput, setAttendanceExportEndDateInput] = useState("");
   const [sessionNowMs, setSessionNowMs] = useState(Date.now());
   const [signatureCaptureMeeting, setSignatureCaptureMeeting] = useState<MeetingRecord | null>(
     null,
   );
 
   const [signaturePoints, setSignaturePoints] = useState<SignaturePoint[]>([]);
+  const [signatureChairNameInput, setSignatureChairNameInput] = useState("");
+  const [signatureChairRoleInput, setSignatureChairRoleInput] = useState("");
   const [signatureCanvasSize, setSignatureCanvasSize] = useState({ width: 320, height: 180 });
   const signaturePreviewPath = useMemo(
     () =>
@@ -1435,6 +1499,7 @@ export default function App() {
   const [sponsorSaving, setSponsorSaving] = useState(false);
   const [sponsorStatus, setSponsorStatus] = useState<string | null>(null);
   const [calendarStatus, setCalendarStatus] = useState("Sponsor calendar not synced yet.");
+  const [meetingAutoAddToCalendar, setMeetingAutoAddToCalendar] = useState(true);
 
   const [notificationStatus, setNotificationStatus] = useState("Notifications not scheduled yet.");
   const [notificationOpenPhone, setNotificationOpenPhone] = useState<string | null>(null);
@@ -1473,6 +1538,9 @@ export default function App() {
   const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
 
+  const activeAttendanceRef = useRef<AttendanceRecord | null>(null);
+  const attendanceRecordsRef = useRef<AttendanceRecord[]>([]);
+  const startAttendanceInFlightRef = useRef(false);
   const arrivalPromptedMeetingRef = useRef<string | null>(null);
   const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
   const meetingsShapeLoggedRef = useRef(false);
@@ -1599,22 +1667,12 @@ export default function App() {
         if (!selectedDayIsToday) {
           return true;
         }
-        return parseMinutesFromHhmm(meeting.startsAtLocal) >= nowMinutes;
+        return isMeetingActionableToday(meeting.startsAtLocal, nowMinutes);
       })
       .map((meeting) => {
-        const distanceMeters =
-          currentLocation && meeting.lat !== null && meeting.lng !== null
-            ? distanceMetersBetween(
-                currentLocation.lat,
-                currentLocation.lng,
-                meeting.lat,
-                meeting.lng,
-              )
-            : null;
-
         return {
           ...meeting,
-          distanceMeters,
+          distanceMeters: resolveMeetingDistanceMeters(meeting, currentLocation),
         };
       });
 
@@ -1645,18 +1703,9 @@ export default function App() {
     const list = todayNearbyMeetings
       .filter((meeting) => meeting.dayOfWeek === todayDay)
       .map((meeting) => {
-        const distanceMeters =
-          currentLocation && meeting.lat !== null && meeting.lng !== null
-            ? distanceMetersBetween(
-                currentLocation.lat,
-                currentLocation.lng,
-                meeting.lat,
-                meeting.lng,
-              )
-            : null;
         return {
           ...meeting,
-          distanceMeters,
+          distanceMeters: resolveMeetingDistanceMeters(meeting, currentLocation),
         };
       });
 
@@ -1680,30 +1729,18 @@ export default function App() {
   const meetingsTodayUpcoming = useMemo<MeetingListItem[]>(() => {
     const nowLocal = new Date(clockTickMs);
     const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
-    return meetingsTodayAll.filter(
-      (meeting) => parseMinutesFromHhmm(meeting.startsAtLocal) >= nowMinutes,
+    return meetingsTodayAll.filter((meeting) =>
+      isMeetingActionableToday(meeting.startsAtLocal, nowMinutes),
     );
   }, [meetingsTodayAll, clockTickMs]);
 
-  const meetingsTomorrowAll = useMemo<MeetingListItem[]>(() => {
-    const tomorrowDay = (new Date(clockTickMs).getDay() + 1) % 7;
-    const list = tomorrowNearbyMeetings
-      .filter((meeting) => meeting.dayOfWeek === tomorrowDay)
-      .map((meeting) => {
-        const distanceMeters =
-          currentLocation && meeting.lat !== null && meeting.lng !== null
-            ? distanceMetersBetween(
-                currentLocation.lat,
-                currentLocation.lng,
-                meeting.lat,
-                meeting.lng,
-              )
-            : null;
-        return {
-          ...meeting,
-          distanceMeters,
-        };
-      });
+  const homeGroupFallbackMeetingItems = useMemo<MeetingListItem[]>(() => {
+    const list = homeGroupFallbackMeetings.map((meeting) => {
+      return {
+        ...meeting,
+        distanceMeters: resolveMeetingDistanceMeters(meeting, currentLocation),
+      };
+    });
 
     list.sort((left, right) => {
       const byTime =
@@ -1720,7 +1757,7 @@ export default function App() {
     });
 
     return list;
-  }, [tomorrowNearbyMeetings, currentLocation, clockTickMs]);
+  }, [homeGroupFallbackMeetings, currentLocation]);
 
   const meetingsForMeetingsScreen = useMemo<MeetingListItem[]>(() => {
     return meetingsForDay.filter((meeting) => {
@@ -1781,13 +1818,13 @@ export default function App() {
         byId.set(meeting.id, meeting);
       }
     }
-    for (const meeting of tomorrowNearbyMeetings) {
+    for (const meeting of homeGroupFallbackMeetings) {
       if (!byId.has(meeting.id)) {
         byId.set(meeting.id, meeting);
       }
     }
     return Array.from(byId.values());
-  }, [meetings, todayNearbyMeetings, tomorrowNearbyMeetings]);
+  }, [meetings, todayNearbyMeetings, homeGroupFallbackMeetings]);
 
   const attendanceRecordsForView = useMemo(() => {
     const byDate =
@@ -1853,26 +1890,29 @@ export default function App() {
       ),
     [meetingsTodayUpcoming],
   );
-  const dashboardNextThreeMeetings = useMemo(() => {
+  const dashboardNextFiveMeetings = useMemo(() => {
     const nearbyInPerson = dashboardUpcomingInPerson.filter(
       (meeting) =>
         meeting.distanceMeters !== null && meeting.distanceMeters <= DASHBOARD_NEARBY_RADIUS_METERS,
     );
 
     if (nearbyInPerson.length > 0) {
-      return nearbyInPerson.slice(0, 3);
+      return nearbyInPerson.slice(0, 5);
     }
 
     if (dashboardUpcomingInPerson.length > 0) {
-      return dashboardUpcomingInPerson.slice(0, 3);
+      return dashboardUpcomingInPerson.slice(0, 5);
     }
 
-    return dashboardUpcomingOnline.slice(0, 3);
+    return dashboardUpcomingOnline.slice(0, 5);
   }, [dashboardUpcomingInPerson, dashboardUpcomingOnline]);
   const dashboardMeetingPrimaryActionLabels = useMemo(() => {
     const labels: Record<string, string> = {};
-    for (const meeting of dashboardNextThreeMeetings) {
-      labels[meeting.id] = "Attend";
+    const now = new Date(clockTickMs);
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    for (const meeting of dashboardNextFiveMeetings) {
+      const meetingInProgress = isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
+      labels[meeting.id] = meetingInProgress ? "Attend now" : "Attend";
     }
     if (activeAttendance && !activeAttendance.endAt) {
       const elapsedSeconds = Math.max(
@@ -1883,24 +1923,29 @@ export default function App() {
         elapsedSeconds >= MIN_VALID_MEETING_MINUTES * 60 ? "End meeting" : "In progress";
     }
     return labels;
-  }, [dashboardNextThreeMeetings, activeAttendance, sessionNowMs]);
+  }, [dashboardNextFiveMeetings, activeAttendance, clockTickMs, sessionNowMs]);
   const dashboardShowsOnlineFallback = useMemo(
     () => dashboardUpcomingInPerson.length === 0 && dashboardUpcomingOnline.length > 0,
     [dashboardUpcomingInPerson, dashboardUpcomingOnline],
   );
-  const homeGroupUsesTomorrowFallback = useMemo(
-    () => meetingsTodayUpcoming.length === 0 && meetingsTomorrowAll.length > 0,
-    [meetingsTodayUpcoming.length, meetingsTomorrowAll.length],
+  const homeGroupUsesNextDayFallback = useMemo(
+    () => meetingsTodayUpcoming.length === 0 && homeGroupFallbackMeetingItems.length > 0,
+    [meetingsTodayUpcoming.length, homeGroupFallbackMeetingItems.length],
+  );
+  const homeGroupFallbackDayLabel = useMemo(
+    () =>
+      dayOptions.find((option) => option.offset === homeGroupFallbackDayOffset)?.label ?? "Next",
+    [dayOptions, homeGroupFallbackDayOffset],
   );
   const homeGroupCandidateMeetings = useMemo(() => {
     if (meetingsTodayUpcoming.length > 0) {
       return meetingsTodayUpcoming;
     }
-    if (meetingsTomorrowAll.length > 0) {
-      return meetingsTomorrowAll;
+    if (homeGroupFallbackMeetingItems.length > 0) {
+      return homeGroupFallbackMeetingItems;
     }
-    return meetingsTodayAll;
-  }, [meetingsTodayUpcoming, meetingsTomorrowAll, meetingsTodayAll]);
+    return [];
+  }, [meetingsTodayUpcoming, homeGroupFallbackMeetingItems]);
 
   const mapMeetingsForDay = useMemo(
     () =>
@@ -2239,89 +2284,43 @@ export default function App() {
     );
   }, [activeAttendance, sessionNowMs]);
 
-  const getBackgroundLocationPermission = useCallback(async () => {
-    if (typeof locationCompat.getBackgroundPermissionsAsync === "function") {
-      return locationCompat.getBackgroundPermissionsAsync();
-    }
-    return null;
-  }, []);
-
-  const requestBackgroundLocationPermission = useCallback(async () => {
-    if (typeof locationCompat.requestBackgroundPermissionsAsync === "function") {
-      return locationCompat.requestBackgroundPermissionsAsync();
-    }
-    return null;
-  }, []);
-
   const readCurrentLocation = useCallback(
     async (requestPermission: boolean): Promise<LocationStamp | null> => {
-      try {
-        const currentPermission = await Location.getForegroundPermissionsAsync();
-        const permission = currentPermission.granted
-          ? currentPermission
-          : requestPermission
-            ? await Location.requestForegroundPermissionsAsync()
-            : currentPermission;
+      const result = await getCurrentLocationFromService({
+        requestPermission,
+        timeoutMs: 12_000,
+        cacheTtlMs: 45_000,
+      });
+      setLocationPermission(result.permissionStatus);
+      setLocationAlwaysPermission(result.alwaysPermissionStatus);
 
-        if (!permission.granted) {
-          setLocationPermission(toLocationPermissionState(permission));
-          locationIssueRef.current = "permission_denied";
-          return null;
-        }
-
-        setLocationPermission("granted");
-        const backgroundPermission = await getBackgroundLocationPermission();
-        setLocationAlwaysPermission(
-          backgroundPermission ? toLocationPermissionState(backgroundPermission) : "unknown",
-        );
-
-        const position = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-        const next: LocationStamp = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          accuracyM: position.coords.accuracy ?? null,
-        };
+      if (result.coords) {
         locationIssueRef.current = null;
-        setCurrentLocation(next);
-        return next;
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          /location provider|unavailable|timeout/i.test(error.message)
-        ) {
-          setLocationPermission("granted");
-          const backgroundPermission = await getBackgroundLocationPermission();
-          setLocationAlwaysPermission(
-            backgroundPermission ? toLocationPermissionState(backgroundPermission) : "unknown",
-          );
-          locationIssueRef.current = "position_unavailable";
-          return null;
-        }
+        setCurrentLocation(result.coords);
+        return result.coords;
+      }
 
-        setLocationPermission("unavailable");
-        setLocationAlwaysPermission("unavailable");
-        locationIssueRef.current = "unavailable";
+      if (result.permissionStatus === "denied" || result.permissionStatus === "unknown") {
+        locationIssueRef.current = "permission_denied";
         return null;
       }
+
+      if (result.permissionStatus === "granted" && result.timedOut) {
+        locationIssueRef.current = "position_unavailable";
+        return null;
+      }
+
+      locationIssueRef.current = "unavailable";
+      return null;
     },
-    [getBackgroundLocationPermission],
+    [],
   );
 
   const refreshLocationPermissionStates = useCallback(async () => {
-    try {
-      const foregroundPermission = await Location.getForegroundPermissionsAsync();
-      setLocationPermission(toLocationPermissionState(foregroundPermission));
-      const backgroundPermission = await getBackgroundLocationPermission();
-      setLocationAlwaysPermission(
-        backgroundPermission ? toLocationPermissionState(backgroundPermission) : "unknown",
-      );
-    } catch {
-      setLocationPermission("unavailable");
-      setLocationAlwaysPermission("unavailable");
-    }
-  }, [getBackgroundLocationPermission]);
+    const permissionState = await readLocationPermissionStates();
+    setLocationPermission(permissionState.permissionStatus);
+    setLocationAlwaysPermission(permissionState.alwaysPermissionStatus);
+  }, []);
 
   const formatApiErrorWithHint = useCallback(
     (baseMessage: string): string => {
@@ -2344,15 +2343,16 @@ export default function App() {
   }, []);
 
   const ensureCalendarPermission = useCallback(async (): Promise<boolean> => {
-    if (Platform.OS !== "ios") {
+    try {
+      const existing = await Calendar.getCalendarPermissionsAsync();
+      if (existing.granted) {
+        return true;
+      }
+      const requested = await Calendar.requestCalendarPermissionsAsync();
+      return requested.granted;
+    } catch {
       return false;
     }
-    const existing = await Calendar.getCalendarPermissionsAsync();
-    if (existing.granted) {
-      return true;
-    }
-    const requested = await Calendar.requestCalendarPermissionsAsync();
-    return requested.granted;
   }, []);
 
   const findWritableCalendarId = useCallback(async (): Promise<string | null> => {
@@ -2475,48 +2475,47 @@ export default function App() {
   }, [readCurrentLocation]);
 
   const requestAlwaysLocationPermission = useCallback(async (): Promise<boolean> => {
-    try {
-      const currentForegroundPermission = await Location.getForegroundPermissionsAsync();
-      const foregroundPermission = currentForegroundPermission.granted
-        ? currentForegroundPermission
-        : await Location.requestForegroundPermissionsAsync();
-      setLocationPermission(toLocationPermissionState(foregroundPermission));
+    const result = await requestAlwaysLocationPermissionFromService();
+    setLocationPermission(result.permissionStatus);
+    setLocationAlwaysPermission(result.alwaysPermissionStatus);
 
-      if (!foregroundPermission.granted) {
-        locationIssueRef.current = "permission_denied";
-        setMeetingsStatus("Location permission denied. Enable While Using the App first.");
-        return false;
-      }
-
-      const currentBackgroundPermission = await getBackgroundLocationPermission();
-      if (!currentBackgroundPermission) {
-        setLocationAlwaysPermission("unavailable");
-        setMeetingsStatus("Always location option is unavailable in this build.");
-        return false;
-      }
-      const backgroundPermission = currentBackgroundPermission.granted
-        ? currentBackgroundPermission
-        : await requestBackgroundLocationPermission();
-      if (!backgroundPermission) {
-        setLocationAlwaysPermission("unavailable");
-        setMeetingsStatus("Always location option is unavailable in this build.");
-        return false;
-      }
-      setLocationAlwaysPermission(toLocationPermissionState(backgroundPermission));
-
-      if (backgroundPermission.granted) {
-        setMeetingsStatus("Always location enabled for automatic meeting logging.");
-        return true;
-      }
-
-      setMeetingsStatus("Always location not enabled. Choose Always in device Location Settings.");
-      return false;
-    } catch {
-      setLocationAlwaysPermission("unavailable");
-      setMeetingsStatus("Always location is unavailable on this device.");
+    if (result.permissionStatus !== "granted") {
+      locationIssueRef.current = "permission_denied";
+      setMeetingsStatus("Location permission denied. Enable While Using the App first.");
       return false;
     }
-  }, [getBackgroundLocationPermission, requestBackgroundLocationPermission]);
+
+    if (result.alwaysPermissionStatus === "granted") {
+      setMeetingsStatus("Always location enabled for automatic meeting logging.");
+      return true;
+    }
+
+    if (result.alwaysPermissionStatus === "denied") {
+      setMeetingsStatus("Always location denied. Open device settings to allow Always.");
+      Alert.alert(
+        "Enable Always Location",
+        "Always access is required for background geofence verification. Open Settings to allow Always.",
+        [
+          { text: "Not now", style: "cancel" },
+          {
+            text: "Open Settings",
+            onPress: () => {
+              void Linking.openSettings();
+            },
+          },
+        ],
+      );
+      return false;
+    }
+
+    if (result.alwaysPermissionStatus === "unavailable") {
+      setMeetingsStatus("Always location option is unavailable in this build.");
+      return false;
+    }
+
+    setMeetingsStatus("Always location not enabled. Choose Always in device location settings.");
+    return false;
+  }, []);
 
   const persistAttendanceRecords = useCallback(
     async (nextRecords: AttendanceRecord[]) => {
@@ -3315,33 +3314,49 @@ export default function App() {
         }
         const todayResultMeetings = Array.from(todayById.values());
 
-        // Setup wizard fallback: if there are no meetings left today, show tomorrow's list.
-        const tomorrowDayOfWeek = (todayDayOfWeek + 1) % 7;
-        const tomorrowScopedResult = await source.listMeetings({
-          dayOfWeek: tomorrowDayOfWeek,
-          ...requestParams,
-        });
-        const tomorrowScopedMeetings = sanitizeMeetingRecords(
-          Array.isArray(tomorrowScopedResult.meetings) ? tomorrowScopedResult.meetings : [],
+        const nowLocal = new Date();
+        const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+        const todayHasUpcomingMeetings = todayResultMeetings.some(
+          (meeting) => parseMinutesFromHhmm(meeting.startsAtLocal) >= nowMinutes,
         );
-        const tomorrowUnscopedResult = await source.listMeetings({
-          dayOfWeek: tomorrowDayOfWeek,
-        });
-        const tomorrowUnscopedMeetings = sanitizeMeetingRecords(
-          Array.isArray(tomorrowUnscopedResult.meetings) ? tomorrowUnscopedResult.meetings : [],
-        );
-        const tomorrowById = new Map<string, MeetingRecord>();
-        for (const meeting of tomorrowUnscopedMeetings) {
-          tomorrowById.set(meeting.id, meeting);
+
+        let nextDayOffset = 1;
+        let nextDayMeetings: MeetingRecord[] = [];
+
+        if (!todayHasUpcomingMeetings) {
+          for (let dayOffset = 1; dayOffset <= 6; dayOffset += 1) {
+            const dayOfWeek = (todayDayOfWeek + dayOffset) % 7;
+            const scopedResult = await source.listMeetings({
+              dayOfWeek,
+              ...requestParams,
+            });
+            const scopedMeetings = sanitizeMeetingRecords(
+              Array.isArray(scopedResult.meetings) ? scopedResult.meetings : [],
+            );
+            const unscopedResult = await source.listMeetings({ dayOfWeek });
+            const unscopedMeetings = sanitizeMeetingRecords(
+              Array.isArray(unscopedResult.meetings) ? unscopedResult.meetings : [],
+            );
+            const byId = new Map<string, MeetingRecord>();
+            for (const meeting of unscopedMeetings) {
+              byId.set(meeting.id, meeting);
+            }
+            for (const meeting of scopedMeetings) {
+              byId.set(meeting.id, meeting);
+            }
+            const merged = Array.from(byId.values());
+            if (merged.length > 0) {
+              nextDayOffset = dayOffset;
+              nextDayMeetings = merged;
+              break;
+            }
+          }
         }
-        for (const meeting of tomorrowScopedMeetings) {
-          tomorrowById.set(meeting.id, meeting);
-        }
-        const tomorrowResultMeetings = Array.from(tomorrowById.values());
 
         setMeetings(selectedDayMeetings);
         setTodayNearbyMeetings(todayResultMeetings);
-        setTomorrowNearbyMeetings(tomorrowResultMeetings);
+        setHomeGroupFallbackDayOffset(nextDayOffset);
+        setHomeGroupFallbackMeetings(nextDayMeetings);
 
         if (!meetingsShapeLoggedRef.current && selectedDayMeetings.length > 0) {
           meetingsShapeLoggedRef.current = true;
@@ -4624,41 +4639,202 @@ export default function App() {
     setSobrietyDateStatus("90-day meeting goal reset to 90.");
   }, []);
 
+  const getScheduledWindowForAttendance = useCallback((record: AttendanceRecord) => {
+    const startedAt = new Date(record.startAt);
+    const fallbackStart = Number.isNaN(startedAt.getTime()) ? new Date() : startedAt;
+
+    if (!record.scheduledStartsAtLocal) {
+      const fallbackEnd = new Date(
+        fallbackStart.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000,
+      );
+      return { startDate: fallbackStart, endDate: fallbackEnd };
+    }
+
+    const match = record.scheduledStartsAtLocal.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) {
+      const fallbackEnd = new Date(
+        fallbackStart.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000,
+      );
+      return { startDate: fallbackStart, endDate: fallbackEnd };
+    }
+
+    const startDate = new Date(fallbackStart);
+    startDate.setHours(
+      Math.max(0, Math.min(23, Number(match[1]))),
+      Math.max(0, Math.min(59, Number(match[2]))),
+      0,
+      0,
+    );
+    const endDate = new Date(startDate.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000);
+    return { startDate, endDate };
+  }, []);
+
+  const attachCalendarEventToAttendance = useCallback(
+    async (recordId: string): Promise<boolean> => {
+      const sourceRecord =
+        (activeAttendanceRef.current && activeAttendanceRef.current.id === recordId
+          ? activeAttendanceRef.current
+          : null) ??
+        attendanceRecordsRef.current.find((record) => record.id === recordId) ??
+        null;
+      if (!sourceRecord) {
+        setAttendanceStatus("Attendance record unavailable for calendar sync.");
+        return false;
+      }
+
+      const hasPermission = await ensureCalendarPermission();
+      if (!hasPermission) {
+        setAttendanceStatus("Calendar permission denied.");
+        Alert.alert("Calendar Permission Needed", "Enable Calendar access to add meeting events.", [
+          { text: "Not now", style: "cancel" },
+          {
+            text: "Open Settings",
+            onPress: () => {
+              void Linking.openSettings();
+            },
+          },
+        ]);
+        return false;
+      }
+
+      const calendarId = await findWritableCalendarId();
+      if (!calendarId) {
+        setAttendanceStatus("No writable calendar found.");
+        return false;
+      }
+
+      let existingEventId = sourceRecord.calendarEventId ?? null;
+      if (existingEventId) {
+        try {
+          await Calendar.getEventAsync(existingEventId);
+          setAttendanceStatus("Calendar event already linked to this attendance.");
+          return true;
+        } catch {
+          existingEventId = null;
+        }
+      }
+
+      const window = getScheduledWindowForAttendance(sourceRecord);
+      const eventId = await Calendar.createEventAsync(calendarId, {
+        title: `AA/NA Meeting - ${sourceRecord.meetingName}`,
+        startDate: window.startDate,
+        endDate:
+          window.endDate > window.startDate
+            ? window.endDate
+            : new Date(window.startDate.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000),
+        location:
+          sourceRecord.meetingAddress && sourceRecord.meetingAddress.trim().length > 0
+            ? sourceRecord.meetingAddress
+            : undefined,
+        notes: "Signature required",
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        alarms: [{ relativeOffset: -10 }],
+      });
+
+      const next: AttendanceRecord = {
+        ...sourceRecord,
+        calendarEventId: eventId,
+      };
+      upsertAttendanceRecord(next);
+      if (activeAttendanceRef.current?.id === next.id) {
+        setActiveAttendance(next);
+      }
+      setAttendanceStatus("Meeting added to calendar.");
+      return true;
+    },
+    [
+      ensureCalendarPermission,
+      findWritableCalendarId,
+      getScheduledWindowForAttendance,
+      upsertAttendanceRecord,
+    ],
+  );
+
+  const promptCalendarAddOnAttend = useCallback(
+    (recordId: string) => {
+      Alert.alert(
+        "Add to calendar?",
+        meetingAutoAddToCalendar
+          ? "Auto-add is enabled. Add this meeting to your calendar?"
+          : "Add this meeting to your calendar?",
+        [
+          { text: "Not now", style: "cancel" },
+          {
+            text: "Add",
+            onPress: () => {
+              void attachCalendarEventToAttendance(recordId);
+            },
+          },
+        ],
+      );
+    },
+    [attachCalendarEventToAttendance, meetingAutoAddToCalendar],
+  );
+
   const startAttendance = useCallback(
     async (meeting: MeetingRecord) => {
-      const location = await readCurrentLocation(false);
-      const nowIso = new Date().toISOString();
-      const next: AttendanceRecord = {
-        id: createId("attendance"),
-        meetingId: meeting.id,
-        meetingName: meeting.name,
-        meetingAddress: meeting.address,
-        scheduledStartsAtLocal: meeting.startsAtLocal ?? null,
-        meetingLat: meeting.lat ?? null,
-        meetingLng: meeting.lng ?? null,
-        meetingFormat: meeting.format,
-        captureMethod: "attend-log",
-        startAt: nowIso,
-        endAt: null,
-        durationSeconds: null,
-        startLat: location?.lat ?? null,
-        startLng: location?.lng ?? null,
-        startAccuracyM: location?.accuracyM ?? null,
-        endLat: null,
-        endLng: null,
-        endAccuracyM: null,
-        inactive: false,
-        signaturePngBase64: null,
-        pdfUri: null,
-      };
+      if (startAttendanceInFlightRef.current) {
+        return;
+      }
 
-      setActiveAttendance(next);
-      setSignatureCaptureMeeting(null);
-      upsertAttendanceRecord(next);
-      setAttendanceStatus(`Attendance started at ${new Date(nowIso).toLocaleTimeString()}.`);
-      setScreen("SESSION");
+      const currentActive = activeAttendanceRef.current;
+      if (currentActive && !currentActive.endAt) {
+        if (currentActive.meetingId === meeting.id) {
+          setAttendanceStatus(`Attendance already in progress for ${meeting.name}.`);
+          setScreen("SESSION");
+          return;
+        }
+        setAttendanceStatus(
+          `Finish ${currentActive.meetingName} before starting another attendance.`,
+        );
+        return;
+      }
+
+      startAttendanceInFlightRef.current = true;
+      try {
+        const location = await readCurrentLocation(false);
+        const nowIso = new Date().toISOString();
+        const meetingCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+        const next: AttendanceRecord = {
+          id: createId("attendance"),
+          meetingId: meeting.id,
+          meetingName: meeting.name,
+          meetingAddress: meeting.address,
+          scheduledStartsAtLocal: meeting.startsAtLocal ?? null,
+          meetingLat: meetingCoords?.lat ?? null,
+          meetingLng: meetingCoords?.lng ?? null,
+          meetingFormat: meeting.format,
+          captureMethod: "attend-log",
+          startAt: nowIso,
+          endAt: null,
+          durationSeconds: null,
+          startLat: location?.lat ?? null,
+          startLng: location?.lng ?? null,
+          startAccuracyM: location?.accuracyM ?? null,
+          endLat: null,
+          endLng: null,
+          endAccuracyM: null,
+          inactive: false,
+          signaturePromptShown: false,
+          chairName: null,
+          chairRole: null,
+          signatureCapturedAtIso: null,
+          calendarEventId: null,
+          signaturePngBase64: null,
+          pdfUri: null,
+        };
+
+        setActiveAttendance(next);
+        setSignatureCaptureMeeting(null);
+        upsertAttendanceRecord(next);
+        setAttendanceStatus(`Attendance started at ${new Date(nowIso).toLocaleTimeString()}.`);
+        setScreen("SESSION");
+        promptCalendarAddOnAttend(next.id);
+      } finally {
+        startAttendanceInFlightRef.current = false;
+      }
     },
-    [readCurrentLocation, upsertAttendanceRecord],
+    [readCurrentLocation, upsertAttendanceRecord, promptCalendarAddOnAttend],
   );
 
   const endAttendanceByRecordId = useCallback(
@@ -4675,6 +4851,39 @@ export default function App() {
         attendanceRecords.find((record) => record.id === recordId) ??
         null;
       if (!baseRecord || baseRecord.endAt) {
+        return;
+      }
+      if (
+        meetingSignatureRequired &&
+        !baseRecord.signaturePngBase64 &&
+        !options?.skipSignaturePrompt
+      ) {
+        const promptedRecord = baseRecord.signaturePromptShown
+          ? baseRecord
+          : {
+              ...baseRecord,
+              signaturePromptShown: true,
+            };
+        if (!baseRecord.signaturePromptShown) {
+          upsertAttendanceRecord(promptedRecord);
+          if (activeAttendance?.id === promptedRecord.id) {
+            setActiveAttendance(promptedRecord);
+          }
+        }
+
+        setAttendanceStatus("Before you leave, obtain chair signature.");
+        if (!baseRecord.signaturePromptShown) {
+          Alert.alert("Chair signature needed", "Before you leave, obtain chair signature.", [
+            { text: "Later", style: "cancel" },
+            {
+              text: "Get signature",
+              onPress: () => {
+                setHomeScreen("MEETINGS");
+                setScreen("SIGNATURE");
+              },
+            },
+          ]);
+        }
         return;
       }
       if (!options?.skipEndConfirm) {
@@ -4751,21 +4960,11 @@ export default function App() {
         return;
       }
 
-      if (meetingSignatureRequired) {
-        setAttendanceStatus("Attendance ended. Signature is required to complete the log.");
-        Alert.alert(
-          "Signature required",
-          "Capture chairperson signature to complete this meeting log.",
-          [
-            {
-              text: "Capture signature",
-              onPress: () => {
-                setHomeScreen("MEETINGS");
-                setScreen("SIGNATURE");
-              },
-            },
-          ],
-        );
+      if (next.signaturePngBase64) {
+        setAttendanceStatus("Attendance ended.");
+        if (homeScreen === "MEETINGS") {
+          setScreen("LIST");
+        }
         return;
       }
 
@@ -4837,6 +5036,8 @@ export default function App() {
       setActiveAttendance(record);
       setSignatureCaptureMeeting(null);
       setSignaturePoints([]);
+      setSignatureChairNameInput(record.chairName ?? "");
+      setSignatureChairRoleInput(record.chairRole ?? "");
       setHomeScreen("MEETINGS");
       setScreen("SIGNATURE");
       setAttendanceStatus(`Capture signature for ${record.meetingName}.`);
@@ -4861,6 +5062,8 @@ export default function App() {
         }
         setSignatureCaptureMeeting(null);
         setSignaturePoints([]);
+        setSignatureChairNameInput(activeAttendance.chairName ?? "");
+        setSignatureChairRoleInput(activeAttendance.chairRole ?? "");
         setSelectedMeeting(meeting);
         setHomeScreen("MEETINGS");
         setMeetingsViewMode("LIST");
@@ -4873,6 +5076,8 @@ export default function App() {
       }
       setSignatureCaptureMeeting(meeting);
       setSignaturePoints([]);
+      setSignatureChairNameInput("");
+      setSignatureChairRoleInput("");
       setSelectedMeeting(meeting);
       setHomeScreen("MEETINGS");
       setMeetingsViewMode("LIST");
@@ -4908,15 +5113,24 @@ export default function App() {
         setAttendanceStatus(signatureWindow.reason ?? SIGNATURE_WINDOW_HELP_TEXT);
         return;
       }
+      const nowIso = new Date().toISOString();
       const next: AttendanceRecord = {
         ...activeAttendance,
         signaturePngBase64: signatureSvgBase64,
+        signaturePromptShown: true,
+        chairName:
+          signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
+        chairRole:
+          signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
+        signatureCapturedAtIso: nowIso,
       };
 
       setActiveAttendance(next);
       upsertAttendanceRecord(next);
       setSignatureCaptureMeeting(null);
       setSignaturePoints([]);
+      setSignatureChairNameInput(next.chairName ?? "");
+      setSignatureChairRoleInput(next.chairRole ?? "");
       setAttendanceStatus(
         activeAttendance.endAt
           ? "Signature saved."
@@ -4933,14 +5147,18 @@ export default function App() {
 
     const location = await readCurrentLocation(false);
     const nowIso = new Date().toISOString();
+    const signatureMeetingCoords = normalizeCoordinates({
+      lat: signatureCaptureMeeting.lat,
+      lng: signatureCaptureMeeting.lng,
+    });
     const signatureOnlyRecord: AttendanceRecord = {
       id: createId("attendance"),
       meetingId: signatureCaptureMeeting.id,
       meetingName: signatureCaptureMeeting.name,
       meetingAddress: signatureCaptureMeeting.address,
       scheduledStartsAtLocal: signatureCaptureMeeting.startsAtLocal ?? null,
-      meetingLat: signatureCaptureMeeting.lat ?? null,
-      meetingLng: signatureCaptureMeeting.lng ?? null,
+      meetingLat: signatureMeetingCoords?.lat ?? null,
+      meetingLng: signatureMeetingCoords?.lng ?? null,
       meetingFormat: signatureCaptureMeeting.format,
       captureMethod: "signature",
       startAt: nowIso,
@@ -4953,6 +5171,11 @@ export default function App() {
       endLng: location?.lng ?? null,
       endAccuracyM: location?.accuracyM ?? null,
       inactive: false,
+      signaturePromptShown: true,
+      chairName: signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
+      chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
+      signatureCapturedAtIso: nowIso,
+      calendarEventId: null,
       signaturePngBase64: signatureSvgBase64,
       pdfUri: null,
     };
@@ -4963,6 +5186,8 @@ export default function App() {
       method: "manual",
     });
     setSignaturePoints([]);
+    setSignatureChairNameInput("");
+    setSignatureChairRoleInput("");
     setSignatureCaptureMeeting(null);
     setAttendanceStatus(
       "Signature captured and meeting log saved (provisional red X until duration and location requirements are met).",
@@ -4973,10 +5198,38 @@ export default function App() {
     signatureCaptureMeeting,
     signaturePoints,
     signatureCanvasSize,
+    signatureChairNameInput,
+    signatureChairRoleInput,
     upsertAttendanceRecord,
     appendMeetingAttendanceLog,
     readCurrentLocation,
   ]);
+
+  const toAttendanceSlipRecord = useCallback(
+    (record: AttendanceRecord) => ({
+      id: record.id,
+      meetingName: record.meetingName,
+      meetingAddress: record.meetingAddress,
+      startAtIso: record.startAt,
+      endAtIso: record.endAt,
+      durationSeconds: record.durationSeconds,
+      signatureSvgBase64: record.signaturePngBase64,
+      chairName: record.chairName ?? null,
+      chairRole: record.chairRole ?? null,
+      signatureCapturedAtIso: record.signatureCapturedAtIso ?? null,
+      startLocation: {
+        lat: record.startLat,
+        lng: record.startLng,
+        accuracyM: record.startAccuracyM,
+      },
+      endLocation: {
+        lat: record.endLat,
+        lng: record.endLng,
+        accuracyM: record.endAccuracyM,
+      },
+    }),
+    [],
+  );
 
   const exportAttendance = useCallback(async () => {
     if (!activeAttendance || !activeAttendance.endAt || activeAttendance.durationSeconds === null) {
@@ -4986,25 +5239,13 @@ export default function App() {
 
     setExportingPdf(true);
     try {
-      const uri = await exportAttendancePdf({
-        userLabel: devUserDisplayName,
-        meetingName: activeAttendance.meetingName,
-        meetingAddress: activeAttendance.meetingAddress,
-        startAtIso: activeAttendance.startAt,
-        endAtIso: activeAttendance.endAt,
-        durationSeconds: activeAttendance.durationSeconds,
-        startLocation: {
-          lat: activeAttendance.startLat,
-          lng: activeAttendance.startLng,
-          accuracyM: activeAttendance.startAccuracyM,
-        },
-        endLocation: {
-          lat: activeAttendance.endLat,
-          lng: activeAttendance.endLng,
-          accuracyM: activeAttendance.endAccuracyM,
-        },
-        signatureSvgBase64: activeAttendance.signaturePngBase64,
-      });
+      const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
+      const uri = await generateAttendanceSlipPdf(
+        [toAttendanceSlipRecord(activeAttendance)],
+        { participantName: devUserDisplayName },
+        { fileName },
+      );
+      await shareAttendanceSlipPdf(uri, fileName);
 
       const next: AttendanceRecord = {
         ...activeAttendance,
@@ -5012,13 +5253,14 @@ export default function App() {
       };
       setActiveAttendance(next);
       upsertAttendanceRecord(next);
-      setAttendanceStatus(`${ATTENDANCE_PDF_FILE_NAME} exported.`);
+      setAttendanceStatus(`${fileName} exported.`);
     } catch (error) {
+      console.log("[attendance-export] failed", error);
       setAttendanceStatus(`PDF export failed: ${formatError(error)}`);
     } finally {
       setExportingPdf(false);
     }
-  }, [activeAttendance, devUserDisplayName, upsertAttendanceRecord]);
+  }, [activeAttendance, devUserDisplayName, toAttendanceSlipRecord, upsertAttendanceRecord]);
 
   const toggleAttendanceSelection = useCallback((recordId: string) => {
     setSelectedAttendanceIds((current) =>
@@ -5067,136 +5309,99 @@ export default function App() {
       setAttendanceStatus("Select at least one attendance record to export.");
       return;
     }
-
-    const escapeHtml = (value: string): string =>
-      value
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-
-    const formatMaybeTime = (value: string | null): string => {
-      if (!value) {
-        return "Not set";
-      }
-      const date = new Date(value);
-      return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-    };
-
-    const buildRecordHtml = (record: AttendanceRecord): string => {
-      const signatureMarkup = record.signaturePngBase64
-        ? record.signaturePngBase64.length <= MAX_SIGNATURE_BASE64_CHARS_IN_MULTI_EXPORT
-          ? `<img alt="Signature" src="data:image/svg+xml;base64,${record.signaturePngBase64}" style="width: 100%; max-width: 340px; border: 1px solid #d0d5dd; border-radius: 8px;" />`
-          : '<p style="color:#6b7280;">Signature captured (omitted in this export to keep PDF generation stable).</p>'
-        : '<p style="color:#6b7280;">No signature captured.</p>';
-      return `<section style="margin-bottom: 20px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px;">
-        <h3 style="margin:0 0 6px 0;">${escapeHtml(record.meetingName)}</h3>
-        <p><strong>Address:</strong> ${escapeHtml(record.meetingAddress || "Unknown")}</p>
-        <p><strong>Started:</strong> ${escapeHtml(formatMaybeTime(record.startAt))}</p>
-        <p><strong>Ended:</strong> ${escapeHtml(formatMaybeTime(record.endAt))}</p>
-        <p><strong>Duration:</strong> ${escapeHtml(formatDuration(record.durationSeconds))}</p>
-        <p><strong>Signature:</strong> ${record.signaturePngBase64 ? "Captured" : "Missing"}</p>
-        ${signatureMarkup}
-      </section>`;
-    };
-
-    const html = `<!doctype html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <title>Selected Attendance - ${new Date().toISOString().slice(0, 10)}</title>
-    <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111827; padding: 24px; }
-      h1 { margin: 0 0 8px 0; font-size: 22px; }
-      p { margin: 4px 0; font-size: 13px; }
-    </style>
-  </head>
-  <body>
-    <h1>Meetings Attended Export</h1>
-    <p>User: ${escapeHtml(devUserDisplayName)}</p>
-    <p>Generated: ${escapeHtml(new Date().toLocaleString())}</p>
-    ${selectedRecords.map(buildRecordHtml).join("\n")}
-  </body>
-</html>`;
-
-    const printModule = loadOptionalModule<{
-      printToFileAsync: (input: {
-        html: string;
-        width?: number;
-        height?: number;
-      }) => Promise<{ uri: string }>;
-    }>("expo-print");
-    const sharingModule = loadOptionalModule<{
-      isAvailableAsync: () => Promise<boolean>;
-      shareAsync: (
-        uri: string,
-        options?: { UTI?: string; mimeType?: string; dialogTitle?: string },
-      ) => Promise<void>;
-    }>("expo-sharing");
-    const fileSystemModule = loadOptionalModule<{
-      documentDirectory?: string;
-      cacheDirectory?: string;
-      getInfoAsync: (uri: string) => Promise<{ exists: boolean }>;
-      deleteAsync: (uri: string, options?: { idempotent?: boolean }) => Promise<void>;
-      moveAsync: (input: { from: string; to: string }) => Promise<void>;
-    }>("expo-file-system");
-
-    if (!printModule || !sharingModule || !fileSystemModule) {
-      setAttendanceStatus(
-        "PDF modules unavailable. Install expo-print, expo-file-system, and expo-sharing.",
-      );
-      return;
-    }
-
     setExportingAttendanceSelectionPdf(true);
     try {
-      const printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
-      const outputDirectory = fileSystemModule.documentDirectory ?? fileSystemModule.cacheDirectory;
-      if (!outputDirectory) {
-        setAttendanceStatus("No writable directory available for attendance export.");
-        return;
-      }
-
-      const fileName = `Meetings Attended - ${new Date().toISOString().slice(0, 10)}.pdf`;
-      const targetUri = `${outputDirectory}${fileName}`;
-      const existing = await fileSystemModule.getInfoAsync(targetUri);
-      if (existing.exists) {
-        await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
-      }
-      await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
-
-      const canShare = await sharingModule.isAvailableAsync();
-      if (canShare) {
-        await sharingModule.shareAsync(targetUri, {
-          UTI: "com.adobe.pdf",
-          mimeType: "application/pdf",
-          dialogTitle: fileName,
-        });
-      }
-      const archivedIds = new Set(selectedRecords.map((record) => record.id));
-      setAttendanceRecords((previous) => {
-        const next = previous.map((record) =>
-          archivedIds.has(record.id) ? { ...record, inactive: true } : record,
-        );
-        void persistAttendanceRecords(next);
-        return next;
-      });
-      setSelectedAttendanceIds((current) => current.filter((id) => !archivedIds.has(id)));
-      setAttendanceStatus(
-        `Exported ${selectedRecords.length} meeting record(s) and hid them from active view.`,
+      const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected ${new Date()
+        .toISOString()
+        .slice(0, 10)}.pdf`;
+      const uri = await generateAttendanceSlipPdf(
+        selectedRecords.map(toAttendanceSlipRecord),
+        { participantName: devUserDisplayName },
+        { fileName },
       );
+      await shareAttendanceSlipPdf(uri, fileName);
+      setAttendanceStatus(`Exported ${selectedRecords.length} meeting record(s).`);
     } catch (error) {
+      console.log("[attendance-export-selected] failed", error);
       setAttendanceStatus(`Failed to export selected attendance: ${formatError(error)}`);
     } finally {
       setExportingAttendanceSelectionPdf(false);
     }
-  }, [
-    attendanceRecordsForView,
-    selectedAttendanceIds,
-    devUserDisplayName,
-    persistAttendanceRecords,
-  ]);
+  }, [attendanceRecordsForView, selectedAttendanceIds, devUserDisplayName, toAttendanceSlipRecord]);
+
+  const exportAttendanceRange = useCallback(
+    async (startDate: Date, endDate: Date, label: string) => {
+      const startMs = startDate.getTime();
+      const endMs = endDate.getTime();
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+        setAttendanceStatus("Invalid export date range.");
+        return;
+      }
+
+      const selectedRecords = attendanceRecords
+        .filter((record) => !record.inactive)
+        .filter((record) => {
+          const atMs = new Date(record.startAt).getTime();
+          return Number.isFinite(atMs) && atMs >= startMs && atMs <= endMs;
+        });
+
+      if (selectedRecords.length === 0) {
+        setAttendanceStatus(`No attendance records found for ${label}.`);
+        return;
+      }
+
+      setExportingAttendanceSelectionPdf(true);
+      try {
+        const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
+        const uri = await generateAttendanceSlipPdf(
+          selectedRecords.map(toAttendanceSlipRecord),
+          { participantName: devUserDisplayName },
+          { fileName },
+        );
+        await shareAttendanceSlipPdf(uri, fileName);
+        setAttendanceStatus(`Exported ${selectedRecords.length} attendance slip(s) for ${label}.`);
+      } catch (error) {
+        console.log("[attendance-export-range] failed", error);
+        setAttendanceStatus(`Failed to export attendance range: ${formatError(error)}`);
+      } finally {
+        setExportingAttendanceSelectionPdf(false);
+      }
+    },
+    [attendanceRecords, devUserDisplayName, toAttendanceSlipRecord],
+  );
+
+  const exportLast7DaysAttendance = useCallback(async () => {
+    const endDate = new Date();
+    endDate.setHours(23, 59, 59, 999);
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 6);
+    startDate.setHours(0, 0, 0, 0);
+    await exportAttendanceRange(startDate, endDate, "Last 7 days");
+  }, [exportAttendanceRange]);
+
+  const exportCustomAttendanceRange = useCallback(async () => {
+    const startText = attendanceExportStartDateInput.trim();
+    const endText = attendanceExportEndDateInput.trim();
+    const startDate = new Date(`${startText}T00:00:00`);
+    const endDate = new Date(`${endText}T23:59:59`);
+
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(startText) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(endText) ||
+      Number.isNaN(startDate.getTime()) ||
+      Number.isNaN(endDate.getTime())
+    ) {
+      setAttendanceStatus("Enter export dates as YYYY-MM-DD.");
+      return;
+    }
+
+    if (endDate < startDate) {
+      setAttendanceStatus("Export end date must be on or after start date.");
+      return;
+    }
+
+    await exportAttendanceRange(startDate, endDate, `${startText} to ${endText}`);
+  }, [attendanceExportEndDateInput, attendanceExportStartDateInput, exportAttendanceRange]);
 
   const shareSelectedAttendanceText = useCallback(async () => {
     const selectedRecords = attendanceRecordsForView.filter((record) =>
@@ -5391,6 +5596,21 @@ export default function App() {
       const meeting = resolveMeetingForLogging(meetingId);
       if (!meeting) {
         Alert.alert("Meeting unavailable", "This meeting is no longer in the upcoming list.");
+        return;
+      }
+
+      const nowLocal = new Date();
+      const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+      const meetingInProgress =
+        meeting.dayOfWeek === nowLocal.getDay() &&
+        isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
+
+      if (meetingInProgress) {
+        setPendingGeofenceLogMeetingId(null);
+        setSelectedMeeting(meeting);
+        setHomeScreen("MEETINGS");
+        await startAttendance(meeting);
+        setAttendanceStatus(`Attendance started for in-progress meeting: ${meeting.name}.`);
         return;
       }
 
@@ -5641,6 +5861,14 @@ export default function App() {
   }, [meetings]);
 
   useEffect(() => {
+    activeAttendanceRef.current = activeAttendance;
+  }, [activeAttendance]);
+
+  useEffect(() => {
+    attendanceRecordsRef.current = attendanceRecords;
+  }, [attendanceRecords]);
+
+  useEffect(() => {
     setSelectedLocationKey(null);
   }, [selectedDay.dayOfWeek, meetingsViewMode]);
 
@@ -5761,6 +5989,29 @@ export default function App() {
               .map((record) => ({
                 ...record,
                 inactive: Boolean(record.inactive),
+                signaturePromptShown: Boolean(record.signaturePromptShown),
+                chairName:
+                  typeof record.chairName === "string" && record.chairName.trim().length > 0
+                    ? record.chairName.trim()
+                    : null,
+                chairRole:
+                  typeof record.chairRole === "string" && record.chairRole.trim().length > 0
+                    ? record.chairRole.trim()
+                    : null,
+                signatureCapturedAtIso:
+                  typeof record.signatureCapturedAtIso === "string"
+                    ? record.signatureCapturedAtIso
+                    : null,
+                calendarEventId:
+                  typeof record.calendarEventId === "string" && record.calendarEventId.length > 0
+                    ? record.calendarEventId
+                    : null,
+                meetingLat: asFiniteNumber(record.meetingLat) ?? null,
+                meetingLng: asFiniteNumber(record.meetingLng) ?? null,
+                startLat: asFiniteNumber(record.startLat) ?? null,
+                startLng: asFiniteNumber(record.startLng) ?? null,
+                endLat: asFiniteNumber(record.endLat) ?? null,
+                endLng: asFiniteNumber(record.endLng) ?? null,
               }))
               .sort(
                 (left, right) =>
@@ -5812,6 +6063,7 @@ export default function App() {
             sponsorEnabled?: boolean;
             sponsorActive?: boolean;
             sponsorLeadMinutes?: SponsorLeadMinutes;
+            meetingAutoAddToCalendar?: boolean;
           };
           if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
             setMeetingRadiusMiles(parsedProfile.radiusMiles);
@@ -5899,6 +6151,9 @@ export default function App() {
             [0, 5, 10, 30].includes(parsedProfile.sponsorLeadMinutes)
           ) {
             setSponsorLeadMinutes(parsedProfile.sponsorLeadMinutes as SponsorLeadMinutes);
+          }
+          if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
+            setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
           }
         }
 
@@ -6095,6 +6350,7 @@ export default function App() {
         sponsorEnabled,
         sponsorActive,
         sponsorLeadMinutes,
+        meetingAutoAddToCalendar,
       }),
     );
   }, [
@@ -6113,6 +6369,7 @@ export default function App() {
     sponsorEnabled,
     sponsorActive,
     sponsorLeadMinutes,
+    meetingAutoAddToCalendar,
     profileStorage,
     bootstrapped,
   ]);
@@ -6347,6 +6604,40 @@ export default function App() {
       clearInterval(timer);
     };
   }, [activeAttendance]);
+
+  useEffect(() => {
+    if (!activeAttendance || activeAttendance.endAt) {
+      return;
+    }
+    if (activeAttendance.signaturePngBase64 || activeAttendance.signaturePromptShown) {
+      return;
+    }
+
+    const startedAtMs = new Date(activeAttendance.startAt).getTime();
+    if (!Number.isFinite(startedAtMs)) {
+      return;
+    }
+    if (sessionNowMs < startedAtMs + SIGNATURE_PROMPT_AFTER_MS) {
+      return;
+    }
+
+    const prompted: AttendanceRecord = {
+      ...activeAttendance,
+      signaturePromptShown: true,
+    };
+    setActiveAttendance(prompted);
+    upsertAttendanceRecord(prompted);
+    Alert.alert("Before you leave", "Before you leave, obtain chair signature.", [
+      { text: "Later", style: "cancel" },
+      {
+        text: "Get signature",
+        onPress: () => {
+          setHomeScreen("MEETINGS");
+          setScreen("SIGNATURE");
+        },
+      },
+    ]);
+  }, [activeAttendance, sessionNowMs, upsertAttendanceRecord]);
 
   useEffect(() => {
     departurePromptedAttendanceRef.current = null;
@@ -7062,13 +7353,13 @@ export default function App() {
                       {wizardHasHomeGroup ? (
                         <>
                           <Text style={styles.sectionMeta}>
-                            {homeGroupUsesTomorrowFallback
-                              ? "No more meetings are available today. Showing tomorrow's meetings."
+                            {homeGroupUsesNextDayFallback
+                              ? `No more meetings are available today. Showing ${homeGroupFallbackDayLabel} meetings.`
                               : "Select a home group from today's remaining meetings."}
                           </Text>
                           {homeGroupCandidateMeetings.length === 0 ? (
                             <Text style={styles.sectionMeta}>
-                              No meetings loaded for today or tomorrow yet.
+                              No meetings loaded for today or upcoming days yet.
                             </Text>
                           ) : (
                             <ScrollView
@@ -7096,7 +7387,11 @@ export default function App() {
                                     <Text style={styles.meetingName}>{meeting.name}</Text>
                                     <Text style={styles.sectionMeta}>
                                       {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
-                                      {formatDistance(meeting.distanceMeters)}
+                                      {meetingDistanceLabel(
+                                        meeting,
+                                        meeting.distanceMeters,
+                                        locationPermission,
+                                      )}
                                     </Text>
                                     <Text style={styles.sectionMeta}>
                                       {selected
@@ -7207,7 +7502,7 @@ export default function App() {
                   sobrietyDateLabel={formatIsoToDdMmYyyy(sobrietyDateIso)}
                   insight={soberInsight}
                   locationEnabled={locationPermission === "granted"}
-                  nextMeetings={dashboardNextThreeMeetings}
+                  nextMeetings={dashboardNextFiveMeetings}
                   showingOnlineMeetingsFallback={dashboardShowsOnlineFallback}
                   chatEnabled={chatEnabled}
                   sponsorEnabled={sponsorEnabled}
@@ -7217,17 +7512,10 @@ export default function App() {
                     homeGroupUpcoming
                       ? {
                           ...homeGroupUpcoming,
-                          distanceMeters:
-                            currentLocation &&
-                            homeGroupUpcoming.lat !== null &&
-                            homeGroupUpcoming.lng !== null
-                              ? distanceMetersBetween(
-                                  currentLocation.lat,
-                                  currentLocation.lng,
-                                  homeGroupUpcoming.lat,
-                                  homeGroupUpcoming.lng,
-                                )
-                              : null,
+                          distanceMeters: resolveMeetingDistanceMeters(
+                            homeGroupUpcoming,
+                            currentLocation,
+                          ),
                         }
                       : null
                   }
@@ -7561,52 +7849,82 @@ export default function App() {
 
                     {screen === "LIST" ? (
                       <>
-                        {meetingsForMeetingsScreen.map((meeting) => (
-                          <View key={meeting.id} style={styles.meetingCard}>
-                            <Text style={styles.meetingName}>{meeting.name}</Text>
-                            <Text style={styles.sectionMeta}>
-                              {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
-                              {meeting.format || "Unknown"}
-                            </Text>
-                            <Text style={styles.sectionMeta}>
-                              {meeting.format === "ONLINE"
-                                ? "Online"
-                                : meeting.address || "Unknown address"}{" "}
-                              • {formatDistance(meeting.distanceMeters)}
-                            </Text>
+                        {meetingsForMeetingsScreen.map((meeting) => {
+                          const nowLocal = new Date(clockTickMs);
+                          const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+                          const meetingInProgress =
+                            selectedDayIsToday &&
+                            isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
+                          const leaveBy = leaveByLabel(
+                            selectedDay.date,
+                            meeting.startsAtLocal,
+                            meeting.distanceMeters,
+                            travelTimeProvider,
+                          );
 
-                            <View style={styles.buttonRow}>
-                              <AppButton
-                                title="Attend & Log"
-                                onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
-                                variant="secondary"
-                              />
-                              <View style={styles.buttonSpacer} />
-                              <AppButton
-                                title="Signature"
-                                onPress={() => openMeetingSignatureCapture(meeting)}
-                                variant="secondary"
-                              />
+                          return (
+                            <View key={meeting.id} style={styles.meetingCard}>
+                              <Text style={styles.meetingName}>{meeting.name}</Text>
+                              <Text style={styles.sectionMeta}>
+                                {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
+                                {meeting.format || "Unknown"}
+                              </Text>
+                              <Text style={styles.sectionMeta}>
+                                {meeting.format === "ONLINE"
+                                  ? "Online"
+                                  : meeting.address || "Unknown address"}{" "}
+                                •{" "}
+                                {meetingDistanceLabel(
+                                  meeting,
+                                  meeting.distanceMeters,
+                                  locationPermission,
+                                )}
+                              </Text>
+                              {leaveBy ? (
+                                <Text style={styles.sectionMeta}>Leave by {leaveBy}</Text>
+                              ) : null}
+                              {meetingInProgress ? (
+                                <Text style={styles.sectionMeta}>Happening now</Text>
+                              ) : null}
+
+                              <View style={styles.buttonRow}>
+                                <AppButton
+                                  title={meetingInProgress ? "Attend" : "Details"}
+                                  onPress={() => {
+                                    if (meetingInProgress) {
+                                      void logUpcomingMeetingFromDashboard(meeting.id);
+                                      return;
+                                    }
+                                    setSelectedMeeting(meeting);
+                                    setScreen("DETAIL");
+                                  }}
+                                  variant={meetingInProgress ? "secondary" : "primary"}
+                                />
+                                <View style={styles.buttonSpacer} />
+                                <AppButton
+                                  title="Attend"
+                                  onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
+                                  variant="secondary"
+                                />
+                              </View>
+
+                              <View style={styles.buttonRow}>
+                                <AppButton
+                                  title="Signature"
+                                  onPress={() => openMeetingSignatureCapture(meeting)}
+                                  variant="secondary"
+                                />
+                              </View>
                             </View>
-
-                            <Pressable
-                              style={styles.detailButton}
-                              onPress={() => {
-                                setSelectedMeeting(meeting);
-                                setScreen("DETAIL");
-                              }}
-                            >
-                              <Text style={styles.detailButtonText}>View details</Text>
-                            </Pressable>
-                          </View>
-                        ))}
+                          );
+                        })}
 
                         {!loadingMeetings && meetingsForMeetingsScreen.length === 0 ? (
                           <Text style={styles.sectionMeta}>
                             {selectedDayIsPast
                               ? "No upcoming meetings for a past day."
                               : selectedDayIsToday
-                                ? "No upcoming meetings remaining today."
+                                ? "No in-progress or upcoming meetings remaining today."
                                 : "No upcoming meetings for this day."}
                           </Text>
                         ) : null}
@@ -7624,6 +7942,43 @@ export default function App() {
                           {selectedMeeting.openness || "Unknown"} •{" "}
                           {selectedMeeting.format || "Unknown"}
                         </Text>
+                        <Text style={styles.sectionMeta}>
+                          Distance:{" "}
+                          {meetingDistanceLabel(
+                            selectedMeeting,
+                            resolveMeetingDistanceMeters(selectedMeeting, currentLocation),
+                            locationPermission,
+                          )}
+                        </Text>
+                        {(() => {
+                          const leaveBy = leaveByLabel(
+                            selectedDay.date,
+                            selectedMeeting.startsAtLocal,
+                            resolveMeetingDistanceMeters(selectedMeeting, currentLocation),
+                            travelTimeProvider,
+                          );
+                          return leaveBy ? (
+                            <Text style={styles.sectionMeta}>Leave by {leaveBy}</Text>
+                          ) : null;
+                        })()}
+                        {__DEV__ ? (
+                          <Text style={styles.sectionMeta}>
+                            Geo debug:{" "}
+                            {selectedMeeting.lat !== null && selectedMeeting.lng !== null
+                              ? `${formatCoordinate(selectedMeeting.lat)}, ${formatCoordinate(selectedMeeting.lng)}`
+                              : "Location unavailable"}{" "}
+                            • {selectedMeeting.geoStatus ?? "unknown"}
+                            {selectedMeeting.geoReason ? ` (${selectedMeeting.geoReason})` : ""}
+                          </Text>
+                        ) : null}
+                        {selectedDayIsToday &&
+                        isMeetingInProgress(
+                          selectedMeeting.startsAtLocal,
+                          new Date(clockTickMs).getHours() * 60 +
+                            new Date(clockTickMs).getMinutes(),
+                        ) ? (
+                          <Text style={styles.sectionMeta}>Happening now</Text>
+                        ) : null}
 
                         <Pressable
                           style={styles.checkboxRow}
@@ -7681,7 +8036,7 @@ export default function App() {
                           <AppButton title="Back to list" onPress={() => setScreen("LIST")} />
                           <View style={styles.buttonSpacer} />
                           <AppButton
-                            title="Drive now"
+                            title="Open in Maps"
                             onPress={() => void openMeetingDestination(selectedMeeting)}
                             variant="secondary"
                           />
@@ -7698,6 +8053,19 @@ export default function App() {
                             />
                           </View>
                         ) : null}
+
+                        <View style={styles.buttonRow}>
+                          <AppButton
+                            title="Attend"
+                            onPress={() => void logUpcomingMeetingFromDashboard(selectedMeeting.id)}
+                          />
+                          <View style={styles.buttonSpacer} />
+                          <AppButton
+                            title="Signature"
+                            onPress={() => openMeetingSignatureCapture(selectedMeeting)}
+                            variant="secondary"
+                          />
+                        </View>
                       </View>
                     ) : null}
                   </GlassCard>
@@ -7722,6 +8090,42 @@ export default function App() {
                     </View>
                   </View>
                   <Text style={styles.sectionMeta}>{attendanceStatus}</Text>
+                  <View style={styles.buttonRow}>
+                    <AppButton
+                      title={
+                        exportingAttendanceSelectionPdf ? "Exporting..." : "Export last 7 days"
+                      }
+                      onPress={() => void exportLast7DaysAttendance()}
+                      disabled={exportingAttendanceSelectionPdf}
+                    />
+                  </View>
+                  <Text style={styles.sectionMeta}>Custom export range (YYYY-MM-DD)</Text>
+                  <View style={styles.inlineRowGap}>
+                    <TextInput
+                      style={styles.input}
+                      value={attendanceExportStartDateInput}
+                      onChangeText={setAttendanceExportStartDateInput}
+                      placeholder="Start date (YYYY-MM-DD)"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
+                    <TextInput
+                      style={styles.input}
+                      value={attendanceExportEndDateInput}
+                      onChangeText={setAttendanceExportEndDateInput}
+                      placeholder="End date (YYYY-MM-DD)"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
+                  </View>
+                  <View style={styles.buttonRow}>
+                    <AppButton
+                      title="Export custom range"
+                      onPress={() => void exportCustomAttendanceRange()}
+                      disabled={exportingAttendanceSelectionPdf}
+                      variant="secondary"
+                    />
+                  </View>
                   <View style={styles.inlineRow}>
                     <Text style={styles.label}>Show inactive ({inactiveAttendanceCount})</Text>
                     <Switch
@@ -8497,7 +8901,7 @@ export default function App() {
 
                     <View style={styles.buttonRow}>
                       <AppButton
-                        title="Enable location"
+                        title="While Using App"
                         onPress={() => {
                           void (async () => {
                             const position = await requestLocationPermission();
@@ -8508,11 +8912,30 @@ export default function App() {
                       />
                       <View style={styles.buttonSpacer} />
                       <AppButton
-                        title="Enable always location"
+                        title="Always (recommended)"
                         onPress={() => {
                           void requestAlwaysLocationPermission();
                         }}
                         variant="secondary"
+                      />
+                    </View>
+                    {locationPermission === "denied" || locationAlwaysPermission === "denied" ? (
+                      <View style={styles.buttonRow}>
+                        <AppButton
+                          title="Open settings"
+                          onPress={() => {
+                            void Linking.openSettings();
+                          }}
+                          variant="secondary"
+                        />
+                      </View>
+                    ) : null}
+
+                    <View style={styles.inlineRow}>
+                      <Text style={styles.label}>Auto-add attended meetings to calendar</Text>
+                      <Switch
+                        value={meetingAutoAddToCalendar}
+                        onValueChange={setMeetingAutoAddToCalendar}
                       />
                     </View>
 
@@ -8653,6 +9076,12 @@ export default function App() {
                           };
                           const isHomeGroup = selectedDayPlan.homeGroupMeetingId === meeting.id;
                           const preview = buildDriveSchedulePreview(meeting, selectedDayPlan);
+                          const leaveBy = leaveByLabel(
+                            selectedDay.date,
+                            meeting.startsAtLocal,
+                            meeting.distanceMeters,
+                            travelTimeProvider,
+                          );
 
                           return (
                             <View key={meeting.id} style={styles.meetingCard}>
@@ -8665,8 +9094,16 @@ export default function App() {
                                 {meeting.format === "ONLINE"
                                   ? "Online"
                                   : meeting.address || "Unknown address"}{" "}
-                                • {formatDistance(meeting.distanceMeters)}
+                                •{" "}
+                                {meetingDistanceLabel(
+                                  meeting,
+                                  meeting.distanceMeters,
+                                  locationPermission,
+                                )}
                               </Text>
+                              {leaveBy ? (
+                                <Text style={styles.sectionMeta}>Leave by {leaveBy}</Text>
+                              ) : null}
 
                               <Pressable
                                 style={styles.checkboxRow}
@@ -8742,27 +9179,64 @@ export default function App() {
 
                               <View style={styles.buttonRow}>
                                 <AppButton
-                                  title="Attend & Log"
+                                  title={
+                                    selectedDayIsToday &&
+                                    isMeetingInProgress(
+                                      meeting.startsAtLocal,
+                                      new Date(clockTickMs).getHours() * 60 +
+                                        new Date(clockTickMs).getMinutes(),
+                                    )
+                                      ? "Attend"
+                                      : "Details"
+                                  }
+                                  onPress={() => {
+                                    const now = new Date(clockTickMs);
+                                    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+                                    const meetingInProgress =
+                                      selectedDayIsToday &&
+                                      isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
+                                    if (meetingInProgress) {
+                                      void logUpcomingMeetingFromDashboard(meeting.id);
+                                      return;
+                                    }
+                                    setSelectedMeeting(meeting);
+                                    setScreen("DETAIL");
+                                  }}
+                                  variant={
+                                    selectedDayIsToday &&
+                                    isMeetingInProgress(
+                                      meeting.startsAtLocal,
+                                      new Date(clockTickMs).getHours() * 60 +
+                                        new Date(clockTickMs).getMinutes(),
+                                    )
+                                      ? "secondary"
+                                      : "primary"
+                                  }
+                                />
+                                <View style={styles.buttonSpacer} />
+                                <AppButton
+                                  title="Attend"
                                   onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
                                   variant="secondary"
                                 />
-                                <View style={styles.buttonSpacer} />
+                              </View>
+
+                              {selectedDayIsToday &&
+                              isMeetingInProgress(
+                                meeting.startsAtLocal,
+                                new Date(clockTickMs).getHours() * 60 +
+                                  new Date(clockTickMs).getMinutes(),
+                              ) ? (
+                                <Text style={styles.sectionMeta}>Happening now</Text>
+                              ) : null}
+
+                              <View style={styles.buttonRow}>
                                 <AppButton
                                   title="Signature"
                                   onPress={() => openMeetingSignatureCapture(meeting)}
                                   variant="secondary"
                                 />
                               </View>
-
-                              <Pressable
-                                style={styles.detailButton}
-                                onPress={() => {
-                                  setSelectedMeeting(meeting);
-                                  setScreen("DETAIL");
-                                }}
-                              >
-                                <Text style={styles.detailButtonText}>View details</Text>
-                              </Pressable>
                             </View>
                           );
                         })}
@@ -8771,7 +9245,7 @@ export default function App() {
                             {selectedDayIsPast
                               ? "No upcoming meetings for a past day."
                               : selectedDayIsToday
-                                ? "No upcoming meetings remaining today."
+                                ? "No in-progress or upcoming meetings remaining today."
                                 : "No upcoming meetings for this day."}
                           </Text>
                         ) : null}
@@ -8791,19 +9265,33 @@ export default function App() {
                         </Text>
                         <Text style={styles.sectionMeta}>
                           Distance:{" "}
-                          {formatDistance(
-                            currentLocation &&
-                              selectedMeeting.lat !== null &&
-                              selectedMeeting.lng !== null
-                              ? distanceMetersBetween(
-                                  currentLocation.lat,
-                                  currentLocation.lng,
-                                  selectedMeeting.lat,
-                                  selectedMeeting.lng,
-                                )
-                              : null,
+                          {meetingDistanceLabel(
+                            selectedMeeting,
+                            resolveMeetingDistanceMeters(selectedMeeting, currentLocation),
+                            locationPermission,
                           )}
                         </Text>
+                        {(() => {
+                          const leaveBy = leaveByLabel(
+                            selectedDay.date,
+                            selectedMeeting.startsAtLocal,
+                            resolveMeetingDistanceMeters(selectedMeeting, currentLocation),
+                            travelTimeProvider,
+                          );
+                          return leaveBy ? (
+                            <Text style={styles.sectionMeta}>Leave by {leaveBy}</Text>
+                          ) : null;
+                        })()}
+                        {__DEV__ ? (
+                          <Text style={styles.sectionMeta}>
+                            Geo debug:{" "}
+                            {selectedMeeting.lat !== null && selectedMeeting.lng !== null
+                              ? `${formatCoordinate(selectedMeeting.lat)}, ${formatCoordinate(selectedMeeting.lng)}`
+                              : "Location unavailable"}{" "}
+                            • {selectedMeeting.geoStatus ?? "unknown"}
+                            {selectedMeeting.geoReason ? ` (${selectedMeeting.geoReason})` : ""}
+                          </Text>
+                        ) : null}
 
                         <Pressable
                           style={styles.checkboxRow}
@@ -8861,7 +9349,7 @@ export default function App() {
                           <AppButton title="Back" onPress={() => setScreen("LIST")} />
                           <View style={styles.buttonSpacer} />
                           <AppButton
-                            title="Drive now"
+                            title="Open in Maps"
                             onPress={() => void openMeetingDestination(selectedMeeting)}
                             variant="secondary"
                           />
@@ -8881,7 +9369,7 @@ export default function App() {
 
                         <View style={styles.buttonRow}>
                           <AppButton
-                            title="Start attendance"
+                            title="Attend"
                             onPress={() => void startAttendance(selectedMeeting)}
                           />
                           <View style={styles.buttonSpacer} />
@@ -8937,22 +9425,25 @@ export default function App() {
                       )}
 
                       <View style={styles.buttonRow}>
-                        {!activeAttendance.endAt ? (
-                          <>
-                            <AppButton title="End meeting" onPress={() => void endAttendance()} />
-                            <View style={styles.buttonSpacer} />
-                          </>
-                        ) : null}
                         <AppButton
                           title={
                             activeAttendance.signaturePngBase64
                               ? "Update signature"
-                              : "Capture signature"
+                              : "Get signature"
                           }
                           onPress={() => openAttendanceRecordSignatureCapture(activeAttendance.id)}
-                          variant="secondary"
                           disabled={!activeAttendanceSignatureWindow?.eligible}
                         />
+                        {!activeAttendance.endAt ? (
+                          <>
+                            <View style={styles.buttonSpacer} />
+                            <AppButton
+                              title="End meeting"
+                              onPress={() => void endAttendance()}
+                              variant="secondary"
+                            />
+                          </>
+                        ) : null}
                       </View>
 
                       {activeAttendance.endAt ? (
@@ -8976,7 +9467,7 @@ export default function App() {
                       ) : null}
 
                       <Text style={styles.sectionMeta}>
-                        PDF file name: {ATTENDANCE_PDF_FILE_NAME}
+                        PDF file name: {ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf
                       </Text>
                     </GlassCard>
                   ) : null}
@@ -9129,6 +9620,21 @@ export default function App() {
                   location requirements are met.
                 </Text>
               ) : null}
+            </View>
+
+            <View style={styles.inlineRowGap}>
+              <TextInput
+                style={styles.input}
+                value={signatureChairNameInput}
+                onChangeText={setSignatureChairNameInput}
+                placeholder="Chair printed name (optional)"
+              />
+              <TextInput
+                style={styles.input}
+                value={signatureChairRoleInput}
+                onChangeText={setSignatureChairRoleInput}
+                placeholder="Role: Chair / Secretary (optional)"
+              />
             </View>
 
             <View style={styles.signatureModalCanvasWrap}>

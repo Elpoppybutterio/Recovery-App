@@ -4,6 +4,13 @@ import {
   parseMeetingGuideFeedsJson,
   type MeetingGuideFeedConfig,
 } from "./meeting-guide";
+import {
+  buildGeocodeQuery,
+  geocodeWithOpenStreetMap,
+  normalizeAddressParts,
+  resolveMeetingGeoStatus,
+  type GeocodeResult,
+} from "./meeting-geo";
 
 interface LoggerLike {
   info(message: string, context?: Record<string, unknown>): void;
@@ -778,62 +785,39 @@ function parseAaMontanaHtmlEntries(rawHtml: string, feedUrl: string): unknown[] 
 
 type NormalizedMeeting = NonNullable<ReturnType<typeof normalizeMeetingGuideMeeting>>;
 
-function buildGeocodeQuery(entry: NormalizedMeeting): string | null {
-  if (entry.lat !== null && entry.lng !== null) {
-    return null;
-  }
-  if ((entry.formattedAddress ?? "").toLowerCase() === "online") {
-    return null;
-  }
-
-  const parts = [
-    entry.formattedAddress,
-    entry.address,
-    entry.city,
-    entry.state,
-    entry.postalCode,
-    entry.country,
-  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
-  if (parts.length === 0) {
-    return null;
-  }
-
-  return Array.from(new Set(parts)).join(", ");
+function normalizeMeetingAddress(entry: NormalizedMeeting): NormalizedMeeting {
+  const normalized = normalizeAddressParts({
+    formattedAddress: entry.formattedAddress,
+    address: entry.address,
+    city: entry.city,
+    state: entry.state,
+    postalCode: entry.postalCode,
+    country: entry.country,
+  });
+  return {
+    ...entry,
+    formattedAddress: normalized.formattedAddress ?? null,
+    address: normalized.address ?? null,
+    city: normalized.city ?? null,
+    state: normalized.state ?? null,
+    postalCode: normalized.postalCode ?? null,
+    country: normalized.country ?? null,
+  };
 }
 
-async function geocodeWithOpenStreetMap(options: {
-  query: string;
-  fetchImpl: FetchLike;
-  userAgent: string;
-}): Promise<{ lat: number; lng: number } | null> {
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(options.query)}`;
-  const response = await options.fetchImpl(url, {
-    headers: {
-      accept: "application/json",
-      "user-agent": options.userAgent,
-    },
+function normalizeMeetingGeo(entry: NormalizedMeeting): NormalizedMeeting {
+  const resolved = resolveMeetingGeoStatus({
+    lat: entry.lat,
+    lng: entry.lng,
+    formattedAddress: entry.formattedAddress,
   });
-  if (!response.ok) {
-    return null;
-  }
-
-  const payload = (await response.json()) as unknown;
-  if (!Array.isArray(payload) || payload.length === 0) {
-    return null;
-  }
-
-  const first = payload[0] as { lat?: string; lon?: string } | undefined;
-  if (!first) {
-    return null;
-  }
-
-  const lat = Number(first.lat);
-  const lng = Number(first.lon);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    return null;
-  }
-
-  return { lat, lng };
+  return {
+    ...entry,
+    lat: resolved.lat,
+    lng: resolved.lng,
+    geoStatus: resolved.geoStatus,
+    geoReason: resolved.geoReason,
+  };
 }
 
 function extractEntries(payload: unknown): unknown[] {
@@ -870,7 +854,7 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
   const now = options.now ?? (() => new Date());
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   const logger = options.logger;
-  const geocodeCache = new Map<string, { lat: number; lng: number } | null>();
+  const geocodeCache = new Map<string, GeocodeResult>();
 
   for (const configured of options.configuredFeeds) {
     await options.repositories.meetingFeeds.upsert(options.tenantId, {
@@ -890,55 +874,108 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
   let meetingsSkipped = 0;
   let meetingsWithCoordinates = 0;
   let meetingsWithoutCoordinates = 0;
+  let geocodeAttemptsTotal = 0;
+  let geocodeSuccessTotal = 0;
+  let geocodeFailedTotal = 0;
 
   const ingestEntriesForFeed = async (feedId: string, entries: unknown[], feedUrl: string) => {
     meetingsFetched += entries.length;
 
-    let normalized: NormalizedMeeting[] = entries
+    const normalizedInput: NormalizedMeeting[] = entries
       .map((entry) => normalizeMeetingGuideMeeting(entry))
       .filter((entry): entry is NormalizedMeeting => Boolean(entry));
+    let normalized = normalizedInput.map(normalizeMeetingAddress).map(normalizeMeetingGeo);
 
-    if (options.geocodeMissingCoordinates) {
+    const missingReasonCounts = new Map<string, number>();
+    const bumpMissingReason = (reason: string | null) => {
+      const key = reason ?? "unknown";
+      missingReasonCounts.set(key, (missingReasonCounts.get(key) ?? 0) + 1);
+    };
+
+    if (options.geocodeMissingCoordinates !== false) {
       const geocodedEntries: NormalizedMeeting[] = [];
       for (const entry of normalized) {
-        const geocodeQuery = buildGeocodeQuery(entry);
+        if (entry.geoStatus === "ok") {
+          geocodedEntries.push(entry);
+          continue;
+        }
+
+        const geocodeQuery = buildGeocodeQuery({
+          formattedAddress: entry.formattedAddress,
+          address: entry.address,
+          city: entry.city,
+          state: entry.state,
+          postalCode: entry.postalCode,
+          country: entry.country,
+        });
         if (!geocodeQuery) {
           geocodedEntries.push(entry);
           continue;
         }
 
-        let coordinates = geocodeCache.get(geocodeQuery);
-        if (coordinates === undefined) {
+        let geocodeResult = geocodeCache.get(geocodeQuery);
+        if (geocodeResult === undefined) {
+          geocodeAttemptsTotal += 1;
           try {
-            coordinates = await geocodeWithOpenStreetMap({
+            geocodeResult = await geocodeWithOpenStreetMap({
               query: geocodeQuery,
               fetchImpl,
               userAgent:
                 options.geocodeUserAgent ?? "Recovery-Accountability/0.1 (+https://sober-ai.app)",
             });
-          } catch {
-            coordinates = null;
+          } catch (error) {
+            geocodeResult = {
+              coords: null,
+              reason: error instanceof Error ? "provider_exception" : "provider_unknown_error",
+            };
           }
-          geocodeCache.set(geocodeQuery, coordinates);
+          if (geocodeResult.coords) {
+            geocodeSuccessTotal += 1;
+          } else {
+            geocodeFailedTotal += 1;
+          }
+          geocodeCache.set(geocodeQuery, geocodeResult);
         }
 
-        if (coordinates) {
+        if (geocodeResult.coords) {
+          const resolved = resolveMeetingGeoStatus({
+            lat: geocodeResult.coords.lat,
+            lng: geocodeResult.coords.lng,
+            formattedAddress: entry.formattedAddress,
+          });
           geocodedEntries.push({
             ...entry,
-            lat: coordinates.lat,
-            lng: coordinates.lng,
+            lat: resolved.lat,
+            lng: resolved.lng,
+            geoStatus: resolved.geoStatus,
+            geoReason: resolved.geoReason,
+            geoUpdatedAt: now().toISOString(),
           });
         } else {
-          geocodedEntries.push(entry);
+          const fallbackReason = geocodeResult.reason ? `geocode_${geocodeResult.reason}` : null;
+          geocodedEntries.push({
+            ...entry,
+            geoReason: fallbackReason ?? entry.geoReason,
+            geoUpdatedAt: now().toISOString(),
+          });
         }
       }
       normalized = geocodedEntries;
     }
+
+    for (const meeting of normalized) {
+      if (meeting.geoStatus !== "ok") {
+        bumpMissingReason(meeting.geoReason ?? null);
+      }
+      if (!meeting.geoUpdatedAt) {
+        meeting.geoUpdatedAt = now().toISOString();
+      }
+    }
     meetingsImported += normalized.length;
-    meetingsSkipped += entries.length - normalized.length;
+    meetingsSkipped += entries.length - normalizedInput.length;
 
     const withCoordinates = normalized.filter(
-      (meeting) => meeting.lat !== null && meeting.lng !== null,
+      (meeting) => meeting.geoStatus === "ok" && meeting.lat !== null && meeting.lng !== null,
     ).length;
     const withoutCoordinates = normalized.length - withCoordinates;
     meetingsWithCoordinates += withCoordinates;
@@ -958,6 +995,11 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
       ingestedCount,
       withCoordinates,
       withoutCoordinates,
+      meetings_ingested_total: normalized.length,
+      meetings_missing_coords_total: withoutCoordinates,
+      geocode_attempts_total: geocodeAttemptsTotal,
+      geocode_success_total: geocodeSuccessTotal,
+      geocode_failed_total: geocodeFailedTotal,
     });
 
     if (withoutCoordinates > 0) {
@@ -966,7 +1008,8 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
         feedId,
         feedUrl,
         withoutCoordinates,
-        note: "Meetings without coordinates are stored with geo_status=missing and excluded from /v1/meetings/nearby.",
+        reasons: Object.fromEntries(missingReasonCounts.entries()),
+        note: "Meetings without coordinates are stored with geo_status and geo_reason, and excluded from /v1/meetings/nearby until fixed.",
       });
     }
   };
@@ -1052,6 +1095,13 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
     meetingsWithCoordinates,
     meetingsWithoutCoordinates,
   };
-  logger?.info("meeting_guide.ingest.complete", result);
+  logger?.info("meeting_guide.ingest.complete", {
+    ...result,
+    meetings_ingested_total: meetingsImported,
+    meetings_missing_coords_total: meetingsWithoutCoordinates,
+    geocode_attempts_total: geocodeAttemptsTotal,
+    geocode_success_total: geocodeSuccessTotal,
+    geocode_failed_total: geocodeFailedTotal,
+  });
   return result;
 }
