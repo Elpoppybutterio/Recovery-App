@@ -166,6 +166,7 @@ const MILES_TO_METERS = 1609.344;
 const WARNING_DISTANCE_METERS = WARNING_DISTANCE_FEET * FEET_TO_METERS;
 const INCIDENT_DEDUPE_WINDOW_MINUTES = 10;
 const EARTH_RADIUS_METERS = 6371000;
+const REQUIRED_MEETING_GUIDE_COLUMNS = ["geo_status", "geo_reason", "geo_updated_at"] as const;
 
 function toRadians(value: number): number {
   return (value * Math.PI) / 180;
@@ -196,6 +197,36 @@ function isDevAuthHeader(value: string | undefined): boolean {
   return /^Bearer DEV_[A-Za-z0-9_-]+$/.test(value.trim());
 }
 
+async function validateMeetingGuideSchema(db: DbPool): Promise<void> {
+  const result = await db.query<{ column_name: string }>(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'meeting_guide_meetings'
+    `,
+  );
+
+  const available = new Set(result.rows.map((row) => row.column_name));
+  const missing = REQUIRED_MEETING_GUIDE_COLUMNS.filter((column) => !available.has(column));
+  if (missing.length === 0) {
+    return;
+  }
+
+  logger.error("meeting_guide.schema.invalid", {
+    fatal: true,
+    migrationRequired: true,
+    table: "meeting_guide_meetings",
+    missingColumns: missing,
+    message:
+      "Missing required meeting_guide_meetings columns. Run API database migrations before starting the service.",
+    runbook: "pnpm --filter @recovery/api run db:migrate",
+  });
+  throw new Error(
+    `meeting_guide_meetings schema missing required columns: ${missing.join(", ")}. Run migrations and restart.`,
+  );
+}
+
 export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date } = {}) {
   const env = options.env ?? loadApiEnv();
   const app = Fastify();
@@ -221,6 +252,10 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   app.addHook("onResponse", auditResponseIfNeeded);
 
   if (isManagedDb) {
+    app.addHook("onReady", async () => {
+      await validateMeetingGuideSchema(db);
+    });
+
     app.addHook("onClose", async () => {
       if (meetingGuideTimer) {
         clearInterval(meetingGuideTimer);
@@ -1117,6 +1152,20 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         combinedById.set(meeting.id, meeting);
       }
       const combinedMeetings = Array.from(combinedById.values());
+      if (meetingGuideWarning && combinedMeetings.length === 0) {
+        reply.code(503).send({
+          code: "MEETINGS_FEED_UNAVAILABLE",
+          message: "Meeting feed temporarily unavailable",
+          meetings: [],
+          filters: {
+            dayOfWeek: requestedDayOfWeek ?? null,
+            radiusMiles: resolvedRadiusMiles,
+            locationScoped: hasLocationFilter,
+          },
+          warning: meetingGuideWarning,
+        });
+        return;
+      }
 
       return {
         meetings: combinedMeetings,
@@ -1164,6 +1213,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
 
       let meetings: Awaited<ReturnType<typeof tenantRepositories.meetingGuide.nearby>> = [];
       let nearbyWarning: string | null = null;
+      let meetingGuideUnavailable = false;
       try {
         meetings = await tenantRepositories.meetingGuide.nearby(
           actor,
@@ -1182,6 +1232,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           },
         );
       } catch (error) {
+        meetingGuideUnavailable = true;
         nearbyWarning = "Nearby Meeting Guide data temporarily unavailable";
         logger.error("meetings.nearby.meeting_guide_failed", {
           tenantId: actor.tenantId,
@@ -1231,6 +1282,15 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
             });
           }
         }
+      }
+      if (meetingGuideUnavailable && scopedMeetings.length === 0) {
+        reply.code(503).send({
+          code: "MEETINGS_FEED_UNAVAILABLE",
+          message: "Nearby meeting feed temporarily unavailable",
+          meetings: [],
+          warning: nearbyWarning,
+        });
+        return;
       }
 
       const parseMinutesFromHhmm = (value: string | null): number => {

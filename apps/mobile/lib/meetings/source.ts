@@ -487,7 +487,19 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
                   .filter((entry): entry is MeetingRecord => entry !== null),
               );
             } else {
-              apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
+              let nearbyErrorSummary = "";
+              try {
+                const nearbyErrorPayload = asObject((await nearbyResponse.json()) as unknown);
+                const code = asString(nearbyErrorPayload?.code);
+                const message = asString(nearbyErrorPayload?.message);
+                const warning = asString(nearbyErrorPayload?.warning);
+                nearbyErrorSummary = [code, message ?? warning]
+                  .filter((value): value is string => Boolean(value && value.length > 0))
+                  .join(": ");
+              } catch {
+                nearbyErrorSummary = "";
+              }
+              apiWarning = `Nearby meetings unavailable (${nearbyResponse.status})${nearbyErrorSummary ? ` - ${nearbyErrorSummary}` : ""}; falling back to tenant meetings`;
             }
           } catch (error) {
             apiWarning = "Nearby meetings unavailable; falling back to tenant meetings";
@@ -505,7 +517,21 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         try {
           const response = await fetch(url, { headers });
           if (!response.ok) {
-            failures.push(`${apiBaseUrl}: ${response.status}`);
+            let errorSummary = "";
+            try {
+              const errorPayload = asObject((await response.json()) as unknown);
+              const code = asString(errorPayload?.code);
+              const message = asString(errorPayload?.message);
+              const warning = asString(errorPayload?.warning);
+              errorSummary = [code, message ?? warning]
+                .filter((value): value is string => Boolean(value && value.length > 0))
+                .join(": ");
+            } catch {
+              errorSummary = "";
+            }
+            failures.push(
+              `${apiBaseUrl}: ${response.status}${errorSummary ? ` (${errorSummary})` : ""}`,
+            );
             continue;
           }
 

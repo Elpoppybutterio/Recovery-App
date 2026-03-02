@@ -327,4 +327,81 @@ describe("meeting-guide ingest", () => {
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
+
+  it("classifies missing geo_reason column errors and marks feed failure without throwing", async () => {
+    const repositories = {
+      meetingFeeds: {
+        upsert: vi.fn().mockResolvedValue(undefined),
+        listActive: vi.fn().mockResolvedValue([
+          {
+            id: "feed-schema",
+            url: "https://example.org/schema.json",
+            etag: null,
+            last_modified: null,
+          },
+        ]),
+        markFetchResult: vi.fn().mockResolvedValue(undefined),
+      },
+      meetingGuideMeetings: {
+        upsertForFeed: vi
+          .fn()
+          .mockRejectedValue(
+            new Error('column "geo_reason" of relation "meeting_guide_meetings" does not exist'),
+          ),
+      },
+    } as const;
+
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () =>
+        JSON.stringify([
+          {
+            slug: "schema-mismatch",
+            name: "Schema Mismatch Meeting",
+            day: 1,
+            time: "19:00",
+            latitude: 45.7895,
+            longitude: -108.4928,
+          },
+        ]),
+      json: async () => [],
+    });
+
+    const result = await ingestMeetingGuideFeedsForTenant({
+      repositories: repositories as never,
+      tenantId: "tenant-a",
+      configuredFeeds: [{ name: "Schema feed", url: "https://example.org/schema.json" }],
+      fetchImpl,
+      logger,
+      now: () => new Date("2026-02-20T12:00:00.000Z"),
+    });
+
+    expect(result.feedsAttempted).toBe(1);
+    expect(result.feedsFailed).toBe(1);
+    expect(repositories.meetingFeeds.markFetchResult).toHaveBeenCalledWith(
+      "tenant-a",
+      "feed-schema",
+      expect.objectContaining({
+        lastError: "MISSING_COLUMN:meeting_guide_meetings:geo_reason",
+      }),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      "meeting_guide.ingest.feed_exception",
+      expect.objectContaining({
+        feedId: "feed-schema",
+        migrationRequired: true,
+        table: "meeting_guide_meetings",
+        column: "geo_reason",
+        classification: "MISSING_COLUMN",
+      }),
+    );
+  });
 });

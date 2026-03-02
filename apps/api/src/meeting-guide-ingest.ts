@@ -31,6 +31,63 @@ type FetchLike = (
   init?: { headers?: Record<string, string> },
 ) => Promise<FetchLikeResponse>;
 
+type MeetingGuideIngestErrorClassification = {
+  code: "MISSING_COLUMN" | "MISSING_TABLE" | "WRITE_FAILED";
+  reason: string;
+  migrationRequired: boolean;
+  table: string | null;
+  column: string | null;
+};
+
+class MeetingGuideIngestWriteError extends Error {
+  readonly classification: MeetingGuideIngestErrorClassification;
+
+  constructor(classification: MeetingGuideIngestErrorClassification) {
+    super(classification.reason);
+    this.name = "MeetingGuideIngestWriteError";
+    this.classification = classification;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message.trim().length > 0 ? error.message : "unknown";
+}
+
+function classifyMeetingGuideIngestWriteError(
+  error: unknown,
+): MeetingGuideIngestErrorClassification {
+  const reason = errorMessage(error);
+  const missingColumnMatch = reason.match(/column "([^"]+)" of relation "([^"]+)" does not exist/i);
+  if (missingColumnMatch) {
+    return {
+      code: "MISSING_COLUMN",
+      reason,
+      migrationRequired: true,
+      table: missingColumnMatch[2] ?? null,
+      column: missingColumnMatch[1] ?? null,
+    };
+  }
+
+  const missingTableMatch = reason.match(/relation "([^"]+)" does not exist/i);
+  if (missingTableMatch) {
+    return {
+      code: "MISSING_TABLE",
+      reason,
+      migrationRequired: true,
+      table: missingTableMatch[1] ?? null,
+      column: null,
+    };
+  }
+
+  return {
+    code: "WRITE_FAILED",
+    reason,
+    migrationRequired: false,
+    table: "meeting_guide_meetings",
+    column: null,
+  };
+}
+
 export interface IngestMeetingGuideResult {
   feedsAttempted: number;
   feedsFailed: number;
@@ -981,12 +1038,17 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
     meetingsWithCoordinates += withCoordinates;
     meetingsWithoutCoordinates += withoutCoordinates;
 
-    const ingestedCount = await options.repositories.meetingGuideMeetings.upsertForFeed(
-      options.tenantId,
-      feedId,
-      normalized,
-      now(),
-    );
+    let ingestedCount = 0;
+    try {
+      ingestedCount = await options.repositories.meetingGuideMeetings.upsertForFeed(
+        options.tenantId,
+        feedId,
+        normalized,
+        now(),
+      );
+    } catch (error) {
+      throw new MeetingGuideIngestWriteError(classifyMeetingGuideIngestWriteError(error));
+    }
 
     logger?.info("meeting_guide.ingest.feed_complete", {
       tenantId: options.tenantId,
@@ -1074,14 +1136,28 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
       });
     } catch (error) {
       feedsFailed += 1;
+      const classified =
+        error instanceof MeetingGuideIngestWriteError ? error.classification : null;
       await options.repositories.meetingFeeds.markFetchResult(options.tenantId, feed.id, {
         fetchedAt: now(),
-        lastError: error instanceof Error ? error.message : "unknown",
+        lastError: classified
+          ? [
+              classified.code,
+              classified.table ?? "meeting_guide_meetings",
+              classified.column ?? undefined,
+            ]
+              .filter((value) => typeof value === "string" && value.length > 0)
+              .join(":")
+          : errorMessage(error),
       });
       logger?.error("meeting_guide.ingest.feed_exception", {
         tenantId: options.tenantId,
         feedId: feed.id,
-        reason: error instanceof Error ? error.message : "unknown",
+        reason: classified?.reason ?? errorMessage(error),
+        migrationRequired: classified?.migrationRequired ?? false,
+        table: classified?.table ?? null,
+        column: classified?.column ?? null,
+        classification: classified?.code ?? "UNCLASSIFIED",
       });
     }
   }

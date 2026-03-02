@@ -3617,8 +3617,22 @@ export default function App() {
           console.log("[meetings] normalized sample", selectedDayMeetingsWithGeo[0]);
         }
 
-        const warningSuffix = selectedDayResult.warning ? ` (${selectedDayResult.warning})` : "";
-        setMeetingsStatus(`Meetings updated${warningSuffix}.`);
+        const warningMessage =
+          selectedDayResult.warning ?? todayScopedResult.warning ?? todayUnscopedResult.warning;
+        if (
+          warningMessage &&
+          /(MEETINGS_FEED_UNAVAILABLE|Meetings API failed|temporarily unavailable)/i.test(
+            warningMessage,
+          )
+        ) {
+          setMeetingsError(warningMessage);
+        }
+
+        if (warningMessage) {
+          setMeetingsStatus(`Meetings loaded with warning: ${warningMessage}`);
+        } else {
+          setMeetingsStatus("Meetings updated.");
+        }
       } catch (error) {
         setMeetingsError(formatApiErrorWithHint(formatError(error)));
         setMeetingsStatus("Unable to load meetings.");
@@ -5486,7 +5500,17 @@ export default function App() {
     [],
   );
 
+  const showExportErrorModal = useCallback((context: string, error: unknown) => {
+    const detail = formatError(error);
+    Alert.alert("Export failed", `${context}. ${detail}`);
+  }, []);
+
   const exportAttendance = useCallback(async () => {
+    if (attendanceRecords.length === 0) {
+      setAttendanceStatus("No attendance records to export.");
+      return;
+    }
+
     if (!activeAttendance || !activeAttendance.endAt || activeAttendance.durationSeconds === null) {
       setAttendanceStatus("Complete attendance session before exporting.");
       return;
@@ -5511,11 +5535,19 @@ export default function App() {
       setAttendanceStatus(`${fileName} exported.`);
     } catch (error) {
       console.log("[attendance-export] failed", error);
+      showExportErrorModal("Unable to export attendance slip PDF", error);
       setAttendanceStatus(`PDF export failed: ${formatError(error)}`);
     } finally {
       setExportingPdf(false);
     }
-  }, [activeAttendance, devUserDisplayName, toAttendanceSlipRecord, upsertAttendanceRecord]);
+  }, [
+    activeAttendance,
+    attendanceRecords.length,
+    devUserDisplayName,
+    showExportErrorModal,
+    toAttendanceSlipRecord,
+    upsertAttendanceRecord,
+  ]);
 
   const toggleAttendanceSelection = useCallback((recordId: string) => {
     setSelectedAttendanceIds((current) =>
@@ -5557,6 +5589,11 @@ export default function App() {
   }, [attendanceRecordsForView, selectedAttendanceIds, persistAttendanceRecords]);
 
   const exportSelectedAttendance = useCallback(async () => {
+    if (attendanceRecordsForView.length === 0) {
+      setAttendanceStatus("No attendance records to export.");
+      return;
+    }
+
     const selectedRecords = attendanceRecordsForView.filter((record) =>
       selectedAttendanceIds.includes(record.id),
     );
@@ -5578,11 +5615,18 @@ export default function App() {
       setAttendanceStatus(`Exported ${selectedRecords.length} meeting record(s).`);
     } catch (error) {
       console.log("[attendance-export-selected] failed", error);
+      showExportErrorModal("Unable to export selected attendance records", error);
       setAttendanceStatus(`Failed to export selected attendance: ${formatError(error)}`);
     } finally {
       setExportingAttendanceSelectionPdf(false);
     }
-  }, [attendanceRecordsForView, selectedAttendanceIds, devUserDisplayName, toAttendanceSlipRecord]);
+  }, [
+    attendanceRecordsForView,
+    selectedAttendanceIds,
+    devUserDisplayName,
+    showExportErrorModal,
+    toAttendanceSlipRecord,
+  ]);
 
   const exportAttendanceRange = useCallback(
     async (startDate: Date, endDate: Date, label: string) => {
@@ -5601,7 +5645,7 @@ export default function App() {
         });
 
       if (selectedRecords.length === 0) {
-        setAttendanceStatus(`No attendance records found for ${label}.`);
+        setAttendanceStatus(`No attendance records to export for ${label}.`);
         return;
       }
 
@@ -5617,12 +5661,13 @@ export default function App() {
         setAttendanceStatus(`Exported ${selectedRecords.length} attendance slip(s) for ${label}.`);
       } catch (error) {
         console.log("[attendance-export-range] failed", error);
+        showExportErrorModal(`Unable to export attendance range (${label})`, error);
         setAttendanceStatus(`Failed to export attendance range: ${formatError(error)}`);
       } finally {
         setExportingAttendanceSelectionPdf(false);
       }
     },
-    [attendanceRecords, devUserDisplayName, toAttendanceSlipRecord],
+    [attendanceRecords, devUserDisplayName, showExportErrorModal, toAttendanceSlipRecord],
   );
 
   const exportLast7DaysAttendance = useCallback(async () => {
