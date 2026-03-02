@@ -11,6 +11,12 @@ declare module "expo-location" {
       accuracy?: number | null;
     };
   }>;
+  export function geocodeAsync(address: string): Promise<
+    Array<{
+      latitude: number;
+      longitude: number;
+    }>
+  >;
 }
 
 declare module "react-native-maps" {

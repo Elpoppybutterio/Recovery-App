@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Calendar from "expo-calendar";
+import { geocodeAsync } from "expo-location";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1556,6 +1557,7 @@ export default function App() {
   >(null);
   const requestLocationPermissionRef = useRef<(() => Promise<LocationStamp | null>) | null>(null);
   const currentLocationRef = useRef<LocationStamp | null>(null);
+  const geocodedAddressCacheRef = useRef<Record<string, { lat: number; lng: number } | null>>({});
   const dailyWisdomFetchKeyRef = useRef<string | null>(null);
   const sponsorScheduleEffectKeyRef = useRef<string | null>(null);
   const bootstrapStartedRef = useRef(false);
@@ -2517,6 +2519,133 @@ export default function App() {
     return false;
   }, []);
 
+  const geocodeMeetingsMissingCoordinates = useCallback(async (records: MeetingRecord[]) => {
+    const MAX_GEOCODE_LOOKUPS_PER_REFRESH = 20;
+    let lookups = 0;
+    let resolved = 0;
+
+    const buildAddressCandidates = (meeting: MeetingRecord): string[] => {
+      const raw = meeting.address.trim().replace(/\s+/g, " ");
+      if (raw.length === 0 || raw.toLowerCase() === "address unavailable") {
+        return [];
+      }
+      const hasStateOrZip = /\b[A-Z]{2}\b/.test(raw) || /\b\d{5}(?:-\d{4})?\b/.test(raw);
+      const lowerName = meeting.name.toLowerCase();
+      const hintedCity = lowerName.includes("laurel")
+        ? "Laurel"
+        : lowerName.includes("billings")
+          ? "Billings"
+          : "Billings";
+      const withMontana = hasStateOrZip ? raw : `${raw}, ${hintedCity}, MT`;
+      return Array.from(new Set([raw, withMontana, `${withMontana}, USA`]));
+    };
+
+    const geocodeFromNetwork = async (candidate: string) => {
+      try {
+        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(candidate)}`;
+        const response = await fetch(url, {
+          headers: {
+            accept: "application/json",
+          },
+        });
+        if (!response.ok) {
+          return null;
+        }
+        const payload = (await response.json()) as Array<{ lat?: string; lon?: string }>;
+        const first = payload[0];
+        const coords = normalizeCoordinates({
+          lat: first?.lat ?? null,
+          lng: first?.lon ?? null,
+        });
+        return coords ? { lat: coords.lat, lng: coords.lng } : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const next = [...records];
+    for (let index = 0; index < next.length; index += 1) {
+      const meeting = next[index];
+      if (!meeting || meeting.format === "ONLINE") {
+        continue;
+      }
+      if (meeting.lat !== null && meeting.lng !== null) {
+        continue;
+      }
+
+      const addressCandidates = buildAddressCandidates(meeting);
+      if (addressCandidates.length === 0) {
+        continue;
+      }
+
+      let cached: { lat: number; lng: number } | null | undefined;
+      let cacheKey = "";
+      for (const candidate of addressCandidates) {
+        const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
+        const entry = geocodedAddressCacheRef.current[candidateKey];
+        if (entry !== undefined) {
+          cacheKey = candidateKey;
+          cached = entry;
+          break;
+        }
+      }
+      if (cached === undefined) {
+        if (lookups >= MAX_GEOCODE_LOOKUPS_PER_REFRESH) {
+          break;
+        }
+        lookups += 1;
+        for (const candidate of addressCandidates) {
+          const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
+          cacheKey = candidateKey;
+          try {
+            const geocoded = await geocodeAsync(candidate);
+            const first = geocoded[0];
+            const coords = normalizeCoordinates({
+              lat: first?.latitude ?? null,
+              lng: first?.longitude ?? null,
+            });
+            cached = coords ? { lat: coords.lat, lng: coords.lng } : null;
+          } catch {
+            cached = await geocodeFromNetwork(candidate);
+          }
+          geocodedAddressCacheRef.current[candidateKey] = cached ?? null;
+          if (cached) {
+            break;
+          }
+        }
+      }
+
+      if (!cached) {
+        if (cacheKey.length === 0) {
+          const fallbackKey = addressCandidates[0]?.toLowerCase().replace(/\s+/g, " ").trim();
+          if (fallbackKey) {
+            geocodedAddressCacheRef.current[fallbackKey] = null;
+          }
+        }
+        continue;
+      }
+
+      resolved += 1;
+      next[index] = {
+        ...meeting,
+        lat: cached.lat,
+        lng: cached.lng,
+        geoStatus: "ok",
+        geoReason: null,
+        geoUpdatedAt: new Date().toISOString(),
+      };
+    }
+
+    if (__DEV__ && resolved > 0) {
+      console.log("[meetings] geocode fallback resolved", {
+        resolved,
+        lookups,
+      });
+    }
+
+    return next;
+  }, []);
+
   const persistAttendanceRecords = useCallback(
     async (nextRecords: AttendanceRecord[]) => {
       try {
@@ -3353,14 +3482,20 @@ export default function App() {
           }
         }
 
-        setMeetings(selectedDayMeetings);
-        setTodayNearbyMeetings(todayResultMeetings);
-        setHomeGroupFallbackDayOffset(nextDayOffset);
-        setHomeGroupFallbackMeetings(nextDayMeetings);
+        const selectedDayMeetingsWithGeo =
+          await geocodeMeetingsMissingCoordinates(selectedDayMeetings);
+        const todayResultMeetingsWithGeo =
+          await geocodeMeetingsMissingCoordinates(todayResultMeetings);
+        const nextDayMeetingsWithGeo = await geocodeMeetingsMissingCoordinates(nextDayMeetings);
 
-        if (!meetingsShapeLoggedRef.current && selectedDayMeetings.length > 0) {
+        setMeetings(selectedDayMeetingsWithGeo);
+        setTodayNearbyMeetings(todayResultMeetingsWithGeo);
+        setHomeGroupFallbackDayOffset(nextDayOffset);
+        setHomeGroupFallbackMeetings(nextDayMeetingsWithGeo);
+
+        if (!meetingsShapeLoggedRef.current && selectedDayMeetingsWithGeo.length > 0) {
           meetingsShapeLoggedRef.current = true;
-          console.log("[meetings] normalized sample", selectedDayMeetings[0]);
+          console.log("[meetings] normalized sample", selectedDayMeetingsWithGeo[0]);
         }
 
         const warningSuffix = selectedDayResult.warning ? ` (${selectedDayResult.warning})` : "";
@@ -3380,6 +3515,7 @@ export default function App() {
       source,
       meetingRadiusMiles,
       formatApiErrorWithHint,
+      geocodeMeetingsMissingCoordinates,
     ],
   );
 
