@@ -294,6 +294,52 @@ function toJsonParam(value: unknown) {
   return JSON.stringify(value ?? {});
 }
 
+function inferGeoStatusFromCoordinates(
+  lat: number | null,
+  lng: number | null,
+): "ok" | "missing" | "invalid" | "partial" {
+  if (lat !== null && lng !== null) {
+    return "ok";
+  }
+  if (lat === null && lng === null) {
+    return "missing";
+  }
+  return "partial";
+}
+
+function inferGeoReasonFromCoordinates(lat: number | null, lng: number | null): string | null {
+  if (lat !== null && lng !== null) {
+    return null;
+  }
+  if (lat === null && lng === null) {
+    return "missing_coordinates";
+  }
+  return lat === null ? "missing_latitude" : "missing_longitude";
+}
+
+type DbErrorShape = {
+  code?: string;
+  message?: string;
+};
+
+function isMissingMeetingGuideGeoColumnsError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as DbErrorShape;
+  const message = String(candidate.message ?? "").toLowerCase();
+  const isUndefinedColumn = candidate.code === "42703";
+  if (!isUndefinedColumn) {
+    return false;
+  }
+  return (
+    message.includes("meeting_guide_meetings") &&
+    (message.includes("geo_status") ||
+      message.includes("geo_reason") ||
+      message.includes("geo_updated_at"))
+  );
+}
+
 function toComparableTimestamp(value: string | null): number {
   if (!value) {
     return Number.NEGATIVE_INFINITY;
@@ -1140,50 +1186,108 @@ export function createRepositories(db: DbClient) {
         filters: { dayOfWeek?: number; limit?: number } = {},
       ): Promise<MeetingGuideMeetingRow[]> {
         const limit = Math.max(1, Math.min(filters.limit ?? 500, 2000));
-        const result = await db.query<MeetingGuideMeetingRow>(
-          `
-          SELECT
-            id,
-            tenant_id,
-            source_feed_id,
-            slug,
-            name,
-            day,
-            time,
-            end_time,
-            timezone,
-            formatted_address,
-            address,
-            city,
-            state,
-            postal_code,
-            country,
-            region,
-            location,
-            notes,
-            types_json,
-            conference_url,
-            conference_phone,
-            lat,
-            lng,
-            geo_status,
-            geo_reason,
-            geo_updated_at,
-            updated_at_source,
-            last_ingested_at
-          FROM meeting_guide_meetings
-          WHERE tenant_id = $1
-            AND ($2::int IS NULL OR day = $2)
-          ORDER BY
-            day ASC NULLS LAST,
-            time ASC NULLS LAST,
-            name ASC
-          LIMIT $3
-        `,
-          [tenantId, filters.dayOfWeek ?? null, limit],
-        );
+        try {
+          const result = await db.query<MeetingGuideMeetingRow>(
+            `
+            SELECT
+              id,
+              tenant_id,
+              source_feed_id,
+              slug,
+              name,
+              day,
+              time,
+              end_time,
+              timezone,
+              formatted_address,
+              address,
+              city,
+              state,
+              postal_code,
+              country,
+              region,
+              location,
+              notes,
+              types_json,
+              conference_url,
+              conference_phone,
+              lat,
+              lng,
+              geo_status,
+              geo_reason,
+              geo_updated_at,
+              updated_at_source,
+              last_ingested_at
+            FROM meeting_guide_meetings
+            WHERE tenant_id = $1
+              AND ($2::int IS NULL OR day = $2)
+            ORDER BY
+              day ASC NULLS LAST,
+              time ASC NULLS LAST,
+              name ASC
+            LIMIT $3
+          `,
+            [tenantId, filters.dayOfWeek ?? null, limit],
+          );
 
-        return result.rows;
+          return result.rows;
+        } catch (error) {
+          if (!isMissingMeetingGuideGeoColumnsError(error)) {
+            throw error;
+          }
+
+          type LegacyMeetingGuideMeetingRow = Omit<
+            MeetingGuideMeetingRow,
+            "geo_status" | "geo_reason" | "geo_updated_at"
+          >;
+
+          const legacy = await db.query<LegacyMeetingGuideMeetingRow>(
+            `
+            SELECT
+              id,
+              tenant_id,
+              source_feed_id,
+              slug,
+              name,
+              day,
+              time,
+              end_time,
+              timezone,
+              formatted_address,
+              address,
+              city,
+              state,
+              postal_code,
+              country,
+              region,
+              location,
+              notes,
+              types_json,
+              conference_url,
+              conference_phone,
+              lat,
+              lng,
+              updated_at_source,
+              last_ingested_at
+            FROM meeting_guide_meetings
+            WHERE tenant_id = $1
+              AND ($2::int IS NULL OR day = $2)
+            ORDER BY
+              day ASC NULLS LAST,
+              time ASC NULLS LAST,
+              name ASC
+            LIMIT $3
+          `,
+            [tenantId, filters.dayOfWeek ?? null, limit],
+          );
+
+          return legacy.rows.map((row) => ({
+            ...row,
+            geo_status: inferGeoStatusFromCoordinates(row.lat, row.lng),
+            geo_reason: inferGeoReasonFromCoordinates(row.lat, row.lng),
+            geo_updated_at: row.last_ingested_at,
+          }));
+        }
       },
 
       async listNearby(
@@ -1195,61 +1299,132 @@ export function createRepositories(db: DbClient) {
         const limit = Math.max(1, Math.min(filters.limit ?? 500, 500));
         const format = filters.format ?? "any";
 
-        const candidates = await db.query<MeetingGuideMeetingRow>(
-          `
-          SELECT
-            id,
-            tenant_id,
-            source_feed_id,
-            slug,
-            name,
-            day,
-            time,
-            end_time,
-            timezone,
-            formatted_address,
-            address,
-            city,
-            state,
-            postal_code,
-            country,
-            region,
-            location,
-            notes,
-            types_json,
-            conference_url,
-            conference_phone,
-            lat,
-            lng,
-            geo_status,
-            geo_reason,
-            geo_updated_at,
-            updated_at_source,
-            last_ingested_at
-          FROM meeting_guide_meetings
-          WHERE tenant_id = $1
-            AND geo_status = 'ok'
-            AND ($2::int IS NULL OR day = $2)
-            AND ($3::text IS NULL OR time >= $3)
-            AND ($4::text IS NULL OR time <= $4)
-            AND (
-              lat BETWEEN $5 AND $6 AND lng BETWEEN $7 AND $8
-            )
-          ORDER BY updated_at DESC
-          LIMIT $9
-        `,
-          [
-            tenantId,
-            filters.dayOfWeek ?? null,
-            filters.timeFrom ?? null,
-            filters.timeTo ?? null,
-            bounds.latMin,
-            bounds.latMax,
-            bounds.lngMin,
-            bounds.lngMax,
-            limit * 2,
-          ],
-        );
+        let candidates: { rows: MeetingGuideMeetingRow[] };
+
+        try {
+          candidates = await db.query<MeetingGuideMeetingRow>(
+            `
+            SELECT
+              id,
+              tenant_id,
+              source_feed_id,
+              slug,
+              name,
+              day,
+              time,
+              end_time,
+              timezone,
+              formatted_address,
+              address,
+              city,
+              state,
+              postal_code,
+              country,
+              region,
+              location,
+              notes,
+              types_json,
+              conference_url,
+              conference_phone,
+              lat,
+              lng,
+              geo_status,
+              geo_reason,
+              geo_updated_at,
+              updated_at_source,
+              last_ingested_at
+            FROM meeting_guide_meetings
+            WHERE tenant_id = $1
+              AND geo_status = 'ok'
+              AND ($2::int IS NULL OR day = $2)
+              AND ($3::text IS NULL OR time >= $3)
+              AND ($4::text IS NULL OR time <= $4)
+              AND (
+                lat BETWEEN $5 AND $6 AND lng BETWEEN $7 AND $8
+              )
+            ORDER BY updated_at DESC
+            LIMIT $9
+          `,
+            [
+              tenantId,
+              filters.dayOfWeek ?? null,
+              filters.timeFrom ?? null,
+              filters.timeTo ?? null,
+              bounds.latMin,
+              bounds.latMax,
+              bounds.lngMin,
+              bounds.lngMax,
+              limit * 2,
+            ],
+          );
+        } catch (error) {
+          if (!isMissingMeetingGuideGeoColumnsError(error)) {
+            throw error;
+          }
+          type LegacyMeetingGuideMeetingRow = Omit<
+            MeetingGuideMeetingRow,
+            "geo_status" | "geo_reason" | "geo_updated_at"
+          >;
+          const legacyResult = await db.query<LegacyMeetingGuideMeetingRow>(
+            `
+            SELECT
+              id,
+              tenant_id,
+              source_feed_id,
+              slug,
+              name,
+              day,
+              time,
+              end_time,
+              timezone,
+              formatted_address,
+              address,
+              city,
+              state,
+              postal_code,
+              country,
+              region,
+              location,
+              notes,
+              types_json,
+              conference_url,
+              conference_phone,
+              lat,
+              lng,
+              updated_at_source,
+              last_ingested_at
+            FROM meeting_guide_meetings
+            WHERE tenant_id = $1
+              AND ($2::int IS NULL OR day = $2)
+              AND ($3::text IS NULL OR time >= $3)
+              AND ($4::text IS NULL OR time <= $4)
+              AND (
+                lat BETWEEN $5 AND $6 AND lng BETWEEN $7 AND $8
+              )
+            ORDER BY updated_at DESC
+            LIMIT $9
+          `,
+            [
+              tenantId,
+              filters.dayOfWeek ?? null,
+              filters.timeFrom ?? null,
+              filters.timeTo ?? null,
+              bounds.latMin,
+              bounds.latMax,
+              bounds.lngMin,
+              bounds.lngMax,
+              limit * 2,
+            ],
+          );
+          candidates = {
+            rows: legacyResult.rows.map((row) => ({
+              ...row,
+              geo_status: inferGeoStatusFromCoordinates(row.lat, row.lng),
+              geo_reason: inferGeoReasonFromCoordinates(row.lat, row.lng),
+              geo_updated_at: row.last_ingested_at,
+            })),
+          };
+        }
 
         const normalized = candidates.rows
           .map((row): NearbyMeetingRow | null => {
