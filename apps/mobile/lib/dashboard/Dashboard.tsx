@@ -91,7 +91,7 @@ function toTwelveHour(hhmm: string): string {
 
 function distanceLabel(distanceMeters: number | null): string {
   if (distanceMeters === null) {
-    return "Online";
+    return "Location unavailable";
   }
   const miles = distanceMeters / 1609.344;
   if (miles > 0 && miles < 0.1) {
@@ -100,14 +100,14 @@ function distanceLabel(distanceMeters: number | null): string {
   return `${miles.toFixed(1)} mi`;
 }
 
-function meetingTypeLabel(meeting: DashboardMeeting): string {
+function meetingFormatLabel(meeting: DashboardMeeting): string {
   if (meeting.format === "ONLINE") {
     return "Online";
   }
   if (meeting.format === "HYBRID") {
-    return `${distanceLabel(meeting.distanceMeters)} • In-Person / Online`;
+    return "In-Person / Online";
   }
-  return `${distanceLabel(meeting.distanceMeters)} • In-Person`;
+  return "In-Person";
 }
 
 function clampPercent(value: number): number {
@@ -238,7 +238,7 @@ export function Dashboard({
   const dailyChecklistPct = clampPercent(dailyChecklist.percent);
   const dailyChecklistSummary = dailyChecklist.summary;
   const dailyChecklistInsight = dailyChecklistMessage(dailyChecklistPct);
-  const upcoming = nextMeetings.slice(0, 3);
+  const upcoming = nextMeetings.slice(0, 5);
   const todayTotal = Math.max(1, morningRoutine.todayTotalCount);
   const todayCompleted = Math.max(0, Math.min(morningRoutine.todayCompletedCount, todayTotal));
   const morningCompletionPct = clampPercent((todayCompleted / todayTotal) * 100);
@@ -512,8 +512,7 @@ export function Dashboard({
               <Text style={styles.streakLabel}>{meetingsTodaySummary}</Text>
               <View style={styles.separator} />
               <View style={styles.weeklyHeaderRow}>
-                <Text style={styles.metricMeta}>This Week</Text>
-                <Text style={styles.metricMeta}>{meetingsWeekTotal} meetings</Text>
+                <Text style={styles.metricMeta}>{`Week's Meetings ${meetingsWeekTotal}`}</Text>
               </View>
               <View style={styles.weeklyBarsRow}>
                 {meetingsWeekBars.map((count, index) => {
@@ -757,7 +756,7 @@ export function Dashboard({
             ]}
           >
             <View style={styles.upcomingHeader}>
-              <Text style={styles.upcomingTitle}>Upcoming Meetings</Text>
+              <Text style={styles.upcomingTitle}>Current & Upcoming Meetings</Text>
               <Pressable
                 style={styles.upcomingMoreButton}
                 onPress={onOpenMeetings}
@@ -797,16 +796,21 @@ export function Dashboard({
                     </Text>
                   </View>
                   <View style={styles.meetingTextCol}>
-                    <Text numberOfLines={1} style={styles.meetingName}>
+                    <Text numberOfLines={2} style={styles.meetingName}>
                       {meeting.name}
                     </Text>
-                    <Text numberOfLines={1} style={styles.meetingMeta}>
-                      {meetingTypeLabel(meeting)}
-                    </Text>
+                    <View style={styles.meetingMetaRow}>
+                      <Text style={styles.meetingDistance}>
+                        {distanceLabel(meeting.distanceMeters)}
+                      </Text>
+                      <Text style={styles.meetingMeta}>• {meetingFormatLabel(meeting)}</Text>
+                      <Text style={styles.meetingMeta}>
+                        • {toTwelveHour(meeting.startsAtLocal)}
+                      </Text>
+                    </View>
                   </View>
-                  <Text style={styles.meetingTime}>{toTwelveHour(meeting.startsAtLocal)}</Text>
                 </Pressable>
-                <View style={styles.meetingActionsCol}>
+                <View style={styles.meetingActionsRow}>
                   <Pressable
                     style={styles.meetingLogButton}
                     onPress={() => onLogMeeting(meeting.id)}
@@ -1554,17 +1558,14 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.55)",
   },
   meetingItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
+    gap: 8,
     padding: 9,
     borderRadius: 12,
     backgroundColor: "rgba(255,255,255,0.92)",
   },
   meetingDetailsButton: {
-    flex: 1,
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 10,
   },
   meetingIcon: {
@@ -1585,35 +1586,43 @@ const styles = StyleSheet.create({
   },
   meetingTextCol: {
     flex: 1,
-    gap: 1,
+    minWidth: 0,
+    gap: 2,
   },
   meetingName: {
     color: "#2B1F72",
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: "700",
+    lineHeight: 19,
+  },
+  meetingMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+  },
+  meetingDistance: {
+    color: "#1F1457",
+    fontSize: 13,
+    fontWeight: "800",
   },
   meetingMeta: {
     color: "#3F2E88",
-    fontSize: 12,
-    fontWeight: "600",
+    fontSize: 13,
+    fontWeight: "700",
   },
-  meetingTime: {
-    color: "#2F2380",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  meetingActionsCol: {
-    gap: 6,
-    alignItems: "stretch",
+  meetingActionsRow: {
+    flexDirection: "row",
+    gap: 8,
   },
   meetingLogButton: {
+    flex: 1,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: "rgba(47,35,128,0.25)",
     backgroundColor: "rgba(90,44,206,0.12)",
     paddingHorizontal: 10,
-    paddingVertical: 8,
-    minWidth: 56,
+    paddingVertical: 9,
     alignItems: "center",
   },
   meetingLogButtonText: {

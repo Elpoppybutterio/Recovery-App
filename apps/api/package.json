@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "db:migrate": "tsx src/scripts/migrate.ts",
+    "meetings:geo:backfill": "tsx src/scripts/backfill-meeting-geo.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

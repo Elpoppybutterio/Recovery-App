@@ -2,8 +2,15 @@ declare module "expo-location" {
   export const Accuracy: {
     Balanced: number;
   };
-  export function getForegroundPermissionsAsync(): Promise<{ granted: boolean }>;
-  export function requestForegroundPermissionsAsync(): Promise<{ granted: boolean }>;
+  export function getForegroundPermissionsAsync(): Promise<{
+    granted: boolean;
+    canAskAgain?: boolean;
+  }>;
+  export function requestForegroundPermissionsAsync(): Promise<{
+    granted: boolean;
+    canAskAgain?: boolean;
+  }>;
+  export function hasServicesEnabledAsync(): Promise<boolean>;
   export function getCurrentPositionAsync(options: { accuracy: number }): Promise<{
     coords: {
       latitude: number;
@@ -11,6 +18,19 @@ declare module "expo-location" {
       accuracy?: number | null;
     };
   }>;
+  export function getLastKnownPositionAsync(): Promise<{
+    coords: {
+      latitude: number;
+      longitude: number;
+      accuracy?: number | null;
+    };
+  } | null>;
+  export function geocodeAsync(address: string): Promise<
+    Array<{
+      latitude: number;
+      longitude: number;
+    }>
+  >;
 }
 
 declare module "react-native-maps" {

@@ -1055,6 +1055,9 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         types: [],
         typesDisplay: [],
         format: "IN_PERSON" as const,
+        geoStatus: "ok" as const,
+        geoReason: null,
+        geoUpdatedAt: meeting.created_at,
       }));
 
       const mappedMeetingGuideMeetings = scopedMeetingGuideMeetings.map((meeting) => {
@@ -1091,6 +1094,9 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           types: typeCodes,
           typesDisplay: mapTypeCodesToLabels(typeCodes),
           format,
+          geoStatus: meeting.geo_status,
+          geoReason: meeting.geo_reason,
+          geoUpdatedAt: meeting.geo_updated_at,
         };
       });
 
@@ -1262,6 +1268,9 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           types: meeting.types,
           typesDisplay: mapTypeCodesToLabels(meeting.types),
           distanceMeters: meeting.distance_meters,
+          geoStatus: meeting.geo_status,
+          geoReason: meeting.geo_reason,
+          geoUpdatedAt: meeting.geo_updated_at,
         })),
       };
     },
@@ -2018,12 +2027,20 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           total_meetings: number;
           meetings_with_coordinates: number;
           meetings_without_coordinates: number;
+          meetings_geo_ok: number;
+          meetings_geo_missing: number;
+          meetings_geo_partial: number;
+          meetings_geo_invalid: number;
         }>(
           `
             SELECT
               COUNT(*)::int AS total_meetings,
               COUNT(*) FILTER (WHERE lat IS NOT NULL AND lng IS NOT NULL)::int AS meetings_with_coordinates,
-              COUNT(*) FILTER (WHERE lat IS NULL OR lng IS NULL)::int AS meetings_without_coordinates
+              COUNT(*) FILTER (WHERE lat IS NULL OR lng IS NULL)::int AS meetings_without_coordinates,
+              COUNT(*) FILTER (WHERE geo_status = 'ok')::int AS meetings_geo_ok,
+              COUNT(*) FILTER (WHERE geo_status = 'missing')::int AS meetings_geo_missing,
+              COUNT(*) FILTER (WHERE geo_status = 'partial')::int AS meetings_geo_partial,
+              COUNT(*) FILTER (WHERE geo_status = 'invalid')::int AS meetings_geo_invalid
             FROM meeting_guide_meetings
             WHERE tenant_id = $1
           `,
@@ -2058,6 +2075,10 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
             total_meetings: 0,
             meetings_with_coordinates: 0,
             meetings_without_coordinates: 0,
+            meetings_geo_ok: 0,
+            meetings_geo_missing: 0,
+            meetings_geo_partial: 0,
+            meetings_geo_invalid: 0,
           },
           nearbySample: nearbySample.map((meeting) => ({
             id: meeting.id,
@@ -2068,6 +2089,8 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
             day: meeting.day,
             distanceMeters: meeting.distance_meters,
             format: meeting.inferred_format,
+            geoStatus: meeting.geo_status,
+            geoReason: meeting.geo_reason,
           })),
         };
       },

@@ -3,16 +3,17 @@
     "name": "Sober AI",
     "slug": "sober-ai",
     "icon": "./assets/icon.png",
-    "version": "0.1.0",
+    "version": "0.9.5",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
       "icon": "./assets/icon.png",
       "bundleIdentifier": "com.sober.ai.dev",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Location is used to show nearby meetings and arrival prompts.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Always location is used to auto-log meeting attendance when you arrive at a meeting geofence.",
-        "UIBackgroundModes": ["location", "location"],
+        "NSLocationWhenInUseUsageDescription": "We use your location to show distance to meetings.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "We use your location to show distance to meetings and enable geofence features if you turn them on.",
+        "NSLocationAlwaysUsageDescription": "We use your location to show distance to meetings and enable geofence features if you turn them on.",
+        "UIBackgroundModes": ["location"],
         "ITSAppUsesNonExemptEncryption": false
       },
       "buildNumber": "1",
@@ -25,9 +26,6 @@
       },
       "package": "com.sober.ai.dev",
       "permissions": [
-        "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION"

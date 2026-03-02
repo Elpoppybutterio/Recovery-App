@@ -233,7 +233,9 @@ export interface MeetingGuideMeetingRow {
   conference_phone: string | null;
   lat: number | null;
   lng: number | null;
-  geo_status: "present" | "missing";
+  geo_status: "ok" | "missing" | "invalid" | "partial";
+  geo_reason: string | null;
+  geo_updated_at: string | null;
   updated_at_source: string | null;
   last_ingested_at: string;
 }
@@ -1027,13 +1029,15 @@ export function createRepositories(db: DbClient) {
               lat,
               lng,
               geo_status,
+              geo_reason,
+              geo_updated_at,
               updated_at_source,
               last_ingested_at
             )
             VALUES (
               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
               $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20,
-              $21, $22, $23, $24, $25, $26
+              $21, $22, $23, $24, $25, $26, $27, $28
             )
             ON CONFLICT (tenant_id, source_feed_id, slug)
             DO UPDATE SET
@@ -1054,9 +1058,31 @@ export function createRepositories(db: DbClient) {
               types_json = EXCLUDED.types_json,
               conference_url = EXCLUDED.conference_url,
               conference_phone = EXCLUDED.conference_phone,
-              lat = EXCLUDED.lat,
-              lng = EXCLUDED.lng,
-              geo_status = EXCLUDED.geo_status,
+              lat = CASE
+                WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.lat
+                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.lat
+                ELSE EXCLUDED.lat
+              END,
+              lng = CASE
+                WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.lng
+                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.lng
+                ELSE EXCLUDED.lng
+              END,
+              geo_status = CASE
+                WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_status
+                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_status
+                ELSE EXCLUDED.geo_status
+              END,
+              geo_reason = CASE
+                WHEN EXCLUDED.geo_status = 'ok' THEN NULL
+                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_reason
+                ELSE EXCLUDED.geo_reason
+              END,
+              geo_updated_at = CASE
+                WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_updated_at
+                WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_updated_at
+                ELSE EXCLUDED.geo_updated_at
+              END,
               updated_at_source = EXCLUDED.updated_at_source,
               last_ingested_at = EXCLUDED.last_ingested_at,
               updated_at = NOW()
@@ -1085,7 +1111,21 @@ export function createRepositories(db: DbClient) {
               meeting.conferencePhone,
               meeting.lat,
               meeting.lng,
-              meeting.lat !== null && meeting.lng !== null ? "present" : "missing",
+              meeting.geoStatus ??
+                (meeting.lat !== null && meeting.lng !== null
+                  ? "ok"
+                  : meeting.lat === null && meeting.lng === null
+                    ? "missing"
+                    : "partial"),
+              meeting.geoReason ??
+                (meeting.lat !== null && meeting.lng !== null
+                  ? null
+                  : meeting.lat === null && meeting.lng === null
+                    ? "missing_coordinates"
+                    : meeting.lat === null
+                      ? "missing_latitude"
+                      : "missing_longitude"),
+              meeting.geoUpdatedAt ?? now.toISOString(),
               meeting.updatedAtSource,
               now.toISOString(),
             ],
@@ -1127,6 +1167,8 @@ export function createRepositories(db: DbClient) {
             lat,
             lng,
             geo_status,
+            geo_reason,
+            geo_updated_at,
             updated_at_source,
             last_ingested_at
           FROM meeting_guide_meetings
@@ -1180,11 +1222,13 @@ export function createRepositories(db: DbClient) {
             lat,
             lng,
             geo_status,
+            geo_reason,
+            geo_updated_at,
             updated_at_source,
             last_ingested_at
           FROM meeting_guide_meetings
           WHERE tenant_id = $1
-            AND geo_status = 'present'
+            AND geo_status = 'ok'
             AND ($2::int IS NULL OR day = $2)
             AND ($3::text IS NULL OR time >= $3)
             AND ($4::text IS NULL OR time <= $4)

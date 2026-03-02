@@ -1,3 +1,5 @@
+import { normalizeCoordinates } from "./distance";
+
 export type MeetingFormat = "IN_PERSON" | "ONLINE" | "HYBRID";
 export type MeetingOpenness = "OPEN" | "CLOSED" | "UNKNOWN";
 
@@ -12,6 +14,10 @@ export type MeetingRecord = {
   lat: number | null;
   lng: number | null;
   onlineUrl: string | null;
+  distanceMeters?: number | null;
+  geoStatus?: "ok" | "missing" | "invalid" | "partial";
+  geoReason?: string | null;
+  geoUpdatedAt?: string | null;
 };
 
 export type ListMeetingsParams = {
@@ -252,6 +258,22 @@ function normalizeMeetingFormat(
   return "IN_PERSON";
 }
 
+function normalizeGeoStatus(value: unknown): "ok" | "missing" | "invalid" | "partial" | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "ok" ||
+    normalized === "missing" ||
+    normalized === "invalid" ||
+    normalized === "partial"
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
 function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecord | null {
   const input = asObject(value);
   if (!input) {
@@ -267,8 +289,11 @@ function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecor
     input.startsAtLocal ?? input.start_time ?? input.time ?? input.formatted_time,
   );
 
-  const lat = asNumber(input.lat ?? input.latitude);
-  const lng = asNumber(input.lng ?? input.longitude);
+  const rawLat = asNumber(input.lat ?? input.latitude);
+  const rawLng = asNumber(input.lng ?? input.longitude);
+  const coords = normalizeCoordinates({ lat: rawLat, lng: rawLng });
+  const lat = coords?.lat ?? null;
+  const lng = coords?.lng ?? null;
   const onlineUrl =
     asString(input.onlineUrl) ??
     asString(input.virtual_meeting_link) ??
@@ -304,6 +329,18 @@ function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecor
     lat,
     lng,
     onlineUrl,
+    distanceMeters: null,
+    geoStatus:
+      lat !== null && lng !== null ? "ok" : lat === null && lng === null ? "missing" : "partial",
+    geoReason:
+      lat !== null && lng !== null
+        ? null
+        : lat === null && lng === null
+          ? "missing_coordinates"
+          : lat === null
+            ? "missing_latitude"
+            : "missing_longitude",
+    geoUpdatedAt: null,
   };
 }
 
@@ -320,11 +357,25 @@ function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): Meeting
   }
 
   const address = asString(input.address) ?? "Address unavailable";
-  const lat = asNumber(input.lat ?? input.latitude);
-  const lng = asNumber(input.lng ?? input.longitude);
+  const rawLat = asNumber(input.lat ?? input.latitude);
+  const rawLng = asNumber(input.lng ?? input.longitude);
+  const coords = normalizeCoordinates({ lat: rawLat, lng: rawLng });
+  const lat = coords?.lat ?? null;
+  const lng = coords?.lng ?? null;
   const onlineUrl = asString(input.onlineUrl);
+  const distanceMeters =
+    asNumber(input.distanceMeters ?? input.distance_meters) ??
+    (() => {
+      const miles = asNumber(input.distanceMiles ?? input.distance_miles);
+      return miles === null ? null : miles * 1609.344;
+    })();
   const format = normalizeMeetingFormat(onlineUrl, lat, lng, address);
   const openness = normalizeOpenness(input.openness, input.types);
+  const geoStatus =
+    normalizeGeoStatus(input.geoStatus ?? input.geo_status) ??
+    (lat !== null && lng !== null ? "ok" : lat === null && lng === null ? "missing" : "partial");
+  const geoReason = asString(input.geoReason ?? input.geo_reason);
+  const geoUpdatedAt = asString(input.geoUpdatedAt ?? input.geo_updated_at);
 
   return {
     id,
@@ -337,6 +388,10 @@ function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): Meeting
     lat,
     lng,
     onlineUrl,
+    distanceMeters,
+    geoStatus,
+    geoReason,
+    geoUpdatedAt,
   };
 }
 
@@ -459,6 +514,24 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
       meetings = hasLocation
         ? dedupeMeetings([...nearbyMeetings, ...allMeetingsForDay])
         : allMeetingsForDay;
+
+      if (__DEV__) {
+        const missingGeo = meetings
+          .filter((meeting) => meeting.lat === null || meeting.lng === null)
+          .slice(0, 8)
+          .map((meeting) => ({
+            id: meeting.id,
+            name: meeting.name,
+            geoStatus: meeting.geoStatus ?? "missing",
+            geoReason: meeting.geoReason ?? "unknown",
+          }));
+        if (missingGeo.length > 0) {
+          console.log("[meetings] location unavailable", {
+            count: missingGeo.length,
+            sample: missingGeo,
+          });
+        }
+      }
 
       return {
         meetings,
