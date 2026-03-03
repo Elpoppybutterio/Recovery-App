@@ -1646,6 +1646,9 @@ export default function App() {
   const [attendanceStatus, setAttendanceStatus] = useState("No active attendance session.");
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportingAttendanceSelectionPdf, setExportingAttendanceSelectionPdf] = useState(false);
+  const [attendanceExportProgressLabel, setAttendanceExportProgressLabel] = useState<string | null>(
+    null,
+  );
   const [selectedAttendanceIds, setSelectedAttendanceIds] = useState<string[]>([]);
   const [diagnosticsExportDryRunStatus, setDiagnosticsExportDryRunStatus] = useState<string | null>(
     null,
@@ -5961,16 +5964,17 @@ export default function App() {
     setExportingPdf(true);
     try {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
-      const uri = await generateAttendanceSlipPdf(
+      const uris = await generateAttendanceSlipPdf(
         [toAttendanceSlipRecord(activeAttendance)],
         { participantName: devUserDisplayName },
         { fileName },
       );
-      await shareAttendanceSlipPdf(uri, fileName);
+      await shareAttendanceSlipPdf(uris, fileName);
+      const primaryUri = uris[0] ?? null;
 
       const next: AttendanceRecord = {
         ...activeAttendance,
-        pdfUri: uri,
+        pdfUri: primaryUri,
       };
       setActiveAttendance(next);
       upsertAttendanceRecord(next);
@@ -6039,16 +6043,22 @@ export default function App() {
       return;
     }
     setExportingAttendanceSelectionPdf(true);
+    setAttendanceExportProgressLabel(null);
     try {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected ${new Date()
         .toISOString()
         .slice(0, 10)}.pdf`;
-      const uri = await generateAttendanceSlipPdf(
+      const uris = await generateAttendanceSlipPdf(
         selectedRecords.map(toAttendanceSlipRecord),
         { participantName: devUserDisplayName },
-        { fileName },
+        {
+          fileName,
+          onProgress: ({ chunkIndex, chunkCount }) => {
+            setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
+          },
+        },
       );
-      await shareAttendanceSlipPdf(uri, fileName);
+      await shareAttendanceSlipPdf(uris, fileName);
       recordLastExportAttempt(true);
       setAttendanceStatus(`Exported ${selectedRecords.length} meeting record(s).`);
     } catch (error) {
@@ -6056,11 +6066,13 @@ export default function App() {
       recordLastExportAttempt(false, error);
       setAttendanceStatus(`Failed to export selected attendance: ${formatError(error)}`);
     } finally {
+      setAttendanceExportProgressLabel(null);
       setExportingAttendanceSelectionPdf(false);
     }
   }, [
     attendanceRecordsForView,
     selectedAttendanceIds,
+    setAttendanceExportProgressLabel,
     devUserDisplayName,
     recordLastExportAttempt,
     toAttendanceSlipRecord,
@@ -6088,14 +6100,20 @@ export default function App() {
       }
 
       setExportingAttendanceSelectionPdf(true);
+      setAttendanceExportProgressLabel(null);
       try {
         const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
-        const uri = await generateAttendanceSlipPdf(
+        const uris = await generateAttendanceSlipPdf(
           selectedRecords.map(toAttendanceSlipRecord),
           { participantName: devUserDisplayName },
-          { fileName },
+          {
+            fileName,
+            onProgress: ({ chunkIndex, chunkCount }) => {
+              setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
+            },
+          },
         );
-        await shareAttendanceSlipPdf(uri, fileName);
+        await shareAttendanceSlipPdf(uris, fileName);
         recordLastExportAttempt(true);
         setAttendanceStatus(`Exported ${selectedRecords.length} attendance slip(s) for ${label}.`);
       } catch (error) {
@@ -6103,10 +6121,17 @@ export default function App() {
         recordLastExportAttempt(false, error);
         setAttendanceStatus(`Failed to export attendance range: ${formatError(error)}`);
       } finally {
+        setAttendanceExportProgressLabel(null);
         setExportingAttendanceSelectionPdf(false);
       }
     },
-    [attendanceRecords, devUserDisplayName, recordLastExportAttempt, toAttendanceSlipRecord],
+    [
+      attendanceRecords,
+      devUserDisplayName,
+      recordLastExportAttempt,
+      setAttendanceExportProgressLabel,
+      toAttendanceSlipRecord,
+    ],
   );
 
   const exportLast7DaysAttendance = useCallback(async () => {
@@ -8848,7 +8873,9 @@ export default function App() {
                   <View style={styles.buttonRow}>
                     <AppButton
                       title={
-                        exportingAttendanceSelectionPdf ? "Exporting..." : "Export last 7 days"
+                        exportingAttendanceSelectionPdf
+                          ? (attendanceExportProgressLabel ?? "Exporting...")
+                          : "Export last 7 days"
                       }
                       onPress={() => void exportLast7DaysAttendance()}
                       disabled={exportingAttendanceSelectionPdf}
@@ -8907,7 +8934,7 @@ export default function App() {
                     <AppButton
                       title={
                         exportingAttendanceSelectionPdf
-                          ? "Exporting..."
+                          ? (attendanceExportProgressLabel ?? "Exporting...")
                           : `Export selected (${selectedAttendanceVisibleCount})`
                       }
                       onPress={() => void exportSelectedAttendance()}
