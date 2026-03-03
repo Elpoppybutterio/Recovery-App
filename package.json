@@ -19,6 +19,7 @@
     "lint:all": "pnpm -r --workspace-concurrency=1 lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "release:audit": "node scripts/release-audit.js",
     "format": "prettier --write .",
     "db:migrate": "pnpm --filter @recovery/api db:migrate",
     "db:seed": "node -e \"console.log('No database configured yet. Add seed scripts under /apps/api and run your seed tool here.')\"",

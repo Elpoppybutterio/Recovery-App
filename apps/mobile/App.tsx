@@ -1375,6 +1375,11 @@ export default function App() {
     () => resolveApiBaseUrl(apiUrlFromEnv, apiUrlFromConfig),
     [apiUrlFromConfig, apiUrlFromEnv],
   );
+  useEffect(() => {
+    if (__DEV__) {
+      console.log("API:", apiUrl);
+    }
+  }, [apiUrl]);
   const devAuthUserId =
     typeof extra.devAuthUserId === "string" ? extra.devAuthUserId : "enduser-a1";
   const devUserDisplayName =
