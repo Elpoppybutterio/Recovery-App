@@ -28,6 +28,7 @@ import {
 import appJson from "./app.json";
 import { createMeetingsSource, MeetingRecord } from "./lib/meetings/source";
 import {
+  ATTENDANCE_SLIP_EXPORT_CHUNK_SIZE,
   ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
   generateAttendanceSlipPdf,
   shareAttendanceSlipPdf,
@@ -5462,10 +5463,13 @@ export default function App() {
 
   const toAttendanceSlipRecord = useCallback(
     (record: AttendanceRecord) => ({
-      id: record.id,
-      meetingName: record.meetingName,
-      meetingAddress: record.meetingAddress,
-      startAtIso: record.startAt,
+      id: record.id || createId("attendance-export"),
+      meetingName: record.meetingName?.trim() || "Recovery Meeting",
+      meetingAddress: record.meetingAddress?.trim() || "Address unavailable",
+      startAtIso:
+        typeof record.startAt === "string" && record.startAt.trim().length > 0
+          ? record.startAt
+          : new Date().toISOString(),
       endAtIso: record.endAt,
       durationSeconds: record.durationSeconds,
       signatureSvgBase64: record.signaturePngBase64,
@@ -5486,6 +5490,65 @@ export default function App() {
     [],
   );
 
+  const sortAttendanceRecordsForExport = useCallback((records: AttendanceRecord[]) => {
+    return [...records].sort((left, right) => {
+      const leftMs = new Date(left.startAt).getTime();
+      const rightMs = new Date(right.startAt).getTime();
+      const leftValid = Number.isFinite(leftMs);
+      const rightValid = Number.isFinite(rightMs);
+      if (leftValid && rightValid && leftMs !== rightMs) {
+        return leftMs - rightMs;
+      }
+      if (leftValid && !rightValid) {
+        return -1;
+      }
+      if (!leftValid && rightValid) {
+        return 1;
+      }
+      return left.id.localeCompare(right.id);
+    });
+  }, []);
+
+  const copyExportDebugInfo = useCallback(
+    async (debugInfo: string) => {
+      try {
+        type ClipboardModule = {
+          setStringAsync(text: string): Promise<void>;
+        };
+        const clipboardModule = loadOptionalModule<ClipboardModule>("expo-clipboard");
+        if (clipboardModule && typeof clipboardModule.setStringAsync === "function") {
+          await clipboardModule.setStringAsync(debugInfo);
+          setAttendanceStatus("Export debug info copied.");
+          return;
+        }
+        await Share.share({ message: debugInfo });
+      } catch (error) {
+        console.log("[attendance-export] debug copy failed", error);
+      }
+    },
+    [setAttendanceStatus],
+  );
+
+  const showExportErrorModal = useCallback(
+    (context: string, error: unknown, debugInfo: string) => {
+      const detail = formatError(error);
+      if (__DEV__) {
+        Alert.alert("Export failed", `${context}. ${detail}`, [
+          { text: "Dismiss", style: "cancel" },
+          {
+            text: "Copy debug info",
+            onPress: () => {
+              void copyExportDebugInfo(debugInfo);
+            },
+          },
+        ]);
+        return;
+      }
+      Alert.alert("Export failed", `${context}. ${detail}`);
+    },
+    [copyExportDebugInfo],
+  );
+
   const exportAttendance = useCallback(async () => {
     if (!activeAttendance || !activeAttendance.endAt || activeAttendance.durationSeconds === null) {
       setAttendanceStatus("Complete attendance session before exporting.");
@@ -5495,10 +5558,16 @@ export default function App() {
     setExportingPdf(true);
     try {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
+      setAttendanceStatus("Generating PDF (1/1)...");
       const uri = await generateAttendanceSlipPdf(
         [toAttendanceSlipRecord(activeAttendance)],
         { participantName: devUserDisplayName },
-        { fileName },
+        {
+          fileName,
+          onProgress: (completed, total) => {
+            setAttendanceStatus(`Generating PDF (${completed}/${total})...`);
+          },
+        },
       );
       await shareAttendanceSlipPdf(uri, fileName);
 
@@ -5511,11 +5580,28 @@ export default function App() {
       setAttendanceStatus(`${fileName} exported.`);
     } catch (error) {
       console.log("[attendance-export] failed", error);
+      const debugInfo = JSON.stringify(
+        {
+          context: "single-export",
+          recordId: activeAttendance?.id ?? null,
+          error: formatError(error),
+        },
+        null,
+        2,
+      );
+      showExportErrorModal("Unable to export attendance slip PDF", error, debugInfo);
       setAttendanceStatus(`PDF export failed: ${formatError(error)}`);
     } finally {
       setExportingPdf(false);
     }
-  }, [activeAttendance, devUserDisplayName, toAttendanceSlipRecord, upsertAttendanceRecord]);
+  }, [
+    activeAttendance,
+    devUserDisplayName,
+    setAttendanceStatus,
+    showExportErrorModal,
+    toAttendanceSlipRecord,
+    upsertAttendanceRecord,
+  ]);
 
   const toggleAttendanceSelection = useCallback((recordId: string) => {
     setSelectedAttendanceIds((current) =>
@@ -5556,33 +5642,93 @@ export default function App() {
     );
   }, [attendanceRecordsForView, selectedAttendanceIds, persistAttendanceRecords]);
 
+  const exportAttendanceRecordsWithProgress = useCallback(
+    async ({
+      source,
+      fileName,
+      successStatus,
+      errorStatusPrefix,
+      errorContext,
+    }: {
+      source: AttendanceRecord[];
+      fileName: string;
+      successStatus: (count: number) => string;
+      errorStatusPrefix: string;
+      errorContext: string;
+    }) => {
+      const orderedRecords = sortAttendanceRecordsForExport(source);
+      if (orderedRecords.length === 0) {
+        setAttendanceStatus("Select at least one meeting to export.");
+        return false;
+      }
+
+      setExportingAttendanceSelectionPdf(true);
+      try {
+        const totalChunks = Math.max(
+          1,
+          Math.ceil(orderedRecords.length / ATTENDANCE_SLIP_EXPORT_CHUNK_SIZE),
+        );
+        setAttendanceStatus(`Generating PDF (0/${totalChunks})...`);
+
+        const uri = await generateAttendanceSlipPdf(
+          orderedRecords.map(toAttendanceSlipRecord),
+          { participantName: devUserDisplayName },
+          {
+            fileName,
+            onProgress: (completed, total) => {
+              setAttendanceStatus(`Generating PDF (${completed}/${total})...`);
+            },
+          },
+        );
+        await shareAttendanceSlipPdf(uri, fileName);
+        setAttendanceStatus(successStatus(orderedRecords.length));
+        return true;
+      } catch (error) {
+        console.log(`[attendance-export] ${errorContext} failed`, error);
+        const debugInfo = JSON.stringify(
+          {
+            context: errorContext,
+            selectedCount: orderedRecords.length,
+            fileName,
+            error: formatError(error),
+          },
+          null,
+          2,
+        );
+        showExportErrorModal("Unable to export attendance PDF", error, debugInfo);
+        setAttendanceStatus(`${errorStatusPrefix}: ${formatError(error)}`);
+        return false;
+      } finally {
+        setExportingAttendanceSelectionPdf(false);
+      }
+    },
+    [
+      devUserDisplayName,
+      setAttendanceStatus,
+      showExportErrorModal,
+      sortAttendanceRecordsForExport,
+      toAttendanceSlipRecord,
+    ],
+  );
+
   const exportSelectedAttendance = useCallback(async () => {
-    const selectedRecords = attendanceRecordsForView.filter((record) =>
-      selectedAttendanceIds.includes(record.id),
-    );
+    const selectedSet = new Set(selectedAttendanceIds);
+    const selectedRecords = attendanceRecordsForView.filter((record) => selectedSet.has(record.id));
     if (selectedRecords.length === 0) {
-      setAttendanceStatus("Select at least one attendance record to export.");
+      setAttendanceStatus("Select at least one meeting to export.");
       return;
     }
-    setExportingAttendanceSelectionPdf(true);
-    try {
-      const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected ${new Date()
-        .toISOString()
-        .slice(0, 10)}.pdf`;
-      const uri = await generateAttendanceSlipPdf(
-        selectedRecords.map(toAttendanceSlipRecord),
-        { participantName: devUserDisplayName },
-        { fileName },
-      );
-      await shareAttendanceSlipPdf(uri, fileName);
-      setAttendanceStatus(`Exported ${selectedRecords.length} meeting record(s).`);
-    } catch (error) {
-      console.log("[attendance-export-selected] failed", error);
-      setAttendanceStatus(`Failed to export selected attendance: ${formatError(error)}`);
-    } finally {
-      setExportingAttendanceSelectionPdf(false);
-    }
-  }, [attendanceRecordsForView, selectedAttendanceIds, devUserDisplayName, toAttendanceSlipRecord]);
+    const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected ${new Date()
+      .toISOString()
+      .slice(0, 10)}.pdf`;
+    await exportAttendanceRecordsWithProgress({
+      source: selectedRecords,
+      fileName,
+      successStatus: (count) => `Exported ${count} meeting record(s).`,
+      errorStatusPrefix: "Failed to export selected attendance",
+      errorContext: "selected-export",
+    });
+  }, [attendanceRecordsForView, exportAttendanceRecordsWithProgress, selectedAttendanceIds]);
 
   const exportAttendanceRange = useCallback(
     async (startDate: Date, endDate: Date, label: string) => {
@@ -5601,28 +5747,20 @@ export default function App() {
         });
 
       if (selectedRecords.length === 0) {
-        setAttendanceStatus(`No attendance records found for ${label}.`);
+        setAttendanceStatus(`No attendance records to export for ${label}.`);
         return;
       }
 
-      setExportingAttendanceSelectionPdf(true);
-      try {
-        const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
-        const uri = await generateAttendanceSlipPdf(
-          selectedRecords.map(toAttendanceSlipRecord),
-          { participantName: devUserDisplayName },
-          { fileName },
-        );
-        await shareAttendanceSlipPdf(uri, fileName);
-        setAttendanceStatus(`Exported ${selectedRecords.length} attendance slip(s) for ${label}.`);
-      } catch (error) {
-        console.log("[attendance-export-range] failed", error);
-        setAttendanceStatus(`Failed to export attendance range: ${formatError(error)}`);
-      } finally {
-        setExportingAttendanceSelectionPdf(false);
-      }
+      const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
+      await exportAttendanceRecordsWithProgress({
+        source: selectedRecords,
+        fileName,
+        successStatus: (count) => `Exported ${count} attendance slip(s) for ${label}.`,
+        errorStatusPrefix: "Failed to export attendance range",
+        errorContext: `range-export:${label}`,
+      });
     },
-    [attendanceRecords, devUserDisplayName, toAttendanceSlipRecord],
+    [attendanceRecords, exportAttendanceRecordsWithProgress],
   );
 
   const exportLast7DaysAttendance = useCallback(async () => {
