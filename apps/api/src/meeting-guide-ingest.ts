@@ -7,6 +7,9 @@ import {
 import {
   buildGeocodeQuery,
   geocodeWithOpenStreetMap,
+  isFarOutsideBillingsRegion,
+  isLikelyBillingsAddress,
+  isWithinBillingsBounds,
   normalizeAddressParts,
   resolveMeetingGeoStatus,
   type GeocodeResult,
@@ -874,6 +877,50 @@ function normalizeMeetingGeo(entry: NormalizedMeeting): NormalizedMeeting {
     lng: resolved.lng,
     geoStatus: resolved.geoStatus,
     geoReason: resolved.geoReason,
+    geoSource: resolved.geoStatus === "ok" ? "feed" : null,
+    geoConfidence: null,
+    geocodedAt: null,
+  };
+}
+
+function normalizedGeocodeCacheKey(query: string): string {
+  return query.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function markBillingsSuspectGeo(entry: NormalizedMeeting): NormalizedMeeting {
+  if (entry.geoStatus !== "ok" || entry.lat === null || entry.lng === null) {
+    return entry;
+  }
+
+  const isBillingsMeeting = isLikelyBillingsAddress({
+    formattedAddress: entry.formattedAddress,
+    address: entry.address,
+    city: entry.city,
+    state: entry.state,
+    postalCode: entry.postalCode,
+    country: entry.country,
+  });
+  if (!isBillingsMeeting) {
+    return entry;
+  }
+
+  if (isWithinBillingsBounds(entry.lat, entry.lng)) {
+    return entry;
+  }
+
+  if (!isFarOutsideBillingsRegion(entry.lat, entry.lng)) {
+    return entry;
+  }
+
+  return {
+    ...entry,
+    lat: null,
+    lng: null,
+    geoStatus: "needs_geocode",
+    geoReason: "billings_out_of_bounds_suspect",
+    geoSource: null,
+    geoConfidence: null,
+    geocodedAt: null,
   };
 }
 
@@ -941,7 +988,10 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
     const normalizedInput: NormalizedMeeting[] = entries
       .map((entry) => normalizeMeetingGuideMeeting(entry))
       .filter((entry): entry is NormalizedMeeting => Boolean(entry));
-    let normalized = normalizedInput.map(normalizeMeetingAddress).map(normalizeMeetingGeo);
+    let normalized = normalizedInput
+      .map(normalizeMeetingAddress)
+      .map(normalizeMeetingGeo)
+      .map(markBillingsSuspectGeo);
 
     const missingReasonCounts = new Map<string, number>();
     const bumpMissingReason = (reason: string | null) => {
@@ -970,7 +1020,8 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
           continue;
         }
 
-        let geocodeResult = geocodeCache.get(geocodeQuery);
+        const geocodeCacheKey = normalizedGeocodeCacheKey(geocodeQuery);
+        let geocodeResult = geocodeCache.get(geocodeCacheKey);
         if (geocodeResult === undefined) {
           geocodeAttemptsTotal += 1;
           try {
@@ -984,6 +1035,8 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
             geocodeResult = {
               coords: null,
               reason: error instanceof Error ? "provider_exception" : "provider_unknown_error",
+              source: "osm_nominatim",
+              confidence: null,
             };
           }
           if (geocodeResult.coords) {
@@ -991,7 +1044,7 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
           } else {
             geocodeFailedTotal += 1;
           }
-          geocodeCache.set(geocodeQuery, geocodeResult);
+          geocodeCache.set(geocodeCacheKey, geocodeResult);
         }
 
         if (geocodeResult.coords) {
@@ -1000,13 +1053,33 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
             lng: geocodeResult.coords.lng,
             formattedAddress: entry.formattedAddress,
           });
+          const billingsAddress = isLikelyBillingsAddress({
+            formattedAddress: entry.formattedAddress,
+            address: entry.address,
+            city: entry.city,
+            state: entry.state,
+            postalCode: entry.postalCode,
+            country: entry.country,
+          });
+          const geocodedWithinBillings =
+            resolved.geoStatus === "ok" &&
+            resolved.lat !== null &&
+            resolved.lng !== null &&
+            (!billingsAddress ||
+              isWithinBillingsBounds(resolved.lat, resolved.lng) ||
+              !isFarOutsideBillingsRegion(resolved.lat, resolved.lng));
           geocodedEntries.push({
             ...entry,
-            lat: resolved.lat,
-            lng: resolved.lng,
-            geoStatus: resolved.geoStatus,
-            geoReason: resolved.geoReason,
+            lat: geocodedWithinBillings ? resolved.lat : null,
+            lng: geocodedWithinBillings ? resolved.lng : null,
+            geoStatus: geocodedWithinBillings ? resolved.geoStatus : "needs_geocode",
+            geoReason: geocodedWithinBillings
+              ? resolved.geoReason
+              : "geocode_billings_out_of_bounds",
             geoUpdatedAt: now().toISOString(),
+            geoSource: geocodedWithinBillings ? geocodeResult.source : null,
+            geoConfidence: geocodedWithinBillings ? geocodeResult.confidence : null,
+            geocodedAt: geocodedWithinBillings ? now().toISOString() : null,
           });
         } else {
           const fallbackReason = geocodeResult.reason ? `geocode_${geocodeResult.reason}` : null;
@@ -1014,6 +1087,8 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
             ...entry,
             geoReason: fallbackReason ?? entry.geoReason,
             geoUpdatedAt: now().toISOString(),
+            geoSource: geocodeResult.source ?? entry.geoSource ?? null,
+            geoConfidence: geocodeResult.confidence ?? entry.geoConfidence ?? null,
           });
         }
       }

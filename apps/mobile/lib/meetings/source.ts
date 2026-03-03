@@ -15,9 +15,12 @@ export type MeetingRecord = {
   lng: number | null;
   onlineUrl: string | null;
   distanceMeters?: number | null;
-  geoStatus?: "ok" | "missing" | "invalid" | "partial";
+  geoStatus?: "ok" | "missing" | "invalid" | "partial" | "needs_geocode";
   geoReason?: string | null;
   geoUpdatedAt?: string | null;
+  geoSource?: string | null;
+  geoConfidence?: number | null;
+  geocodedAt?: string | null;
 };
 
 export type ListMeetingsParams = {
@@ -284,7 +287,9 @@ function normalizeMeetingFormat(
   return "IN_PERSON";
 }
 
-function normalizeGeoStatus(value: unknown): "ok" | "missing" | "invalid" | "partial" | null {
+function normalizeGeoStatus(
+  value: unknown,
+): "ok" | "missing" | "invalid" | "partial" | "needs_geocode" | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -293,7 +298,8 @@ function normalizeGeoStatus(value: unknown): "ok" | "missing" | "invalid" | "par
     normalized === "ok" ||
     normalized === "missing" ||
     normalized === "invalid" ||
-    normalized === "partial"
+    normalized === "partial" ||
+    normalized === "needs_geocode"
   ) {
     return normalized;
   }
@@ -367,6 +373,9 @@ function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecor
             ? "missing_latitude"
             : "missing_longitude",
     geoUpdatedAt: null,
+    geoSource: null,
+    geoConfidence: null,
+    geocodedAt: null,
   };
 }
 
@@ -402,6 +411,9 @@ function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): Meeting
     (lat !== null && lng !== null ? "ok" : lat === null && lng === null ? "missing" : "partial");
   const geoReason = asString(input.geoReason ?? input.geo_reason);
   const geoUpdatedAt = asString(input.geoUpdatedAt ?? input.geo_updated_at);
+  const geoSource = asString(input.geoSource ?? input.geo_source);
+  const geoConfidence = asNumber(input.geoConfidence ?? input.geo_confidence);
+  const geocodedAt = asString(input.geocodedAt ?? input.geocoded_at);
 
   return {
     id,
@@ -418,6 +430,9 @@ function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): Meeting
     geoStatus,
     geoReason,
     geoUpdatedAt,
+    geoSource,
+    geoConfidence,
+    geocodedAt,
   };
 }
 

@@ -341,6 +341,8 @@ const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for 
 const DEFAULT_MAP_LATITUDE_DELTA = 0.22;
 const DEFAULT_MAP_LONGITUDE_DELTA = 0.22;
 const METERS_PER_MILE = 1609.344;
+const BILLINGS_DISTANCE_ANOMALY_MILES = 200;
+const BILLINGS_DISTANCE_ANOMALY_METERS = BILLINGS_DISTANCE_ANOMALY_MILES * METERS_PER_MILE;
 const DEBUG_SUSPICIOUS_DISTANCE_MILES = 75;
 const DEBUG_DISTANCE_MISMATCH_MILES = 15;
 const DEV_MEETING_DEBUG_MAX_KEYS = 300;
@@ -435,20 +437,57 @@ function distanceMetersBetween(latA: number, lngA: number, latB: number, lngB: n
   return haversineDistanceMeters({ lat: latA, lng: lngA }, { lat: latB, lng: lngB });
 }
 
+function isLikelyBillingsMeeting(meeting: Pick<MeetingRecord, "name" | "address">): boolean {
+  return (
+    /\bbillings\b/i.test(meeting.address) ||
+    /\bbillings\b/i.test(meeting.name) ||
+    /\bMT\b/i.test(meeting.address) ||
+    /\b591\d{2}\b/.test(meeting.address)
+  );
+}
+
 function resolveMeetingDistanceMeters(
-  meeting: Pick<MeetingRecord, "lat" | "lng" | "distanceMeters">,
+  meeting: Pick<
+    MeetingRecord,
+    "id" | "name" | "address" | "lat" | "lng" | "distanceMeters" | "geoStatus" | "geoReason"
+  >,
   currentLocation: LocationStamp | null,
 ): number | null {
-  if (currentLocation && meeting.lat !== null && meeting.lng !== null) {
-    return distanceMetersBetween(
+  const normalizedCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+  const isBillingsMeeting = isLikelyBillingsMeeting(meeting);
+  const clampDistance = (distanceMeters: number, source: "computed" | "api"): number | null => {
+    if (isBillingsMeeting && distanceMeters > BILLINGS_DISTANCE_ANOMALY_METERS) {
+      logDevMeetingDebugOnce(
+        `billings-anomaly:${meeting.id}:${source}`,
+        "billings distance anomaly suppressed",
+        {
+          meetingId: meeting.id,
+          name: meeting.name,
+          address: meeting.address,
+          distanceMiles: Number((distanceMeters / METERS_PER_MILE).toFixed(1)),
+          source,
+          lat: meeting.lat,
+          lng: meeting.lng,
+          geoStatus: meeting.geoStatus ?? null,
+          geoReason: meeting.geoReason ?? null,
+        },
+      );
+      return null;
+    }
+    return distanceMeters;
+  };
+
+  if (currentLocation && normalizedCoords) {
+    const computed = distanceMetersBetween(
       currentLocation.lat,
       currentLocation.lng,
-      meeting.lat,
-      meeting.lng,
+      normalizedCoords.lat,
+      normalizedCoords.lng,
     );
+    return clampDistance(computed, "computed");
   }
   if (typeof meeting.distanceMeters === "number" && Number.isFinite(meeting.distanceMeters)) {
-    return Math.max(0, meeting.distanceMeters);
+    return clampDistance(Math.max(0, meeting.distanceMeters), "api");
   }
   return null;
 }
@@ -480,13 +519,16 @@ function isMeetingActionableToday(startsAtLocal: string, nowMinutes: number): bo
 }
 
 function meetingDistanceLabel(
-  meeting: Pick<MeetingRecord, "lat" | "lng">,
+  meeting: Pick<MeetingRecord, "lat" | "lng" | "geoStatus">,
   distanceMeters: number | null,
   permission: LocationPermissionState,
   issue: LocationIssue,
 ): string {
   const hasCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng }) !== null;
   if (!hasCoords) {
+    if (__DEV__ && meeting.geoStatus && meeting.geoStatus !== "missing") {
+      return "Location unavailable (Invalid meeting coordinates)";
+    }
     return "Location unavailable";
   }
   if (distanceMeters === null || !Number.isFinite(distanceMeters)) {
@@ -1475,6 +1517,35 @@ function sanitizeMeetingRecords(
         );
       }
 
+      const billingsDistanceAnomaly =
+        computedDistanceMeters !== null &&
+        isLikelyBillingsMeeting({ name: safeName, address: safeAddress }) &&
+        computedDistanceMeters > BILLINGS_DISTANCE_ANOMALY_METERS;
+
+      if (billingsDistanceAnomaly) {
+        logDevMeetingDebugOnce(
+          `billings-anomaly:sanitize:${safeId}`,
+          "billings outlier coordinates suppressed",
+          {
+            sourceLabel,
+            meetingId: safeId,
+            name: safeName,
+            address: safeAddress,
+            computedDistanceMiles: Number((computedDistanceMeters / METERS_PER_MILE).toFixed(1)),
+            lat: normalizedCoords?.lat ?? null,
+            lng: normalizedCoords?.lng ?? null,
+            geoStatus: entry.geoStatus ?? null,
+            geoReason: entry.geoReason ?? null,
+          },
+        );
+      }
+
+      const safeDistanceMeters =
+        typeof parsedDistance === "number" && Number.isFinite(parsedDistance)
+          ? Math.max(0, parsedDistance)
+          : null;
+      const finalCoords = billingsDistanceAnomaly ? null : normalizedCoords;
+
       return {
         ...entry,
         id: safeId,
@@ -1482,12 +1553,15 @@ function sanitizeMeetingRecords(
         address: safeAddress,
         startsAtLocal: safeStartsAtLocal,
         dayOfWeek: safeDayOfWeek,
-        lat: normalizedCoords?.lat ?? null,
-        lng: normalizedCoords?.lng ?? null,
-        distanceMeters:
-          typeof parsedDistance === "number" && Number.isFinite(parsedDistance)
-            ? Math.max(0, parsedDistance)
-            : null,
+        lat: finalCoords?.lat ?? null,
+        lng: finalCoords?.lng ?? null,
+        distanceMeters: billingsDistanceAnomaly ? null : safeDistanceMeters,
+        geoStatus: billingsDistanceAnomaly
+          ? "needs_geocode"
+          : (entry.geoStatus ?? (finalCoords ? "ok" : "missing")),
+        geoReason: billingsDistanceAnomaly
+          ? "billings_distance_anomaly"
+          : (entry.geoReason ?? (finalCoords ? null : "missing_coordinates")),
       };
     });
 }
@@ -6192,6 +6266,28 @@ export default function App() {
         return;
       }
 
+      const meetingCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+      const hasValidGeofence = meeting.format !== "ONLINE" && meetingCoords !== null;
+      if (meeting.format !== "ONLINE" && !hasValidGeofence) {
+        Alert.alert(
+          "Location needs verification",
+          "Meeting location needs verification. Start manually?",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Start manually",
+              onPress: () => {
+                setPendingGeofenceLogMeetingId(null);
+                setSelectedMeeting(meeting);
+                setHomeScreen("MEETINGS");
+                void startAttendance(meeting);
+              },
+            },
+          ],
+        );
+        return;
+      }
+
       const nowLocal = new Date();
       const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
       const meetingInProgress =
@@ -6207,18 +6303,14 @@ export default function App() {
         return;
       }
 
-      const hasValidGeofence =
-        meeting.format !== "ONLINE" &&
-        meeting.lat !== null &&
-        meeting.lng !== null &&
-        Number.isFinite(meeting.lat) &&
-        Number.isFinite(meeting.lng);
-
       const location = await readCurrentLocation(true);
       if (location && hasValidGeofence) {
-        const meetingLat = meeting.lat as number;
-        const meetingLng = meeting.lng as number;
-        const distance = distanceMetersBetween(location.lat, location.lng, meetingLat, meetingLng);
+        const distance = distanceMetersBetween(
+          location.lat,
+          location.lng,
+          meetingCoords.lat,
+          meetingCoords.lng,
+        );
         if (distance <= ARRIVAL_RADIUS_METERS) {
           setPendingGeofenceLogMeetingId(null);
           setSelectedMeeting(meeting);
@@ -7333,6 +7425,13 @@ export default function App() {
 
     let cancelled = false;
     let timer: ReturnType<typeof setInterval> | null = null;
+    const selectedCoords = normalizeCoordinates({
+      lat: selectedMeeting.lat,
+      lng: selectedMeeting.lng,
+    });
+    if (!selectedCoords) {
+      return;
+    }
 
     const checkArrival = async () => {
       if (cancelled) {
@@ -7347,8 +7446,8 @@ export default function App() {
       const distance = distanceMetersBetween(
         location.lat,
         location.lng,
-        selectedMeeting.lat as number,
-        selectedMeeting.lng as number,
+        selectedCoords.lat,
+        selectedCoords.lng,
       );
 
       if (
@@ -7396,6 +7495,9 @@ export default function App() {
       if (cancelled) {
         return;
       }
+      if (appStateRef.current !== "active") {
+        return;
+      }
 
       const meeting = resolveMeetingForLogging(pendingGeofenceLogMeetingId);
       if (!meeting) {
@@ -7403,13 +7505,8 @@ export default function App() {
         return;
       }
 
-      if (
-        meeting.format === "ONLINE" ||
-        meeting.lat === null ||
-        meeting.lng === null ||
-        !Number.isFinite(meeting.lat) ||
-        !Number.isFinite(meeting.lng)
-      ) {
+      const meetingCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+      if (meeting.format === "ONLINE" || !meetingCoords) {
         // Keep pending queue alive; geofence coordinates may appear after refresh.
         return;
       }
@@ -7419,7 +7516,12 @@ export default function App() {
         return;
       }
 
-      const distance = distanceMetersBetween(location.lat, location.lng, meeting.lat, meeting.lng);
+      const distance = distanceMetersBetween(
+        location.lat,
+        location.lng,
+        meetingCoords.lat,
+        meetingCoords.lng,
+      );
       if (distance > ARRIVAL_RADIUS_METERS) {
         return;
       }
@@ -7440,7 +7542,7 @@ export default function App() {
     void checkPendingMeeting();
     timer = setInterval(() => {
       void checkPendingMeeting();
-    }, 15_000);
+    }, 10_000);
 
     return () => {
       cancelled = true;

@@ -233,9 +233,12 @@ export interface MeetingGuideMeetingRow {
   conference_phone: string | null;
   lat: number | null;
   lng: number | null;
-  geo_status: "ok" | "missing" | "invalid" | "partial";
+  geo_status: "ok" | "missing" | "invalid" | "partial" | "needs_geocode";
   geo_reason: string | null;
   geo_updated_at: string | null;
+  geo_source: string | null;
+  geo_confidence: number | null;
+  geocoded_at: string | null;
   updated_at_source: string | null;
   last_ingested_at: string;
 }
@@ -297,8 +300,14 @@ function toJsonParam(value: unknown) {
 function inferGeoStatusFromCoordinates(
   lat: number | null,
   lng: number | null,
-): "ok" | "missing" | "invalid" | "partial" {
+): "ok" | "missing" | "invalid" | "partial" | "needs_geocode" {
   if (lat !== null && lng !== null) {
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return "invalid";
+    }
+    if (lat === 0 && lng === 0) {
+      return "invalid";
+    }
     return "ok";
   }
   if (lat === null && lng === null) {
@@ -309,6 +318,12 @@ function inferGeoStatusFromCoordinates(
 
 function inferGeoReasonFromCoordinates(lat: number | null, lng: number | null): string | null {
   if (lat !== null && lng !== null) {
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return "coordinate_out_of_range";
+    }
+    if (lat === 0 && lng === 0) {
+      return "zero_coordinates";
+    }
     return null;
   }
   if (lat === null && lng === null) {
@@ -343,7 +358,10 @@ function isMissingMeetingGuideGeoColumnsError(error: unknown): boolean {
     message.includes("meeting_guide_meetings") &&
     (message.includes("geo_status") ||
       message.includes("geo_reason") ||
-      message.includes("geo_updated_at"))
+      message.includes("geo_updated_at") ||
+      message.includes("geo_source") ||
+      message.includes("geo_confidence") ||
+      message.includes("geocoded_at"))
   );
 }
 
@@ -1075,6 +1093,13 @@ export function createRepositories(db: DbClient) {
           const resolvedGeoReason =
             meeting.geoReason ?? inferGeoReasonFromCoordinates(meeting.lat, meeting.lng);
           const resolvedGeoUpdatedAt = meeting.geoUpdatedAt ?? now.toISOString();
+          const resolvedGeoSource =
+            meeting.geoSource ?? (resolvedGeoStatus === "ok" ? "feed" : null);
+          const resolvedGeoConfidence =
+            typeof meeting.geoConfidence === "number" && Number.isFinite(meeting.geoConfidence)
+              ? meeting.geoConfidence
+              : null;
+          const resolvedGeocodedAt = meeting.geocodedAt ?? null;
 
           try {
             await db.query(
@@ -1106,13 +1131,16 @@ export function createRepositories(db: DbClient) {
                 geo_status,
                 geo_reason,
                 geo_updated_at,
+                geo_source,
+                geo_confidence,
+                geocoded_at,
                 updated_at_source,
                 last_ingested_at
               )
               VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20,
-                $21, $22, $23, $24, $25, $26, $27, $28
+                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31
               )
               ON CONFLICT (tenant_id, source_feed_id, slug)
               DO UPDATE SET
@@ -1149,7 +1177,7 @@ export function createRepositories(db: DbClient) {
                   ELSE EXCLUDED.geo_status
                 END,
                 geo_reason = CASE
-                  WHEN EXCLUDED.geo_status = 'ok' THEN NULL
+                  WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_reason
                   WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_reason
                   ELSE EXCLUDED.geo_reason
                 END,
@@ -1157,6 +1185,21 @@ export function createRepositories(db: DbClient) {
                   WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_updated_at
                   WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_updated_at
                   ELSE EXCLUDED.geo_updated_at
+                END,
+                geo_source = CASE
+                  WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_source
+                  WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_source
+                  ELSE EXCLUDED.geo_source
+                END,
+                geo_confidence = CASE
+                  WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_confidence
+                  WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_confidence
+                  ELSE EXCLUDED.geo_confidence
+                END,
+                geocoded_at = CASE
+                  WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geocoded_at
+                  WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geocoded_at
+                  ELSE EXCLUDED.geocoded_at
                 END,
                 updated_at_source = EXCLUDED.updated_at_source,
                 last_ingested_at = EXCLUDED.last_ingested_at,
@@ -1189,6 +1232,9 @@ export function createRepositories(db: DbClient) {
                 resolvedGeoStatus,
                 resolvedGeoReason,
                 resolvedGeoUpdatedAt,
+                resolvedGeoSource,
+                resolvedGeoConfidence,
+                resolvedGeocodedAt,
                 meeting.updatedAtSource,
                 now.toISOString(),
               ],
@@ -1345,6 +1391,9 @@ export function createRepositories(db: DbClient) {
               geo_status,
               geo_reason,
               geo_updated_at,
+              geo_source,
+              geo_confidence,
+              geocoded_at,
               updated_at_source,
               last_ingested_at
             FROM meeting_guide_meetings
@@ -1367,7 +1416,12 @@ export function createRepositories(db: DbClient) {
 
           type LegacyMeetingGuideMeetingRow = Omit<
             MeetingGuideMeetingRow,
-            "geo_status" | "geo_reason" | "geo_updated_at"
+            | "geo_status"
+            | "geo_reason"
+            | "geo_updated_at"
+            | "geo_source"
+            | "geo_confidence"
+            | "geocoded_at"
           >;
 
           const legacy = await db.query<LegacyMeetingGuideMeetingRow>(
@@ -1415,6 +1469,9 @@ export function createRepositories(db: DbClient) {
             geo_status: inferGeoStatusFromCoordinates(row.lat, row.lng),
             geo_reason: inferGeoReasonFromCoordinates(row.lat, row.lng),
             geo_updated_at: row.last_ingested_at,
+            geo_source: null,
+            geo_confidence: null,
+            geocoded_at: null,
           }));
         }
       },
@@ -1460,6 +1517,9 @@ export function createRepositories(db: DbClient) {
               geo_status,
               geo_reason,
               geo_updated_at,
+              geo_source,
+              geo_confidence,
+              geocoded_at,
               updated_at_source,
               last_ingested_at
             FROM meeting_guide_meetings
@@ -1492,7 +1552,12 @@ export function createRepositories(db: DbClient) {
           }
           type LegacyMeetingGuideMeetingRow = Omit<
             MeetingGuideMeetingRow,
-            "geo_status" | "geo_reason" | "geo_updated_at"
+            | "geo_status"
+            | "geo_reason"
+            | "geo_updated_at"
+            | "geo_source"
+            | "geo_confidence"
+            | "geocoded_at"
           >;
           const legacyResult = await db.query<LegacyMeetingGuideMeetingRow>(
             `
@@ -1551,6 +1616,9 @@ export function createRepositories(db: DbClient) {
               geo_status: inferGeoStatusFromCoordinates(row.lat, row.lng),
               geo_reason: inferGeoReasonFromCoordinates(row.lat, row.lng),
               geo_updated_at: row.last_ingested_at,
+              geo_source: null,
+              geo_confidence: null,
+              geocoded_at: null,
             })),
           };
         }
@@ -1570,6 +1638,15 @@ export function createRepositories(db: DbClient) {
 
             let distanceMeters: number | null = null;
             if (row.lat !== null && row.lng !== null) {
+              const validCoordinates =
+                row.lat >= -90 &&
+                row.lat <= 90 &&
+                row.lng >= -180 &&
+                row.lng <= 180 &&
+                !(row.lat === 0 && row.lng === 0);
+              if (!validCoordinates) {
+                return null;
+              }
               distanceMeters = haversineDistanceMeters(center.lat, center.lng, row.lat, row.lng);
               if (distanceMeters > center.radiusMiles * 1609.344) {
                 return null;

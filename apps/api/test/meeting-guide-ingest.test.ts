@@ -328,6 +328,101 @@ describe("meeting-guide ingest", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it("re-geocodes far out-of-bounds Billings coordinates and stores metadata", async () => {
+    const repositories = {
+      meetingFeeds: {
+        upsert: vi.fn().mockResolvedValue(undefined),
+        listActive: vi.fn().mockResolvedValue([
+          {
+            id: "feed-billings-regeo",
+            url: "https://example.org/billings.json",
+            etag: null,
+            last_modified: null,
+          },
+        ]),
+        markFetchResult: vi.fn().mockResolvedValue(undefined),
+      },
+      meetingGuideMeetings: {
+        upsertForFeed: vi.fn().mockResolvedValue(1),
+      },
+    } as const;
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () =>
+          JSON.stringify([
+            {
+              slug: "recovery-group",
+              name: "Recovery Group",
+              day: 2,
+              time: "20:00",
+              formatted_address: "131 Moore Lane, Billings, MT 59101",
+              address: "131 Moore Lane",
+              city: "Billings",
+              state: "MT",
+              postal_code: "59101",
+              country: "US",
+              latitude: 39.7392,
+              longitude: -104.9903,
+            },
+          ]),
+        json: async () => [],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => [{ lat: "45.7834", lon: "-108.5052", importance: 0.93 }],
+        text: async () => "",
+      });
+
+    const result = await ingestMeetingGuideFeedsForTenant({
+      repositories: repositories as never,
+      tenantId: "tenant-a",
+      configuredFeeds: [{ name: "Billings feed", url: "https://example.org/billings.json" }],
+      fetchImpl,
+      now: () => new Date("2026-02-20T12:00:00.000Z"),
+      geocodeMissingCoordinates: true,
+    });
+
+    expect(result).toEqual({
+      feedsAttempted: 1,
+      feedsFailed: 0,
+      meetingsFetched: 1,
+      meetingsImported: 1,
+      meetingsSkipped: 0,
+      meetingsWithCoordinates: 1,
+      meetingsWithoutCoordinates: 0,
+    });
+
+    const meetingsArg = repositories.meetingGuideMeetings.upsertForFeed.mock.calls[0]?.[2] as
+      | Array<{
+          lat: number | null;
+          lng: number | null;
+          geoStatus?: string;
+          geoReason?: string | null;
+          geoSource?: string | null;
+          geoConfidence?: number | null;
+          geocodedAt?: string | null;
+        }>
+      | undefined;
+
+    expect(meetingsArg?.[0]).toMatchObject({
+      lat: 45.7834,
+      lng: -108.5052,
+      geoStatus: "ok",
+      geoReason: null,
+      geoSource: "osm_nominatim",
+      geoConfidence: 0.93,
+      geocodedAt: "2026-02-20T12:00:00.000Z",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("classifies missing geo_reason column errors and marks feed failure without throwing", async () => {
     const repositories = {
       meetingFeeds: {

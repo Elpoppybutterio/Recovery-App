@@ -32,6 +32,9 @@ export type NormalizedMeetingGuideMeeting = {
   geoStatus?: MeetingGeoStatus;
   geoReason?: string | null;
   geoUpdatedAt?: string | null;
+  geoSource?: string | null;
+  geoConfidence?: number | null;
+  geocodedAt?: string | null;
   updatedAtSource: string | null;
 };
 
@@ -175,6 +178,9 @@ export function normalizeMeetingGuideMeeting(value: unknown): NormalizedMeetingG
     conferencePhone: asString(input.conference_phone),
     lat,
     lng,
+    geoSource: asString(input.geo_source),
+    geoConfidence: asNumber(input.geo_confidence),
+    geocodedAt: asString(input.geocoded_at),
     updatedAtSource: asString(input.updated),
   };
 }

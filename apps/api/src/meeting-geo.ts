@@ -1,10 +1,11 @@
-export type MeetingGeoStatus = "ok" | "missing" | "invalid" | "partial";
+export type MeetingGeoStatus = "ok" | "missing" | "invalid" | "partial" | "needs_geocode";
 
 export type MeetingGeoResolution = {
   lat: number | null;
   lng: number | null;
   geoStatus: MeetingGeoStatus;
   geoReason: string | null;
+  swapFixed: boolean;
 };
 
 type AddressParts = {
@@ -19,7 +20,18 @@ type AddressParts = {
 export type GeocodeResult = {
   coords: { lat: number; lng: number } | null;
   reason: string | null;
+  source: "osm_nominatim" | null;
+  confidence: number | null;
 };
+
+const BILLINGS_LAT_MIN = 45.6;
+const BILLINGS_LAT_MAX = 45.9;
+const BILLINGS_LNG_MIN = -108.7;
+const BILLINGS_LNG_MAX = -108.3;
+const BILLINGS_CENTER_LAT = 45.7833;
+const BILLINGS_CENTER_LNG = -108.5007;
+const BILLINGS_FAR_DISTANCE_MILES = 200;
+const EARTH_RADIUS_METERS = 6_371_000;
 
 type FetchLikeResponse = {
   ok: boolean;
@@ -93,6 +105,70 @@ function isOnlineAddress(value: string | null | undefined): boolean {
   return normalized === "online" || normalized === "virtual";
 }
 
+function toRadians(value: number): number {
+  return (value * Math.PI) / 180;
+}
+
+function haversineDistanceMeters(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number },
+): number {
+  const latDelta = toRadians(to.lat - from.lat);
+  const lngDelta = toRadians(to.lng - from.lng);
+  const fromLat = toRadians(from.lat);
+  const toLat = toRadians(to.lat);
+
+  const a =
+    Math.sin(latDelta / 2) * Math.sin(latDelta / 2) +
+    Math.cos(fromLat) * Math.cos(toLat) * Math.sin(lngDelta / 2) * Math.sin(lngDelta / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_METERS * c;
+}
+
+function inValidBounds(lat: number, lng: number): boolean {
+  return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+}
+
+export function isLikelyBillingsAddress(parts: AddressParts): boolean {
+  const normalized = normalizeAddressParts(parts);
+  const city = normalized.city?.toLowerCase();
+  if (city === "billings") {
+    return true;
+  }
+
+  const state = normalized.state?.toUpperCase();
+  const hasMontanaState = state === "MT" || state === "MONTANA";
+  const haystack = [
+    normalized.formattedAddress,
+    normalized.address,
+    normalized.city,
+    normalized.state,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+  if (haystack.includes("billings")) {
+    return true;
+  }
+  return hasMontanaState && /\b591\d{2}\b/.test(haystack);
+}
+
+export function isWithinBillingsBounds(lat: number, lng: number): boolean {
+  return (
+    lat >= BILLINGS_LAT_MIN &&
+    lat <= BILLINGS_LAT_MAX &&
+    lng >= BILLINGS_LNG_MIN &&
+    lng <= BILLINGS_LNG_MAX
+  );
+}
+
+export function isFarOutsideBillingsRegion(lat: number, lng: number): boolean {
+  const miles =
+    haversineDistanceMeters({ lat: BILLINGS_CENTER_LAT, lng: BILLINGS_CENTER_LNG }, { lat, lng }) /
+    1609.344;
+  return miles > BILLINGS_FAR_DISTANCE_MILES;
+}
+
 export function buildGeocodeQuery(parts: AddressParts): string | null {
   const normalized = normalizeAddressParts(parts);
   if (isOnlineAddress(normalized.formattedAddress)) {
@@ -123,39 +199,88 @@ export function resolveMeetingGeoStatus(options: {
   lng: unknown;
   formattedAddress?: string | null;
 }): MeetingGeoResolution {
-  const lat = asFiniteNumber(options.lat);
-  const lng = asFiniteNumber(options.lng);
+  let lat = asFiniteNumber(options.lat);
+  let lng = asFiniteNumber(options.lng);
   const formattedAddress = normalizeAddressText(options.formattedAddress);
   const onlineAddress = isOnlineAddress(formattedAddress);
+  const hasAddress = Boolean(formattedAddress) && !onlineAddress;
+  let swapFixed = false;
 
   if (lat === null && lng === null) {
     if (onlineAddress) {
-      return { lat: null, lng: null, geoStatus: "missing", geoReason: "online_meeting" };
+      return {
+        lat: null,
+        lng: null,
+        geoStatus: "missing",
+        geoReason: "online_meeting",
+        swapFixed: false,
+      };
     }
     if (!formattedAddress) {
-      return { lat: null, lng: null, geoStatus: "missing", geoReason: "missing_address" };
+      return {
+        lat: null,
+        lng: null,
+        geoStatus: "missing",
+        geoReason: "missing_address",
+        swapFixed: false,
+      };
     }
-    return { lat: null, lng: null, geoStatus: "missing", geoReason: "missing_coordinates" };
+    return {
+      lat: null,
+      lng: null,
+      geoStatus: "needs_geocode",
+      geoReason: "missing_coordinates",
+      swapFixed: false,
+    };
   }
 
   if (lat === null || lng === null) {
     return {
-      lat,
-      lng,
-      geoStatus: "partial",
+      lat: null,
+      lng: null,
+      geoStatus: hasAddress ? "needs_geocode" : "partial",
       geoReason: lat === null ? "missing_latitude" : "missing_longitude",
+      swapFixed: false,
     };
   }
 
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-    return { lat: null, lng: null, geoStatus: "invalid", geoReason: "coordinate_out_of_range" };
+  if ((lat < -90 || lat > 90) && Math.abs(lng) <= 90) {
+    const swappedLat = lng;
+    const swappedLng = lat;
+    if (inValidBounds(swappedLat, swappedLng)) {
+      lat = swappedLat;
+      lng = swappedLng;
+      swapFixed = true;
+    }
+  }
+
+  if (!inValidBounds(lat, lng)) {
+    return {
+      lat: null,
+      lng: null,
+      geoStatus: hasAddress ? "needs_geocode" : "invalid",
+      geoReason: "coordinate_out_of_range",
+      swapFixed,
+    };
   }
 
   if (lat === 0 && lng === 0) {
-    return { lat: null, lng: null, geoStatus: "invalid", geoReason: "zero_coordinates" };
+    return {
+      lat: null,
+      lng: null,
+      geoStatus: hasAddress ? "needs_geocode" : "invalid",
+      geoReason: "zero_coordinates",
+      swapFixed,
+    };
   }
 
-  return { lat, lng, geoStatus: "ok", geoReason: null };
+  return {
+    lat,
+    lng,
+    geoStatus: "ok",
+    geoReason: swapFixed ? "swap_fixed_lat_lng" : null,
+    swapFixed,
+  };
 }
 
 export async function geocodeWithOpenStreetMap(options: {
@@ -172,17 +297,24 @@ export async function geocodeWithOpenStreetMap(options: {
     },
   });
   if (!response.ok) {
-    return { coords: null, reason: `provider_http_${response.status}` };
+    return {
+      coords: null,
+      reason: `provider_http_${response.status}`,
+      source: "osm_nominatim",
+      confidence: null,
+    };
   }
 
   const payload = (await response.json()) as unknown;
   if (!Array.isArray(payload) || payload.length === 0) {
-    return { coords: null, reason: "no_results" };
+    return { coords: null, reason: "no_results", source: "osm_nominatim", confidence: null };
   }
 
-  const first = payload[0] as { lat?: string; lon?: string } | undefined;
+  const first = payload[0] as
+    | { lat?: string; lon?: string; importance?: number | string }
+    | undefined;
   if (!first) {
-    return { coords: null, reason: "invalid_payload" };
+    return { coords: null, reason: "invalid_payload", source: "osm_nominatim", confidence: null };
   }
 
   const resolved = resolveMeetingGeoStatus({
@@ -192,8 +324,17 @@ export async function geocodeWithOpenStreetMap(options: {
   });
 
   if (resolved.geoStatus !== "ok" || resolved.lat === null || resolved.lng === null) {
-    return { coords: null, reason: resolved.geoReason ?? "invalid_coordinates" };
+    return {
+      coords: null,
+      reason: resolved.geoReason ?? "invalid_coordinates",
+      source: "osm_nominatim",
+      confidence: null,
+    };
   }
+
+  const importance = asFiniteNumber(first.importance);
+  const confidence =
+    importance === null ? null : Math.max(0, Math.min(1, Number(importance.toFixed(4))));
 
   return {
     coords: {
@@ -201,5 +342,7 @@ export async function geocodeWithOpenStreetMap(options: {
       lng: resolved.lng,
     },
     reason: null,
+    source: "osm_nominatim",
+    confidence,
   };
 }

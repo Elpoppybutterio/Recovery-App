@@ -14,7 +14,7 @@ UPDATE meeting_guide_meetings
 SET
   geo_status = CASE
     WHEN geo_status = 'present' THEN 'ok'
-    WHEN geo_status IN ('ok', 'missing', 'invalid', 'partial') THEN geo_status
+    WHEN geo_status IN ('ok', 'missing', 'invalid', 'partial', 'needs_geocode') THEN geo_status
     WHEN lat IS NOT NULL AND lng IS NOT NULL THEN 'ok'
     WHEN lat IS NULL AND lng IS NULL THEN 'missing'
     ELSE 'partial'
@@ -31,7 +31,7 @@ SET
 
 ALTER TABLE meeting_guide_meetings
   ADD CONSTRAINT meeting_guide_meetings_geo_status_check
-  CHECK (geo_status IN ('ok', 'missing', 'invalid', 'partial'));
+  CHECK (geo_status IN ('ok', 'missing', 'invalid', 'partial', 'needs_geocode'));
 
 CREATE INDEX IF NOT EXISTS meeting_guide_meetings_tenant_geo_status_updated_idx
   ON meeting_guide_meetings (tenant_id, geo_status, geo_updated_at);

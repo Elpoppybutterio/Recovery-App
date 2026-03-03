@@ -23,7 +23,7 @@ type MeetingGeoCandidateRow = {
   country: string | null;
   lat: number | null;
   lng: number | null;
-  geo_status: "ok" | "missing" | "invalid" | "partial";
+  geo_status: "ok" | "missing" | "invalid" | "partial" | "needs_geocode";
   geo_reason: string | null;
   geo_updated_at: string | null;
 };
@@ -158,6 +158,8 @@ async function main() {
                 geocodeResult = {
                   coords: null,
                   reason: "provider_exception",
+                  source: "osm_nominatim",
+                  confidence: null,
                 };
               }
               geocodeCache.set(geocodeQuery, geocodeResult);

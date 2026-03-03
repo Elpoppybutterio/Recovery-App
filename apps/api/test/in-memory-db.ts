@@ -205,9 +205,12 @@ type MeetingGuideMeeting = {
   conference_phone: string | null;
   lat: number | null;
   lng: number | null;
-  geo_status: "ok" | "missing" | "invalid" | "partial";
+  geo_status: "ok" | "missing" | "invalid" | "partial" | "needs_geocode";
   geo_reason: string | null;
   geo_updated_at: string | null;
+  geo_source: string | null;
+  geo_confidence: number | null;
+  geocoded_at: string | null;
   updated_at_source: string | null;
   last_ingested_at: string;
   updated_at: string;
@@ -741,6 +744,9 @@ export class InMemoryDb implements DbPool {
         geoStatus,
         geoReason,
         geoUpdatedAt,
+        geoSource,
+        geoConfidence,
+        geocodedAt,
         updatedAtSource,
         lastIngestedAt,
       ] = params as [
@@ -767,8 +773,11 @@ export class InMemoryDb implements DbPool {
         string | null,
         number | null,
         number | null,
-        "ok" | "missing" | "invalid" | "partial",
+        "ok" | "missing" | "invalid" | "partial" | "needs_geocode",
         string | null,
+        string | null,
+        string | null,
+        number | null,
         string | null,
         string | null,
         string,
@@ -806,12 +815,11 @@ export class InMemoryDb implements DbPool {
         existing.lat = preserveExistingGeo ? existing.lat : lat;
         existing.lng = preserveExistingGeo ? existing.lng : lng;
         existing.geo_status = preserveExistingGeo ? existing.geo_status : geoStatus;
-        existing.geo_reason = preserveExistingGeo
-          ? existing.geo_reason
-          : geoStatus === "ok"
-            ? null
-            : geoReason;
+        existing.geo_reason = preserveExistingGeo ? existing.geo_reason : geoReason;
         existing.geo_updated_at = preserveExistingGeo ? existing.geo_updated_at : geoUpdatedAt;
+        existing.geo_source = preserveExistingGeo ? existing.geo_source : geoSource;
+        existing.geo_confidence = preserveExistingGeo ? existing.geo_confidence : geoConfidence;
+        existing.geocoded_at = preserveExistingGeo ? existing.geocoded_at : geocodedAt;
         existing.updated_at_source = updatedAtSource;
         existing.last_ingested_at = lastIngestedAt;
         existing.updated_at = nowIso;
@@ -845,6 +853,9 @@ export class InMemoryDb implements DbPool {
         geo_status: geoStatus,
         geo_reason: geoReason,
         geo_updated_at: geoUpdatedAt,
+        geo_source: geoSource,
+        geo_confidence: geoConfidence,
+        geocoded_at: geocodedAt,
         updated_at_source: updatedAtSource,
         last_ingested_at: lastIngestedAt,
         updated_at: nowIso,
@@ -944,6 +955,7 @@ export class InMemoryDb implements DbPool {
       const geoMissing = scoped.filter((entry) => entry.geo_status === "missing").length;
       const geoPartial = scoped.filter((entry) => entry.geo_status === "partial").length;
       const geoInvalid = scoped.filter((entry) => entry.geo_status === "invalid").length;
+      const geoNeedsGeocode = scoped.filter((entry) => entry.geo_status === "needs_geocode").length;
       return {
         rowCount: 1,
         rows: [
@@ -955,6 +967,7 @@ export class InMemoryDb implements DbPool {
             meetings_geo_missing: geoMissing,
             meetings_geo_partial: geoPartial,
             meetings_geo_invalid: geoInvalid,
+            meetings_geo_needs_geocode: geoNeedsGeocode,
           } as Row,
         ],
       };

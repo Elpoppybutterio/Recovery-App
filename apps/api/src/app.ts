@@ -21,6 +21,7 @@ import {
   ingestMeetingGuideFeedsForTenant,
   parseConfiguredMeetingGuideFeeds,
 } from "./meeting-guide-ingest";
+import { resolveMeetingGeoStatus } from "./meeting-geo";
 import { mapTypeCodesToLabels } from "./meeting-guide";
 import { requirePermission, requireRole, requireSupervisorAssignment } from "./rbac";
 import { getDailyWisdomQuote, wisdomDailyQuerySchema } from "./wisdom";
@@ -166,7 +167,14 @@ const MILES_TO_METERS = 1609.344;
 const WARNING_DISTANCE_METERS = WARNING_DISTANCE_FEET * FEET_TO_METERS;
 const INCIDENT_DEDUPE_WINDOW_MINUTES = 10;
 const EARTH_RADIUS_METERS = 6371000;
-const REQUIRED_MEETING_GUIDE_COLUMNS = ["geo_status", "geo_reason", "geo_updated_at"] as const;
+const REQUIRED_MEETING_GUIDE_COLUMNS = [
+  "geo_status",
+  "geo_reason",
+  "geo_updated_at",
+  "geo_source",
+  "geo_confidence",
+  "geocoded_at",
+] as const;
 
 function toRadians(value: number): number {
   return (value * Math.PI) / 180;
@@ -188,6 +196,45 @@ function distanceMetersBetween(
     Math.cos(leftLatRad) * Math.cos(rightLatRad) * Math.sin(lngDelta / 2) * Math.sin(lngDelta / 2);
   const arc = 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
   return EARTH_RADIUS_METERS * arc;
+}
+
+function shapeMeetingGuideGeoForApi(meeting: {
+  lat: number | null;
+  lng: number | null;
+  formatted_address: string | null;
+  address: string | null;
+  geo_status: "ok" | "missing" | "invalid" | "partial" | "needs_geocode";
+  geo_reason: string | null;
+  geo_updated_at: string | null;
+  geo_source: string | null;
+  geo_confidence: number | null;
+  geocoded_at: string | null;
+}) {
+  const resolved = resolveMeetingGeoStatus({
+    lat: meeting.lat,
+    lng: meeting.lng,
+    formattedAddress: meeting.formatted_address ?? meeting.address,
+  });
+  const hasValidCoords =
+    resolved.geoStatus === "ok" && resolved.lat !== null && resolved.lng !== null;
+  const geoStatus = hasValidCoords
+    ? meeting.geo_status
+    : meeting.geo_status === "ok"
+      ? "needs_geocode"
+      : meeting.geo_status;
+
+  return {
+    lat: hasValidCoords ? resolved.lat : null,
+    lng: hasValidCoords ? resolved.lng : null,
+    geoStatus,
+    geoReason: hasValidCoords
+      ? (meeting.geo_reason ?? resolved.geoReason)
+      : (meeting.geo_reason ?? resolved.geoReason ?? "invalid_coordinates"),
+    geoUpdatedAt: meeting.geo_updated_at,
+    geoSource: hasValidCoords ? meeting.geo_source : null,
+    geoConfidence: hasValidCoords ? meeting.geo_confidence : null,
+    geocodedAt: hasValidCoords ? meeting.geocoded_at : null,
+  };
 }
 
 function isDevAuthHeader(value: string | undefined): boolean {
@@ -1102,6 +1149,9 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         geoStatus: "ok" as const,
         geoReason: null,
         geoUpdatedAt: meeting.created_at,
+        geoSource: "manual",
+        geoConfidence: null,
+        geocodedAt: null,
       }));
 
       const mappedMeetingGuideMeetings = scopedMeetingGuideMeetings.map((meeting) => {
@@ -1120,14 +1170,15 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         const address =
           meeting.formatted_address ??
           (fallbackAddress.length > 0 ? fallbackAddress : "Address unavailable");
+        const geo = shapeMeetingGuideGeoForApi(meeting);
 
         return {
           id: meeting.id,
           tenantId: meeting.tenant_id,
           name: meeting.name,
           address,
-          lat: meeting.lat,
-          lng: meeting.lng,
+          lat: geo.lat,
+          lng: geo.lng,
           radiusM: null,
           createdAt: meeting.last_ingested_at,
           createdByUserId: "meeting-guide",
@@ -1138,9 +1189,12 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           types: typeCodes,
           typesDisplay: mapTypeCodesToLabels(typeCodes),
           format,
-          geoStatus: meeting.geo_status,
-          geoReason: meeting.geo_reason,
-          geoUpdatedAt: meeting.geo_updated_at,
+          geoStatus: geo.geoStatus,
+          geoReason: geo.geoReason,
+          geoUpdatedAt: geo.geoUpdatedAt,
+          geoSource: geo.geoSource,
+          geoConfidence: geo.geoConfidence,
+          geocodedAt: geo.geocodedAt,
         };
       });
 
@@ -1334,24 +1388,30 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       });
 
       return {
-        meetings: filteredMeetings.map((meeting) => ({
-          id: meeting.id,
-          name: meeting.name,
-          address: meeting.formatted_address ?? meeting.address ?? "Address unavailable",
-          format: meeting.inferred_format,
-          dayOfWeek: meeting.day,
-          startsAtLocal: meeting.time,
-          endsAtLocal: meeting.end_time,
-          lat: meeting.lat,
-          lng: meeting.lng,
-          onlineUrl: meeting.conference_url,
-          types: meeting.types,
-          typesDisplay: mapTypeCodesToLabels(meeting.types),
-          distanceMeters: meeting.distance_meters,
-          geoStatus: meeting.geo_status,
-          geoReason: meeting.geo_reason,
-          geoUpdatedAt: meeting.geo_updated_at,
-        })),
+        meetings: filteredMeetings.map((meeting) => {
+          const geo = shapeMeetingGuideGeoForApi(meeting);
+          return {
+            id: meeting.id,
+            name: meeting.name,
+            address: meeting.formatted_address ?? meeting.address ?? "Address unavailable",
+            format: meeting.inferred_format,
+            dayOfWeek: meeting.day,
+            startsAtLocal: meeting.time,
+            endsAtLocal: meeting.end_time,
+            lat: geo.lat,
+            lng: geo.lng,
+            onlineUrl: meeting.conference_url,
+            types: meeting.types,
+            typesDisplay: mapTypeCodesToLabels(meeting.types),
+            distanceMeters: meeting.distance_meters,
+            geoStatus: geo.geoStatus,
+            geoReason: geo.geoReason,
+            geoUpdatedAt: geo.geoUpdatedAt,
+            geoSource: geo.geoSource,
+            geoConfidence: geo.geoConfidence,
+            geocodedAt: geo.geocodedAt,
+          };
+        }),
         warning: nearbyWarning,
       };
     },
@@ -2112,6 +2172,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           meetings_geo_missing: number;
           meetings_geo_partial: number;
           meetings_geo_invalid: number;
+          meetings_geo_needs_geocode: number;
         }>(
           `
             SELECT
@@ -2121,7 +2182,8 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
               COUNT(*) FILTER (WHERE geo_status = 'ok')::int AS meetings_geo_ok,
               COUNT(*) FILTER (WHERE geo_status = 'missing')::int AS meetings_geo_missing,
               COUNT(*) FILTER (WHERE geo_status = 'partial')::int AS meetings_geo_partial,
-              COUNT(*) FILTER (WHERE geo_status = 'invalid')::int AS meetings_geo_invalid
+              COUNT(*) FILTER (WHERE geo_status = 'invalid')::int AS meetings_geo_invalid,
+              COUNT(*) FILTER (WHERE geo_status = 'needs_geocode')::int AS meetings_geo_needs_geocode
             FROM meeting_guide_meetings
             WHERE tenant_id = $1
           `,
@@ -2160,19 +2222,25 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
             meetings_geo_missing: 0,
             meetings_geo_partial: 0,
             meetings_geo_invalid: 0,
+            meetings_geo_needs_geocode: 0,
           },
-          nearbySample: nearbySample.map((meeting) => ({
-            id: meeting.id,
-            name: meeting.name,
-            lat: meeting.lat,
-            lng: meeting.lng,
-            time: meeting.time,
-            day: meeting.day,
-            distanceMeters: meeting.distance_meters,
-            format: meeting.inferred_format,
-            geoStatus: meeting.geo_status,
-            geoReason: meeting.geo_reason,
-          })),
+          nearbySample: nearbySample.map((meeting) => {
+            const geo = shapeMeetingGuideGeoForApi(meeting);
+            return {
+              id: meeting.id,
+              name: meeting.name,
+              lat: geo.lat,
+              lng: geo.lng,
+              time: meeting.time,
+              day: meeting.day,
+              distanceMeters: meeting.distance_meters,
+              format: meeting.inferred_format,
+              geoStatus: geo.geoStatus,
+              geoReason: geo.geoReason,
+              geoSource: geo.geoSource,
+              geoConfidence: geo.geoConfidence,
+            };
+          }),
         };
       },
     );
