@@ -1,6 +1,8 @@
 export const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
+export const ATTENDANCE_SLIP_EXPORT_CHUNK_SIZE = 5;
 const MAX_SIGNATURE_BASE64_CHARS = 20_000;
 const MAX_SIGNATURE_BASE64_TOTAL_CHARS = 160_000;
+const MAX_RECORDS_WITH_SIGNATURE_IMAGES = 10;
 
 type LocationStamp = {
   lat: number | null;
@@ -27,6 +29,8 @@ export type AttendanceSlipUserProfile = {
   participantName: string;
   tenantLabel?: string | null;
 };
+
+export type AttendanceSlipProgressCallback = (completedChunks: number, totalChunks: number) => void;
 
 type PrintModule = {
   printToFileAsync(input: {
@@ -83,6 +87,41 @@ function asSafeText(value: unknown, fallback: string): string {
     return String(value);
   }
   return fallback;
+}
+
+function asSafeOptionalText(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return null;
+}
+
+function parseDateMs(value: string | null | undefined): number | null {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return null;
+  }
+  const date = new Date(value);
+  const ms = date.getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function normalizeIso(value: unknown, fallbackIso: string): string {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+  return fallbackIso;
+}
+
+function normalizeOptionalIso(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function formatDateOnly(valueIso: string): string {
@@ -160,16 +199,88 @@ function sanitizeBase64Signature(value: unknown): string | null {
   if (trimmed.length === 0) {
     return null;
   }
-  // Keep only plausible base64 chars to avoid malformed image payloads.
   const cleaned = trimmed.replace(/[^A-Za-z0-9+/=]/g, "");
   return cleaned.length > 0 ? cleaned : null;
 }
 
+function normalizeDurationSeconds(
+  value: unknown,
+  startAtIso: string,
+  endAtIso: string | null,
+): number | null {
+  const provided = asFiniteOrNull(value);
+  if (provided !== null) {
+    return Math.max(0, Math.floor(provided));
+  }
+
+  const startMs = parseDateMs(startAtIso);
+  const endMs = parseDateMs(endAtIso);
+  if (startMs === null || endMs === null || endMs < startMs) {
+    return null;
+  }
+
+  return Math.floor((endMs - startMs) / 1000);
+}
+
+function normalizeAttendanceSlipRecord(
+  record: AttendanceSlipRecord | null | undefined,
+  index: number,
+): AttendanceSlipRecord {
+  const fallbackIso = new Date().toISOString();
+  const startAtIso = normalizeIso(record?.startAtIso, fallbackIso);
+  const endAtIso = normalizeOptionalIso(record?.endAtIso ?? null);
+
+  return {
+    id: asSafeText(record?.id, `attendance-${index + 1}`),
+    meetingName: asSafeText(record?.meetingName, "Recovery Meeting"),
+    meetingAddress: asSafeText(record?.meetingAddress, "Address unavailable"),
+    startAtIso,
+    endAtIso,
+    durationSeconds: normalizeDurationSeconds(record?.durationSeconds, startAtIso, endAtIso),
+    signatureSvgBase64: sanitizeBase64Signature(record?.signatureSvgBase64),
+    chairName: asSafeOptionalText(record?.chairName),
+    chairRole: asSafeOptionalText(record?.chairRole),
+    signatureCapturedAtIso: normalizeOptionalIso(record?.signatureCapturedAtIso),
+    startLocation: normalizeLocationStamp(record?.startLocation),
+    endLocation: normalizeLocationStamp(record?.endLocation),
+  };
+}
+
+export function normalizeAttendanceSlipRecords(
+  records: ReadonlyArray<AttendanceSlipRecord | null | undefined>,
+): AttendanceSlipRecord[] {
+  if (!Array.isArray(records)) {
+    return [];
+  }
+
+  return records.map((record, index) => normalizeAttendanceSlipRecord(record, index));
+}
+
+function compareAttendanceRecords(left: AttendanceSlipRecord, right: AttendanceSlipRecord): number {
+  const leftMs = parseDateMs(left.startAtIso);
+  const rightMs = parseDateMs(right.startAtIso);
+  if (leftMs !== null && rightMs !== null && leftMs !== rightMs) {
+    return leftMs - rightMs;
+  }
+  if (leftMs !== null && rightMs === null) {
+    return -1;
+  }
+  if (leftMs === null && rightMs !== null) {
+    return 1;
+  }
+  return left.id.localeCompare(right.id);
+}
+
 function shouldEmbedSignatures(records: AttendanceSlipRecord[]): boolean {
+  if (records.length > MAX_RECORDS_WITH_SIGNATURE_IMAGES) {
+    return false;
+  }
+
   const totalChars = records.reduce((sum, record) => {
     const signature = sanitizeBase64Signature(record.signatureSvgBase64);
     return sum + (signature?.length ?? 0);
   }, 0);
+
   return totalChars <= MAX_SIGNATURE_BASE64_TOTAL_CHARS;
 }
 
@@ -180,13 +291,16 @@ function buildSignatureMarkup(
   if (!includeSignatureImages) {
     return '<p class="muted">Signature captured on file (image omitted for stable export).</p>';
   }
+
   const signature = sanitizeBase64Signature(record.signatureSvgBase64);
   if (!signature) {
     return '<p class="muted">Unsigned</p>';
   }
+
   if (signature.length > MAX_SIGNATURE_BASE64_CHARS) {
     return '<p class="muted">Signature captured on file (image omitted for stable export).</p>';
   }
+
   return `<img alt="Chair signature" src="data:image/svg+xml;base64,${signature}" style="width:100%;max-width:460px;border:1px solid #d5d9e4;border-radius:6px;"/>`;
 }
 
@@ -211,8 +325,8 @@ function buildAttendancePage(
       <tr><td><strong>Start</strong></td><td>${escapeHtml(formatDateTime(record.startAtIso))}</td></tr>
       <tr><td><strong>End</strong></td><td>${escapeHtml(formatDateTime(record.endAtIso))}</td></tr>
       <tr><td><strong>Duration</strong></td><td>${escapeHtml(formatDuration(record.durationSeconds))}</td></tr>
-      <tr><td><strong>GPS Snapshot (start)</strong></td><td>${escapeHtml(formatLocation(record.startLocation ?? { lat: null, lng: null, accuracyM: null }))}</td></tr>
-      <tr><td><strong>GPS Snapshot (end)</strong></td><td>${escapeHtml(formatLocation(record.endLocation ?? { lat: null, lng: null, accuracyM: null }))}</td></tr>
+      <tr><td><strong>GPS Snapshot (start)</strong></td><td>${escapeHtml(formatLocation(record.startLocation))}</td></tr>
+      <tr><td><strong>GPS Snapshot (end)</strong></td><td>${escapeHtml(formatLocation(record.endLocation))}</td></tr>
     </table>
 
     <h2>Chair Signature</h2>
@@ -225,11 +339,24 @@ function buildAttendancePage(
 function buildAttendanceHtml(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
+  onProgress?: AttendanceSlipProgressCallback,
 ): string {
   const includeSignatureImages = shouldEmbedSignatures(records);
-  const pages = records
-    .map((record) => buildAttendancePage(record, profile, includeSignatureImages))
-    .join("\n");
+  const totalChunks = Math.max(1, Math.ceil(records.length / ATTENDANCE_SLIP_EXPORT_CHUNK_SIZE));
+
+  let pages = "";
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const start = chunkIndex * ATTENDANCE_SLIP_EXPORT_CHUNK_SIZE;
+    const end = Math.min(start + ATTENDANCE_SLIP_EXPORT_CHUNK_SIZE, records.length);
+    const chunkRecords = records.slice(start, end);
+
+    onProgress?.(chunkIndex + 1, totalChunks);
+
+    for (const record of chunkRecords) {
+      pages += `${buildAttendancePage(record, profile, includeSignatureImages)}\n`;
+    }
+  }
+
   return `<!doctype html>
 <html>
   <head>
@@ -257,7 +384,7 @@ function buildAttendanceHtml(
 export async function generateAttendanceSlipPdf(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
-  options?: { fileName?: string },
+  options?: { fileName?: string; onProgress?: AttendanceSlipProgressCallback },
 ): Promise<string> {
   if (!Array.isArray(records) || records.length === 0) {
     throw new Error("No attendance records selected for export.");
@@ -272,10 +399,13 @@ export async function generateAttendanceSlipPdf(
     );
   }
 
-  const sorted = [...records].sort(
-    (left, right) => new Date(left.startAtIso).getTime() - new Date(right.startAtIso).getTime(),
-  );
-  const html = buildAttendanceHtml(sorted, profile);
+  const normalized = normalizeAttendanceSlipRecords(records);
+  if (normalized.length === 0) {
+    throw new Error("No valid attendance records selected for export.");
+  }
+
+  const sorted = [...normalized].sort(compareAttendanceRecords);
+  const html = buildAttendanceHtml(sorted, profile, options?.onProgress);
   const printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
 
   const outputDirectory = fileSystemModule.cacheDirectory ?? fileSystemModule.documentDirectory;
