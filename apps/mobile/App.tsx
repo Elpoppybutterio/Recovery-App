@@ -33,6 +33,14 @@ import {
   type MeetingsApiHealthEvent,
 } from "./lib/meetings/source";
 import {
+  classifyGeo,
+  distanceMiles,
+  isValidLatLng,
+  isTrustedGeoStatus,
+  type MeetingGeoSource,
+  type MeetingGeoStatus,
+} from "./lib/geo/geoTrust";
+import {
   ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
   generateAttendanceSlipPdf,
   shareAttendanceSlipPdf,
@@ -50,6 +58,8 @@ import {
   refreshLocationPermissionStates as readLocationPermissionStates,
   requestAlwaysLocationPermission as requestAlwaysLocationPermissionFromService,
 } from "./lib/services/locationService";
+import { getDirectionsDuration } from "./lib/services/directionsService";
+import { buildLeaveTimePlan } from "./lib/services/leaveTimePlanner";
 import { getInsightForDay } from "./lib/recoveryInsights";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import { featureFlags } from "./lib/config/featureFlags";
@@ -172,6 +182,9 @@ type AttendanceRecord = {
   scheduledStartsAtLocal?: string | null;
   meetingLat?: number | null;
   meetingLng?: number | null;
+  meetingGeoStatus?: MeetingGeoStatus | null;
+  meetingGeoSource?: MeetingGeoSource | null;
+  meetingGeoReason?: string | null;
   meetingFormat?: "IN_PERSON" | "ONLINE" | "HYBRID";
   captureMethod?: "attend-log" | "signature";
   startAt: string;
@@ -189,6 +202,8 @@ type AttendanceRecord = {
   chairRole?: string | null;
   signatureCapturedAtIso?: string | null;
   calendarEventId?: string | null;
+  leaveNotificationId?: string | null;
+  leaveNotificationAtIso?: string | null;
   signaturePngBase64: string | null;
   pdfUri: string | null;
 };
@@ -215,7 +230,7 @@ type HomeScreen =
   | "SETTINGS"
   | "TOOLS"
   | "DIAGNOSTICS";
-type SetupStep = 1 | 2 | 3 | 4 | 5 | 6;
+type SetupStep = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
 type MeetingsLocationFilter = "CURRENT" | "MILES_50" | "MILES_100";
@@ -233,6 +248,7 @@ type RoutineReaderState = {
   url: string | null;
   bodyText?: string | null;
   itemId?: string | null;
+  requiredDwellSeconds?: number | null;
 };
 type SignaturePoint = {
   x: number;
@@ -269,6 +285,7 @@ type MeetingPlansState = Record<string, DayPlanState>;
 type NotificationBuckets = {
   sponsor: string[];
   drive: string[];
+  attendLeave: string[];
 };
 
 type TravelTimeProvider = {
@@ -285,6 +302,7 @@ type DriveSchedulePreview = {
 };
 
 type AttendanceValidationResult = {
+  code: "VALID" | "INVALID" | "UNVERIFIED_LOCATION";
   valid: boolean;
   reason: string;
 };
@@ -362,6 +380,8 @@ const DRIVE_ACTION_ID = "DRIVE_NOW";
 
 const DEFAULT_MEETING_EARLY_MINUTES = 10;
 const DEFAULT_SERVICE_COMMITMENT_MINUTES = 45;
+const DEFAULT_MORNING_READ_DWELL_SECONDS = 20;
+const SPONSOR_NO_KNEES_READ_DWELL_SECONDS = 15;
 const MAX_MEETING_MINUTES = 99;
 const DEFAULT_NINETY_DAY_GOAL_TARGET = 90;
 const DEFAULT_DAILY_MEETINGS_GOAL_TARGET = 3;
@@ -443,16 +463,28 @@ function distanceMetersBetween(latA: number, lngA: number, latB: number, lngB: n
 }
 
 function resolveMeetingDistanceMeters(
-  meeting: Pick<MeetingRecord, "lat" | "lng" | "distanceMeters">,
+  meeting: Pick<MeetingRecord, "lat" | "lng" | "distanceMeters" | "address" | "geoStatus">,
   currentLocation: LocationStamp | null,
 ): number | null {
+  if (!isTrustedGeoStatus(meeting.geoStatus ?? null)) {
+    return null;
+  }
   if (currentLocation && meeting.lat !== null && meeting.lng !== null) {
-    return distanceMetersBetween(
-      currentLocation.lat,
-      currentLocation.lng,
-      meeting.lat,
-      meeting.lng,
+    const computedMiles = distanceMiles(
+      { lat: currentLocation.lat, lng: currentLocation.lng },
+      { lat: meeting.lat, lng: meeting.lng },
     );
+    const geoClassification = classifyGeo({
+      lat: meeting.lat,
+      lng: meeting.lng,
+      address: meeting.address,
+      userRegionHint: resolveUserRegionHintFromLocation(currentLocation),
+      distanceFromUserMiles: computedMiles,
+    });
+    if (!isTrustedGeoStatus(geoClassification.geoStatus)) {
+      return null;
+    }
+    return computedMiles * 1609.344;
   }
   if (typeof meeting.distanceMeters === "number" && Number.isFinite(meeting.distanceMeters)) {
     return Math.max(0, meeting.distanceMeters);
@@ -487,14 +519,17 @@ function isMeetingActionableToday(startsAtLocal: string, nowMinutes: number): bo
 }
 
 function meetingDistanceLabel(
-  meeting: Pick<MeetingRecord, "lat" | "lng">,
+  meeting: Pick<MeetingRecord, "lat" | "lng" | "geoStatus">,
   distanceMeters: number | null,
   permission: LocationPermissionState,
   issue: LocationIssue,
 ): string {
+  if (!isTrustedGeoStatus(meeting.geoStatus ?? null)) {
+    return "Distance unavailable";
+  }
   const hasCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng }) !== null;
   if (!hasCoords) {
-    return "Location unavailable";
+    return "Distance unavailable";
   }
   if (distanceMeters === null || !Number.isFinite(distanceMeters)) {
     if (issue === "services_disabled") {
@@ -608,15 +643,33 @@ function validateAttendanceRecord(
   record: AttendanceRecord,
   requiresSignature: boolean,
 ): AttendanceValidationResult {
+  const invalid = (reason: string): AttendanceValidationResult => ({
+    code: "INVALID",
+    valid: false,
+    reason,
+  });
+  const unverifiedLocation = (): AttendanceValidationResult => ({
+    code: "UNVERIFIED_LOCATION",
+    valid: false,
+    reason: "Meeting location could not be verified",
+  });
+
   const startAtMs = new Date(record.startAt).getTime();
   if (!Number.isFinite(startAtMs)) {
-    return { valid: false, reason: "Invalid start time" };
+    return invalid("Invalid start time");
+  }
+
+  const inferredMeetingGeoStatus =
+    normalizeMeetingGeoStatus(record.meetingGeoStatus) ??
+    (isValidLatLng(record.meetingLat, record.meetingLng) ? "verified" : "missing");
+  if (!isTrustedGeoStatus(inferredMeetingGeoStatus)) {
+    return unverifiedLocation();
   }
 
   const meetingLat = typeof record.meetingLat === "number" ? record.meetingLat : null;
   const meetingLng = typeof record.meetingLng === "number" ? record.meetingLng : null;
   if (meetingLat === null || meetingLng === null) {
-    return { valid: false, reason: "Missing geofence location" };
+    return unverifiedLocation();
   }
 
   const startLat = typeof record.startLat === "number" ? record.startLat : null;
@@ -634,7 +687,7 @@ function validateAttendanceRecord(
       : null;
 
   if (startDistance === null && endDistance === null) {
-    return { valid: false, reason: "Missing geofence location" };
+    return unverifiedLocation();
   }
 
   const startAccuracyTolerance =
@@ -653,43 +706,40 @@ function validateAttendanceRecord(
 
   if (!startWithinGeofence && !endWithinGeofence) {
     if (startDistance !== null && endDistance !== null) {
-      return { valid: false, reason: "Not within geofence at check-in or check-out" };
+      return invalid("Not within geofence at check-in or check-out");
     }
     if (startDistance !== null) {
-      return { valid: false, reason: "Not within geofence at check-in" };
+      return invalid("Not within geofence at check-in");
     }
-    return { valid: false, reason: "Not within geofence at check-out" };
+    return invalid("Not within geofence at check-out");
   }
 
   const scheduledStartMs = parseScheduledStartForAttendance(record);
   if (scheduledStartMs === null) {
-    return { valid: false, reason: "Missing scheduled meeting time" };
+    return invalid("Missing scheduled meeting time");
   }
   const checkInWindowMs = 10 * 60 * 1000;
   if (startAtMs - scheduledStartMs > checkInWindowMs) {
-    return { valid: false, reason: "Check-in was more than 10 minutes late" };
+    return invalid("Check-in was more than 10 minutes late");
   }
 
   if (!record.endAt) {
-    return { valid: false, reason: "Missing end time" };
+    return invalid("Missing end time");
   }
   const endAtMs = new Date(record.endAt).getTime();
   if (!Number.isFinite(endAtMs)) {
-    return { valid: false, reason: "Invalid end time" };
+    return invalid("Invalid end time");
   }
   const minDurationMs = MIN_VALID_MEETING_MINUTES * 60 * 1000;
   if (endAtMs - startAtMs < minDurationMs) {
-    return {
-      valid: false,
-      reason: `Duration must be at least ${MIN_VALID_MEETING_MINUTES} minutes`,
-    };
+    return invalid(`Duration must be at least ${MIN_VALID_MEETING_MINUTES} minutes`);
   }
 
   if (requiresSignature && !record.signaturePngBase64) {
-    return { valid: false, reason: "Signature required" };
+    return invalid("Signature required");
   }
 
-  return { valid: true, reason: "Valid meeting" };
+  return { code: "VALID", valid: true, reason: "Valid meeting" };
 }
 
 function formatHhmmForDisplay(value: string | null | undefined): string {
@@ -949,6 +999,16 @@ function combineDateWithHhmm(date: Date, hhmm: string): Date {
     0,
     0,
   );
+  return result;
+}
+
+function resolveNextMeetingDateForDayOfWeek(dayOfWeek: number, now: Date): Date {
+  const result = new Date(now);
+  const normalizedDay = Math.max(0, Math.min(6, Math.floor(dayOfWeek)));
+  const currentDay = now.getDay();
+  const deltaDays = (normalizedDay - currentDay + 7) % 7;
+  result.setHours(0, 0, 0, 0);
+  result.setDate(result.getDate() + deltaDays);
   return result;
 }
 
@@ -1296,6 +1356,53 @@ function invalidMeetingCoordsReason(lat: number | null, lng: number | null): str
   return null;
 }
 
+function normalizeMeetingGeoStatus(value: unknown): MeetingGeoStatus | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "ok" || normalized === "verified") {
+    return "verified";
+  }
+  if (normalized === "estimated") {
+    return "estimated";
+  }
+  if (normalized === "missing") {
+    return "missing";
+  }
+  if (normalized === "invalid" || normalized === "partial" || normalized === "suspect") {
+    return "suspect";
+  }
+  return null;
+}
+
+function normalizeMeetingGeoSource(value: unknown): MeetingGeoSource | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "feed" ||
+    normalized === "api" ||
+    normalized === "device_geocode" ||
+    normalized === "backend_geocode" ||
+    normalized === "nominatim" ||
+    normalized === "unknown"
+  ) {
+    return normalized as MeetingGeoSource;
+  }
+  return null;
+}
+
+function resolveUserRegionHintFromLocation(location: LocationStamp | null): string | null {
+  if (!location) {
+    return null;
+  }
+  const inMontanaBounds =
+    location.lat >= 44 && location.lat <= 49.5 && location.lng >= -116 && location.lng <= -104;
+  return inMontanaBounds ? "MT" : null;
+}
+
 function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     const runtime = globalThis as { require?: (name: string) => unknown };
@@ -1420,6 +1527,7 @@ function emptyNotificationBuckets(): NotificationBuckets {
   return {
     sponsor: [],
     drive: [],
+    attendLeave: [],
   };
 }
 
@@ -1431,7 +1539,6 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
   return meetings
     .filter((entry) => entry && typeof entry === "object")
     .map((entry, index) => {
-      const coords = normalizeCoordinates({ lat: entry.lat, lng: entry.lng });
       const parsedDistance = asFiniteNumber(entry.distanceMeters);
       const safeId =
         typeof entry.id === "string" && entry.id.trim().length > 0 ? entry.id : `meeting-${index}`;
@@ -1450,6 +1557,20 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
       const safeDayOfWeek = Number.isFinite(entry.dayOfWeek)
         ? Math.max(0, Math.min(6, Math.round(entry.dayOfWeek)))
         : 0;
+      const classifiedGeo = classifyGeo({
+        lat: entry.lat,
+        lng: entry.lng,
+        address: safeAddress,
+      });
+      const normalizedExistingStatus = normalizeMeetingGeoStatus(entry.geoStatus);
+      const geoStatus: MeetingGeoStatus =
+        normalizedExistingStatus === "missing" || normalizedExistingStatus === "suspect"
+          ? normalizedExistingStatus
+          : classifiedGeo.geoStatus;
+      const trustedCoords = isTrustedGeoStatus(geoStatus);
+      const normalizedGeoSource = normalizeMeetingGeoSource(entry.geoSource);
+      const geoSource: MeetingGeoSource =
+        normalizedGeoSource ?? (trustedCoords ? "api" : "unknown");
 
       return {
         ...entry,
@@ -1458,11 +1579,18 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
         address: safeAddress,
         startsAtLocal: safeStartsAtLocal,
         dayOfWeek: safeDayOfWeek,
-        lat: coords?.lat ?? null,
-        lng: coords?.lng ?? null,
+        lat: trustedCoords ? classifiedGeo.lat : null,
+        lng: trustedCoords ? classifiedGeo.lng : null,
         distanceMeters:
           typeof parsedDistance === "number" && Number.isFinite(parsedDistance)
             ? Math.max(0, parsedDistance)
+            : null,
+        geoStatus,
+        geoSource,
+        geoReason: entry.geoReason ?? classifiedGeo.geoReason,
+        geoUpdatedAt:
+          typeof entry.geoUpdatedAt === "string" && entry.geoUpdatedAt.trim().length > 0
+            ? entry.geoUpdatedAt
             : null,
       };
     });
@@ -1710,12 +1838,16 @@ export default function App() {
     "Sobriety milestones not synced yet.",
   );
   const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
+  const [wizardSponsorKneesSuggested, setWizardSponsorKneesSuggested] = useState<boolean | null>(
+    null,
+  );
   const [wizardWantsReminders, setWizardWantsReminders] = useState<boolean | null>(null);
   const [wizardHasHomeGroup, setWizardHasHomeGroup] = useState<boolean | null>(null);
   const [wizardMeetingSignatureRequired, setWizardMeetingSignatureRequired] = useState<
     boolean | null
   >(null);
   const [meetingSignatureRequired, setMeetingSignatureRequired] = useState(false);
+  const [sponsorKneesSuggested, setSponsorKneesSuggested] = useState<boolean | null>(null);
   const [homeGroupMeetingIds, setHomeGroupMeetingIds] = useState<string[]>([]);
   const [sponsorEnabledAtIso, setSponsorEnabledAtIso] = useState<string | null>(null);
   const [, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
@@ -1753,7 +1885,9 @@ export default function App() {
   >(null);
   const requestLocationPermissionRef = useRef<(() => Promise<LocationStamp | null>) | null>(null);
   const currentLocationRef = useRef<LocationStamp | null>(null);
-  const geocodedAddressCacheRef = useRef<Record<string, { lat: number; lng: number } | null>>({});
+  const geocodedAddressCacheRef = useRef<
+    Record<string, { lat: number; lng: number; source: MeetingGeoSource } | null>
+  >({});
   const dailyWisdomFetchKeyRef = useRef<string | null>(null);
   const sponsorScheduleEffectKeyRef = useRef<string | null>(null);
   const bootstrapStartedRef = useRef(false);
@@ -2504,8 +2638,10 @@ export default function App() {
       .map((item) => {
         const completed = Boolean(morningRoutineDayState.completedByItemId[item.id]);
         const prayerUsesOnKnees = MORNING_PRAYER_ITEM_IDS.has(item.id);
+        const onKneesToggleRequired =
+          prayerUsesOnKnees && !(wizardHasSponsor === true && sponsorKneesSuggested === false);
         const onKnees = Boolean(morningRoutineDayState.prayerOnKneesByItemId[item.id]);
-        const progress = prayerUsesOnKnees
+        const progress = onKneesToggleRequired
           ? completed
             ? onKnees
               ? 100
@@ -2517,7 +2653,7 @@ export default function App() {
         const itemLabel =
           item.id === ELEVENTH_STEP_PRAYER_ITEM_ID ? "11th Step AM Prayer" : item.title;
         const kneesSuffix =
-          prayerUsesOnKnees && completed ? (onKnees ? " -knees" : " -no knees") : "";
+          onKneesToggleRequired && completed ? (onKnees ? " -knees" : " -no knees") : "";
         return {
           id: `morning-${item.id}`,
           label: `Morning: ${itemLabel}${kneesSuffix}`,
@@ -2550,8 +2686,12 @@ export default function App() {
             (() => {
               const completed = Boolean(nightlyInventoryDayState.eleventhStepPrayerCompletedAt);
               const onKnees = Boolean(nightlyInventoryDayState.gotOnKneesCompleted);
-              const progress = completed ? (onKnees ? 100 : 50) : 0;
-              const kneesSuffix = completed ? (onKnees ? " -knees" : " -no knees") : "";
+              const onKneesToggleRequired = !(
+                wizardHasSponsor === true && sponsorKneesSuggested === false
+              );
+              const progress = completed ? (onKneesToggleRequired ? (onKnees ? 100 : 50) : 100) : 0;
+              const kneesSuffix =
+                onKneesToggleRequired && completed ? (onKnees ? " -knees" : " -no knees") : "";
               return {
                 id: "nightly-eleventh-step-prayer",
                 label: `Nightly: 11th Step Prayer${kneesSuffix}`,
@@ -2574,6 +2714,8 @@ export default function App() {
     routinesStore.morningTemplate.items,
     morningRoutineDayState.completedByItemId,
     morningRoutineDayState.prayerOnKneesByItemId,
+    wizardHasSponsor,
+    sponsorKneesSuggested,
     meetingsAttendedTodayCount,
     todayDateKey,
     nightlyInventoryDayState.completedAt,
@@ -2723,6 +2865,7 @@ export default function App() {
       return {
         sponsor: Array.isArray(parsed.sponsor) ? parsed.sponsor : [],
         drive: Array.isArray(parsed.drive) ? parsed.drive : [],
+        attendLeave: Array.isArray(parsed.attendLeave) ? parsed.attendLeave : [],
       };
     } catch {
       return emptyNotificationBuckets();
@@ -2912,9 +3055,13 @@ export default function App() {
 
   const geocodeMeetingsMissingCoordinates = useCallback(
     async (records: MeetingRecord[]) => {
-      const MAX_GEOCODE_LOOKUPS_PER_REFRESH = 20;
+      const MAX_GEOCODE_LOOKUPS_PER_REFRESH = 30;
+      const ADDRESS_SECOND_CHECK_MISMATCH_MILES = 75;
+      const ADDRESS_SECOND_CHECK_DISTANCE_ANOMALY_MILES = 120;
       let lookups = 0;
       let resolved = 0;
+      let overrides = 0;
+      const userRegionHint = resolveUserRegionHintFromLocation(currentLocation);
 
       const buildAddressCandidates = (meeting: MeetingRecord): string[] => {
         const raw = meeting.address.trim().replace(/\s+/g, " ");
@@ -2932,7 +3079,9 @@ export default function App() {
         return Array.from(new Set([raw, withMontana, `${withMontana}, USA`]));
       };
 
-      const geocodeFromNetwork = async (candidate: string) => {
+      const geocodeFromNetwork = async (
+        candidate: string,
+      ): Promise<{ lat: number; lng: number; source: MeetingGeoSource } | null> => {
         try {
           const apiResponse = await fetch(
             `${apiUrl}/v1/geo/geocode?address=${encodeURIComponent(candidate)}`,
@@ -2946,12 +3095,13 @@ export default function App() {
             const payload = (await apiResponse.json()) as {
               coords?: { lat?: number; lng?: number };
             };
-            const coords = normalizeCoordinates({
+            const geo = classifyGeo({
               lat: payload?.coords?.lat ?? null,
               lng: payload?.coords?.lng ?? null,
+              address: candidate,
             });
-            if (coords) {
-              return { lat: coords.lat, lng: coords.lng };
+            if (isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null) {
+              return { lat: geo.lat, lng: geo.lng, source: "backend_geocode" };
             }
           }
         } catch {
@@ -2970,11 +3120,14 @@ export default function App() {
           }
           const payload = (await response.json()) as Array<{ lat?: string; lon?: string }>;
           const first = payload[0];
-          const coords = normalizeCoordinates({
+          const geo = classifyGeo({
             lat: first?.lat ?? null,
             lng: first?.lon ?? null,
+            address: candidate,
           });
-          return coords ? { lat: coords.lat, lng: coords.lng } : null;
+          return isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null
+            ? { lat: geo.lat, lng: geo.lng, source: "nominatim" }
+            : null;
         } catch {
           return null;
         }
@@ -2986,7 +3139,35 @@ export default function App() {
         if (!meeting || meeting.format === "ONLINE") {
           continue;
         }
-        if (meeting.lat !== null && meeting.lng !== null) {
+        const currentGeoStatus =
+          normalizeMeetingGeoStatus(meeting.geoStatus) ??
+          (meeting.lat !== null && meeting.lng !== null ? "verified" : "missing");
+        const needsRecovery = currentGeoStatus === "missing" || currentGeoStatus === "suspect";
+        const hasTrustedCoords =
+          isTrustedGeoStatus(currentGeoStatus) &&
+          typeof meeting.lat === "number" &&
+          Number.isFinite(meeting.lat) &&
+          typeof meeting.lng === "number" &&
+          Number.isFinite(meeting.lng);
+        const distanceFromUserToExistingMiles =
+          currentLocation && hasTrustedCoords
+            ? distanceMiles(
+                { lat: currentLocation.lat, lng: currentLocation.lng },
+                { lat: meeting.lat as number, lng: meeting.lng as number },
+              )
+            : null;
+        const shouldSecondCheckTrusted =
+          hasTrustedCoords &&
+          (meeting.geoSource === "feed" ||
+            meeting.geoSource === "api" ||
+            meeting.geoSource === "unknown" ||
+            meeting.geoSource === null ||
+            meeting.geoSource === undefined) &&
+          (userRegionHint === "MT" ||
+            (typeof distanceFromUserToExistingMiles === "number" &&
+              Number.isFinite(distanceFromUserToExistingMiles) &&
+              distanceFromUserToExistingMiles > ADDRESS_SECOND_CHECK_DISTANCE_ANOMALY_MILES));
+        if (!needsRecovery && !shouldSecondCheckTrusted) {
           continue;
         }
 
@@ -2995,7 +3176,7 @@ export default function App() {
           continue;
         }
 
-        let cached: { lat: number; lng: number } | null | undefined;
+        let cached: { lat: number; lng: number; source: MeetingGeoSource } | null | undefined;
         let cacheKey = "";
         for (const candidate of addressCandidates) {
           const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
@@ -3017,11 +3198,15 @@ export default function App() {
             try {
               const geocoded = await geocodeAsync(candidate);
               const first = geocoded[0];
-              const coords = normalizeCoordinates({
+              const geo = classifyGeo({
                 lat: first?.latitude ?? null,
                 lng: first?.longitude ?? null,
+                address: candidate,
               });
-              cached = coords ? { lat: coords.lat, lng: coords.lng } : null;
+              cached =
+                isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null
+                  ? { lat: geo.lat, lng: geo.lng, source: "device_geocode" }
+                  : null;
             } catch {
               cached = await geocodeFromNetwork(candidate);
             }
@@ -3039,16 +3224,102 @@ export default function App() {
               geocodedAddressCacheRef.current[fallbackKey] = null;
             }
           }
+          if (needsRecovery) {
+            next[index] = {
+              ...meeting,
+              lat: null,
+              lng: null,
+              geoStatus: "missing",
+              geoReason: "missing_coordinates",
+            };
+          }
           continue;
         }
 
-        resolved += 1;
-        next[index] = {
-          ...meeting,
+        const distanceFromUserMiles =
+          currentLocation &&
+          Number.isFinite(currentLocation.lat) &&
+          Number.isFinite(currentLocation.lng)
+            ? distanceMiles(
+                { lat: currentLocation.lat, lng: currentLocation.lng },
+                { lat: cached.lat, lng: cached.lng },
+              )
+            : null;
+        const trustedGeo = classifyGeo({
           lat: cached.lat,
           lng: cached.lng,
-          geoStatus: "ok",
-          geoReason: null,
+          address: meeting.address,
+          userRegionHint,
+          distanceFromUserMiles,
+        });
+        if (
+          !isTrustedGeoStatus(trustedGeo.geoStatus) ||
+          trustedGeo.lat === null ||
+          trustedGeo.lng === null
+        ) {
+          if (needsRecovery) {
+            next[index] = {
+              ...meeting,
+              lat: null,
+              lng: null,
+              geoStatus: "missing",
+              geoSource: cached.source,
+              geoReason: trustedGeo.geoReason ?? "missing_coordinates",
+              geoUpdatedAt: new Date().toISOString(),
+            };
+          }
+          continue;
+        }
+
+        if (needsRecovery) {
+          resolved += 1;
+          next[index] = {
+            ...meeting,
+            lat: trustedGeo.lat,
+            lng: trustedGeo.lng,
+            geoStatus: "estimated",
+            geoSource: cached.source,
+            geoReason: trustedGeo.geoReason,
+            geoUpdatedAt: new Date().toISOString(),
+          };
+          continue;
+        }
+
+        if (!hasTrustedCoords) {
+          continue;
+        }
+
+        const existingVsAddressMiles = distanceMiles(
+          { lat: meeting.lat as number, lng: meeting.lng as number },
+          { lat: trustedGeo.lat, lng: trustedGeo.lng },
+        );
+        if (
+          !Number.isFinite(existingVsAddressMiles) ||
+          existingVsAddressMiles < ADDRESS_SECOND_CHECK_MISMATCH_MILES
+        ) {
+          continue;
+        }
+
+        const distanceMetersFromCurrent =
+          currentLocation &&
+          Number.isFinite(currentLocation.lat) &&
+          Number.isFinite(currentLocation.lng)
+            ? distanceMiles(
+                { lat: currentLocation.lat, lng: currentLocation.lng },
+                { lat: trustedGeo.lat, lng: trustedGeo.lng },
+              ) * 1609.344
+            : (meeting.distanceMeters ?? null);
+
+        resolved += 1;
+        overrides += 1;
+        next[index] = {
+          ...meeting,
+          lat: trustedGeo.lat,
+          lng: trustedGeo.lng,
+          distanceMeters: distanceMetersFromCurrent,
+          geoStatus: "estimated",
+          geoSource: cached.source,
+          geoReason: "address_second_check_override",
           geoUpdatedAt: new Date().toISOString(),
         };
       }
@@ -3056,13 +3327,14 @@ export default function App() {
       if (__DEV__ && resolved > 0) {
         console.log("[meetings] geocode fallback resolved", {
           resolved,
+          overrides,
           lookups,
         });
       }
 
       return next;
     },
-    [apiUrl, authHeader],
+    [apiUrl, authHeader, currentLocation],
   );
 
   const persistAttendanceRecords = useCallback(
@@ -3293,6 +3565,26 @@ export default function App() {
     [routineDateKey, routinesStore, updateRoutinesStore],
   );
 
+  const isMorningItemEnabled = useCallback(
+    (itemId: string): boolean =>
+      routinesStore.morningTemplate.items.some((item) => item.id === itemId && item.enabled),
+    [routinesStore.morningTemplate.items],
+  );
+
+  const resolveMorningReadRequiredSeconds = useCallback(
+    (itemId: string): number => {
+      if (
+        MORNING_PRAYER_ITEM_IDS.has(itemId) &&
+        wizardHasSponsor === true &&
+        sponsorKneesSuggested === false
+      ) {
+        return SPONSOR_NO_KNEES_READ_DWELL_SECONDS;
+      }
+      return DEFAULT_MORNING_READ_DWELL_SECONDS;
+    },
+    [wizardHasSponsor, sponsorKneesSuggested],
+  );
+
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
       const previousState = appStateRef.current;
@@ -3411,8 +3703,7 @@ export default function App() {
   );
 
   const onReadThirdStepPrayer = useCallback(() => {
-    const completionReason = completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
-    if (completionReason === "disabled") {
+    if (!isMorningItemEnabled(THIRD_STEP_PRAYER_ITEM_ID)) {
       setRoutinesStatus("Turn this checklist item on first.");
       return;
     }
@@ -3422,9 +3713,10 @@ export default function App() {
       url: null,
       bodyText: THIRD_STEP_PRAYER_READ_TEXT,
       itemId: THIRD_STEP_PRAYER_ITEM_ID,
+      requiredDwellSeconds: resolveMorningReadRequiredSeconds(THIRD_STEP_PRAYER_ITEM_ID),
     });
     setToolsScreen("READER");
-  }, [completeMorningItemForCurrentDayIfEnabled]);
+  }, [isMorningItemEnabled, resolveMorningReadRequiredSeconds]);
 
   const onListenThirdStepPrayer = useCallback(() => {
     const completionReason = completeMorningItemForCurrentDayIfEnabled(THIRD_STEP_PRAYER_ITEM_ID);
@@ -3468,8 +3760,7 @@ export default function App() {
   }, [completeMorningItemForCurrentDayIfEnabled, sponsorPhoneDigits, sponsorPhoneE164]);
 
   const onReadSeventhStepPrayer = useCallback(() => {
-    const completionReason = completeMorningItemForCurrentDayIfEnabled(SEVENTH_STEP_PRAYER_ITEM_ID);
-    if (completionReason === "disabled") {
+    if (!isMorningItemEnabled(SEVENTH_STEP_PRAYER_ITEM_ID)) {
       setRoutinesStatus("Turn this checklist item on first.");
       return;
     }
@@ -3479,15 +3770,13 @@ export default function App() {
       url: null,
       bodyText: SEVENTH_STEP_PRAYER_READ_TEXT,
       itemId: SEVENTH_STEP_PRAYER_ITEM_ID,
+      requiredDwellSeconds: resolveMorningReadRequiredSeconds(SEVENTH_STEP_PRAYER_ITEM_ID),
     });
     setToolsScreen("READER");
-  }, [completeMorningItemForCurrentDayIfEnabled]);
+  }, [isMorningItemEnabled, resolveMorningReadRequiredSeconds]);
 
   const onReadEleventhStepPrayer = useCallback(() => {
-    const completionReason = completeMorningItemForCurrentDayIfEnabled(
-      ELEVENTH_STEP_PRAYER_ITEM_ID,
-    );
-    if (completionReason === "disabled") {
+    if (!isMorningItemEnabled(ELEVENTH_STEP_PRAYER_ITEM_ID)) {
       setRoutinesStatus("Turn this checklist item on first.");
       return;
     }
@@ -3497,9 +3786,10 @@ export default function App() {
       url: null,
       bodyText: ELEVENTH_STEP_AM_PRAYER_TEXT,
       itemId: ELEVENTH_STEP_PRAYER_ITEM_ID,
+      requiredDwellSeconds: resolveMorningReadRequiredSeconds(ELEVENTH_STEP_PRAYER_ITEM_ID),
     });
     setToolsScreen("READER");
-  }, [completeMorningItemForCurrentDayIfEnabled]);
+  }, [isMorningItemEnabled, resolveMorningReadRequiredSeconds]);
 
   const onListenNightlyPrayer = useCallback(() => {
     speakRoutineText(ELEVENTH_STEP_NIGHTLY_PRAYER_TEXT);
@@ -3531,11 +3821,13 @@ export default function App() {
 
   const openRoutineReader = useCallback(
     (itemId: string, title: string, url: string | null) => {
+      if (!isMorningItemEnabled(itemId)) {
+        setRoutinesStatus("Turn this checklist item on first.");
+        return;
+      }
+
+      const requiredDwellSeconds = resolveMorningReadRequiredSeconds(itemId);
       if (itemId === BIG_BOOK_86_88_ITEM_ID || itemId === BIG_BOOK_60_63_ITEM_ID) {
-        const completionReason = completeMorningItemForCurrentDayIfEnabled(itemId);
-        if (completionReason === "disabled") {
-          return;
-        }
         const bigBookBodyText = BIG_BOOK_ROUTINE_TEXT[itemId] ?? "";
         setRoutineReaderBackScreen("MORNING");
         setRoutineReader({
@@ -3543,16 +3835,16 @@ export default function App() {
           url: null,
           bodyText: bigBookBodyText,
           itemId,
+          requiredDwellSeconds,
         });
         setToolsScreen("READER");
         return;
       }
-
       setRoutineReaderBackScreen("MORNING");
-      setRoutineReader({ title, url, bodyText: null, itemId });
+      setRoutineReader({ title, url, bodyText: null, itemId, requiredDwellSeconds });
       setToolsScreen("READER");
     },
-    [completeMorningItemForCurrentDayIfEnabled],
+    [isMorningItemEnabled, resolveMorningReadRequiredSeconds],
   );
 
   const openRoutineReaderLink = useCallback(async (url: string) => {
@@ -3580,8 +3872,12 @@ export default function App() {
     [routineReaderBackScreen, routineReader?.title],
   );
 
+  const hideOnKneesToggleForSponsorPreference =
+    wizardHasSponsor === true && sponsorKneesSuggested === false;
+
   const routineReaderShowsOnKneesToggle =
-    routineReaderShowsNightlyOnKneesToggle || routineReaderMorningPrayerItemId !== null;
+    !hideOnKneesToggleForSponsorPreference &&
+    (routineReaderShowsNightlyOnKneesToggle || routineReaderMorningPrayerItemId !== null);
 
   const routineReaderOnKneesCompleted = useMemo(() => {
     if (routineReaderShowsNightlyOnKneesToggle) {
@@ -3624,6 +3920,24 @@ export default function App() {
     updateNightlyDayState,
     updateMorningDayState,
   ]);
+
+  const onRoutineReaderDwellEligible = useCallback(() => {
+    if (routineReaderBackScreen !== "MORNING") {
+      return;
+    }
+    const itemId = routineReader?.itemId ?? null;
+    if (!itemId) {
+      return;
+    }
+    const completionReason = completeMorningItemForCurrentDayIfEnabled(itemId);
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+    if (completionReason === "completed") {
+      setRoutinesStatus("Read complete.");
+    }
+  }, [completeMorningItemForCurrentDayIfEnabled, routineReader?.itemId, routineReaderBackScreen]);
 
   const openDailyReflections = useCallback(
     async (source: "read" | "listen") => {
@@ -4128,12 +4442,13 @@ export default function App() {
     setHomeScreen("SETUP");
     setSetupStep(1);
     setSetupError(null);
+    setWizardSponsorKneesSuggested(sponsorEnabled ? (sponsorKneesSuggested ?? true) : null);
     setWizardMeetingSignatureRequired(meetingSignatureRequired);
     setScreen("LIST");
     setSelectedMeeting(null);
     setSelectedDayOffset(0);
     void refreshMeetings();
-  }, [refreshMeetings, meetingSignatureRequired]);
+  }, [refreshMeetings, meetingSignatureRequired, sponsorEnabled, sponsorKneesSuggested]);
 
   const nextSetupStep = useCallback(async () => {
     setSetupError(null);
@@ -4166,24 +4481,41 @@ export default function App() {
           setSetupError("Enter sponsor name and phone.");
           return;
         }
+        setWizardSponsorKneesSuggested((current) => (current === null ? true : current));
         setWizardWantsReminders((current) => (current === null ? true : current));
         setSponsorEnabled(true);
         setSetupStep(3);
       } else {
         setSponsorEnabled(false);
         setSponsorActive(false);
+        setWizardSponsorKneesSuggested(null);
+        setSponsorKneesSuggested(null);
         setWizardWantsReminders(false);
-        setSetupStep(5);
+        setSetupStep(6);
       }
       return;
     }
 
     if (setupStep === 3) {
+      if (wizardHasSponsor) {
+        if (wizardSponsorKneesSuggested === null) {
+          setSetupError("Choose whether your sponsor suggests praying on your knees.");
+          return;
+        }
+        setSponsorKneesSuggested(wizardSponsorKneesSuggested);
+      } else {
+        setSponsorKneesSuggested(null);
+      }
       setSetupStep(4);
       return;
     }
 
     if (setupStep === 4) {
+      setSetupStep(5);
+      return;
+    }
+
+    if (setupStep === 5) {
       if (wizardHasSponsor) {
         if (wizardWantsReminders === null) {
           setSetupError("Choose whether calendar notifications and alerts are enabled.");
@@ -4213,11 +4545,11 @@ export default function App() {
       } else {
         setWizardWantsReminders(false);
       }
-      setSetupStep(5);
+      setSetupStep(6);
       return;
     }
 
-    if (setupStep === 5) {
+    if (setupStep === 6) {
       if (wizardHasHomeGroup === null) {
         setSetupError("Choose whether you have a home group.");
         return;
@@ -4230,13 +4562,14 @@ export default function App() {
         setSetupError("Choose whether signatures are required at meetings.");
         return;
       }
-      setSetupStep(6);
+      setSetupStep(7);
     }
   }, [
     setupStep,
     sobrietyDateInput,
     ninetyDayGoalInput,
     wizardHasSponsor,
+    wizardSponsorKneesSuggested,
     normalizedSponsorName,
     sponsorPhoneE164,
     wizardWantsReminders,
@@ -5101,19 +5434,24 @@ export default function App() {
       setSetupStep(2);
       return;
     }
+    if (hasSponsor && wizardSponsorKneesSuggested === null) {
+      setSetupError("Choose whether your sponsor suggests praying on your knees.");
+      setSetupStep(3);
+      return;
+    }
     if (wantsReminders && sponsorRepeatUnit === "WEEKLY" && sponsorRepeatDaysSorted.length === 0) {
       setSetupError("Select at least one reminder day.");
-      setSetupStep(4);
+      setSetupStep(5);
       return;
     }
     if (wizardHasHomeGroup === true && homeGroupMeetingIds.length === 0) {
       setSetupError("Select a home group meeting.");
-      setSetupStep(5);
+      setSetupStep(6);
       return;
     }
     if (wizardMeetingSignatureRequired === null) {
       setSetupError("Choose whether signatures are required at meetings.");
-      setSetupStep(5);
+      setSetupStep(6);
       return;
     }
 
@@ -5123,6 +5461,7 @@ export default function App() {
     setMeetingSignatureRequired(wizardMeetingSignatureRequired);
     setSponsorEnabled(hasSponsor);
     setSponsorActive(wantsReminders);
+    setSponsorKneesSuggested(hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null);
     if (!hasSponsor) {
       setSponsorName("");
       setSponsorPhoneDigits("");
@@ -5154,6 +5493,7 @@ export default function App() {
     sobrietyDateInput,
     ninetyDayGoalInput,
     wizardHasSponsor,
+    wizardSponsorKneesSuggested,
     wizardWantsReminders,
     normalizedSponsorName,
     sponsorPhoneE164,
@@ -5336,25 +5676,148 @@ export default function App() {
     ],
   );
 
-  const promptCalendarAddOnAttend = useCallback(
-    (recordId: string) => {
-      Alert.alert(
-        "Add to calendar?",
-        meetingAutoAddToCalendar
-          ? "Auto-add is enabled. Add this meeting to your calendar?"
-          : "Add this meeting to your calendar?",
-        [
-          { text: "Not now", style: "cancel" },
-          {
-            text: "Add",
-            onPress: () => {
-              void attachCalendarEventToAttendance(recordId);
-            },
+  const syncAttendCalendarAndLeaveAlert = useCallback(
+    async (recordId: string, meeting: MeetingRecord, originOverride?: LocationStamp | null) => {
+      try {
+        const calendarAdded = await attachCalendarEventToAttendance(recordId);
+
+        const sourceRecord =
+          (activeAttendanceRef.current && activeAttendanceRef.current.id === recordId
+            ? activeAttendanceRef.current
+            : null) ??
+          attendanceRecordsRef.current.find((record) => record.id === recordId) ??
+          null;
+        if (!sourceRecord) {
+          return;
+        }
+
+        const destination = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+        if (!destination) {
+          setAttendanceStatus(
+            "Added to Calendar. Leave-time unavailable (missing meeting location).",
+          );
+          return;
+        }
+
+        const origin =
+          originOverride ?? currentLocationRef.current ?? (await readCurrentLocation(false));
+        if (!origin) {
+          setAttendanceStatus(
+            "Added to Calendar. Leave-time unavailable (current location unavailable).",
+          );
+          return;
+        }
+
+        const earlyMinutes =
+          selectedDayPlan.plans[meeting.id]?.earlyMinutes ?? DEFAULT_MEETING_EARLY_MINUTES;
+        const baseStartDate = new Date(sourceRecord.startAt);
+        const startDateSource = Number.isNaN(baseStartDate.getTime()) ? new Date() : baseStartDate;
+        const meetingDate = resolveNextMeetingDateForDayOfWeek(meeting.dayOfWeek, startDateSource);
+        const meetingStartAt = combineDateWithHhmm(meetingDate, meeting.startsAtLocal);
+        const directions = await getDirectionsDuration({
+          origin: { lat: origin.lat, lng: origin.lng },
+          destination,
+          arrivalTime: meetingStartAt,
+        });
+        const leavePlan = buildLeaveTimePlan({
+          meetingStartAt,
+          earlyMinutes,
+          travelDurationSeconds: directions.durationSeconds,
+        });
+
+        const hasNotificationPermission = await ensureNotificationPermission();
+        if (!hasNotificationPermission) {
+          setAttendanceStatus(
+            "Added to Calendar. Notification permission denied for leave alerts.",
+          );
+          return;
+        }
+
+        let buckets = await loadNotificationBuckets();
+        if (sourceRecord.leaveNotificationId) {
+          try {
+            await Notifications.cancelScheduledNotificationAsync(sourceRecord.leaveNotificationId);
+          } catch {
+            // ignore stale ids
+          }
+          buckets = {
+            ...buckets,
+            attendLeave: buckets.attendLeave.filter(
+              (id) => id !== sourceRecord.leaveNotificationId,
+            ),
+          };
+        }
+
+        const fallbackImmediate = new Date(Date.now() + 1_500);
+        const scheduledAt = leavePlan.notifyImmediately
+          ? fallbackImmediate
+          : (applyScheduleTime(leavePlan.leaveAt) ?? fallbackImmediate);
+        const leaveTimeLabel = leavePlan.leaveAt.toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit",
+        });
+        const arrivalTimeLabel = leavePlan.arrivalTargetAt.toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit",
+        });
+
+        const leaveNotificationId = await scheduleAt(scheduledAt, {
+          title: leavePlan.notifyImmediately
+            ? "Leave now to arrive on time"
+            : `Time to leave for ${meeting.name}`,
+          body: `${leaveTimeLabel} leave • arrive by ${arrivalTimeLabel} (${earlyMinutes} min early)`,
+          categoryIdentifier: DRIVE_NOTIFICATION_CATEGORY_ID,
+          data: {
+            type: "drive",
+            meetingId: meeting.id,
+            reason: "attend-leave",
           },
-        ],
-      );
+        });
+
+        const nextBuckets: NotificationBuckets = {
+          ...buckets,
+          attendLeave: Array.from(new Set([...buckets.attendLeave, leaveNotificationId])),
+        };
+        await saveNotificationBuckets(nextBuckets);
+
+        const latestRecord =
+          (activeAttendanceRef.current && activeAttendanceRef.current.id === sourceRecord.id
+            ? activeAttendanceRef.current
+            : null) ??
+          attendanceRecordsRef.current.find((record) => record.id === sourceRecord.id) ??
+          sourceRecord;
+        const nextRecord: AttendanceRecord = {
+          ...latestRecord,
+          leaveNotificationId,
+          leaveNotificationAtIso: scheduledAt.toISOString(),
+        };
+        upsertAttendanceRecord(nextRecord);
+        if (activeAttendanceRef.current?.id === nextRecord.id) {
+          setActiveAttendance(nextRecord);
+        }
+
+        const summary = `Leave at ${leaveTimeLabel} to arrive by ${arrivalTimeLabel} (${earlyMinutes} min early).`;
+        setAttendanceStatus(
+          calendarAdded ? `Added to Calendar. ${summary}` : `Attendance started. ${summary}`,
+        );
+        Alert.alert("Attend confirmed", `Added to Calendar\n${summary}`);
+      } catch (error) {
+        setAttendanceStatus(
+          `Attendance started. Post-attend scheduling failed: ${formatError(error)}`,
+        );
+      }
     },
-    [attachCalendarEventToAttendance, meetingAutoAddToCalendar],
+    [
+      attachCalendarEventToAttendance,
+      readCurrentLocation,
+      selectedDayPlan.plans,
+      ensureNotificationPermission,
+      loadNotificationBuckets,
+      applyScheduleTime,
+      scheduleAt,
+      saveNotificationBuckets,
+      upsertAttendanceRecord,
+    ],
   );
 
   const startAttendance = useCallback(
@@ -5389,6 +5852,13 @@ export default function App() {
           scheduledStartsAtLocal: meeting.startsAtLocal ?? null,
           meetingLat: meetingCoords?.lat ?? null,
           meetingLng: meetingCoords?.lng ?? null,
+          meetingGeoStatus:
+            normalizeMeetingGeoStatus(meeting.geoStatus) ??
+            (isValidLatLng(meetingCoords?.lat ?? null, meetingCoords?.lng ?? null)
+              ? "verified"
+              : "missing"),
+          meetingGeoSource: normalizeMeetingGeoSource(meeting.geoSource) ?? "unknown",
+          meetingGeoReason: meeting.geoReason ?? null,
           meetingFormat: meeting.format,
           captureMethod: "attend-log",
           startAt: nowIso,
@@ -5406,6 +5876,8 @@ export default function App() {
           chairRole: null,
           signatureCapturedAtIso: null,
           calendarEventId: null,
+          leaveNotificationId: null,
+          leaveNotificationAtIso: null,
           signaturePngBase64: null,
           pdfUri: null,
         };
@@ -5415,12 +5887,12 @@ export default function App() {
         upsertAttendanceRecord(next);
         setAttendanceStatus(`Attendance started at ${new Date(nowIso).toLocaleTimeString()}.`);
         setScreen("SESSION");
-        promptCalendarAddOnAttend(next.id);
+        void syncAttendCalendarAndLeaveAlert(next.id, meeting, location);
       } finally {
         startAttendanceInFlightRef.current = false;
       }
     },
-    [readCurrentLocation, upsertAttendanceRecord, promptCalendarAddOnAttend],
+    [readCurrentLocation, upsertAttendanceRecord, syncAttendCalendarAndLeaveAlert],
   );
 
   const endAttendanceByRecordId = useCallback(
@@ -5745,6 +6217,13 @@ export default function App() {
       scheduledStartsAtLocal: signatureCaptureMeeting.startsAtLocal ?? null,
       meetingLat: signatureMeetingCoords?.lat ?? null,
       meetingLng: signatureMeetingCoords?.lng ?? null,
+      meetingGeoStatus:
+        normalizeMeetingGeoStatus(signatureCaptureMeeting.geoStatus) ??
+        (isValidLatLng(signatureMeetingCoords?.lat ?? null, signatureMeetingCoords?.lng ?? null)
+          ? "verified"
+          : "missing"),
+      meetingGeoSource: normalizeMeetingGeoSource(signatureCaptureMeeting.geoSource) ?? "unknown",
+      meetingGeoReason: signatureCaptureMeeting.geoReason ?? null,
       meetingFormat: signatureCaptureMeeting.format,
       captureMethod: "signature",
       startAt: nowIso,
@@ -5955,6 +6434,93 @@ export default function App() {
     );
   }, [diagnosticsSelectedAttendanceRecords]);
 
+  const createDiagnosticsCompletedTestMeeting = useCallback(() => {
+    if (!isDiagnosticsEnabled) {
+      return;
+    }
+
+    const now = new Date();
+    const start = new Date(now.getTime() - 65 * 60 * 1000);
+    const candidateMeeting = selectedMeeting ?? allMeetings[0] ?? null;
+    const candidateCoords = normalizeCoordinates({
+      lat: candidateMeeting?.lat ?? currentLocation?.lat ?? null,
+      lng: candidateMeeting?.lng ?? currentLocation?.lng ?? null,
+    });
+
+    const fallbackLat = 39.7392;
+    const fallbackLng = -104.9903;
+    const lat = candidateCoords?.lat ?? currentLocation?.lat ?? fallbackLat;
+    const lng = candidateCoords?.lng ?? currentLocation?.lng ?? fallbackLng;
+    const accuracyM = currentLocation?.accuracyM ?? 18;
+
+    const sampleSignature = buildSignatureSvgBase64(
+      [
+        { x: 16, y: 90, isStrokeStart: true },
+        { x: 68, y: 64, isStrokeStart: false },
+        { x: 118, y: 92, isStrokeStart: false },
+        { x: 178, y: 58, isStrokeStart: false },
+        { x: 232, y: 88, isStrokeStart: false },
+      ],
+      320,
+      180,
+    );
+
+    const recordId = createId("attendance-diagnostic");
+    const scheduledStartsAtLocal = `${String(start.getHours()).padStart(2, "0")}:${String(
+      start.getMinutes(),
+    ).padStart(2, "0")}`;
+
+    const diagnosticRecord: AttendanceRecord = {
+      id: recordId,
+      meetingId: candidateMeeting?.id ?? "diagnostic-meeting",
+      meetingName: candidateMeeting?.name ?? "Diagnostics Test Meeting",
+      meetingAddress: candidateMeeting?.address ?? "Diagnostics Address",
+      scheduledStartsAtLocal,
+      meetingLat: lat,
+      meetingLng: lng,
+      meetingGeoStatus: "verified",
+      meetingGeoSource: "device_geocode",
+      meetingGeoReason: null,
+      meetingFormat: candidateMeeting?.format ?? "IN_PERSON",
+      captureMethod: "signature",
+      startAt: start.toISOString(),
+      endAt: now.toISOString(),
+      durationSeconds: Math.max(0, Math.floor((now.getTime() - start.getTime()) / 1000)),
+      startLat: lat,
+      startLng: lng,
+      startAccuracyM: accuracyM,
+      endLat: lat,
+      endLng: lng,
+      endAccuracyM: accuracyM,
+      signaturePromptShown: true,
+      chairName: "Diagnostics Chair",
+      chairRole: "Chairperson",
+      signatureCapturedAtIso: now.toISOString(),
+      calendarEventId: null,
+      signaturePngBase64: sampleSignature,
+      pdfUri: null,
+    };
+
+    upsertAttendanceRecord(diagnosticRecord);
+    setSelectedAttendanceIds((previous) => Array.from(new Set([recordId, ...previous])));
+    setHomeScreen("ATTENDANCE");
+    setAttendanceViewFilter("ALL");
+    setShowInactiveAttendance(false);
+    setScreen("LIST");
+    setAttendanceStatus("Diagnostics: added a completed test meeting and selected it for export.");
+  }, [
+    allMeetings,
+    currentLocation,
+    isDiagnosticsEnabled,
+    selectedMeeting,
+    setSelectedAttendanceIds,
+    setHomeScreen,
+    setAttendanceViewFilter,
+    setShowInactiveAttendance,
+    setScreen,
+    upsertAttendanceRecord,
+  ]);
+
   const exportAttendance = useCallback(async () => {
     if (!activeAttendance || !activeAttendance.endAt || activeAttendance.durationSeconds === null) {
       setAttendanceStatus("Complete attendance session before exporting.");
@@ -5983,7 +6549,9 @@ export default function App() {
     } catch (error) {
       console.log("[attendance-export] failed", error);
       recordLastExportAttempt(false, error);
-      setAttendanceStatus(`PDF export failed: ${formatError(error)}`);
+      const message = `PDF export failed: ${formatError(error)}`;
+      setAttendanceStatus(message);
+      Alert.alert("Export failed", "Try exporting fewer meetings.");
     } finally {
       setExportingPdf(false);
     }
@@ -6064,7 +6632,9 @@ export default function App() {
     } catch (error) {
       console.log("[attendance-export-selected] failed", error);
       recordLastExportAttempt(false, error);
-      setAttendanceStatus(`Failed to export selected attendance: ${formatError(error)}`);
+      const message = `Failed to export selected attendance: ${formatError(error)}`;
+      setAttendanceStatus(message);
+      Alert.alert("Export failed", "Try exporting fewer meetings.");
     } finally {
       setAttendanceExportProgressLabel(null);
       setExportingAttendanceSelectionPdf(false);
@@ -6119,7 +6689,9 @@ export default function App() {
       } catch (error) {
         console.log("[attendance-export-range] failed", error);
         recordLastExportAttempt(false, error);
-        setAttendanceStatus(`Failed to export attendance range: ${formatError(error)}`);
+        const message = `Failed to export attendance range: ${formatError(error)}`;
+        setAttendanceStatus(message);
+        Alert.alert("Export failed", "Try exporting fewer meetings.");
       } finally {
         setAttendanceExportProgressLabel(null);
         setExportingAttendanceSelectionPdf(false);
@@ -6783,8 +7355,27 @@ export default function App() {
                   typeof record.calendarEventId === "string" && record.calendarEventId.length > 0
                     ? record.calendarEventId
                     : null,
+                leaveNotificationId:
+                  typeof record.leaveNotificationId === "string" &&
+                  record.leaveNotificationId.length > 0
+                    ? record.leaveNotificationId
+                    : null,
+                leaveNotificationAtIso:
+                  typeof record.leaveNotificationAtIso === "string" &&
+                  record.leaveNotificationAtIso.trim().length > 0
+                    ? record.leaveNotificationAtIso
+                    : null,
                 meetingLat: asFiniteNumber(record.meetingLat) ?? null,
                 meetingLng: asFiniteNumber(record.meetingLng) ?? null,
+                meetingGeoStatus:
+                  normalizeMeetingGeoStatus(record.meetingGeoStatus) ??
+                  (isValidLatLng(record.meetingLat, record.meetingLng) ? "verified" : "missing"),
+                meetingGeoSource: normalizeMeetingGeoSource(record.meetingGeoSource) ?? "unknown",
+                meetingGeoReason:
+                  typeof record.meetingGeoReason === "string" &&
+                  record.meetingGeoReason.trim().length > 0
+                    ? record.meetingGeoReason
+                    : null,
                 startLat: asFiniteNumber(record.startLat) ?? null,
                 startLng: asFiniteNumber(record.startLng) ?? null,
                 endLat: asFiniteNumber(record.endLat) ?? null,
@@ -6840,6 +7431,7 @@ export default function App() {
             sponsorEnabled?: boolean;
             sponsorActive?: boolean;
             sponsorLeadMinutes?: SponsorLeadMinutes;
+            sponsorKneesSuggested?: boolean | null;
             meetingAutoAddToCalendar?: boolean;
           };
           if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
@@ -6928,6 +7520,13 @@ export default function App() {
             [0, 5, 10, 30].includes(parsedProfile.sponsorLeadMinutes)
           ) {
             setSponsorLeadMinutes(parsedProfile.sponsorLeadMinutes as SponsorLeadMinutes);
+          }
+          if (
+            typeof parsedProfile.sponsorKneesSuggested === "boolean" ||
+            parsedProfile.sponsorKneesSuggested === null
+          ) {
+            setSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
+            setWizardSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
           }
           if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
             setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
@@ -7048,11 +7647,20 @@ export default function App() {
       return;
     }
     setWizardHasSponsor((current) => (current === null ? sponsorEnabled : current));
+    setWizardSponsorKneesSuggested((current) =>
+      current === null ? (sponsorEnabled ? (sponsorKneesSuggested ?? true) : null) : current,
+    );
     setWizardWantsReminders((current) => (current === null ? sponsorActive : current));
     setWizardHasHomeGroup((current) =>
       current === null ? homeGroupMeetingIds.length > 0 : current,
     );
-  }, [bootstrapped, sponsorEnabled, sponsorActive, homeGroupMeetingIds.length]);
+  }, [
+    bootstrapped,
+    sponsorEnabled,
+    sponsorKneesSuggested,
+    sponsorActive,
+    homeGroupMeetingIds.length,
+  ]);
 
   useEffect(() => {
     if (!bootstrapped) {
@@ -7127,6 +7735,7 @@ export default function App() {
         sponsorEnabled,
         sponsorActive,
         sponsorLeadMinutes,
+        sponsorKneesSuggested,
         meetingAutoAddToCalendar,
       }),
     );
@@ -7146,6 +7755,7 @@ export default function App() {
     sponsorEnabled,
     sponsorActive,
     sponsorLeadMinutes,
+    sponsorKneesSuggested,
     meetingAutoAddToCalendar,
     profileStorage,
     bootstrapped,
@@ -7159,7 +7769,7 @@ export default function App() {
   }, [meetingRadiusMiles]);
 
   useEffect(() => {
-    if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 5) {
+    if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 6) {
       setupStep4RefreshLocationKeyRef.current = null;
       return;
     }
@@ -7816,7 +8426,7 @@ export default function App() {
               {homeScreen === "SETUP" ? (
                 <GlassCard style={styles.card} strong>
                   <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
-                  <Text style={styles.sectionMeta}>Step {setupStep} of 5</Text>
+                  <Text style={styles.sectionMeta}>Step {setupStep} of 7</Text>
                   {setupStep === 1 ? (
                     <>
                       <Text style={styles.label}>What is your sobriety date?</Text>
@@ -7905,6 +8515,62 @@ export default function App() {
                     <>
                       {wizardHasSponsor ? (
                         <>
+                          <Text style={styles.label}>
+                            Does your sponsor suggest you pray on your knees?
+                          </Text>
+                          <View style={styles.chipRow}>
+                            <Pressable
+                              style={[
+                                styles.chip,
+                                wizardSponsorKneesSuggested === true ? styles.chipSelected : null,
+                              ]}
+                              onPress={() => setWizardSponsorKneesSuggested(true)}
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  wizardSponsorKneesSuggested === true
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                Yes
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              style={[
+                                styles.chip,
+                                wizardSponsorKneesSuggested === false ? styles.chipSelected : null,
+                              ]}
+                              onPress={() => setWizardSponsorKneesSuggested(false)}
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  wizardSponsorKneesSuggested === false
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                No
+                              </Text>
+                            </Pressable>
+                          </View>
+                          <Text style={styles.sectionMeta}>
+                            This controls whether the On knees checklist toggle appears in daily
+                            reading flows.
+                          </Text>
+                        </>
+                      ) : (
+                        <Text style={styles.sectionMeta}>Sponsor is disabled for this setup.</Text>
+                      )}
+                    </>
+                  ) : null}
+
+                  {setupStep === 4 ? (
+                    <>
+                      {wizardHasSponsor ? (
+                        <>
                           <Text style={styles.label}>Sponsor call time</Text>
                           <View style={styles.timeRow}>
                             <Pressable style={styles.stepButton} onPress={() => incrementHour(-1)}>
@@ -7949,7 +8615,7 @@ export default function App() {
                     </>
                   ) : null}
 
-                  {setupStep === 4 ? (
+                  {setupStep === 5 ? (
                     <>
                       {wizardHasSponsor ? (
                         <>
@@ -8089,7 +8755,7 @@ export default function App() {
                     </>
                   ) : null}
 
-                  {setupStep === 5 ? (
+                  {setupStep === 6 ? (
                     <>
                       <Text style={styles.label}>Do you have a home group meeting?</Text>
                       <View style={styles.chipRow}>
@@ -8228,7 +8894,7 @@ export default function App() {
                     </>
                   ) : null}
 
-                  {setupStep === 6 ? (
+                  {setupStep === 7 ? (
                     <>
                       <Text style={styles.label}>Review</Text>
                       <Text style={styles.sectionMeta}>
@@ -8238,6 +8904,12 @@ export default function App() {
                       <Text style={styles.sectionMeta}>
                         Sponsor: {wizardHasSponsor ? "Enabled" : "Not enabled"}
                       </Text>
+                      {wizardHasSponsor ? (
+                        <Text style={styles.sectionMeta}>
+                          Sponsor suggests knees prayer:{" "}
+                          {wizardSponsorKneesSuggested === false ? "No" : "Yes"}
+                        </Text>
+                      ) : null}
                       <Text style={styles.sectionMeta}>
                         Calendar notifications and alerts:{" "}
                         {wizardWantsReminders ? "Enabled" : "Disabled"}
@@ -8264,7 +8936,7 @@ export default function App() {
                         <View style={styles.buttonSpacer} />
                       </>
                     ) : null}
-                    {setupStep < 5 ? (
+                    {setupStep < 7 ? (
                       <AppButton title="Next" onPress={() => void nextSetupStep()} />
                     ) : (
                       <AppButton title="Save & Finish" onPress={() => void finishSetup()} />
@@ -8970,9 +9642,26 @@ export default function App() {
                     attendanceRecordsForView.map((record) => {
                       const selected = selectedAttendanceIds.includes(record.id);
                       const validation = attendanceValidationById.get(record.id) ?? {
+                        code: "INVALID" as const,
                         valid: false,
                         reason: "Validation unavailable",
                       };
+                      const validationStatusLabel =
+                        validation.code === "VALID"
+                          ? "Valid"
+                          : validation.code === "UNVERIFIED_LOCATION"
+                            ? "Unverified"
+                            : "Invalid";
+                      const validationReason =
+                        validation.code === "UNVERIFIED_LOCATION"
+                          ? "Meeting location could not be verified"
+                          : validation.reason;
+                      const validationBadgeLabel =
+                        validation.code === "VALID"
+                          ? "✓"
+                          : validation.code === "UNVERIFIED_LOCATION"
+                            ? "?"
+                            : "✕";
                       const signatureWindow = attendanceSignatureWindowById.get(record.id) ?? {
                         eligible: false,
                         reason: "Signature is unavailable because meeting start time is missing.",
@@ -8990,12 +9679,12 @@ export default function App() {
                             <Text
                               style={[
                                 styles.validationBadge,
-                                validation.valid
+                                validation.code === "VALID"
                                   ? styles.validationBadgeValid
                                   : styles.validationBadgeInvalid,
                               ]}
                             >
-                              {validation.valid ? "✓" : "✕"}
+                              {validationBadgeLabel}
                             </Text>
                           </View>
                           <Text style={styles.sectionMeta}>
@@ -9006,7 +9695,7 @@ export default function App() {
                             {record.endAt ? new Date(record.endAt).toLocaleString() : "In progress"}
                           </Text>
                           <Text style={styles.sectionMeta}>
-                            Status: {validation.valid ? "Valid" : "Invalid"} • {validation.reason}
+                            Status: {validationStatusLabel} • {validationReason}
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Duration: {formatDuration(record.durationSeconds)} • Signature:{" "}
@@ -9310,6 +9999,15 @@ export default function App() {
                       showGotOnKneesToggle={routineReaderShowsOnKneesToggle}
                       gotOnKneesCompleted={routineReaderOnKneesCompleted}
                       onToggleGotOnKnees={onToggleRoutineReaderOnKnees}
+                      requiredSeconds={
+                        routineReader?.requiredDwellSeconds ?? DEFAULT_MORNING_READ_DWELL_SECONDS
+                      }
+                      dwellResetKey={`${routineReaderBackScreen}:${routineReader?.itemId ?? routineReader?.title ?? "reader"}`}
+                      onDwellEligible={
+                        routineReaderBackScreen === "MORNING" && routineReader?.itemId
+                          ? onRoutineReaderDwellEligible
+                          : undefined
+                      }
                       onBack={() => setToolsScreen(routineReaderBackScreen)}
                       onOpenLink={(url) => void openRoutineReaderLink(url)}
                     />
@@ -9331,6 +10029,7 @@ export default function App() {
                   exportDebug={diagnosticsExportDebug}
                   lastExportAttempt={lastExportAttempt}
                   onRunExportDryRun={runDiagnosticsExportDryRun}
+                  onCreateCompletedTestMeeting={createDiagnosticsCompletedTestMeeting}
                   onBack={closeDiagnostics}
                 />
               ) : null}
@@ -9338,7 +10037,13 @@ export default function App() {
               {homeScreen === "SETTINGS" ? (
                 <>
                   <GlassCard style={styles.card} strong>
-                    <Text style={styles.sectionTitle}>Recovery Settings</Text>
+                    <Pressable
+                      delayLongPress={1800}
+                      onLongPress={openDiagnosticsFromSettings}
+                      disabled={!isDiagnosticsEnabled}
+                    >
+                      <Text style={styles.sectionTitle}>Recovery Settings</Text>
+                    </Pressable>
                     <Text style={styles.sectionMeta}>
                       Configure sponsor reminders, meeting planning, and attendance options.
                     </Text>
@@ -9351,6 +10056,11 @@ export default function App() {
                         Version {appVersion} ({buildNumber})
                       </Text>
                     </Pressable>
+                    {isDiagnosticsEnabled ? (
+                      <Text style={styles.sectionMeta}>
+                        Dev/Preview: long-press Recovery Settings or Version to open Diagnostics.
+                      </Text>
+                    ) : null}
                     <View style={styles.buttonRow}>
                       <AppButton title="Open dashboard" onPress={openDashboard} />
                       <View style={styles.buttonSpacer} />
