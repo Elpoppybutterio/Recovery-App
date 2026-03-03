@@ -296,6 +296,7 @@ type MeetingAttendanceLog = {
 };
 
 const ARRIVAL_RADIUS_METERS = 61;
+const MAX_GPS_ACCURACY_TOLERANCE_METERS = 160;
 const MIN_VALID_MEETING_MINUTES = 45;
 const DEFAULT_MEETING_DURATION_MINUTES = 60;
 const SIGNATURE_WINDOW_MINUTES = 90;
@@ -584,15 +585,50 @@ function validateAttendanceRecord(
 
   const meetingLat = typeof record.meetingLat === "number" ? record.meetingLat : null;
   const meetingLng = typeof record.meetingLng === "number" ? record.meetingLng : null;
-  const startLat = typeof record.startLat === "number" ? record.startLat : null;
-  const startLng = typeof record.startLng === "number" ? record.startLng : null;
-  if (meetingLat === null || meetingLng === null || startLat === null || startLng === null) {
+  if (meetingLat === null || meetingLng === null) {
     return { valid: false, reason: "Missing geofence location" };
   }
 
-  const startDistance = distanceMetersBetween(startLat, startLng, meetingLat, meetingLng);
-  if (startDistance > ARRIVAL_RADIUS_METERS) {
-    return { valid: false, reason: "Not within geofence at check-in" };
+  const startLat = typeof record.startLat === "number" ? record.startLat : null;
+  const startLng = typeof record.startLng === "number" ? record.startLng : null;
+  const endLat = typeof record.endLat === "number" ? record.endLat : null;
+  const endLng = typeof record.endLng === "number" ? record.endLng : null;
+
+  const startDistance =
+    startLat !== null && startLng !== null
+      ? distanceMetersBetween(startLat, startLng, meetingLat, meetingLng)
+      : null;
+  const endDistance =
+    endLat !== null && endLng !== null
+      ? distanceMetersBetween(endLat, endLng, meetingLat, meetingLng)
+      : null;
+
+  if (startDistance === null && endDistance === null) {
+    return { valid: false, reason: "Missing geofence location" };
+  }
+
+  const startAccuracyTolerance =
+    typeof record.startAccuracyM === "number" && Number.isFinite(record.startAccuracyM)
+      ? Math.max(0, Math.min(record.startAccuracyM, MAX_GPS_ACCURACY_TOLERANCE_METERS))
+      : 0;
+  const endAccuracyTolerance =
+    typeof record.endAccuracyM === "number" && Number.isFinite(record.endAccuracyM)
+      ? Math.max(0, Math.min(record.endAccuracyM, MAX_GPS_ACCURACY_TOLERANCE_METERS))
+      : 0;
+
+  const startWithinGeofence =
+    startDistance !== null && startDistance <= ARRIVAL_RADIUS_METERS + startAccuracyTolerance;
+  const endWithinGeofence =
+    endDistance !== null && endDistance <= ARRIVAL_RADIUS_METERS + endAccuracyTolerance;
+
+  if (!startWithinGeofence && !endWithinGeofence) {
+    if (startDistance !== null && endDistance !== null) {
+      return { valid: false, reason: "Not within geofence at check-in or check-out" };
+    }
+    if (startDistance !== null) {
+      return { valid: false, reason: "Not within geofence at check-in" };
+    }
+    return { valid: false, reason: "Not within geofence at check-out" };
   }
 
   const scheduledStartMs = parseScheduledStartForAttendance(record);
