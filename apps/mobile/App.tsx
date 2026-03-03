@@ -40,6 +40,7 @@ import {
   haversineDistanceMeters,
   normalizeCoordinates,
 } from "./lib/meetings/distance";
+import { getMeetingCardActions } from "./lib/meetings/meetingCardActions";
 import {
   getCurrentLocation as getCurrentLocationFromService,
   refreshLocationPermissionStates as readLocationPermissionStates,
@@ -8124,6 +8125,8 @@ export default function App() {
                           const meetingInProgress =
                             selectedDayIsToday &&
                             isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
+                          const [detailsAction, attendAction] =
+                            getMeetingCardActions(meetingInProgress);
                           const leaveBy = leaveByLabel(
                             selectedDay.date,
                             meeting.startsAtLocal,
@@ -8159,22 +8162,18 @@ export default function App() {
 
                               <View style={styles.buttonRow}>
                                 <AppButton
-                                  title={meetingInProgress ? "Attend" : "Details"}
+                                  title={detailsAction.label}
                                   onPress={() => {
-                                    if (meetingInProgress) {
-                                      void logUpcomingMeetingFromDashboard(meeting.id);
-                                      return;
-                                    }
                                     setSelectedMeeting(meeting);
                                     setScreen("DETAIL");
                                   }}
-                                  variant={meetingInProgress ? "secondary" : "primary"}
+                                  variant={detailsAction.variant}
                                 />
                                 <View style={styles.buttonSpacer} />
                                 <AppButton
-                                  title="Attend"
+                                  title={attendAction.label}
                                   onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
-                                  variant="secondary"
+                                  variant={attendAction.variant}
                                 />
                               </View>
 
@@ -9351,6 +9350,13 @@ export default function App() {
                             serviceCommitmentMinutes: null,
                           };
                           const isHomeGroup = selectedDayPlan.homeGroupMeetingId === meeting.id;
+                          const now = new Date(clockTickMs);
+                          const nowMinutes = now.getHours() * 60 + now.getMinutes();
+                          const meetingInProgress =
+                            selectedDayIsToday &&
+                            isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
+                          const [detailsAction, attendAction] =
+                            getMeetingCardActions(meetingInProgress);
                           const preview = buildDriveSchedulePreview(meeting, selectedDayPlan);
                           const leaveBy = leaveByLabel(
                             selectedDay.date,
@@ -9456,54 +9462,22 @@ export default function App() {
 
                               <View style={styles.buttonRow}>
                                 <AppButton
-                                  title={
-                                    selectedDayIsToday &&
-                                    isMeetingInProgress(
-                                      meeting.startsAtLocal,
-                                      new Date(clockTickMs).getHours() * 60 +
-                                        new Date(clockTickMs).getMinutes(),
-                                    )
-                                      ? "Attend"
-                                      : "Details"
-                                  }
+                                  title={detailsAction.label}
                                   onPress={() => {
-                                    const now = new Date(clockTickMs);
-                                    const nowMinutes = now.getHours() * 60 + now.getMinutes();
-                                    const meetingInProgress =
-                                      selectedDayIsToday &&
-                                      isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
-                                    if (meetingInProgress) {
-                                      void logUpcomingMeetingFromDashboard(meeting.id);
-                                      return;
-                                    }
                                     setSelectedMeeting(meeting);
                                     setScreen("DETAIL");
                                   }}
-                                  variant={
-                                    selectedDayIsToday &&
-                                    isMeetingInProgress(
-                                      meeting.startsAtLocal,
-                                      new Date(clockTickMs).getHours() * 60 +
-                                        new Date(clockTickMs).getMinutes(),
-                                    )
-                                      ? "secondary"
-                                      : "primary"
-                                  }
+                                  variant={detailsAction.variant}
                                 />
                                 <View style={styles.buttonSpacer} />
                                 <AppButton
-                                  title="Attend"
+                                  title={attendAction.label}
                                   onPress={() => void logUpcomingMeetingFromDashboard(meeting.id)}
-                                  variant="secondary"
+                                  variant={attendAction.variant}
                                 />
                               </View>
 
-                              {selectedDayIsToday &&
-                              isMeetingInProgress(
-                                meeting.startsAtLocal,
-                                new Date(clockTickMs).getHours() * 60 +
-                                  new Date(clockTickMs).getMinutes(),
-                              ) ? (
+                              {meetingInProgress ? (
                                 <Text style={styles.sectionMeta}>Happening now</Text>
                               ) : null}
 
