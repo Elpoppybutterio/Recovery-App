@@ -23,10 +23,15 @@ import {
   Switch,
   Text,
   TextInput,
+  ToastAndroid,
   View,
 } from "react-native";
 import appJson from "./app.json";
-import { createMeetingsSource, MeetingRecord } from "./lib/meetings/source";
+import {
+  createMeetingsSource,
+  MeetingRecord,
+  type MeetingsApiHealthEvent,
+} from "./lib/meetings/source";
 import {
   ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
   generateAttendanceSlipPdf,
@@ -82,6 +87,13 @@ import { NightlyInventoryScreen } from "./screens/NightlyInventoryScreen";
 import { ChatComingSoonScreen } from "./screens/ChatComingSoonScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
+import {
+  DiagnosticsScreen,
+  type DiagnosticsExportAttempt,
+  type DiagnosticsExportDebug,
+  type DiagnosticsLocationStatus,
+  type DiagnosticsMeetingsApiHealth,
+} from "./screens/DiagnosticsScreen";
 import {
   LEGACY_WISDOM_QUOTE,
   getLocalDailyWisdomQuote,
@@ -194,7 +206,15 @@ type MeetingListItem = MeetingRecord & {
 };
 
 type MeetingsViewMode = "LIST" | "MAP";
-type HomeScreen = "SETUP" | "DASHBOARD" | "MEETINGS" | "ATTENDANCE" | "CHAT" | "SETTINGS" | "TOOLS";
+type HomeScreen =
+  | "SETUP"
+  | "DASHBOARD"
+  | "MEETINGS"
+  | "ATTENDANCE"
+  | "CHAT"
+  | "SETTINGS"
+  | "TOOLS"
+  | "DIAGNOSTICS";
 type SetupStep = 1 | 2 | 3 | 4 | 5 | 6;
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
@@ -276,6 +296,16 @@ type LocationIssue =
   | "unavailable"
   | null;
 
+type DiagnosticsLocationSnapshot = {
+  servicesEnabled: boolean | null;
+  foregroundPermission: LocationPermissionState;
+  backgroundPermission: LocationPermissionState;
+  lat: number | null;
+  lng: number | null;
+  accuracyM: number | null;
+  timestampIso: string;
+};
+
 const DASHBOARD_FOOTER_NAV_HEIGHT = Platform.OS === "ios" ? 74 : 66;
 const DASHBOARD_SCROLL_FADE_HEIGHT = 34;
 const DEFAULT_REMOTE_API_URL = "https://sober-ai-api.onrender.com";
@@ -296,6 +326,7 @@ type MeetingAttendanceLog = {
 };
 
 const ARRIVAL_RADIUS_METERS = 61;
+const MAX_GPS_ACCURACY_TOLERANCE_METERS = 160;
 const MIN_VALID_MEETING_MINUTES = 45;
 const DEFAULT_MEETING_DURATION_MINUTES = 60;
 const SIGNATURE_WINDOW_MINUTES = 90;
@@ -584,15 +615,50 @@ function validateAttendanceRecord(
 
   const meetingLat = typeof record.meetingLat === "number" ? record.meetingLat : null;
   const meetingLng = typeof record.meetingLng === "number" ? record.meetingLng : null;
-  const startLat = typeof record.startLat === "number" ? record.startLat : null;
-  const startLng = typeof record.startLng === "number" ? record.startLng : null;
-  if (meetingLat === null || meetingLng === null || startLat === null || startLng === null) {
+  if (meetingLat === null || meetingLng === null) {
     return { valid: false, reason: "Missing geofence location" };
   }
 
-  const startDistance = distanceMetersBetween(startLat, startLng, meetingLat, meetingLng);
-  if (startDistance > ARRIVAL_RADIUS_METERS) {
-    return { valid: false, reason: "Not within geofence at check-in" };
+  const startLat = typeof record.startLat === "number" ? record.startLat : null;
+  const startLng = typeof record.startLng === "number" ? record.startLng : null;
+  const endLat = typeof record.endLat === "number" ? record.endLat : null;
+  const endLng = typeof record.endLng === "number" ? record.endLng : null;
+
+  const startDistance =
+    startLat !== null && startLng !== null
+      ? distanceMetersBetween(startLat, startLng, meetingLat, meetingLng)
+      : null;
+  const endDistance =
+    endLat !== null && endLng !== null
+      ? distanceMetersBetween(endLat, endLng, meetingLat, meetingLng)
+      : null;
+
+  if (startDistance === null && endDistance === null) {
+    return { valid: false, reason: "Missing geofence location" };
+  }
+
+  const startAccuracyTolerance =
+    typeof record.startAccuracyM === "number" && Number.isFinite(record.startAccuracyM)
+      ? Math.max(0, Math.min(record.startAccuracyM, MAX_GPS_ACCURACY_TOLERANCE_METERS))
+      : 0;
+  const endAccuracyTolerance =
+    typeof record.endAccuracyM === "number" && Number.isFinite(record.endAccuracyM)
+      ? Math.max(0, Math.min(record.endAccuracyM, MAX_GPS_ACCURACY_TOLERANCE_METERS))
+      : 0;
+
+  const startWithinGeofence =
+    startDistance !== null && startDistance <= ARRIVAL_RADIUS_METERS + startAccuracyTolerance;
+  const endWithinGeofence =
+    endDistance !== null && endDistance <= ARRIVAL_RADIUS_METERS + endAccuracyTolerance;
+
+  if (!startWithinGeofence && !endWithinGeofence) {
+    if (startDistance !== null && endDistance !== null) {
+      return { valid: false, reason: "Not within geofence at check-in or check-out" };
+    }
+    if (startDistance !== null) {
+      return { valid: false, reason: "Not within geofence at check-in" };
+    }
+    return { valid: false, reason: "Not within geofence at check-out" };
   }
 
   const scheduledStartMs = parseScheduledStartForAttendance(record);
@@ -1192,6 +1258,44 @@ function formatError(error: unknown): string {
   return "Unknown error";
 }
 
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function looksLikeFileUri(value: string): boolean {
+  return value.startsWith("file://") || value.startsWith("/");
+}
+
+function estimateBase64Bytes(value: string): number {
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return 0;
+  }
+  const paddingLength = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - paddingLength);
+}
+
+function invalidMeetingCoordsReason(lat: number | null, lng: number | null): string | null {
+  if (lat === null || lng === null) {
+    return "missing coords";
+  }
+  const latValid = lat >= -90 && lat <= 90;
+  const lngValid = lng >= -180 && lng <= 180;
+  if (!latValid || !lngValid) {
+    if (Math.abs(lat) <= 180 && Math.abs(lng) <= 90) {
+      return "swapped coords suspected";
+    }
+    return "invalid coords";
+  }
+  if (lat === 0 && lng === 0) {
+    return "invalid coords";
+  }
+  return null;
+}
+
 function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     const runtime = globalThis as { require?: (name: string) => unknown };
@@ -1366,6 +1470,10 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
 
 export default function App() {
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
+  const appEnvFromProcess = typeof process.env.APP_ENV === "string" ? process.env.APP_ENV : "";
+  const appEnvFromConfig = typeof extra.appEnv === "string" ? extra.appEnv : "";
+  const resolvedAppEnv = appEnvFromProcess || appEnvFromConfig || "development";
+  const isDiagnosticsEnabled = process.env.APP_ENV !== "production";
   const apiUrlFromEnv =
     typeof process.env.EXPO_PUBLIC_API_URL === "string"
       ? process.env.EXPO_PUBLIC_API_URL.trim()
@@ -1375,6 +1483,28 @@ export default function App() {
     () => resolveApiBaseUrl(apiUrlFromEnv, apiUrlFromConfig),
     [apiUrlFromConfig, apiUrlFromEnv],
   );
+  const appVersion = typeof appJson.expo.version === "string" ? appJson.expo.version : "unknown";
+  const buildNumber = useMemo(() => {
+    type ConstantsLike = {
+      expoConfig?: {
+        ios?: { buildNumber?: string | number };
+        android?: { versionCode?: string | number };
+      };
+    };
+    const constantsModule = loadOptionalModule<{ default?: ConstantsLike } & ConstantsLike>(
+      "expo-constants",
+    );
+    const constants = constantsModule?.default ?? constantsModule;
+    const iosBuild = constants?.expoConfig?.ios?.buildNumber;
+    const androidBuild = constants?.expoConfig?.android?.versionCode;
+    if (iosBuild !== undefined && iosBuild !== null) {
+      return String(iosBuild);
+    }
+    if (androidBuild !== undefined && androidBuild !== null) {
+      return String(androidBuild);
+    }
+    return "unknown";
+  }, []);
   const devAuthUserId =
     typeof extra.devAuthUserId === "string" ? extra.devAuthUserId : "enduser-a1";
   const devUserDisplayName =
@@ -1400,6 +1530,9 @@ export default function App() {
         fallbackApiUrls: resolveFallbackApiUrls(apiUrl),
         authHeader,
         radiusMiles: defaultMeetingRadiusMiles,
+        onApiEvent: (event) => {
+          setLastMeetingsApiEvent(event);
+        },
       }),
     [apiUrl, authHeader, meetingFeedUrl, defaultMeetingRadiusMiles],
   );
@@ -1492,8 +1625,14 @@ export default function App() {
   const [loadingMeetings, setLoadingMeetings] = useState(false);
   const [meetingsStatus, setMeetingsStatus] = useState("Meetings not loaded yet.");
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
+  const [lastMeetingsApiEvent, setLastMeetingsApiEvent] = useState<MeetingsApiHealthEvent | null>(
+    null,
+  );
   const [dailyWisdomText, setDailyWisdomText] = useState<string | null>(null);
   const [selectedMeeting, setSelectedMeeting] = useState<MeetingRecord | null>(null);
+  const [diagnosticsMeetingIdInput, setDiagnosticsMeetingIdInput] = useState("");
+  const [diagnosticsLocationSnapshot, setDiagnosticsLocationSnapshot] =
+    useState<DiagnosticsLocationSnapshot | null>(null);
   const [pendingGeofenceLogMeetingId, setPendingGeofenceLogMeetingId] = useState<string | null>(
     null,
   );
@@ -1507,7 +1646,17 @@ export default function App() {
   const [attendanceStatus, setAttendanceStatus] = useState("No active attendance session.");
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportingAttendanceSelectionPdf, setExportingAttendanceSelectionPdf] = useState(false);
+  const [attendanceExportProgressLabel, setAttendanceExportProgressLabel] = useState<string | null>(
+    null,
+  );
   const [selectedAttendanceIds, setSelectedAttendanceIds] = useState<string[]>([]);
+  const [diagnosticsExportDryRunStatus, setDiagnosticsExportDryRunStatus] = useState<string | null>(
+    null,
+  );
+  const [diagnosticsSignatureUriBytes, setDiagnosticsSignatureUriBytes] = useState<number | null>(
+    null,
+  );
+  const [lastExportAttempt, setLastExportAttempt] = useState<DiagnosticsExportAttempt | null>(null);
   const [showInactiveAttendance, setShowInactiveAttendance] = useState(false);
   const [attendanceExportStartDateInput, setAttendanceExportStartDateInput] = useState("");
   const [attendanceExportEndDateInput, setAttendanceExportEndDateInput] = useState("");
@@ -1874,6 +2023,131 @@ export default function App() {
     }
     return Array.from(byId.values());
   }, [meetings, todayNearbyMeetings, homeGroupFallbackMeetings]);
+
+  const diagnosticsSelectedAttendanceRecords = useMemo(() => {
+    const selected = new Set(selectedAttendanceIds);
+    return attendanceRecords.filter((record) => selected.has(record.id));
+  }, [attendanceRecords, selectedAttendanceIds]);
+
+  const diagnosticsExportDebug = useMemo<DiagnosticsExportDebug>(() => {
+    let signedCount = 0;
+    let signatureBase64Bytes = 0;
+    let signatureUriCount = 0;
+
+    for (const record of diagnosticsSelectedAttendanceRecords) {
+      const signature =
+        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64 : "";
+      const trimmed = signature.trim();
+      if (trimmed.length === 0) {
+        continue;
+      }
+      signedCount += 1;
+      if (looksLikeFileUri(trimmed)) {
+        signatureUriCount += 1;
+      } else {
+        signatureBase64Bytes += estimateBase64Bytes(trimmed);
+      }
+    }
+
+    return {
+      selectedCount: diagnosticsSelectedAttendanceRecords.length,
+      signedCount,
+      unsignedCount: diagnosticsSelectedAttendanceRecords.length - signedCount,
+      signatureBase64Bytes,
+      signatureUriCount,
+      signatureUriBytes: diagnosticsSignatureUriBytes,
+      dryRunStatus: diagnosticsExportDryRunStatus,
+    };
+  }, [
+    diagnosticsExportDryRunStatus,
+    diagnosticsSelectedAttendanceRecords,
+    diagnosticsSignatureUriBytes,
+  ]);
+
+  const diagnosticsMeetingGeoSample = useMemo(() => {
+    const targetId = diagnosticsMeetingIdInput.trim();
+    if (targetId.length === 0) {
+      return null;
+    }
+    const targetMeeting = allMeetings.find((meeting) => meeting.id === targetId);
+    if (!targetMeeting) {
+      return null;
+    }
+
+    const lat = asFiniteNumber(targetMeeting.lat);
+    const lng = asFiniteNumber(targetMeeting.lng);
+    const invalidReason = invalidMeetingCoordsReason(lat, lng);
+    const validCoords = lat !== null && lng !== null && invalidReason === null;
+    const distanceMeters =
+      validCoords && currentLocation
+        ? haversineDistanceMeters(
+            { lat: currentLocation.lat, lng: currentLocation.lng },
+            { lat, lng },
+          )
+        : null;
+
+    return {
+      meetingId: targetMeeting.id,
+      name: targetMeeting.name,
+      address: targetMeeting.address,
+      lat,
+      lng,
+      isValidLatLng: validCoords,
+      distanceMeters,
+      invalidReason,
+    };
+  }, [allMeetings, currentLocation, diagnosticsMeetingIdInput]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const signatures = diagnosticsSelectedAttendanceRecords
+      .map((record) =>
+        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64.trim() : "",
+      )
+      .filter((signature) => signature.length > 0 && looksLikeFileUri(signature));
+
+    if (signatures.length === 0) {
+      setDiagnosticsSignatureUriBytes(0);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    type FileSystemLike = {
+      getInfoAsync(uri: string): Promise<{ exists: boolean; size?: number }>;
+    };
+
+    const run = async () => {
+      const fileSystemModule = loadOptionalModule<FileSystemLike>("expo-file-system");
+      if (!fileSystemModule || typeof fileSystemModule.getInfoAsync !== "function") {
+        if (!cancelled) {
+          setDiagnosticsSignatureUriBytes(null);
+        }
+        return;
+      }
+
+      let totalBytes = 0;
+      for (const signatureUri of signatures) {
+        try {
+          const info = await fileSystemModule.getInfoAsync(signatureUri);
+          if (info.exists && typeof info.size === "number" && Number.isFinite(info.size)) {
+            totalBytes += info.size;
+          }
+        } catch {
+          // ignore unreadable files and continue gathering available metrics
+        }
+      }
+
+      if (!cancelled) {
+        setDiagnosticsSignatureUriBytes(totalBytes);
+      }
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [diagnosticsSelectedAttendanceRecords]);
 
   const attendanceRecordsForView = useMemo(() => {
     const byDate =
@@ -2609,6 +2883,32 @@ export default function App() {
     }
     return position;
   }, [readCurrentLocation]);
+
+  const refreshDiagnosticsLocation = useCallback(async () => {
+    const permissions = await readLocationPermissionStates();
+    const locationResult = await getCurrentLocationFromService({
+      requestPermission: false,
+      timeoutMs: 12_000,
+      cacheTtlMs: 10_000,
+    });
+
+    setLocationPermission(permissions.permissionStatus);
+    setLocationAlwaysPermission(permissions.alwaysPermissionStatus);
+
+    if (locationResult.coords) {
+      setCurrentLocation(locationResult.coords);
+    }
+
+    setDiagnosticsLocationSnapshot({
+      servicesEnabled: locationResult.servicesEnabled,
+      foregroundPermission: permissions.permissionStatus,
+      backgroundPermission: permissions.alwaysPermissionStatus,
+      lat: locationResult.coords?.lat ?? null,
+      lng: locationResult.coords?.lng ?? null,
+      accuracyM: locationResult.coords?.accuracyM ?? null,
+      timestampIso: new Date().toISOString(),
+    });
+  }, []);
 
   const geocodeMeetingsMissingCoordinates = useCallback(
     async (records: MeetingRecord[]) => {
@@ -3650,6 +3950,18 @@ export default function App() {
     currentLocationRef.current = currentLocation;
   }, [currentLocation]);
 
+  useEffect(() => {
+    if (homeScreen === "DIAGNOSTICS" && isDiagnosticsEnabled) {
+      void refreshDiagnosticsLocation();
+    }
+  }, [homeScreen, isDiagnosticsEnabled, refreshDiagnosticsLocation]);
+
+  useEffect(() => {
+    if (homeScreen === "DIAGNOSTICS" && !isDiagnosticsEnabled) {
+      setHomeScreen("SETTINGS");
+    }
+  }, [homeScreen, isDiagnosticsEnabled]);
+
   const handleModeSelect = useCallback(
     (nextMode: RecoveryMode) => {
       setMode(nextMode);
@@ -3675,6 +3987,25 @@ export default function App() {
     setHomeScreen("SETTINGS");
     setScreen("LIST");
     setSelectedMeeting(null);
+  }, []);
+
+  const openDiagnosticsFromSettings = useCallback(() => {
+    if (!isDiagnosticsEnabled) {
+      return;
+    }
+
+    if (Platform.OS === "android") {
+      ToastAndroid.show("Diagnostics unlocked", ToastAndroid.SHORT);
+    } else {
+      Alert.alert("Diagnostics unlocked");
+    }
+    setHomeScreen("DIAGNOSTICS");
+    setScreen("LIST");
+  }, [isDiagnosticsEnabled]);
+
+  const closeDiagnostics = useCallback(() => {
+    setHomeScreen("SETTINGS");
+    setScreen("LIST");
   }, []);
 
   const openAttendanceHub = useCallback(
@@ -5486,6 +5817,144 @@ export default function App() {
     [],
   );
 
+  const diagnosticsBuildInfo = useMemo(
+    () => ({
+      appEnv: resolvedAppEnv,
+      apiUrl,
+      appVersion,
+      buildNumber,
+    }),
+    [apiUrl, appVersion, buildNumber, resolvedAppEnv],
+  );
+
+  const diagnosticsMeetingsApiHealth = useMemo<DiagnosticsMeetingsApiHealth>(
+    () => ({
+      endpointPath: lastMeetingsApiEvent?.endpointPath ?? "",
+      statusCode: lastMeetingsApiEvent?.statusCode ?? null,
+      errorMessage: lastMeetingsApiEvent?.errorMessage ?? null,
+      errorBodySnippet: lastMeetingsApiEvent?.errorBodySnippet
+        ? truncateText(lastMeetingsApiEvent.errorBodySnippet, 500)
+        : null,
+      timestampIso: lastMeetingsApiEvent?.timestampIso ?? null,
+    }),
+    [lastMeetingsApiEvent],
+  );
+
+  const diagnosticsLocationStatus = useMemo<DiagnosticsLocationStatus>(
+    () => ({
+      servicesEnabled: diagnosticsLocationSnapshot?.servicesEnabled ?? null,
+      foregroundPermission: diagnosticsLocationSnapshot?.foregroundPermission ?? locationPermission,
+      backgroundPermission:
+        diagnosticsLocationSnapshot?.backgroundPermission ?? locationAlwaysPermission,
+      preciseIndicator:
+        diagnosticsLocationSnapshot?.accuracyM !== null &&
+        diagnosticsLocationSnapshot?.accuracyM !== undefined
+          ? `accuracy ±${Math.round(diagnosticsLocationSnapshot.accuracyM)}m`
+          : "accuracy unavailable",
+      lat: diagnosticsLocationSnapshot?.lat ?? currentLocation?.lat ?? null,
+      lng: diagnosticsLocationSnapshot?.lng ?? currentLocation?.lng ?? null,
+      accuracyM: diagnosticsLocationSnapshot?.accuracyM ?? currentLocation?.accuracyM ?? null,
+      timestampIso: diagnosticsLocationSnapshot?.timestampIso ?? null,
+    }),
+    [
+      currentLocation?.accuracyM,
+      currentLocation?.lat,
+      currentLocation?.lng,
+      diagnosticsLocationSnapshot,
+      locationAlwaysPermission,
+      locationPermission,
+    ],
+  );
+
+  const recordLastExportAttempt = useCallback((success: boolean, error?: unknown) => {
+    setLastExportAttempt({
+      success,
+      errorMessage: success ? null : formatError(error),
+      timestampIso: new Date().toISOString(),
+    });
+  }, []);
+
+  const runDiagnosticsExportDryRun = useCallback(() => {
+    if (diagnosticsSelectedAttendanceRecords.length === 0) {
+      setDiagnosticsExportDryRunStatus("Dry-run failed: select at least one attendance record.");
+      return;
+    }
+
+    const ordered = [...diagnosticsSelectedAttendanceRecords].sort(
+      (left, right) => new Date(left.startAt).getTime() - new Date(right.startAt).getTime(),
+    );
+
+    for (const record of ordered) {
+      if (typeof record.id !== "string" || record.id.trim().length === 0) {
+        const reason = "Dry-run failed: attendance record missing id.";
+        console.log("[diagnostics][export-dry-run] failed", { reason, record });
+        setDiagnosticsExportDryRunStatus(reason);
+        return;
+      }
+      if (typeof record.meetingName !== "string" || record.meetingName.trim().length === 0) {
+        const reason = `Dry-run failed: ${record.id} missing meetingName.`;
+        console.log("[diagnostics][export-dry-run] failed", { reason, recordId: record.id });
+        setDiagnosticsExportDryRunStatus(reason);
+        return;
+      }
+      const startMs = new Date(record.startAt).getTime();
+      if (!Number.isFinite(startMs)) {
+        const reason = `Dry-run failed: ${record.id} has invalid startAt.`;
+        console.log("[diagnostics][export-dry-run] failed", {
+          reason,
+          recordId: record.id,
+          startAt: record.startAt,
+        });
+        setDiagnosticsExportDryRunStatus(reason);
+        return;
+      }
+      if (record.endAt) {
+        const endMs = new Date(record.endAt).getTime();
+        if (!Number.isFinite(endMs)) {
+          const reason = `Dry-run failed: ${record.id} has invalid endAt.`;
+          console.log("[diagnostics][export-dry-run] failed", {
+            reason,
+            recordId: record.id,
+            endAt: record.endAt,
+          });
+          setDiagnosticsExportDryRunStatus(reason);
+          return;
+        }
+      }
+      if (
+        record.durationSeconds !== null &&
+        (!Number.isFinite(record.durationSeconds) || record.durationSeconds < 0)
+      ) {
+        const reason = `Dry-run failed: ${record.id} has invalid durationSeconds.`;
+        console.log("[diagnostics][export-dry-run] failed", {
+          reason,
+          recordId: record.id,
+          durationSeconds: record.durationSeconds,
+        });
+        setDiagnosticsExportDryRunStatus(reason);
+        return;
+      }
+      const signature =
+        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64 : "";
+      if (signature.trim().length > 0 && !looksLikeFileUri(signature.trim())) {
+        const cleaned = signature.replace(/[^A-Za-z0-9+/=]/g, "");
+        if (cleaned.length === 0) {
+          const reason = `Dry-run failed: ${record.id} signature payload is malformed.`;
+          console.log("[diagnostics][export-dry-run] failed", {
+            reason,
+            recordId: record.id,
+          });
+          setDiagnosticsExportDryRunStatus(reason);
+          return;
+        }
+      }
+    }
+
+    setDiagnosticsExportDryRunStatus(
+      `Dry-run passed for ${diagnosticsSelectedAttendanceRecords.length} record(s).`,
+    );
+  }, [diagnosticsSelectedAttendanceRecords]);
+
   const exportAttendance = useCallback(async () => {
     if (!activeAttendance || !activeAttendance.endAt || activeAttendance.durationSeconds === null) {
       setAttendanceStatus("Complete attendance session before exporting.");
@@ -5495,27 +5964,36 @@ export default function App() {
     setExportingPdf(true);
     try {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
-      const uri = await generateAttendanceSlipPdf(
+      const uris = await generateAttendanceSlipPdf(
         [toAttendanceSlipRecord(activeAttendance)],
         { participantName: devUserDisplayName },
         { fileName },
       );
-      await shareAttendanceSlipPdf(uri, fileName);
+      await shareAttendanceSlipPdf(uris, fileName);
+      const primaryUri = uris[0] ?? null;
 
       const next: AttendanceRecord = {
         ...activeAttendance,
-        pdfUri: uri,
+        pdfUri: primaryUri,
       };
       setActiveAttendance(next);
       upsertAttendanceRecord(next);
+      recordLastExportAttempt(true);
       setAttendanceStatus(`${fileName} exported.`);
     } catch (error) {
       console.log("[attendance-export] failed", error);
+      recordLastExportAttempt(false, error);
       setAttendanceStatus(`PDF export failed: ${formatError(error)}`);
     } finally {
       setExportingPdf(false);
     }
-  }, [activeAttendance, devUserDisplayName, toAttendanceSlipRecord, upsertAttendanceRecord]);
+  }, [
+    activeAttendance,
+    devUserDisplayName,
+    recordLastExportAttempt,
+    toAttendanceSlipRecord,
+    upsertAttendanceRecord,
+  ]);
 
   const toggleAttendanceSelection = useCallback((recordId: string) => {
     setSelectedAttendanceIds((current) =>
@@ -5565,24 +6043,40 @@ export default function App() {
       return;
     }
     setExportingAttendanceSelectionPdf(true);
+    setAttendanceExportProgressLabel(null);
     try {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected ${new Date()
         .toISOString()
         .slice(0, 10)}.pdf`;
-      const uri = await generateAttendanceSlipPdf(
+      const uris = await generateAttendanceSlipPdf(
         selectedRecords.map(toAttendanceSlipRecord),
         { participantName: devUserDisplayName },
-        { fileName },
+        {
+          fileName,
+          onProgress: ({ chunkIndex, chunkCount }) => {
+            setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
+          },
+        },
       );
-      await shareAttendanceSlipPdf(uri, fileName);
+      await shareAttendanceSlipPdf(uris, fileName);
+      recordLastExportAttempt(true);
       setAttendanceStatus(`Exported ${selectedRecords.length} meeting record(s).`);
     } catch (error) {
       console.log("[attendance-export-selected] failed", error);
+      recordLastExportAttempt(false, error);
       setAttendanceStatus(`Failed to export selected attendance: ${formatError(error)}`);
     } finally {
+      setAttendanceExportProgressLabel(null);
       setExportingAttendanceSelectionPdf(false);
     }
-  }, [attendanceRecordsForView, selectedAttendanceIds, devUserDisplayName, toAttendanceSlipRecord]);
+  }, [
+    attendanceRecordsForView,
+    selectedAttendanceIds,
+    setAttendanceExportProgressLabel,
+    devUserDisplayName,
+    recordLastExportAttempt,
+    toAttendanceSlipRecord,
+  ]);
 
   const exportAttendanceRange = useCallback(
     async (startDate: Date, endDate: Date, label: string) => {
@@ -5606,23 +6100,38 @@ export default function App() {
       }
 
       setExportingAttendanceSelectionPdf(true);
+      setAttendanceExportProgressLabel(null);
       try {
         const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
-        const uri = await generateAttendanceSlipPdf(
+        const uris = await generateAttendanceSlipPdf(
           selectedRecords.map(toAttendanceSlipRecord),
           { participantName: devUserDisplayName },
-          { fileName },
+          {
+            fileName,
+            onProgress: ({ chunkIndex, chunkCount }) => {
+              setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
+            },
+          },
         );
-        await shareAttendanceSlipPdf(uri, fileName);
+        await shareAttendanceSlipPdf(uris, fileName);
+        recordLastExportAttempt(true);
         setAttendanceStatus(`Exported ${selectedRecords.length} attendance slip(s) for ${label}.`);
       } catch (error) {
         console.log("[attendance-export-range] failed", error);
+        recordLastExportAttempt(false, error);
         setAttendanceStatus(`Failed to export attendance range: ${formatError(error)}`);
       } finally {
+        setAttendanceExportProgressLabel(null);
         setExportingAttendanceSelectionPdf(false);
       }
     },
-    [attendanceRecords, devUserDisplayName, toAttendanceSlipRecord],
+    [
+      attendanceRecords,
+      devUserDisplayName,
+      recordLastExportAttempt,
+      setAttendanceExportProgressLabel,
+      toAttendanceSlipRecord,
+    ],
   );
 
   const exportLast7DaysAttendance = useCallback(async () => {
@@ -8364,7 +8873,9 @@ export default function App() {
                   <View style={styles.buttonRow}>
                     <AppButton
                       title={
-                        exportingAttendanceSelectionPdf ? "Exporting..." : "Export last 7 days"
+                        exportingAttendanceSelectionPdf
+                          ? (attendanceExportProgressLabel ?? "Exporting...")
+                          : "Export last 7 days"
                       }
                       onPress={() => void exportLast7DaysAttendance()}
                       disabled={exportingAttendanceSelectionPdf}
@@ -8423,7 +8934,7 @@ export default function App() {
                     <AppButton
                       title={
                         exportingAttendanceSelectionPdf
-                          ? "Exporting..."
+                          ? (attendanceExportProgressLabel ?? "Exporting...")
                           : `Export selected (${selectedAttendanceVisibleCount})`
                       }
                       onPress={() => void exportSelectedAttendance()}
@@ -8806,6 +9317,24 @@ export default function App() {
                 </>
               ) : null}
 
+              {homeScreen === "DIAGNOSTICS" ? (
+                <DiagnosticsScreen
+                  buildInfo={diagnosticsBuildInfo}
+                  meetingsApiHealth={diagnosticsMeetingsApiHealth}
+                  locationStatus={diagnosticsLocationStatus}
+                  onRefreshLocation={() => {
+                    void refreshDiagnosticsLocation();
+                  }}
+                  meetingIdInput={diagnosticsMeetingIdInput}
+                  onMeetingIdInputChange={setDiagnosticsMeetingIdInput}
+                  meetingGeoSample={diagnosticsMeetingGeoSample}
+                  exportDebug={diagnosticsExportDebug}
+                  lastExportAttempt={lastExportAttempt}
+                  onRunExportDryRun={runDiagnosticsExportDryRun}
+                  onBack={closeDiagnostics}
+                />
+              ) : null}
+
               {homeScreen === "SETTINGS" ? (
                 <>
                   <GlassCard style={styles.card} strong>
@@ -8813,6 +9342,15 @@ export default function App() {
                     <Text style={styles.sectionMeta}>
                       Configure sponsor reminders, meeting planning, and attendance options.
                     </Text>
+                    <Pressable
+                      delayLongPress={1800}
+                      onLongPress={openDiagnosticsFromSettings}
+                      disabled={!isDiagnosticsEnabled}
+                    >
+                      <Text style={styles.sectionMeta}>
+                        Version {appVersion} ({buildNumber})
+                      </Text>
+                    </Pressable>
                     <View style={styles.buttonRow}>
                       <AppButton title="Open dashboard" onPress={openDashboard} />
                       <View style={styles.buttonSpacer} />

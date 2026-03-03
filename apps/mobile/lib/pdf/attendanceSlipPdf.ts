@@ -1,6 +1,9 @@
 export const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
-const MAX_SIGNATURE_BASE64_CHARS = 20_000;
-const MAX_SIGNATURE_BASE64_TOTAL_CHARS = 160_000;
+const MAX_SIGNATURE_EMBED_SINGLE_BYTES = 900_000;
+const MAX_SIGNATURE_EMBED_TOTAL_BYTES = 6_500_000;
+const DEFAULT_RECORDS_PER_CHUNK = 5;
+const MAX_SIGNATURE_WIDTH_PX = 800;
+const SIGNATURE_COMPRESS_QUALITY = 0.7;
 
 type LocationStamp = {
   lat: number | null;
@@ -28,6 +31,13 @@ export type AttendanceSlipUserProfile = {
   tenantLabel?: string | null;
 };
 
+export type AttendanceSlipExportProgress = {
+  chunkIndex: number;
+  chunkCount: number;
+  processedRecords: number;
+  totalRecords: number;
+};
+
 type PrintModule = {
   printToFileAsync(input: {
     html: string;
@@ -51,9 +61,64 @@ type SharingModule = {
 type FileSystemModule = {
   documentDirectory?: string;
   cacheDirectory?: string;
-  getInfoAsync(uri: string): Promise<{ exists: boolean }>;
+  EncodingType?: { Base64?: string };
+  getInfoAsync(uri: string): Promise<{ exists: boolean; size?: number }>;
   deleteAsync(uri: string, options?: { idempotent?: boolean }): Promise<void>;
   moveAsync(input: { from: string; to: string }): Promise<void>;
+  makeDirectoryAsync(uri: string, options?: { intermediates?: boolean }): Promise<void>;
+  writeAsStringAsync(uri: string, contents: string, options?: { encoding?: string }): Promise<void>;
+};
+
+type ImageManipulatorModule = {
+  manipulateAsync?: (
+    uri: string,
+    actions: Array<{ resize: { width: number } }>,
+    saveOptions?: { compress?: number; format?: string; base64?: boolean },
+  ) => Promise<{ uri: string }>;
+  SaveFormat?: { JPEG?: string };
+};
+
+type GenerateAttendanceSlipOptions = {
+  fileName?: string;
+  maxRecordsPerChunk?: number;
+  onProgress?: (progress: AttendanceSlipExportProgress) => void;
+};
+
+type PreparedSignatureState =
+  | { state: "unsigned" }
+  | { state: "on_file" }
+  | { state: "image"; src: string };
+
+type PreparedAttendanceSlipRecord = {
+  id: string;
+  meetingName: string;
+  meetingAddress: string;
+  startAtIso: string;
+  endAtIso: string | null;
+  durationSeconds: number | null;
+  chairName?: string | null;
+  chairRole?: string | null;
+  signatureCapturedAtIso?: string | null;
+  startLocation: LocationStamp;
+  endLocation: LocationStamp;
+  signatureState: PreparedSignatureState;
+};
+
+type SignaturePayload =
+  | { kind: "none" }
+  | { kind: "file"; uri: string }
+  | {
+      kind: "base64";
+      base64: string;
+      extension: "svg" | "png" | "jpg";
+    };
+
+type SignaturePreparationRuntime = {
+  fileSystem: FileSystemModule;
+  imageManipulator: ImageManipulatorModule | null;
+  signatureDirectory: string;
+  cacheByAttendanceId: Map<string, string>;
+  embeddedBytes: number;
 };
 
 function loadModule<T>(name: string): T | null {
@@ -152,48 +217,294 @@ function formatLocation(value: LocationStamp): string {
   return `${base} (±${Math.round(normalized.accuracyM)}m)`;
 }
 
-function sanitizeBase64Signature(value: unknown): string | null {
-  if (typeof value !== "string") {
+function sanitizePdfFileName(fileName: string): string {
+  const stripped = fileName
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (stripped.length === 0) {
+    return `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf`;
+  }
+  return stripped.toLowerCase().endsWith(".pdf") ? stripped : `${stripped}.pdf`;
+}
+
+function fileNameWithoutPdfExtension(fileName: string): string {
+  return fileName.replace(/\.pdf$/i, "");
+}
+
+function looksLikeFileUri(value: string): boolean {
+  return value.startsWith("file://") || value.startsWith("/");
+}
+
+function estimateBase64Bytes(value: string): number {
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return 0;
+  }
+  const paddingLength = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - paddingLength);
+}
+
+function normalizeIsoDate(value: unknown, fallback: string): string {
+  const text = asSafeText(value, fallback);
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return fallback;
+  }
+  return parsed.toISOString();
+}
+
+function normalizeDurationSeconds(
+  value: unknown,
+  startAtIso: string,
+  endAtIso: string | null,
+): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  if (!endAtIso) {
     return null;
   }
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
+  const startMs = new Date(startAtIso).getTime();
+  const endMs = new Date(endAtIso).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
     return null;
   }
-  // Keep only plausible base64 chars to avoid malformed image payloads.
-  const cleaned = trimmed.replace(/[^A-Za-z0-9+/=]/g, "");
+  return Math.floor((endMs - startMs) / 1000);
+}
+
+function sanitizeBase64Value(value: string): string | null {
+  const cleaned = value.replace(/[^A-Za-z0-9+/=]/g, "");
   return cleaned.length > 0 ? cleaned : null;
 }
 
-function shouldEmbedSignatures(records: AttendanceSlipRecord[]): boolean {
-  const totalChars = records.reduce((sum, record) => {
-    const signature = sanitizeBase64Signature(record.signatureSvgBase64);
-    return sum + (signature?.length ?? 0);
-  }, 0);
-  return totalChars <= MAX_SIGNATURE_BASE64_TOTAL_CHARS;
+function inferBase64ImageExtension(value: string): "svg" | "png" | "jpg" {
+  const prefix = value.slice(0, 32);
+  if (prefix.startsWith("PHN2Zy") || prefix.startsWith("PD94bW")) {
+    return "svg";
+  }
+  if (prefix.startsWith("iVBOR")) {
+    return "png";
+  }
+  if (prefix.startsWith("/9j/")) {
+    return "jpg";
+  }
+  return "svg";
+}
+
+function parseSignaturePayload(value: unknown): SignaturePayload {
+  if (typeof value !== "string") {
+    return { kind: "none" };
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return { kind: "none" };
+  }
+
+  if (looksLikeFileUri(trimmed)) {
+    return { kind: "file", uri: trimmed };
+  }
+
+  const dataUriMatch = trimmed.match(/^data:image\/([A-Za-z0-9.+-]+);base64,(.+)$/i);
+  if (dataUriMatch) {
+    const base64 = sanitizeBase64Value(dataUriMatch[2]);
+    if (!base64) {
+      return { kind: "none" };
+    }
+    const mimeSubtype = dataUriMatch[1].toLowerCase();
+    const extension: "svg" | "png" | "jpg" = mimeSubtype.includes("png")
+      ? "png"
+      : mimeSubtype.includes("jpeg") || mimeSubtype.includes("jpg")
+        ? "jpg"
+        : "svg";
+    return { kind: "base64", base64, extension };
+  }
+
+  const base64 = sanitizeBase64Value(trimmed);
+  if (!base64) {
+    return { kind: "none" };
+  }
+
+  return {
+    kind: "base64",
+    base64,
+    extension: inferBase64ImageExtension(base64),
+  };
+}
+
+function createHash(input: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash >>> 0).toString(16);
+}
+
+function toSafeFileNamePart(value: string): string {
+  const cleaned = value.replace(/[^A-Za-z0-9_-]/g, "-");
+  return cleaned.length > 0 ? cleaned : "attendance";
+}
+
+function chunkRecords<T>(items: T[], chunkSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+async function ensureDirectory(fileSystem: FileSystemModule, directoryUri: string): Promise<void> {
+  try {
+    await fileSystem.makeDirectoryAsync(directoryUri, { intermediates: true });
+  } catch {
+    // best-effort directory creation
+  }
+}
+
+function getBase64EncodingLabel(fileSystem: FileSystemModule): string {
+  return fileSystem.EncodingType?.Base64 ?? "base64";
+}
+
+async function getFileSizeBytes(fileSystem: FileSystemModule, uri: string): Promise<number | null> {
+  try {
+    const info = await fileSystem.getInfoAsync(uri);
+    if (!info.exists) {
+      return null;
+    }
+    if (typeof info.size === "number" && Number.isFinite(info.size) && info.size >= 0) {
+      return info.size;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeBase64SignatureToFile(
+  runtime: SignaturePreparationRuntime,
+  attendanceId: string,
+  base64: string,
+  extension: "svg" | "png" | "jpg",
+): Promise<string> {
+  const safeAttendanceId = toSafeFileNamePart(attendanceId);
+  const hash = createHash(base64.slice(0, 256));
+  const targetUri = `${runtime.signatureDirectory}${safeAttendanceId}-${hash}.${extension}`;
+  const existing = await runtime.fileSystem.getInfoAsync(targetUri);
+  if (!existing.exists) {
+    await runtime.fileSystem.writeAsStringAsync(targetUri, base64, {
+      encoding: getBase64EncodingLabel(runtime.fileSystem),
+    });
+  }
+  return targetUri;
+}
+
+async function compressSignatureIfPossible(
+  runtime: SignaturePreparationRuntime,
+  attendanceId: string,
+  signatureUri: string,
+): Promise<string> {
+  const cached = runtime.cacheByAttendanceId.get(attendanceId);
+  if (cached) {
+    return cached;
+  }
+
+  const manipulator = runtime.imageManipulator;
+  if (!manipulator?.manipulateAsync) {
+    runtime.cacheByAttendanceId.set(attendanceId, signatureUri);
+    return signatureUri;
+  }
+
+  const jpegFormat = manipulator.SaveFormat?.JPEG;
+  try {
+    const result = await manipulator.manipulateAsync(
+      signatureUri,
+      [{ resize: { width: MAX_SIGNATURE_WIDTH_PX } }],
+      {
+        compress: SIGNATURE_COMPRESS_QUALITY,
+        format: jpegFormat,
+        base64: false,
+      },
+    );
+    const normalized =
+      typeof result?.uri === "string" && result.uri.length > 0 ? result.uri : signatureUri;
+    runtime.cacheByAttendanceId.set(attendanceId, normalized);
+    return normalized;
+  } catch {
+    runtime.cacheByAttendanceId.set(attendanceId, signatureUri);
+    return signatureUri;
+  }
+}
+
+async function prepareSignatureState(
+  runtime: SignaturePreparationRuntime,
+  attendanceId: string,
+  rawSignature: unknown,
+): Promise<PreparedSignatureState> {
+  const signaturePayload = parseSignaturePayload(rawSignature);
+  if (signaturePayload.kind === "none") {
+    return { state: "unsigned" };
+  }
+
+  let candidateUri: string | null = null;
+  let expectedBytes: number | null = null;
+
+  if (signaturePayload.kind === "file") {
+    candidateUri = signaturePayload.uri;
+    expectedBytes = await getFileSizeBytes(runtime.fileSystem, candidateUri);
+  } else {
+    expectedBytes = estimateBase64Bytes(signaturePayload.base64);
+    if (expectedBytes <= 0) {
+      return { state: "on_file" };
+    }
+    candidateUri = await writeBase64SignatureToFile(
+      runtime,
+      attendanceId,
+      signaturePayload.base64,
+      signaturePayload.extension,
+    );
+  }
+
+  if (!candidateUri) {
+    return { state: "on_file" };
+  }
+
+  const compressedUri = await compressSignatureIfPossible(runtime, attendanceId, candidateUri);
+  const compressedSize = await getFileSizeBytes(runtime.fileSystem, compressedUri);
+  const estimatedSize = compressedSize ?? expectedBytes ?? 0;
+
+  if (estimatedSize <= 0) {
+    return { state: "on_file" };
+  }
+  if (estimatedSize > MAX_SIGNATURE_EMBED_SINGLE_BYTES) {
+    return { state: "on_file" };
+  }
+  if (runtime.embeddedBytes + estimatedSize > MAX_SIGNATURE_EMBED_TOTAL_BYTES) {
+    return { state: "on_file" };
+  }
+
+  runtime.embeddedBytes += estimatedSize;
+  return { state: "image", src: compressedUri };
 }
 
 function buildSignatureMarkup(
-  record: AttendanceSlipRecord,
-  includeSignatureImages: boolean,
+  signatureState: PreparedSignatureState,
+  forceOnFileFallback: boolean,
 ): string {
-  if (!includeSignatureImages) {
-    return '<p class="muted">Signature captured on file (image omitted for stable export).</p>';
-  }
-  const signature = sanitizeBase64Signature(record.signatureSvgBase64);
-  if (!signature) {
+  if (signatureState.state === "unsigned") {
     return '<p class="muted">Unsigned</p>';
   }
-  if (signature.length > MAX_SIGNATURE_BASE64_CHARS) {
-    return '<p class="muted">Signature captured on file (image omitted for stable export).</p>';
+  if (forceOnFileFallback || signatureState.state === "on_file") {
+    return '<p class="muted">Signature: On file (image unavailable)</p>';
   }
-  return `<img alt="Chair signature" src="data:image/svg+xml;base64,${signature}" style="width:100%;max-width:460px;border:1px solid #d5d9e4;border-radius:6px;"/>`;
+  return `<img alt="Chair signature" src="${escapeHtml(signatureState.src)}" style="width:100%;max-width:460px;border:1px solid #d5d9e4;border-radius:6px;"/>`;
 }
 
 function buildAttendancePage(
-  record: AttendanceSlipRecord,
+  record: PreparedAttendanceSlipRecord,
   profile: AttendanceSlipUserProfile,
-  includeSignatureImages: boolean,
+  forceOnFileFallback: boolean,
 ): string {
   const chairIdentity = [record.chairName?.trim() ?? "", record.chairRole?.trim() ?? ""]
     .filter((entry) => entry.length > 0)
@@ -205,30 +516,30 @@ function buildAttendancePage(
 
     <table>
       <tr><td><strong>Participant</strong></td><td>${escapeHtml(asSafeText(profile.participantName, "Unknown"))}</td></tr>
-      <tr><td><strong>Date</strong></td><td>${escapeHtml(formatDateOnly(asSafeText(record.startAtIso, new Date().toISOString())))}</td></tr>
+      <tr><td><strong>Date</strong></td><td>${escapeHtml(formatDateOnly(record.startAtIso))}</td></tr>
       <tr><td><strong>Meeting</strong></td><td>${escapeHtml(asSafeText(record.meetingName, "Recovery Meeting"))}</td></tr>
       <tr><td><strong>Location</strong></td><td>${escapeHtml(asSafeText(record.meetingAddress, "Address unavailable"))}</td></tr>
       <tr><td><strong>Start</strong></td><td>${escapeHtml(formatDateTime(record.startAtIso))}</td></tr>
       <tr><td><strong>End</strong></td><td>${escapeHtml(formatDateTime(record.endAtIso))}</td></tr>
       <tr><td><strong>Duration</strong></td><td>${escapeHtml(formatDuration(record.durationSeconds))}</td></tr>
-      <tr><td><strong>GPS Snapshot (start)</strong></td><td>${escapeHtml(formatLocation(record.startLocation ?? { lat: null, lng: null, accuracyM: null }))}</td></tr>
-      <tr><td><strong>GPS Snapshot (end)</strong></td><td>${escapeHtml(formatLocation(record.endLocation ?? { lat: null, lng: null, accuracyM: null }))}</td></tr>
+      <tr><td><strong>GPS Snapshot (start)</strong></td><td>${escapeHtml(formatLocation(record.startLocation))}</td></tr>
+      <tr><td><strong>GPS Snapshot (end)</strong></td><td>${escapeHtml(formatLocation(record.endLocation))}</td></tr>
     </table>
 
     <h2>Chair Signature</h2>
-    ${buildSignatureMarkup(record, includeSignatureImages)}
+    ${buildSignatureMarkup(record.signatureState, forceOnFileFallback)}
     <p><strong>Chair Printed Name</strong>: ${escapeHtml(chairIdentity || "Not provided")}</p>
     <p class="muted">Electronically captured signature${record.signatureCapturedAtIso ? ` at ${escapeHtml(formatDateTime(record.signatureCapturedAtIso))}` : ""}.</p>
   </section>`;
 }
 
 function buildAttendanceHtml(
-  records: AttendanceSlipRecord[],
+  records: PreparedAttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
+  forceOnFileFallback: boolean,
 ): string {
-  const includeSignatureImages = shouldEmbedSignatures(records);
   const pages = records
-    .map((record) => buildAttendancePage(record, profile, includeSignatureImages))
+    .map((record) => buildAttendancePage(record, profile, forceOnFileFallback))
     .join("\n");
   return `<!doctype html>
 <html>
@@ -254,17 +565,74 @@ function buildAttendanceHtml(
 </html>`;
 }
 
+async function prepareRecordsForExport(
+  records: AttendanceSlipRecord[],
+  fileSystem: FileSystemModule,
+  imageManipulator: ImageManipulatorModule | null,
+  outputDirectory: string,
+): Promise<PreparedAttendanceSlipRecord[]> {
+  const signatureDirectory = `${outputDirectory}attendance-signatures/`;
+  await ensureDirectory(fileSystem, signatureDirectory);
+
+  const runtime: SignaturePreparationRuntime = {
+    fileSystem,
+    imageManipulator,
+    signatureDirectory,
+    cacheByAttendanceId: new Map<string, string>(),
+    embeddedBytes: 0,
+  };
+
+  const prepared: PreparedAttendanceSlipRecord[] = [];
+
+  for (const sourceRecord of records) {
+    const startAtIso = normalizeIsoDate(sourceRecord.startAtIso, new Date().toISOString());
+    const normalizedEndAtIso = sourceRecord.endAtIso
+      ? normalizeIsoDate(sourceRecord.endAtIso, sourceRecord.endAtIso)
+      : null;
+    const endAtIso =
+      normalizedEndAtIso && Number.isFinite(new Date(normalizedEndAtIso).getTime())
+        ? normalizedEndAtIso
+        : null;
+
+    const signatureState = await prepareSignatureState(
+      runtime,
+      asSafeText(sourceRecord.id, `attendance-${prepared.length + 1}`),
+      sourceRecord.signatureSvgBase64,
+    );
+
+    prepared.push({
+      id: asSafeText(sourceRecord.id, `attendance-${prepared.length + 1}`),
+      meetingName: asSafeText(sourceRecord.meetingName, "Recovery Meeting"),
+      meetingAddress: asSafeText(sourceRecord.meetingAddress, "Address unavailable"),
+      startAtIso,
+      endAtIso,
+      durationSeconds: normalizeDurationSeconds(sourceRecord.durationSeconds, startAtIso, endAtIso),
+      chairName: sourceRecord.chairName ?? null,
+      chairRole: sourceRecord.chairRole ?? null,
+      signatureCapturedAtIso: sourceRecord.signatureCapturedAtIso ?? null,
+      startLocation: normalizeLocationStamp(sourceRecord.startLocation),
+      endLocation: normalizeLocationStamp(sourceRecord.endLocation),
+      signatureState,
+    });
+  }
+
+  return prepared.sort(
+    (left, right) => new Date(left.startAtIso).getTime() - new Date(right.startAtIso).getTime(),
+  );
+}
+
 export async function generateAttendanceSlipPdf(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
-  options?: { fileName?: string },
-): Promise<string> {
+  options?: GenerateAttendanceSlipOptions,
+): Promise<string[]> {
   if (!Array.isArray(records) || records.length === 0) {
     throw new Error("No attendance records selected for export.");
   }
 
   const printModule = loadModule<PrintModule>("expo-print");
   const fileSystemModule = loadModule<FileSystemModule>("expo-file-system");
+  const imageManipulatorModule = loadModule<ImageManipulatorModule>("expo-image-manipulator");
 
   if (!printModule || !fileSystemModule) {
     throw new Error(
@@ -272,37 +640,77 @@ export async function generateAttendanceSlipPdf(
     );
   }
 
-  const sorted = [...records].sort(
-    (left, right) => new Date(left.startAtIso).getTime() - new Date(right.startAtIso).getTime(),
-  );
-  const html = buildAttendanceHtml(sorted, profile);
-  const printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
-
   const outputDirectory = fileSystemModule.cacheDirectory ?? fileSystemModule.documentDirectory;
   if (!outputDirectory) {
     throw new Error("No writable directory available for attendance export.");
   }
 
   const defaultFileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
-  const fileName = (options?.fileName ?? defaultFileName)
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const targetUri = `${outputDirectory}${fileName}`;
+  const fileName = sanitizePdfFileName(options?.fileName ?? defaultFileName);
+  const baseFileName = fileNameWithoutPdfExtension(fileName);
+  const chunkSize = Math.max(
+    1,
+    Math.floor(options?.maxRecordsPerChunk ?? DEFAULT_RECORDS_PER_CHUNK),
+  );
 
-  const existing = await fileSystemModule.getInfoAsync(targetUri);
-  if (existing.exists) {
-    await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
+  const preparedRecords = await prepareRecordsForExport(
+    records,
+    fileSystemModule,
+    imageManipulatorModule,
+    outputDirectory,
+  );
+  const recordChunks = chunkRecords(preparedRecords, chunkSize);
+  const outputUris: string[] = [];
+
+  for (let chunkIndex = 0; chunkIndex < recordChunks.length; chunkIndex += 1) {
+    const chunkRecordsForPdf = recordChunks[chunkIndex];
+    options?.onProgress?.({
+      chunkIndex: chunkIndex + 1,
+      chunkCount: recordChunks.length,
+      processedRecords: Math.min((chunkIndex + 1) * chunkSize, preparedRecords.length),
+      totalRecords: preparedRecords.length,
+    });
+
+    let printed = null as { uri: string } | null;
+    try {
+      const html = buildAttendanceHtml(chunkRecordsForPdf, profile, false);
+      printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
+    } catch {
+      // Retry this chunk in explicit fallback mode so export succeeds without crashing.
+      const fallbackHtml = buildAttendanceHtml(chunkRecordsForPdf, profile, true);
+      printed = await printModule.printToFileAsync({ html: fallbackHtml, width: 612, height: 792 });
+    }
+
+    const chunkFileName =
+      recordChunks.length === 1
+        ? fileName
+        : `${baseFileName} (Part ${chunkIndex + 1} of ${recordChunks.length}).pdf`;
+    const targetUri = `${outputDirectory}${sanitizePdfFileName(chunkFileName)}`;
+    const existing = await fileSystemModule.getInfoAsync(targetUri);
+    if (existing.exists) {
+      await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
+    }
+    await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
+    outputUris.push(targetUri);
   }
 
-  await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
-  return targetUri;
+  return outputUris;
 }
 
-export async function shareAttendanceSlipPdf(uri: string, fileName?: string): Promise<void> {
+export async function shareAttendanceSlipPdf(
+  uriOrUris: string | string[],
+  fileName?: string,
+): Promise<void> {
   const sharingModule = loadModule<SharingModule>("expo-sharing");
   if (!sharingModule) {
     throw new Error("Share module unavailable. Install expo-sharing then restart Metro.");
+  }
+
+  const uris = Array.isArray(uriOrUris)
+    ? uriOrUris.filter((uri) => uri.trim().length > 0)
+    : [uriOrUris];
+  if (uris.length === 0) {
+    throw new Error("No exported PDF file available to share.");
   }
 
   const canShare = await sharingModule.isAvailableAsync();
@@ -310,9 +718,17 @@ export async function shareAttendanceSlipPdf(uri: string, fileName?: string): Pr
     throw new Error("Share sheet unavailable on this device.");
   }
 
-  await sharingModule.shareAsync(uri, {
-    UTI: "com.adobe.pdf",
-    mimeType: "application/pdf",
-    dialogTitle: fileName ?? ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
-  });
+  for (let index = 0; index < uris.length; index += 1) {
+    const uri = uris[index];
+    const dialogTitle =
+      uris.length === 1
+        ? (fileName ?? ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX)
+        : `${fileName ?? ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} (${index + 1}/${uris.length})`;
+
+    await sharingModule.shareAsync(uri, {
+      UTI: "com.adobe.pdf",
+      mimeType: "application/pdf",
+      dialogTitle,
+    });
+  }
 }

@@ -37,12 +37,23 @@ export type MeetingsSource = {
   listMeetings(params: ListMeetingsParams): Promise<ListMeetingsResult>;
 };
 
+export type MeetingsApiHealthEvent = {
+  endpointPath: string;
+  method: "GET";
+  statusCode: number | null;
+  errorMessage: string | null;
+  errorBodySnippet: string | null;
+  timestampIso: string;
+  source: "feed" | "nearby" | "meetings";
+};
+
 type SourceConfig = {
   feedUrl?: string;
   apiUrl: string;
   fallbackApiUrls?: string[];
   authHeader: string;
   radiusMiles?: number;
+  onApiEvent?: (event: MeetingsApiHealthEvent) => void;
 };
 
 const DAY_NAME_MAP: Record<string, number> = {
@@ -411,6 +422,15 @@ function extractFeedMeetings(rawPayload: unknown, fallbackDay: number): MeetingR
     .filter((entry): entry is MeetingRecord => entry !== null);
 }
 
+function endpointPathFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url;
+  }
+}
+
 export function createMeetingsSource(config: SourceConfig): MeetingsSource {
   const normalizedFeedUrl = config.feedUrl?.trim();
   const candidateApiUrls = Array.from(
@@ -424,13 +444,41 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
   return {
     async listMeetings(params: ListMeetingsParams): Promise<ListMeetingsResult> {
       let warning: string | undefined;
+      const emitApiEvent = (event: Omit<MeetingsApiHealthEvent, "timestampIso" | "method">) => {
+        config.onApiEvent?.({
+          method: "GET",
+          timestampIso: new Date().toISOString(),
+          ...event,
+        });
+      };
 
       if (normalizedFeedUrl) {
         try {
           const response = await fetch(normalizedFeedUrl);
           if (!response.ok) {
+            let errorBodySnippet: string | null = null;
+            try {
+              const text = await response.text();
+              errorBodySnippet = text.slice(0, 500);
+            } catch {
+              errorBodySnippet = null;
+            }
+            emitApiEvent({
+              endpointPath: endpointPathFromUrl(normalizedFeedUrl),
+              statusCode: response.status,
+              errorMessage: `Meeting feed failed (${response.status})`,
+              errorBodySnippet,
+              source: "feed",
+            });
             warning = `Meeting feed failed (${response.status})`;
           } else {
+            emitApiEvent({
+              endpointPath: endpointPathFromUrl(normalizedFeedUrl),
+              statusCode: response.status,
+              errorMessage: null,
+              errorBodySnippet: null,
+              source: "feed",
+            });
             const payload = (await response.json()) as unknown;
             const meetings = dedupeMeetings(extractFeedMeetings(payload, params.dayOfWeek));
             if (meetings.length > 0) {
@@ -439,6 +487,13 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
             warning = "Meeting feed returned no usable meetings";
           }
         } catch {
+          emitApiEvent({
+            endpointPath: endpointPathFromUrl(normalizedFeedUrl),
+            statusCode: null,
+            errorMessage: "Meeting feed unavailable",
+            errorBodySnippet: null,
+            source: "feed",
+          });
           warning = "Meeting feed unavailable";
         }
       }
@@ -477,6 +532,13 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           try {
             const nearbyResponse = await fetch(nearbyUrl, { headers });
             if (nearbyResponse.ok) {
+              emitApiEvent({
+                endpointPath: endpointPathFromUrl(nearbyUrl),
+                statusCode: nearbyResponse.status,
+                errorMessage: null,
+                errorBodySnippet: null,
+                source: "nearby",
+              });
               const nearbyPayload = asObject((await nearbyResponse.json()) as unknown);
               const nearbyMeetingsRaw = Array.isArray(nearbyPayload?.meetings)
                 ? nearbyPayload.meetings
@@ -487,10 +549,34 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
                   .filter((entry): entry is MeetingRecord => entry !== null),
               );
             } else {
+              let errorBodySnippet: string | null = null;
+              try {
+                const text = await nearbyResponse.text();
+                errorBodySnippet = text.slice(0, 500);
+              } catch {
+                errorBodySnippet = null;
+              }
+              emitApiEvent({
+                endpointPath: endpointPathFromUrl(nearbyUrl),
+                statusCode: nearbyResponse.status,
+                errorMessage: `Nearby meetings unavailable (${nearbyResponse.status})`,
+                errorBodySnippet,
+                source: "nearby",
+              });
               apiWarning = `Nearby meetings unavailable (${nearbyResponse.status}); falling back to tenant meetings`;
             }
           } catch (error) {
             apiWarning = "Nearby meetings unavailable; falling back to tenant meetings";
+            emitApiEvent({
+              endpointPath: endpointPathFromUrl(nearbyUrl),
+              statusCode: null,
+              errorMessage:
+                error instanceof Error && error.message
+                  ? error.message
+                  : "Nearby meetings request failed",
+              errorBodySnippet: null,
+              source: "nearby",
+            });
             if (__DEV__) {
               console.log("[meetings] nearby fallback", {
                 apiBaseUrl,
@@ -505,9 +591,30 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
         try {
           const response = await fetch(url, { headers });
           if (!response.ok) {
+            let errorBodySnippet: string | null = null;
+            try {
+              const text = await response.text();
+              errorBodySnippet = text.slice(0, 500);
+            } catch {
+              errorBodySnippet = null;
+            }
+            emitApiEvent({
+              endpointPath: endpointPathFromUrl(url),
+              statusCode: response.status,
+              errorMessage: `Meetings endpoint failed (${response.status})`,
+              errorBodySnippet,
+              source: "meetings",
+            });
             failures.push(`${apiBaseUrl}: ${response.status}`);
             continue;
           }
+          emitApiEvent({
+            endpointPath: endpointPathFromUrl(url),
+            statusCode: response.status,
+            errorMessage: null,
+            errorBodySnippet: null,
+            source: "meetings",
+          });
 
           const payload = asObject((await response.json()) as unknown);
           const meetingsRaw = Array.isArray(payload?.meetings) ? payload.meetings : [];
@@ -549,6 +656,14 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
                 : apiWarning),
           };
         } catch (error) {
+          emitApiEvent({
+            endpointPath: endpointPathFromUrl(url),
+            statusCode: null,
+            errorMessage:
+              error instanceof Error && error.message ? error.message : "Meetings request failed",
+            errorBodySnippet: null,
+            source: "meetings",
+          });
           failures.push(
             `${apiBaseUrl}: ${error instanceof Error && error.message ? error.message : "request_failed"}`,
           );
