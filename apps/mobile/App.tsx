@@ -469,6 +469,10 @@ function resolveMeetingDistanceMeters(
   if (!isTrustedGeoStatus(meeting.geoStatus ?? null)) {
     return null;
   }
+  if (!currentLocation) {
+    // Avoid stale/remote-provided distance values when we do not have device location.
+    return null;
+  }
   if (currentLocation && meeting.lat !== null && meeting.lng !== null) {
     const computedMiles = distanceMiles(
       { lat: currentLocation.lat, lng: currentLocation.lng },
@@ -485,9 +489,6 @@ function resolveMeetingDistanceMeters(
       return null;
     }
     return computedMiles * 1609.344;
-  }
-  if (typeof meeting.distanceMeters === "number" && Number.isFinite(meeting.distanceMeters)) {
-    return Math.max(0, meeting.distanceMeters);
   }
   return null;
 }
@@ -3163,7 +3164,8 @@ export default function App() {
             meeting.geoSource === "unknown" ||
             meeting.geoSource === null ||
             meeting.geoSource === undefined) &&
-          (userRegionHint === "MT" ||
+          (!currentLocation ||
+            userRegionHint === "MT" ||
             (typeof distanceFromUserToExistingMiles === "number" &&
               Number.isFinite(distanceFromUserToExistingMiles) &&
               distanceFromUserToExistingMiles > ADDRESS_SECOND_CHECK_DISTANCE_ANOMALY_MILES));
@@ -5891,21 +5893,50 @@ export default function App() {
         const location = await readCurrentLocation(false);
         const nowIso = new Date().toISOString();
         const meetingCoords = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+        const distanceFromUserMiles =
+          location && meetingCoords
+            ? distanceMiles(
+                { lat: location.lat, lng: location.lng },
+                { lat: meetingCoords.lat, lng: meetingCoords.lng },
+              )
+            : null;
+        const meetingGeoClassification = classifyGeo({
+          lat: meetingCoords?.lat ?? null,
+          lng: meetingCoords?.lng ?? null,
+          address: meeting.address,
+          userRegionHint: resolveUserRegionHintFromLocation(location),
+          distanceFromUserMiles,
+        });
+        const normalizedMeetingGeoStatus = normalizeMeetingGeoStatus(meeting.geoStatus);
+        const resolvedMeetingGeoStatus: MeetingGeoStatus = !isTrustedGeoStatus(
+          meetingGeoClassification.geoStatus,
+        )
+          ? meetingGeoClassification.geoStatus
+          : normalizedMeetingGeoStatus && !isTrustedGeoStatus(normalizedMeetingGeoStatus)
+            ? normalizedMeetingGeoStatus
+            : meetingGeoClassification.geoStatus;
+        const resolvedMeetingCoords =
+          isTrustedGeoStatus(resolvedMeetingGeoStatus) &&
+          meetingGeoClassification.lat !== null &&
+          meetingGeoClassification.lng !== null
+            ? { lat: meetingGeoClassification.lat, lng: meetingGeoClassification.lng }
+            : null;
         const next: AttendanceRecord = {
           id: createId("attendance"),
           meetingId: meeting.id,
           meetingName: meeting.name,
           meetingAddress: meeting.address,
           scheduledStartsAtLocal: meeting.startsAtLocal ?? null,
-          meetingLat: meetingCoords?.lat ?? null,
-          meetingLng: meetingCoords?.lng ?? null,
-          meetingGeoStatus:
-            normalizeMeetingGeoStatus(meeting.geoStatus) ??
-            (isValidLatLng(meetingCoords?.lat ?? null, meetingCoords?.lng ?? null)
-              ? "verified"
-              : "missing"),
+          meetingLat: resolvedMeetingCoords?.lat ?? null,
+          meetingLng: resolvedMeetingCoords?.lng ?? null,
+          meetingGeoStatus: resolvedMeetingGeoStatus,
           meetingGeoSource: normalizeMeetingGeoSource(meeting.geoSource) ?? "unknown",
-          meetingGeoReason: meeting.geoReason ?? null,
+          meetingGeoReason:
+            (!isTrustedGeoStatus(meetingGeoClassification.geoStatus)
+              ? meetingGeoClassification.geoReason
+              : null) ??
+            meeting.geoReason ??
+            null,
           meetingFormat: meeting.format,
           captureMethod: "attend-log",
           startAt: nowIso,
