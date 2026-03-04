@@ -228,21 +228,6 @@ function normalizeStreetText(value: string | null | undefined): string | null {
   return withoutNumber.length > 0 ? withoutNumber : null;
 }
 
-function stripUnitSuffix(value: string | null | undefined): string | null {
-  const normalized = normalizeAddressText(value);
-  if (!normalized) {
-    return null;
-  }
-
-  // Unit markers (for example "#8", "Suite 3", "Apt B") frequently hurt geocoder match quality.
-  const stripped = normalized
-    .replace(/\s*,\s*(?:#|apt\.?|apartment|suite|ste\.?|unit|rm\.?|room)\s*[a-z0-9-]+$/i, "")
-    .replace(/\s+(?:#|apt\.?|apartment|suite|ste\.?|unit|rm\.?|room)\s*[a-z0-9-]+$/i, "")
-    .trim();
-
-  return stripped.length > 0 ? stripped : normalized;
-}
-
 function extractCandidateCity(address: NominatimAddress | undefined): string | null {
   return normalizeLooseText(
     address?.city ??
