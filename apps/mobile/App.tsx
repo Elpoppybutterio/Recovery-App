@@ -1029,7 +1029,33 @@ function parseTwoDigitMinutes(value: string, fallback: number): number {
   return Math.min(MAX_MEETING_MINUTES, parsePositiveInt(digitsOnly, fallback));
 }
 
-function buildSignatureSvgMarkup(
+function encodeBase64(value: string): string {
+  const btoaFn = (globalThis as { btoa?: (data: string) => string }).btoa;
+  if (typeof btoaFn === "function") {
+    return btoaFn(value);
+  }
+
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+  let output = "";
+  let index = 0;
+
+  while (index < value.length) {
+    const c1 = value.charCodeAt(index++);
+    const c2 = value.charCodeAt(index++);
+    const c3 = value.charCodeAt(index++);
+
+    const e1 = c1 >> 2;
+    const e2 = ((c1 & 3) << 4) | (c2 >> 4);
+    const e3 = Number.isNaN(c2) ? 64 : ((c2 & 15) << 2) | (c3 >> 6);
+    const e4 = Number.isNaN(c3) ? 64 : c3 & 63;
+
+    output += `${chars.charAt(e1)}${chars.charAt(e2)}${chars.charAt(e3)}${chars.charAt(e4)}`;
+  }
+
+  return output;
+}
+
+function buildSignatureSvgBase64(
   points: SignaturePoint[],
   width: number,
   height: number,
@@ -1060,61 +1086,7 @@ function buildSignatureSvgMarkup(
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(width)}" height="${Math.round(height)}" viewBox="0 0 ${Math.round(width)} ${Math.round(height)}"><rect width="100%" height="100%" fill="white"/><path d="${path}" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-  return svg;
-}
-
-type SignatureFileSystemModule = {
-  documentDirectory?: string;
-  cacheDirectory?: string;
-  EncodingType?: { UTF8?: string };
-  makeDirectoryAsync?: (uri: string, options?: { intermediates?: boolean }) => Promise<void>;
-  writeAsStringAsync?: (
-    uri: string,
-    contents: string,
-    options?: { encoding?: string },
-  ) => Promise<void>;
-};
-
-function sanitizeSignatureFilePart(value: string): string {
-  const cleaned = value
-    .replace(/[^A-Za-z0-9_-]/g, "-")
-    .replace(/-+/g, "-")
-    .trim();
-  return cleaned.length > 0 ? cleaned : "signature";
-}
-
-async function persistSignatureSvgToFile(
-  attendanceId: string,
-  signatureSvgMarkup: string,
-): Promise<string> {
-  const fileSystemModule = loadOptionalModule<SignatureFileSystemModule>("expo-file-system");
-  if (
-    !fileSystemModule ||
-    typeof fileSystemModule.makeDirectoryAsync !== "function" ||
-    typeof fileSystemModule.writeAsStringAsync !== "function"
-  ) {
-    throw new Error("Signature storage module unavailable.");
-  }
-
-  const baseDirectory = fileSystemModule.documentDirectory ?? fileSystemModule.cacheDirectory;
-  if (!baseDirectory) {
-    throw new Error("No writable directory available for signature storage.");
-  }
-
-  const signatureDirectory = `${baseDirectory}attendance-signatures/`;
-  try {
-    await fileSystemModule.makeDirectoryAsync(signatureDirectory, { intermediates: true });
-  } catch {
-    // best-effort directory creation
-  }
-
-  const safeId = sanitizeSignatureFilePart(attendanceId);
-  const uniqueSuffix = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
-  const targetUri = `${signatureDirectory}${safeId}-${uniqueSuffix}.svg`;
-  await fileSystemModule.writeAsStringAsync(targetUri, signatureSvgMarkup, {
-    encoding: fileSystemModule.EncodingType?.UTF8 ?? "utf8",
-  });
-  return targetUri;
+  return encodeBase64(svg);
 }
 
 function attendanceStorageKey(userId: string): string {
@@ -6260,13 +6232,13 @@ export default function App() {
       return;
     }
 
-    const signatureSvgMarkup = buildSignatureSvgMarkup(
+    const signatureSvgBase64 = buildSignatureSvgBase64(
       signaturePoints,
       signatureCanvasSize.width,
       signatureCanvasSize.height,
     );
 
-    if (!signatureSvgMarkup) {
+    if (!signatureSvgBase64) {
       setAttendanceStatus("Draw a signature before saving.");
       return;
     }
@@ -6277,19 +6249,10 @@ export default function App() {
         setAttendanceStatus(signatureWindow.reason ?? SIGNATURE_WINDOW_HELP_TEXT);
         return;
       }
-
-      let signatureFileUri: string;
-      try {
-        signatureFileUri = await persistSignatureSvgToFile(activeAttendance.id, signatureSvgMarkup);
-      } catch (error) {
-        setAttendanceStatus(`Signature save failed: ${formatError(error)}`);
-        return;
-      }
-
       const nowIso = new Date().toISOString();
       const next: AttendanceRecord = {
         ...activeAttendance,
-        signaturePngBase64: signatureFileUri,
+        signaturePngBase64: signatureSvgBase64,
         signaturePromptShown: true,
         chairName:
           signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
@@ -6320,21 +6283,12 @@ export default function App() {
 
     const location = await readCurrentLocation(false);
     const nowIso = new Date().toISOString();
-    const recordId = createId("attendance");
-    let signatureFileUri: string;
-    try {
-      signatureFileUri = await persistSignatureSvgToFile(recordId, signatureSvgMarkup);
-    } catch (error) {
-      setAttendanceStatus(`Signature save failed: ${formatError(error)}`);
-      return;
-    }
-
     const signatureMeetingCoords = normalizeCoordinates({
       lat: signatureCaptureMeeting.lat,
       lng: signatureCaptureMeeting.lng,
     });
     const signatureOnlyRecord: AttendanceRecord = {
-      id: recordId,
+      id: createId("attendance"),
       meetingId: signatureCaptureMeeting.id,
       meetingName: signatureCaptureMeeting.name,
       meetingAddress: signatureCaptureMeeting.address,
@@ -6365,7 +6319,7 @@ export default function App() {
       chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
       signatureCapturedAtIso: nowIso,
       calendarEventId: null,
-      signaturePngBase64: signatureFileUri,
+      signaturePngBase64: signatureSvgBase64,
       pdfUri: null,
     };
 
@@ -6558,7 +6512,7 @@ export default function App() {
     );
   }, [diagnosticsSelectedAttendanceRecords]);
 
-  const createDiagnosticsCompletedTestMeeting = useCallback(async () => {
+  const createDiagnosticsCompletedTestMeeting = useCallback(() => {
     if (!isDiagnosticsEnabled) {
       return;
     }
@@ -6577,7 +6531,7 @@ export default function App() {
     const lng = candidateCoords?.lng ?? currentLocation?.lng ?? fallbackLng;
     const accuracyM = currentLocation?.accuracyM ?? 18;
 
-    const sampleSignatureMarkup = buildSignatureSvgMarkup(
+    const sampleSignature = buildSignatureSvgBase64(
       [
         { x: 16, y: 90, isStrokeStart: true },
         { x: 68, y: 64, isStrokeStart: false },
@@ -6590,15 +6544,6 @@ export default function App() {
     );
 
     const recordId = createId("attendance-diagnostic");
-    let sampleSignatureUri: string | null = null;
-    if (sampleSignatureMarkup) {
-      try {
-        sampleSignatureUri = await persistSignatureSvgToFile(recordId, sampleSignatureMarkup);
-      } catch (error) {
-        console.log("[diagnostics] failed to persist sample signature", error);
-      }
-    }
-
     const scheduledStartsAtLocal = `${String(start.getHours()).padStart(2, "0")}:${String(
       start.getMinutes(),
     ).padStart(2, "0")}`;
@@ -6630,7 +6575,7 @@ export default function App() {
       chairRole: "Chairperson",
       signatureCapturedAtIso: now.toISOString(),
       calendarEventId: null,
-      signaturePngBase64: sampleSignatureUri,
+      signaturePngBase64: sampleSignature,
       pdfUri: null,
     };
 
