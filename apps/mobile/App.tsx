@@ -3167,12 +3167,27 @@ export default function App() {
             (typeof distanceFromUserToExistingMiles === "number" &&
               Number.isFinite(distanceFromUserToExistingMiles) &&
               distanceFromUserToExistingMiles > ADDRESS_SECOND_CHECK_DISTANCE_ANOMALY_MILES));
+        const existingTrustedLooksAbsurd =
+          typeof distanceFromUserToExistingMiles === "number" &&
+          Number.isFinite(distanceFromUserToExistingMiles) &&
+          distanceFromUserToExistingMiles > ADDRESS_SECOND_CHECK_DISTANCE_ANOMALY_MILES;
         if (!needsRecovery && !shouldSecondCheckTrusted) {
           continue;
         }
 
         const addressCandidates = buildAddressCandidates(meeting);
         if (addressCandidates.length === 0) {
+          if (shouldSecondCheckTrusted && existingTrustedLooksAbsurd) {
+            next[index] = {
+              ...meeting,
+              lat: null,
+              lng: null,
+              distanceMeters: null,
+              geoStatus: "suspect",
+              geoReason: "address_missing_for_second_check",
+              geoUpdatedAt: new Date().toISOString(),
+            };
+          }
           continue;
         }
 
@@ -3189,7 +3204,18 @@ export default function App() {
         }
         if (cached === undefined) {
           if (lookups >= MAX_GEOCODE_LOOKUPS_PER_REFRESH) {
-            break;
+            if (shouldSecondCheckTrusted && existingTrustedLooksAbsurd) {
+              next[index] = {
+                ...meeting,
+                lat: null,
+                lng: null,
+                distanceMeters: null,
+                geoStatus: "suspect",
+                geoReason: "second_check_lookup_budget_exhausted",
+                geoUpdatedAt: new Date().toISOString(),
+              };
+            }
+            continue;
           }
           lookups += 1;
           for (const candidate of addressCandidates) {
@@ -3232,6 +3258,16 @@ export default function App() {
               geoStatus: "missing",
               geoReason: "missing_coordinates",
             };
+          } else if (shouldSecondCheckTrusted && existingTrustedLooksAbsurd) {
+            next[index] = {
+              ...meeting,
+              lat: null,
+              lng: null,
+              distanceMeters: null,
+              geoStatus: "suspect",
+              geoReason: "address_second_check_failed",
+              geoUpdatedAt: new Date().toISOString(),
+            };
           }
           continue;
         }
@@ -3265,6 +3301,17 @@ export default function App() {
               geoStatus: "missing",
               geoSource: cached.source,
               geoReason: trustedGeo.geoReason ?? "missing_coordinates",
+              geoUpdatedAt: new Date().toISOString(),
+            };
+          } else if (shouldSecondCheckTrusted && existingTrustedLooksAbsurd) {
+            next[index] = {
+              ...meeting,
+              lat: null,
+              lng: null,
+              distanceMeters: null,
+              geoStatus: "suspect",
+              geoSource: cached.source,
+              geoReason: trustedGeo.geoReason ?? "address_second_check_failed",
               geoUpdatedAt: new Date().toISOString(),
             };
           }
@@ -9340,16 +9387,12 @@ export default function App() {
 
                               <View style={styles.buttonRow}>
                                 <AppButton
-                                  title={meetingInProgress ? "Attend" : "Details"}
+                                  title="Details"
                                   onPress={() => {
-                                    if (meetingInProgress) {
-                                      void logUpcomingMeetingFromDashboard(meeting.id);
-                                      return;
-                                    }
                                     setSelectedMeeting(meeting);
                                     setScreen("DETAIL");
                                   }}
-                                  variant={meetingInProgress ? "secondary" : "primary"}
+                                  variant="primary"
                                 />
                                 <View style={styles.buttonSpacer} />
                                 <AppButton
@@ -10704,39 +10747,12 @@ export default function App() {
 
                               <View style={styles.buttonRow}>
                                 <AppButton
-                                  title={
-                                    selectedDayIsToday &&
-                                    isMeetingInProgress(
-                                      meeting.startsAtLocal,
-                                      new Date(clockTickMs).getHours() * 60 +
-                                        new Date(clockTickMs).getMinutes(),
-                                    )
-                                      ? "Attend"
-                                      : "Details"
-                                  }
+                                  title="Details"
                                   onPress={() => {
-                                    const now = new Date(clockTickMs);
-                                    const nowMinutes = now.getHours() * 60 + now.getMinutes();
-                                    const meetingInProgress =
-                                      selectedDayIsToday &&
-                                      isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
-                                    if (meetingInProgress) {
-                                      void logUpcomingMeetingFromDashboard(meeting.id);
-                                      return;
-                                    }
                                     setSelectedMeeting(meeting);
                                     setScreen("DETAIL");
                                   }}
-                                  variant={
-                                    selectedDayIsToday &&
-                                    isMeetingInProgress(
-                                      meeting.startsAtLocal,
-                                      new Date(clockTickMs).getHours() * 60 +
-                                        new Date(clockTickMs).getMinutes(),
-                                    )
-                                      ? "secondary"
-                                      : "primary"
-                                  }
+                                  variant="primary"
                                 />
                                 <View style={styles.buttonSpacer} />
                                 <AppButton
