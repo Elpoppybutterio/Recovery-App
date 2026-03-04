@@ -402,7 +402,13 @@ async function compressSignatureIfPossible(
   runtime: SignaturePreparationRuntime,
   attendanceId: string,
   signatureUri: string,
+  options?: { allowCompression?: boolean },
 ): Promise<string> {
+  if (options?.allowCompression === false) {
+    runtime.cacheByAttendanceId.set(attendanceId, signatureUri);
+    return signatureUri;
+  }
+
   const cached = runtime.cacheByAttendanceId.get(attendanceId);
   if (cached) {
     return cached;
@@ -435,6 +441,17 @@ async function compressSignatureIfPossible(
   }
 }
 
+function hasRasterImageFileExtension(uri: string): boolean {
+  const normalizedUri = uri.split("?")[0]?.split("#")[0]?.toLowerCase() ?? uri.toLowerCase();
+  return (
+    normalizedUri.endsWith(".png") ||
+    normalizedUri.endsWith(".jpg") ||
+    normalizedUri.endsWith(".jpeg") ||
+    normalizedUri.endsWith(".webp") ||
+    normalizedUri.endsWith(".heic")
+  );
+}
+
 async function getCompressedSignatureUri(
   runtime: SignaturePreparationRuntime,
   attendanceId: string,
@@ -446,7 +463,10 @@ async function getCompressedSignatureUri(
   }
 
   if (signaturePayload.kind === "file") {
-    return compressSignatureIfPossible(runtime, attendanceId, signaturePayload.uri);
+    return compressSignatureIfPossible(runtime, attendanceId, signaturePayload.uri, {
+      // iOS can hard-crash when manipulating vector files (especially SVG).
+      allowCompression: hasRasterImageFileExtension(signaturePayload.uri),
+    });
   }
 
   const expectedBytes = estimateBase64Bytes(signaturePayload.base64);
@@ -460,7 +480,9 @@ async function getCompressedSignatureUri(
     signaturePayload.base64,
     signaturePayload.extension,
   );
-  return compressSignatureIfPossible(runtime, attendanceId, rawUri);
+  return compressSignatureIfPossible(runtime, attendanceId, rawUri, {
+    allowCompression: signaturePayload.extension !== "svg",
+  });
 }
 
 async function prepareSignatureState(
@@ -476,8 +498,14 @@ async function prepareSignatureState(
   let expectedBytes: number | null = null;
 
   if (signaturePayload.kind === "file") {
+    if (!hasRasterImageFileExtension(signaturePayload.uri)) {
+      return { signatureState: { state: "on_file" }, imageBytes: 0 };
+    }
     expectedBytes = await getFileSizeBytes(runtime.fileSystem, signaturePayload.uri);
   } else {
+    if (signaturePayload.extension === "svg") {
+      return { signatureState: { state: "on_file" }, imageBytes: 0 };
+    }
     expectedBytes = estimateBase64Bytes(signaturePayload.base64);
     if (expectedBytes <= 0) {
       return { signatureState: { state: "on_file" }, imageBytes: 0 };
