@@ -43,6 +43,25 @@ Optional env:
 - `MEETING_GUIDE_GITHUB_TOKEN=...` (optional, used for GitHub Contents API feeds)
 - `MEETING_GUIDE_REFRESH_INTERVAL_MS=43200000` (12 hours)
 
+## Render Setup (NA Montana)
+
+Use these env vars in your Render API service:
+
+```bash
+MEETING_GUIDE_DEFAULT_TENANT_ID=tenant-a
+MEETING_GUIDE_AUTO_INGEST=true
+MEETING_GUIDE_GEOCODE_MISSING=true
+MEETING_GUIDE_GEOCODE_VERIFY_EXISTING=true
+MEETING_GUIDE_GOOGLE_VERIFY=false
+GOOGLE_MAPS_API_KEY=<your_google_maps_api_key>
+MEETING_GUIDE_FEEDS_JSON=[{"name":"NA Montana - Region","url":"https://namontana.org/wp-json/tsml/meetings","tenantId":"tenant-a"}]
+```
+
+Notes:
+
+- `MEETING_GUIDE_FEEDS_JSON` is just feed URLs; it does not include a sharing key.
+- If you enable `MEETING_GUIDE_GOOGLE_VERIFY=true`, provide a valid `GOOGLE_MAPS_API_KEY`.
+
 Legacy feed env vars are still supported as fallback:
 
 - `MEETING_FEEDS_AA` (comma-separated URLs)
