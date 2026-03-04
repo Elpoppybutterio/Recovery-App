@@ -42,8 +42,7 @@ import {
 } from "./lib/geo/geoTrust";
 import {
   ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
-  generateAttendanceSlipPdf,
-  shareAttendanceSlipPdf,
+  printAttendanceSlipPdf,
 } from "./lib/pdf/attendanceSlipPdf";
 import { exportMorningRoutinePdf } from "./lib/pdf/exportMorningRoutinePdf";
 import { exportNightlyInventoryPdf } from "./lib/pdf/exportNightlyInventoryPdf";
@@ -1063,60 +1062,6 @@ function buildSignatureSvgMarkup(
   return svg;
 }
 
-type SignatureFileSystemModule = {
-  documentDirectory?: string;
-  cacheDirectory?: string;
-  EncodingType?: { UTF8?: string };
-  makeDirectoryAsync?: (uri: string, options?: { intermediates?: boolean }) => Promise<void>;
-  writeAsStringAsync?: (
-    uri: string,
-    contents: string,
-    options?: { encoding?: string },
-  ) => Promise<void>;
-};
-
-function sanitizeSignatureFilePart(value: string): string {
-  const cleaned = value
-    .replace(/[^A-Za-z0-9_-]/g, "-")
-    .replace(/-+/g, "-")
-    .trim();
-  return cleaned.length > 0 ? cleaned : "signature";
-}
-
-async function persistSignatureSvgToFile(
-  attendanceId: string,
-  signatureSvgMarkup: string,
-): Promise<string> {
-  const fileSystemModule = loadOptionalModule<SignatureFileSystemModule>("expo-file-system");
-  if (
-    !fileSystemModule ||
-    typeof fileSystemModule.makeDirectoryAsync !== "function" ||
-    typeof fileSystemModule.writeAsStringAsync !== "function"
-  ) {
-    throw new Error("Signature storage module unavailable.");
-  }
-
-  const baseDirectory = fileSystemModule.documentDirectory ?? fileSystemModule.cacheDirectory;
-  if (!baseDirectory) {
-    throw new Error("No writable directory available for signature storage.");
-  }
-
-  const signatureDirectory = `${baseDirectory}attendance-signatures/`;
-  try {
-    await fileSystemModule.makeDirectoryAsync(signatureDirectory, { intermediates: true });
-  } catch {
-    // best-effort directory creation
-  }
-
-  const safeId = sanitizeSignatureFilePart(attendanceId);
-  const uniqueSuffix = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
-  const targetUri = `${signatureDirectory}${safeId}-${uniqueSuffix}.svg`;
-  await fileSystemModule.writeAsStringAsync(targetUri, signatureSvgMarkup, {
-    encoding: fileSystemModule.EncodingType?.UTF8 ?? "utf8",
-  });
-  return targetUri;
-}
-
 function attendanceStorageKey(userId: string): string {
   return `${ATTENDANCE_STORAGE_KEY_PREFIX}${userId}`;
 }
@@ -1365,6 +1310,35 @@ function estimateBase64Bytes(value: string): number {
   }
   const paddingLength = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
   return Math.max(0, Math.floor((normalized.length * 3) / 4) - paddingLength);
+}
+
+function estimateUtf8Bytes(value: string): number {
+  const textEncoderCtor = (
+    globalThis as {
+      TextEncoder?: new () => {
+        encode(input: string): Uint8Array;
+      };
+    }
+  ).TextEncoder;
+  if (typeof textEncoderCtor === "function") {
+    return new textEncoderCtor().encode(value).length;
+  }
+  return value.length;
+}
+
+function looksLikeSvgMarkup(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized.startsWith("<svg") || (normalized.startsWith("<?xml") && normalized.includes("<svg"))
+  );
+}
+
+function looksLikeSvgDataUri(value: string): boolean {
+  return value.trim().toLowerCase().startsWith("data:image/svg+xml");
+}
+
+function looksLikeInlineSvgSignature(value: string): boolean {
+  return looksLikeSvgMarkup(value) || looksLikeSvgDataUri(value);
 }
 
 function invalidMeetingCoordsReason(lat: number | null, lng: number | null): string | null {
@@ -2207,6 +2181,8 @@ export default function App() {
       signedCount += 1;
       if (looksLikeFileUri(trimmed)) {
         signatureUriCount += 1;
+      } else if (looksLikeInlineSvgSignature(trimmed)) {
+        signatureBase64Bytes += estimateUtf8Bytes(trimmed);
       } else {
         signatureBase64Bytes += estimateBase64Bytes(trimmed);
       }
@@ -6277,19 +6253,10 @@ export default function App() {
         setAttendanceStatus(signatureWindow.reason ?? SIGNATURE_WINDOW_HELP_TEXT);
         return;
       }
-
-      let signatureFileUri: string;
-      try {
-        signatureFileUri = await persistSignatureSvgToFile(activeAttendance.id, signatureSvgMarkup);
-      } catch (error) {
-        setAttendanceStatus(`Signature save failed: ${formatError(error)}`);
-        return;
-      }
-
       const nowIso = new Date().toISOString();
       const next: AttendanceRecord = {
         ...activeAttendance,
-        signaturePngBase64: signatureFileUri,
+        signaturePngBase64: signatureSvgMarkup,
         signaturePromptShown: true,
         chairName:
           signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
@@ -6320,21 +6287,12 @@ export default function App() {
 
     const location = await readCurrentLocation(false);
     const nowIso = new Date().toISOString();
-    const recordId = createId("attendance");
-    let signatureFileUri: string;
-    try {
-      signatureFileUri = await persistSignatureSvgToFile(recordId, signatureSvgMarkup);
-    } catch (error) {
-      setAttendanceStatus(`Signature save failed: ${formatError(error)}`);
-      return;
-    }
-
     const signatureMeetingCoords = normalizeCoordinates({
       lat: signatureCaptureMeeting.lat,
       lng: signatureCaptureMeeting.lng,
     });
     const signatureOnlyRecord: AttendanceRecord = {
-      id: recordId,
+      id: createId("attendance"),
       meetingId: signatureCaptureMeeting.id,
       meetingName: signatureCaptureMeeting.name,
       meetingAddress: signatureCaptureMeeting.address,
@@ -6365,7 +6323,7 @@ export default function App() {
       chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
       signatureCapturedAtIso: nowIso,
       calendarEventId: null,
-      signaturePngBase64: signatureFileUri,
+      signaturePngBase64: signatureSvgMarkup,
       pdfUri: null,
     };
 
@@ -6540,6 +6498,9 @@ export default function App() {
       const signature =
         typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64 : "";
       if (signature.trim().length > 0 && !looksLikeFileUri(signature.trim())) {
+        if (looksLikeInlineSvgSignature(signature)) {
+          continue;
+        }
         const cleaned = signature.replace(/[^A-Za-z0-9+/=]/g, "");
         if (cleaned.length === 0) {
           const reason = `Dry-run failed: ${record.id} signature payload is malformed.`;
@@ -6558,7 +6519,7 @@ export default function App() {
     );
   }, [diagnosticsSelectedAttendanceRecords]);
 
-  const createDiagnosticsCompletedTestMeeting = useCallback(async () => {
+  const createDiagnosticsCompletedTestMeeting = useCallback(() => {
     if (!isDiagnosticsEnabled) {
       return;
     }
@@ -6577,7 +6538,7 @@ export default function App() {
     const lng = candidateCoords?.lng ?? currentLocation?.lng ?? fallbackLng;
     const accuracyM = currentLocation?.accuracyM ?? 18;
 
-    const sampleSignatureMarkup = buildSignatureSvgMarkup(
+    const sampleSignature = buildSignatureSvgMarkup(
       [
         { x: 16, y: 90, isStrokeStart: true },
         { x: 68, y: 64, isStrokeStart: false },
@@ -6590,15 +6551,6 @@ export default function App() {
     );
 
     const recordId = createId("attendance-diagnostic");
-    let sampleSignatureUri: string | null = null;
-    if (sampleSignatureMarkup) {
-      try {
-        sampleSignatureUri = await persistSignatureSvgToFile(recordId, sampleSignatureMarkup);
-      } catch (error) {
-        console.log("[diagnostics] failed to persist sample signature", error);
-      }
-    }
-
     const scheduledStartsAtLocal = `${String(start.getHours()).padStart(2, "0")}:${String(
       start.getMinutes(),
     ).padStart(2, "0")}`;
@@ -6630,7 +6582,7 @@ export default function App() {
       chairRole: "Chairperson",
       signatureCapturedAtIso: now.toISOString(),
       calendarEventId: null,
-      signaturePngBase64: sampleSignatureUri,
+      signaturePngBase64: sampleSignature,
       pdfUri: null,
     };
 
@@ -6662,39 +6614,23 @@ export default function App() {
 
     setExportingPdf(true);
     try {
-      const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
-      const uris = await generateAttendanceSlipPdf(
+      await printAttendanceSlipPdf(
         [toAttendanceSlipRecord(activeAttendance)],
         { participantName: devUserDisplayName },
-        { fileName },
+        { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
       );
-      await shareAttendanceSlipPdf(uris, fileName);
-      const primaryUri = uris[0] ?? null;
-
-      const next: AttendanceRecord = {
-        ...activeAttendance,
-        pdfUri: primaryUri,
-      };
-      setActiveAttendance(next);
-      upsertAttendanceRecord(next);
       recordLastExportAttempt(true);
-      setAttendanceStatus(`${fileName} exported.`);
+      setAttendanceStatus("Print dialog opened. Choose Print or Save as PDF.");
     } catch (error) {
       console.log("[attendance-export] failed", error);
       recordLastExportAttempt(false, error);
-      const message = `PDF export failed: ${formatError(error)}`;
+      const message = `PDF print failed: ${formatError(error)}`;
       setAttendanceStatus(message);
-      Alert.alert("Export failed", "Try exporting fewer meetings.");
+      Alert.alert("Print failed", "Try exporting fewer meetings.");
     } finally {
       setExportingPdf(false);
     }
-  }, [
-    activeAttendance,
-    devUserDisplayName,
-    recordLastExportAttempt,
-    toAttendanceSlipRecord,
-    upsertAttendanceRecord,
-  ]);
+  }, [activeAttendance, devUserDisplayName, recordLastExportAttempt, toAttendanceSlipRecord]);
 
   const toggleAttendanceSelection = useCallback((recordId: string) => {
     setSelectedAttendanceIds((current) =>
@@ -6746,28 +6682,24 @@ export default function App() {
     setExportingAttendanceSelectionPdf(true);
     setAttendanceExportProgressLabel(null);
     try {
-      const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected ${new Date()
-        .toISOString()
-        .slice(0, 10)}.pdf`;
-      const uris = await generateAttendanceSlipPdf(
+      await printAttendanceSlipPdf(
         selectedRecords.map(toAttendanceSlipRecord),
         { participantName: devUserDisplayName },
         {
-          fileName,
+          fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`,
           onProgress: ({ chunkIndex, chunkCount }) => {
             setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
           },
         },
       );
-      await shareAttendanceSlipPdf(uris, fileName);
       recordLastExportAttempt(true);
-      setAttendanceStatus(`Exported ${selectedRecords.length} meeting record(s).`);
+      setAttendanceStatus(`Print dialog opened for ${selectedRecords.length} meeting record(s).`);
     } catch (error) {
       console.log("[attendance-export-selected] failed", error);
       recordLastExportAttempt(false, error);
-      const message = `Failed to export selected attendance: ${formatError(error)}`;
+      const message = `Failed to print selected attendance: ${formatError(error)}`;
       setAttendanceStatus(message);
-      Alert.alert("Export failed", "Try exporting fewer meetings.");
+      Alert.alert("Print failed", "Try exporting fewer meetings.");
     } finally {
       setAttendanceExportProgressLabel(null);
       setExportingAttendanceSelectionPdf(false);
@@ -6805,26 +6737,26 @@ export default function App() {
       setExportingAttendanceSelectionPdf(true);
       setAttendanceExportProgressLabel(null);
       try {
-        const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
-        const uris = await generateAttendanceSlipPdf(
+        await printAttendanceSlipPdf(
           selectedRecords.map(toAttendanceSlipRecord),
           { participantName: devUserDisplayName },
           {
-            fileName,
+            fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`,
             onProgress: ({ chunkIndex, chunkCount }) => {
               setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
             },
           },
         );
-        await shareAttendanceSlipPdf(uris, fileName);
         recordLastExportAttempt(true);
-        setAttendanceStatus(`Exported ${selectedRecords.length} attendance slip(s) for ${label}.`);
+        setAttendanceStatus(
+          `Print dialog opened for ${selectedRecords.length} attendance slip(s) for ${label}.`,
+        );
       } catch (error) {
         console.log("[attendance-export-range] failed", error);
         recordLastExportAttempt(false, error);
-        const message = `Failed to export attendance range: ${formatError(error)}`;
+        const message = `Failed to print attendance range: ${formatError(error)}`;
         setAttendanceStatus(message);
-        Alert.alert("Export failed", "Try exporting fewer meetings.");
+        Alert.alert("Print failed", "Try exporting fewer meetings.");
       } finally {
         setAttendanceExportProgressLabel(null);
         setExportingAttendanceSelectionPdf(false);
@@ -7483,6 +7415,11 @@ export default function App() {
                 signatureCapturedAtIso:
                   typeof record.signatureCapturedAtIso === "string"
                     ? record.signatureCapturedAtIso
+                    : null,
+                signaturePngBase64:
+                  typeof record.signaturePngBase64 === "string" &&
+                  record.signaturePngBase64.trim().length > 0
+                    ? record.signaturePngBase64.trim()
                     : null,
                 calendarEventId:
                   typeof record.calendarEventId === "string" && record.calendarEventId.length > 0

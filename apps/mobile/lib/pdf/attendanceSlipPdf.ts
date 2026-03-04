@@ -45,6 +45,7 @@ type PrintModule = {
     width?: number;
     height?: number;
   }): Promise<{ uri: string }>;
+  printAsync?(input: { html: string }): Promise<void>;
 };
 
 type SharingModule = {
@@ -109,6 +110,7 @@ type PreparedAttendanceSlipRecord = {
 type SignaturePayload =
   | { kind: "none" }
   | { kind: "file"; uri: string }
+  | { kind: "svg_markup"; svg: string }
   | {
       kind: "base64";
       base64: string;
@@ -129,11 +131,7 @@ type PreparedSignatureResult = {
 
 function loadModule<T>(name: string): T | null {
   try {
-    const runtime = globalThis as { require?: (moduleName: string) => unknown };
-    const dynamicRequire = runtime.require ?? (typeof require === "function" ? require : undefined);
-    if (typeof dynamicRequire !== "function") {
-      return null;
-    }
+    const dynamicRequire: (moduleName: string) => unknown = require;
     return dynamicRequire(name) as T;
   } catch {
     return null;
@@ -302,6 +300,13 @@ function inferBase64ImageExtension(value: string): "svg" | "png" | "jpg" {
   return "svg";
 }
 
+function looksLikeSvgMarkup(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized.startsWith("<svg") || (normalized.startsWith("<?xml") && normalized.includes("<svg"))
+  );
+}
+
 function parseSignaturePayload(value: unknown): SignaturePayload {
   if (typeof value !== "string") {
     return { kind: "none" };
@@ -314,6 +319,21 @@ function parseSignaturePayload(value: unknown): SignaturePayload {
 
   if (looksLikeFileUri(trimmed)) {
     return { kind: "file", uri: trimmed };
+  }
+
+  if (looksLikeSvgMarkup(trimmed)) {
+    return { kind: "svg_markup", svg: trimmed };
+  }
+
+  const svgDataUriMatch = trimmed.match(
+    /^data:image\/svg\+xml(?:;charset=[^;,]+)?(?:;(?:utf8|utf-8))?,(.*)$/i,
+  );
+  if (svgDataUriMatch) {
+    try {
+      return { kind: "svg_markup", svg: decodeURIComponent(svgDataUriMatch[1]) };
+    } catch {
+      return { kind: "svg_markup", svg: svgDataUriMatch[1] };
+    }
   }
 
   const dataUriMatch = trimmed.match(/^data:image\/([A-Za-z0-9.+-]+);base64,(.+)$/i);
@@ -468,9 +488,12 @@ async function getCompressedSignatureUri(
 
   if (signaturePayload.kind === "file") {
     return compressSignatureIfPossible(runtime, attendanceId, signaturePayload.uri, {
-      // iOS can hard-crash when manipulating SVGs; only compress known raster formats.
+      // iOS can hard-crash when manipulating vector files (especially SVG).
       allowCompression: hasRasterImageFileExtension(signaturePayload.uri),
     });
+  }
+  if (signaturePayload.kind === "svg_markup") {
+    return null;
   }
 
   const expectedBytes = estimateBase64Bytes(signaturePayload.base64);
@@ -502,12 +525,20 @@ async function prepareSignatureState(
   let expectedBytes: number | null = null;
 
   if (signaturePayload.kind === "file") {
+    if (!hasRasterImageFileExtension(signaturePayload.uri)) {
+      return { signatureState: { state: "on_file" }, imageBytes: 0 };
+    }
     expectedBytes = await getFileSizeBytes(runtime.fileSystem, signaturePayload.uri);
-  } else {
+  } else if (signaturePayload.kind === "base64") {
+    if (signaturePayload.extension === "svg") {
+      return { signatureState: { state: "on_file" }, imageBytes: 0 };
+    }
     expectedBytes = estimateBase64Bytes(signaturePayload.base64);
     if (expectedBytes <= 0) {
       return { signatureState: { state: "on_file" }, imageBytes: 0 };
     }
+  } else {
+    return { signatureState: { state: "on_file" }, imageBytes: 0 };
   }
 
   const compressedUri = await getCompressedSignatureUri(runtime, attendanceId, rawSignature);
@@ -732,6 +763,44 @@ async function prepareRecordsForExport(
   );
 }
 
+function prepareRecordsForPrint(records: AttendanceSlipRecord[]): PreparedAttendanceSlipRecord[] {
+  const prepared: PreparedAttendanceSlipRecord[] = [];
+
+  for (const sourceRecord of records) {
+    const startAtIso = normalizeIsoDate(sourceRecord.startAtIso, new Date().toISOString());
+    const normalizedEndAtIso = sourceRecord.endAtIso
+      ? normalizeIsoDate(sourceRecord.endAtIso, sourceRecord.endAtIso)
+      : null;
+    const endAtIso =
+      normalizedEndAtIso && Number.isFinite(new Date(normalizedEndAtIso).getTime())
+        ? normalizedEndAtIso
+        : null;
+    const signaturePayload = parseSignaturePayload(sourceRecord.signatureSvgBase64);
+    const signatureState: PreparedSignatureState =
+      signaturePayload.kind === "none" ? { state: "unsigned" } : { state: "on_file" };
+
+    prepared.push({
+      id: asSafeText(sourceRecord.id, `attendance-${prepared.length + 1}`),
+      meetingName: asSafeText(sourceRecord.meetingName, "Recovery Meeting"),
+      meetingAddress: asSafeText(sourceRecord.meetingAddress, "Address unavailable"),
+      startAtIso,
+      endAtIso,
+      durationSeconds: normalizeDurationSeconds(sourceRecord.durationSeconds, startAtIso, endAtIso),
+      chairName: sourceRecord.chairName ?? null,
+      chairRole: sourceRecord.chairRole ?? null,
+      signatureCapturedAtIso: sourceRecord.signatureCapturedAtIso ?? null,
+      startLocation: normalizeLocationStamp(sourceRecord.startLocation),
+      endLocation: normalizeLocationStamp(sourceRecord.endLocation),
+      signatureState,
+      signatureImageBytes: 0,
+    });
+  }
+
+  return prepared.sort(
+    (left, right) => new Date(left.startAtIso).getTime() - new Date(right.startAtIso).getTime(),
+  );
+}
+
 export async function generateAttendanceSlipPdf(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
@@ -827,6 +896,46 @@ export async function generateAttendanceSlipPdf(
   }
 
   return outputUris;
+}
+
+export async function printAttendanceSlipPdf(
+  records: AttendanceSlipRecord[],
+  profile: AttendanceSlipUserProfile,
+  options?: GenerateAttendanceSlipOptions,
+): Promise<void> {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error("No attendance records selected for export.");
+  }
+
+  const printModule = loadModule<PrintModule>("expo-print");
+  if (!printModule || typeof printModule.printAsync !== "function") {
+    throw new Error("Print module unavailable. Install expo-print then restart Metro.");
+  }
+
+  const preferredChunkSize = Math.max(
+    1,
+    Math.floor(options?.maxRecordsPerChunk ?? DEFAULT_RECORDS_PER_CHUNK),
+  );
+
+  // Printing route is intentionally lightweight: avoid image manipulation/file rewriting
+  // because iOS can crash in native modules on some signature payloads.
+  const preparedRecords = prepareRecordsForPrint(records);
+  const recordChunks = buildChunkPlan(preparedRecords, preferredChunkSize);
+
+  let processedRecords = 0;
+  for (let chunkIndex = 0; chunkIndex < recordChunks.length; chunkIndex += 1) {
+    const chunkRecordsForPdf = recordChunks[chunkIndex];
+    processedRecords += chunkRecordsForPdf.length;
+    options?.onProgress?.({
+      chunkIndex: chunkIndex + 1,
+      chunkCount: recordChunks.length,
+      processedRecords,
+      totalRecords: preparedRecords.length,
+    });
+
+    const html = buildAttendanceHtml(chunkRecordsForPdf, profile, true);
+    await printModule.printAsync({ html });
+  }
 }
 
 export async function shareAttendanceSlipPdf(
