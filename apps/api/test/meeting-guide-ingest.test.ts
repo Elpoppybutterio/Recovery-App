@@ -250,6 +250,13 @@ describe("meeting-guide ingest", () => {
                 <td>07:00 PM</td>
                 <td>201 East Main St</td>
               </tr>
+              <tr>
+                <td>Downtown Group(O)</td>
+                <td>Tuesday</td>
+                <td></td>
+                <td>12:00 PM</td>
+                <td>17 N 31ST ST</td>
+              </tr>
             </tbody>
           </table>
         </body>
@@ -282,11 +289,11 @@ describe("meeting-guide ingest", () => {
     expect(result).toEqual({
       feedsAttempted: 1,
       feedsFailed: 0,
-      meetingsFetched: 2,
-      meetingsImported: 2,
+      meetingsFetched: 3,
+      meetingsImported: 3,
       meetingsSkipped: 0,
       meetingsWithCoordinates: 0,
-      meetingsWithoutCoordinates: 2,
+      meetingsWithoutCoordinates: 3,
     });
 
     const meetingsArg = repositories.meetingGuideMeetings.upsertForFeed.mock.calls[0]?.[2] as
@@ -318,6 +325,15 @@ describe("meeting-guide ingest", () => {
           day: 3,
           time: "19:00",
           address: "201 East Main St",
+          city: "Billings",
+          state: "MT",
+          types: ["O"],
+        }),
+        expect.objectContaining({
+          name: "Downtown Group",
+          day: 2,
+          time: "12:00",
+          address: "17 N 31ST ST",
           city: "Billings",
           state: "MT",
           types: ["O"],
