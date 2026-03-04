@@ -99,23 +99,46 @@ export function buildGeocodeQuery(parts: AddressParts): string | null {
     return null;
   }
 
-  if (normalized.formattedAddress) {
-    return normalized.formattedAddress;
-  }
+  const segments: string[] = [];
+  const pushIfMissing = (value: string | null) => {
+    if (!value) {
+      return;
+    }
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+    const lowerTrimmed = trimmed.toLowerCase();
+    const exists = segments.some((segment) => {
+      const lowerSegment = segment.toLowerCase();
+      if (lowerSegment.includes(lowerTrimmed)) {
+        return true;
+      }
+      if (trimmed.length === 2) {
+        const statePattern = new RegExp(`\\b${trimmed.toUpperCase()}\\b`);
+        return statePattern.test(segment.toUpperCase());
+      }
+      return false;
+    });
+    if (!exists) {
+      segments.push(trimmed);
+    }
+  };
 
-  const segments = [
-    normalized.address,
-    normalized.city,
-    normalized.state,
-    normalized.postalCode,
-    normalized.country,
-  ].filter((entry): entry is string => Boolean(entry));
+  // Many feeds provide formattedAddress as street-only (for example "510 Cook Ave").
+  // Keep it, but append missing city/state/postal context so geocoding does not drift to other states.
+  pushIfMissing(normalized.formattedAddress);
+  pushIfMissing(normalized.address);
+  pushIfMissing(normalized.city);
+  pushIfMissing(normalized.state);
+  pushIfMissing(normalized.postalCode);
+  pushIfMissing(normalized.country);
 
   if (segments.length === 0) {
     return null;
   }
 
-  return Array.from(new Set(segments)).join(", ");
+  return segments.join(", ");
 }
 
 export function resolveMeetingGeoStatus(options: {

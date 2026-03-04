@@ -86,4 +86,17 @@ describe("meeting geo helpers", () => {
       }),
     ).toBeNull();
   });
+
+  it("enriches street-only formatted address with city/state context", () => {
+    expect(
+      buildGeocodeQuery({
+        formattedAddress: "510 Cook Ave",
+        address: "510 Cook Ave",
+        city: "Billings",
+        state: "MT",
+        postalCode: null,
+        country: null,
+      }),
+    ).toBe("510 Cook Ave, Billings, MT");
+  });
 });
