@@ -228,6 +228,21 @@ function normalizeStreetText(value: string | null | undefined): string | null {
   return withoutNumber.length > 0 ? withoutNumber : null;
 }
 
+function stripUnitSuffix(value: string | null | undefined): string | null {
+  const normalized = normalizeAddressText(value);
+  if (!normalized) {
+    return null;
+  }
+
+  // Unit markers (for example "#8", "Suite 3", "Apt B") frequently hurt geocoder match quality.
+  const stripped = normalized
+    .replace(/\s*,\s*(?:#|apt\.?|apartment|suite|ste\.?|unit|rm\.?|room)\s*[a-z0-9-]+$/i, "")
+    .replace(/\s+(?:#|apt\.?|apartment|suite|ste\.?|unit|rm\.?|room)\s*[a-z0-9-]+$/i, "")
+    .trim();
+
+  return stripped.length > 0 ? stripped : normalized;
+}
+
 function extractCandidateCity(address: NominatimAddress | undefined): string | null {
   return normalizeLooseText(
     address?.city ??
@@ -429,6 +444,8 @@ export function buildGeocodeQuery(parts: AddressParts): string | null {
   if (isOnlineAddress(normalized.formattedAddress)) {
     return null;
   }
+  const geocodeFormattedAddress = stripUnitSuffix(normalized.formattedAddress);
+  const geocodeAddress = stripUnitSuffix(normalized.address);
 
   const segments: string[] = [];
   const pushIfMissing = (value: string | null | undefined) => {
@@ -458,8 +475,8 @@ export function buildGeocodeQuery(parts: AddressParts): string | null {
 
   // Many feeds provide formattedAddress as street-only (for example "510 Cook Ave").
   // Keep it, but append missing city/state/postal context so geocoding does not drift to other states.
-  pushIfMissing(normalized.formattedAddress);
-  pushIfMissing(normalized.address);
+  pushIfMissing(geocodeFormattedAddress);
+  pushIfMissing(geocodeAddress);
   pushIfMissing(normalized.city);
   pushIfMissing(normalized.state);
   pushIfMissing(normalized.postalCode);
