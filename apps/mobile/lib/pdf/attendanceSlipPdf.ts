@@ -735,6 +735,44 @@ async function prepareRecordsForExport(
   );
 }
 
+function prepareRecordsForPrint(records: AttendanceSlipRecord[]): PreparedAttendanceSlipRecord[] {
+  const prepared: PreparedAttendanceSlipRecord[] = [];
+
+  for (const sourceRecord of records) {
+    const startAtIso = normalizeIsoDate(sourceRecord.startAtIso, new Date().toISOString());
+    const normalizedEndAtIso = sourceRecord.endAtIso
+      ? normalizeIsoDate(sourceRecord.endAtIso, sourceRecord.endAtIso)
+      : null;
+    const endAtIso =
+      normalizedEndAtIso && Number.isFinite(new Date(normalizedEndAtIso).getTime())
+        ? normalizedEndAtIso
+        : null;
+    const signaturePayload = parseSignaturePayload(sourceRecord.signatureSvgBase64);
+    const signatureState: PreparedSignatureState =
+      signaturePayload.kind === "none" ? { state: "unsigned" } : { state: "on_file" };
+
+    prepared.push({
+      id: asSafeText(sourceRecord.id, `attendance-${prepared.length + 1}`),
+      meetingName: asSafeText(sourceRecord.meetingName, "Recovery Meeting"),
+      meetingAddress: asSafeText(sourceRecord.meetingAddress, "Address unavailable"),
+      startAtIso,
+      endAtIso,
+      durationSeconds: normalizeDurationSeconds(sourceRecord.durationSeconds, startAtIso, endAtIso),
+      chairName: sourceRecord.chairName ?? null,
+      chairRole: sourceRecord.chairRole ?? null,
+      signatureCapturedAtIso: sourceRecord.signatureCapturedAtIso ?? null,
+      startLocation: normalizeLocationStamp(sourceRecord.startLocation),
+      endLocation: normalizeLocationStamp(sourceRecord.endLocation),
+      signatureState,
+      signatureImageBytes: 0,
+    });
+  }
+
+  return prepared.sort(
+    (left, right) => new Date(left.startAtIso).getTime() - new Date(right.startAtIso).getTime(),
+  );
+}
+
 export async function generateAttendanceSlipPdf(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
@@ -842,18 +880,8 @@ export async function printAttendanceSlipPdf(
   }
 
   const printModule = loadModule<PrintModule>("expo-print");
-  const fileSystemModule = loadModule<FileSystemModule>("expo-file-system");
-  const imageManipulatorModule = loadModule<ImageManipulatorModule>("expo-image-manipulator");
-
-  if (!printModule || typeof printModule.printAsync !== "function" || !fileSystemModule) {
-    throw new Error(
-      "Print module unavailable. Install expo-print and expo-file-system then restart Metro.",
-    );
-  }
-
-  const outputDirectory = fileSystemModule.cacheDirectory ?? fileSystemModule.documentDirectory;
-  if (!outputDirectory) {
-    throw new Error("No writable directory available for attendance export.");
+  if (!printModule || typeof printModule.printAsync !== "function") {
+    throw new Error("Print module unavailable. Install expo-print then restart Metro.");
   }
 
   const preferredChunkSize = Math.max(
@@ -861,15 +889,10 @@ export async function printAttendanceSlipPdf(
     Math.floor(options?.maxRecordsPerChunk ?? DEFAULT_RECORDS_PER_CHUNK),
   );
 
-  const preparedRecords = await prepareRecordsForExport(
-    records,
-    fileSystemModule,
-    imageManipulatorModule,
-    outputDirectory,
-  );
-  const recordChunks = buildChunkPlan(preparedRecords, preferredChunkSize).map((chunk) =>
-    enforceChunkSignatureBudget(chunk),
-  );
+  // Printing route is intentionally lightweight: avoid image manipulation/file rewriting
+  // because iOS can crash in native modules on some signature payloads.
+  const preparedRecords = prepareRecordsForPrint(records);
+  const recordChunks = buildChunkPlan(preparedRecords, preferredChunkSize);
 
   let processedRecords = 0;
   for (let chunkIndex = 0; chunkIndex < recordChunks.length; chunkIndex += 1) {
@@ -882,13 +905,8 @@ export async function printAttendanceSlipPdf(
       totalRecords: preparedRecords.length,
     });
 
-    try {
-      const html = buildAttendanceHtml(chunkRecordsForPdf, profile, false);
-      await printModule.printAsync({ html });
-    } catch {
-      const fallbackHtml = buildAttendanceHtml(chunkRecordsForPdf, profile, true);
-      await printModule.printAsync({ html: fallbackHtml });
-    }
+    const html = buildAttendanceHtml(chunkRecordsForPdf, profile, true);
+    await printModule.printAsync({ html });
   }
 }
 
