@@ -45,6 +45,7 @@ type PrintModule = {
     width?: number;
     height?: number;
   }): Promise<{ uri: string }>;
+  printAsync?(input: { html: string }): Promise<void>;
 };
 
 type SharingModule = {
@@ -829,6 +830,66 @@ export async function generateAttendanceSlipPdf(
   }
 
   return outputUris;
+}
+
+export async function printAttendanceSlipPdf(
+  records: AttendanceSlipRecord[],
+  profile: AttendanceSlipUserProfile,
+  options?: GenerateAttendanceSlipOptions,
+): Promise<void> {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error("No attendance records selected for export.");
+  }
+
+  const printModule = loadModule<PrintModule>("expo-print");
+  const fileSystemModule = loadModule<FileSystemModule>("expo-file-system");
+  const imageManipulatorModule = loadModule<ImageManipulatorModule>("expo-image-manipulator");
+
+  if (!printModule || typeof printModule.printAsync !== "function" || !fileSystemModule) {
+    throw new Error(
+      "Print module unavailable. Install expo-print and expo-file-system then restart Metro.",
+    );
+  }
+
+  const outputDirectory = fileSystemModule.cacheDirectory ?? fileSystemModule.documentDirectory;
+  if (!outputDirectory) {
+    throw new Error("No writable directory available for attendance export.");
+  }
+
+  const preferredChunkSize = Math.max(
+    1,
+    Math.floor(options?.maxRecordsPerChunk ?? DEFAULT_RECORDS_PER_CHUNK),
+  );
+
+  const preparedRecords = await prepareRecordsForExport(
+    records,
+    fileSystemModule,
+    imageManipulatorModule,
+    outputDirectory,
+  );
+  const recordChunks = buildChunkPlan(preparedRecords, preferredChunkSize).map((chunk) =>
+    enforceChunkSignatureBudget(chunk),
+  );
+
+  let processedRecords = 0;
+  for (let chunkIndex = 0; chunkIndex < recordChunks.length; chunkIndex += 1) {
+    const chunkRecordsForPdf = recordChunks[chunkIndex];
+    processedRecords += chunkRecordsForPdf.length;
+    options?.onProgress?.({
+      chunkIndex: chunkIndex + 1,
+      chunkCount: recordChunks.length,
+      processedRecords,
+      totalRecords: preparedRecords.length,
+    });
+
+    try {
+      const html = buildAttendanceHtml(chunkRecordsForPdf, profile, false);
+      await printModule.printAsync({ html });
+    } catch {
+      const fallbackHtml = buildAttendanceHtml(chunkRecordsForPdf, profile, true);
+      await printModule.printAsync({ html: fallbackHtml });
+    }
+  }
 }
 
 export async function shareAttendanceSlipPdf(
