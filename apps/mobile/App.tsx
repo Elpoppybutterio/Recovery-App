@@ -1028,7 +1028,33 @@ function parseTwoDigitMinutes(value: string, fallback: number): number {
   return Math.min(MAX_MEETING_MINUTES, parsePositiveInt(digitsOnly, fallback));
 }
 
-function buildSignatureSvgMarkup(
+function encodeBase64(value: string): string {
+  const btoaFn = (globalThis as { btoa?: (data: string) => string }).btoa;
+  if (typeof btoaFn === "function") {
+    return btoaFn(value);
+  }
+
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+  let output = "";
+  let index = 0;
+
+  while (index < value.length) {
+    const c1 = value.charCodeAt(index++);
+    const c2 = value.charCodeAt(index++);
+    const c3 = value.charCodeAt(index++);
+
+    const e1 = c1 >> 2;
+    const e2 = ((c1 & 3) << 4) | (c2 >> 4);
+    const e3 = Number.isNaN(c2) ? 64 : ((c2 & 15) << 2) | (c3 >> 6);
+    const e4 = Number.isNaN(c3) ? 64 : c3 & 63;
+
+    output += `${chars.charAt(e1)}${chars.charAt(e2)}${chars.charAt(e3)}${chars.charAt(e4)}`;
+  }
+
+  return output;
+}
+
+function buildSignatureSvgBase64(
   points: SignaturePoint[],
   width: number,
   height: number,
@@ -1059,7 +1085,7 @@ function buildSignatureSvgMarkup(
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(width)}" height="${Math.round(height)}" viewBox="0 0 ${Math.round(width)} ${Math.round(height)}"><rect width="100%" height="100%" fill="white"/><path d="${path}" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-  return svg;
+  return encodeBase64(svg);
 }
 
 function attendanceStorageKey(userId: string): string {
@@ -1310,35 +1336,6 @@ function estimateBase64Bytes(value: string): number {
   }
   const paddingLength = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
   return Math.max(0, Math.floor((normalized.length * 3) / 4) - paddingLength);
-}
-
-function estimateUtf8Bytes(value: string): number {
-  const textEncoderCtor = (
-    globalThis as {
-      TextEncoder?: new () => {
-        encode(input: string): Uint8Array;
-      };
-    }
-  ).TextEncoder;
-  if (typeof textEncoderCtor === "function") {
-    return new textEncoderCtor().encode(value).length;
-  }
-  return value.length;
-}
-
-function looksLikeSvgMarkup(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  return (
-    normalized.startsWith("<svg") || (normalized.startsWith("<?xml") && normalized.includes("<svg"))
-  );
-}
-
-function looksLikeSvgDataUri(value: string): boolean {
-  return value.trim().toLowerCase().startsWith("data:image/svg+xml");
-}
-
-function looksLikeInlineSvgSignature(value: string): boolean {
-  return looksLikeSvgMarkup(value) || looksLikeSvgDataUri(value);
 }
 
 function invalidMeetingCoordsReason(lat: number | null, lng: number | null): string | null {
@@ -2181,8 +2178,6 @@ export default function App() {
       signedCount += 1;
       if (looksLikeFileUri(trimmed)) {
         signatureUriCount += 1;
-      } else if (looksLikeInlineSvgSignature(trimmed)) {
-        signatureBase64Bytes += estimateUtf8Bytes(trimmed);
       } else {
         signatureBase64Bytes += estimateBase64Bytes(trimmed);
       }
@@ -6236,13 +6231,13 @@ export default function App() {
       return;
     }
 
-    const signatureSvgMarkup = buildSignatureSvgMarkup(
+    const signatureSvgBase64 = buildSignatureSvgBase64(
       signaturePoints,
       signatureCanvasSize.width,
       signatureCanvasSize.height,
     );
 
-    if (!signatureSvgMarkup) {
+    if (!signatureSvgBase64) {
       setAttendanceStatus("Draw a signature before saving.");
       return;
     }
@@ -6256,7 +6251,7 @@ export default function App() {
       const nowIso = new Date().toISOString();
       const next: AttendanceRecord = {
         ...activeAttendance,
-        signaturePngBase64: signatureSvgMarkup,
+        signaturePngBase64: signatureSvgBase64,
         signaturePromptShown: true,
         chairName:
           signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
@@ -6323,7 +6318,7 @@ export default function App() {
       chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
       signatureCapturedAtIso: nowIso,
       calendarEventId: null,
-      signaturePngBase64: signatureSvgMarkup,
+      signaturePngBase64: signatureSvgBase64,
       pdfUri: null,
     };
 
@@ -6498,9 +6493,6 @@ export default function App() {
       const signature =
         typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64 : "";
       if (signature.trim().length > 0 && !looksLikeFileUri(signature.trim())) {
-        if (looksLikeInlineSvgSignature(signature)) {
-          continue;
-        }
         const cleaned = signature.replace(/[^A-Za-z0-9+/=]/g, "");
         if (cleaned.length === 0) {
           const reason = `Dry-run failed: ${record.id} signature payload is malformed.`;
@@ -6538,7 +6530,7 @@ export default function App() {
     const lng = candidateCoords?.lng ?? currentLocation?.lng ?? fallbackLng;
     const accuracyM = currentLocation?.accuracyM ?? 18;
 
-    const sampleSignature = buildSignatureSvgMarkup(
+    const sampleSignature = buildSignatureSvgBase64(
       [
         { x: 16, y: 90, isStrokeStart: true },
         { x: 68, y: 64, isStrokeStart: false },
@@ -7415,11 +7407,6 @@ export default function App() {
                 signatureCapturedAtIso:
                   typeof record.signatureCapturedAtIso === "string"
                     ? record.signatureCapturedAtIso
-                    : null,
-                signaturePngBase64:
-                  typeof record.signaturePngBase64 === "string" &&
-                  record.signaturePngBase64.trim().length > 0
-                    ? record.signaturePngBase64.trim()
                     : null,
                 calendarEventId:
                   typeof record.calendarEventId === "string" && record.calendarEventId.length > 0

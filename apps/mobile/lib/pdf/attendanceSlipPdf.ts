@@ -110,7 +110,6 @@ type PreparedAttendanceSlipRecord = {
 type SignaturePayload =
   | { kind: "none" }
   | { kind: "file"; uri: string }
-  | { kind: "svg_markup"; svg: string }
   | {
       kind: "base64";
       base64: string;
@@ -300,13 +299,6 @@ function inferBase64ImageExtension(value: string): "svg" | "png" | "jpg" {
   return "svg";
 }
 
-function looksLikeSvgMarkup(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  return (
-    normalized.startsWith("<svg") || (normalized.startsWith("<?xml") && normalized.includes("<svg"))
-  );
-}
-
 function parseSignaturePayload(value: unknown): SignaturePayload {
   if (typeof value !== "string") {
     return { kind: "none" };
@@ -319,21 +311,6 @@ function parseSignaturePayload(value: unknown): SignaturePayload {
 
   if (looksLikeFileUri(trimmed)) {
     return { kind: "file", uri: trimmed };
-  }
-
-  if (looksLikeSvgMarkup(trimmed)) {
-    return { kind: "svg_markup", svg: trimmed };
-  }
-
-  const svgDataUriMatch = trimmed.match(
-    /^data:image\/svg\+xml(?:;charset=[^;,]+)?(?:;(?:utf8|utf-8))?,(.*)$/i,
-  );
-  if (svgDataUriMatch) {
-    try {
-      return { kind: "svg_markup", svg: decodeURIComponent(svgDataUriMatch[1]) };
-    } catch {
-      return { kind: "svg_markup", svg: svgDataUriMatch[1] };
-    }
   }
 
   const dataUriMatch = trimmed.match(/^data:image\/([A-Za-z0-9.+-]+);base64,(.+)$/i);
@@ -492,9 +469,6 @@ async function getCompressedSignatureUri(
       allowCompression: hasRasterImageFileExtension(signaturePayload.uri),
     });
   }
-  if (signaturePayload.kind === "svg_markup") {
-    return null;
-  }
 
   const expectedBytes = estimateBase64Bytes(signaturePayload.base64);
   if (expectedBytes <= 0) {
@@ -529,7 +503,7 @@ async function prepareSignatureState(
       return { signatureState: { state: "on_file" }, imageBytes: 0 };
     }
     expectedBytes = await getFileSizeBytes(runtime.fileSystem, signaturePayload.uri);
-  } else if (signaturePayload.kind === "base64") {
+  } else {
     if (signaturePayload.extension === "svg") {
       return { signatureState: { state: "on_file" }, imageBytes: 0 };
     }
@@ -537,8 +511,6 @@ async function prepareSignatureState(
     if (expectedBytes <= 0) {
       return { signatureState: { state: "on_file" }, imageBytes: 0 };
     }
-  } else {
-    return { signatureState: { state: "on_file" }, imageBytes: 0 };
   }
 
   const compressedUri = await getCompressedSignatureUri(runtime, attendanceId, rawSignature);

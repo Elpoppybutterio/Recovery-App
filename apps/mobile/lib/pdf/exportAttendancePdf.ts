@@ -82,29 +82,10 @@ function formatLocation(value: LocationStamp): string {
   return `${coordinates} (±${Math.round(value.accuracyM)}m)`;
 }
 
-function looksLikeSvgMarkup(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  return (
-    normalized.startsWith("<svg") || (normalized.startsWith("<?xml") && normalized.includes("<svg"))
-  );
-}
-
-function resolveSignatureImageSrc(signature: string): string {
-  const trimmed = signature.trim();
-  if (trimmed.toLowerCase().startsWith("data:image/")) {
-    return trimmed;
-  }
-  if (looksLikeSvgMarkup(trimmed)) {
-    return `data:image/svg+xml;utf8,${encodeURIComponent(trimmed)}`;
-  }
-  // Backward compatibility with existing base64 payloads.
-  return `data:image/svg+xml;base64,${trimmed}`;
-}
-
 function buildAttendanceHtml(payload: AttendancePdfPayload): string {
   const signatureMarkup = payload.signatureSvgBase64
     ? payload.signatureSvgBase64.length <= MAX_SIGNATURE_BASE64_CHARS_IN_ATTENDANCE_PDF
-      ? `<img alt="Signature" src="${escapeHtml(resolveSignatureImageSrc(payload.signatureSvgBase64))}" style="width: 100%; max-width: 420px; border: 1px solid #d0d5dd; border-radius: 8px;" />`
+      ? `<img alt="Signature" src="data:image/svg+xml;base64,${payload.signatureSvgBase64}" style="width: 100%; max-width: 420px; border: 1px solid #d0d5dd; border-radius: 8px;" />`
       : `<p style="color:#667085;">Signature captured (omitted in PDF to keep generation stable).</p>`
     : `<p style="color:#667085;">No signature captured.</p>`;
 
