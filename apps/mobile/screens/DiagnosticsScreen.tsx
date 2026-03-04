@@ -217,7 +217,7 @@ export function DiagnosticsScreen({
           Signed: {exportDebug.signedCount} • Unsigned: {exportDebug.unsignedCount}
         </Text>
         <Text style={styles.meta}>
-          Signature bytes (base64): {exportDebug.signatureBase64Bytes}
+          Signature bytes (inline/base64): {exportDebug.signatureBase64Bytes}
         </Text>
         <Text style={styles.meta}>Signature URI count: {exportDebug.signatureUriCount}</Text>
         <Text style={styles.meta}>
