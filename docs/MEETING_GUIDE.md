@@ -22,12 +22,25 @@ For local dev (no external feed required), use the built-in Billings test feed:
 MEETING_GUIDE_FEEDS_JSON='[{"name":"Billings Test Feed","url":"builtin://billings-test","tenantId":"tenant-a"}]'
 ```
 
+For GitHub-hosted meeting JSON (public or private repo), point to the GitHub Contents API URL:
+
+```bash
+MEETING_GUIDE_FEEDS_JSON='[{"name":"GitHub Meetings","url":"https://api.github.com/repos/<owner>/<repo>/contents/<path>/meetings.json?ref=main","tenantId":"tenant-a"}]'
+```
+
+Optional for private repos or higher rate limits:
+
+```bash
+MEETING_GUIDE_GITHUB_TOKEN=ghp_xxx
+```
+
 Optional env:
 
 - `MEETING_GUIDE_DEFAULT_TENANT_ID=tenant-a`
 - `MEETING_GUIDE_AUTO_INGEST=true`
 - `MEETING_GUIDE_GEOCODE_MISSING=true` (recommended for production feeds with missing coordinates)
 - `MEETING_GUIDE_GEOCODE_USER_AGENT=Recovery-Accountability/0.1 (+https://sober-ai.app)`
+- `MEETING_GUIDE_GITHUB_TOKEN=...` (optional, used for GitHub Contents API feeds)
 - `MEETING_GUIDE_REFRESH_INTERVAL_MS=43200000` (12 hours)
 
 Legacy feed env vars are still supported as fallback:

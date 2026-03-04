@@ -88,6 +88,90 @@ describe("meeting-guide ingest", () => {
     expect(repositories.meetingGuideMeetings.upsertForFeed).toHaveBeenCalledTimes(1);
   });
 
+  it("ingests GitHub contents API payloads", async () => {
+    const repositories = {
+      meetingFeeds: {
+        upsert: vi.fn().mockResolvedValue(undefined),
+        listActive: vi.fn().mockResolvedValue([
+          {
+            id: "feed-github",
+            url: "https://api.github.com/repos/example-org/example-repo/contents/meetings.json?ref=main",
+            etag: null,
+            last_modified: null,
+          },
+        ]),
+        markFetchResult: vi.fn().mockResolvedValue(undefined),
+      },
+      meetingGuideMeetings: {
+        upsertForFeed: vi.fn().mockResolvedValue(1),
+      },
+    } as const;
+
+    const githubFilePayload = {
+      meetings: [
+        {
+          slug: "github-downtown-noon",
+          name: "GitHub Downtown Noon",
+          day: 2,
+          time: "12:00",
+          latitude: 45.7836,
+          longitude: -108.5002,
+        },
+      ],
+    };
+    const base64Content = Buffer.from(JSON.stringify(githubFilePayload), "utf8").toString("base64");
+
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () =>
+        JSON.stringify({
+          type: "file",
+          encoding: "base64",
+          content: base64Content,
+        }),
+      json: async () => ({
+        type: "file",
+        encoding: "base64",
+        content: base64Content,
+      }),
+    });
+
+    const result = await ingestMeetingGuideFeedsForTenant({
+      repositories: repositories as never,
+      tenantId: "tenant-a",
+      configuredFeeds: [
+        {
+          name: "GitHub Feed",
+          url: "https://api.github.com/repos/example-org/example-repo/contents/meetings.json?ref=main",
+        },
+      ],
+      fetchImpl,
+      now: () => new Date("2026-02-20T12:00:00.000Z"),
+      githubToken: "ghp_testtoken",
+    });
+
+    expect(result).toEqual({
+      feedsAttempted: 1,
+      feedsFailed: 0,
+      meetingsFetched: 1,
+      meetingsImported: 1,
+      meetingsSkipped: 0,
+      meetingsWithCoordinates: 1,
+      meetingsWithoutCoordinates: 0,
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.github.com/repos/example-org/example-repo/contents/meetings.json?ref=main",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          accept: "application/vnd.github+json",
+          authorization: "Bearer ghp_testtoken",
+        }),
+      }),
+    );
+  });
+
   it("supports the built-in Billings test feed without external fetch", async () => {
     const repositories = {
       meetingFeeds: {

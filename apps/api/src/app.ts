@@ -341,6 +341,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       logger,
       geocodeMissingCoordinates: env.MEETING_GUIDE_GEOCODE_MISSING,
       geocodeUserAgent: env.MEETING_GUIDE_GEOCODE_USER_AGENT,
+      githubToken: env.MEETING_GUIDE_GITHUB_TOKEN,
     });
   };
 

@@ -39,6 +39,7 @@ const apiEnvSchema = z.object({
   MEETING_GUIDE_GEOCODE_USER_AGENT: z
     .string()
     .default("Recovery-Accountability/0.1 (+https://sober-ai.app)"),
+  MEETING_GUIDE_GITHUB_TOKEN: z.string().optional(),
 });
 
 type ParsedApiEnv = z.infer<typeof apiEnvSchema>;

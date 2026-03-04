@@ -829,8 +829,33 @@ function extractEntries(payload: unknown): unknown[] {
     if (Array.isArray(recordPayload.meetings)) {
       return recordPayload.meetings;
     }
+    const encodedContent =
+      typeof recordPayload.content === "string" ? recordPayload.content.trim() : null;
+    const encoding =
+      typeof recordPayload.encoding === "string"
+        ? recordPayload.encoding.trim().toLowerCase()
+        : null;
+    if (encodedContent && encoding === "base64") {
+      try {
+        const decodedText = Buffer.from(encodedContent.replace(/\s+/g, ""), "base64").toString(
+          "utf8",
+        );
+        const decodedPayload = JSON.parse(decodedText) as unknown;
+        return extractEntries(decodedPayload);
+      } catch {
+        return [];
+      }
+    }
   }
   return [];
+}
+
+function isGitHubApiUrl(url: string): boolean {
+  try {
+    return new URL(url).hostname.toLowerCase() === "api.github.com";
+  } catch {
+    return false;
+  }
 }
 
 export function parseConfiguredMeetingGuideFeeds(rawJson: string): MeetingGuideFeedConfig[] {
@@ -850,6 +875,7 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
   logger?: LoggerLike;
   geocodeMissingCoordinates?: boolean;
   geocodeUserAgent?: string;
+  githubToken?: string;
 }): Promise<IngestMeetingGuideResult> {
   const now = options.now ?? (() => new Date());
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -1025,6 +1051,15 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
     }
     if (feed.last_modified) {
       requestHeaders["if-modified-since"] = feed.last_modified;
+    }
+    if (isGitHubApiUrl(feed.url)) {
+      requestHeaders.accept = "application/vnd.github+json";
+      requestHeaders["x-github-api-version"] = "2022-11-28";
+      requestHeaders["user-agent"] =
+        options.geocodeUserAgent ?? "Recovery-Accountability/0.1 (+https://sober-ai.app)";
+      if (typeof options.githubToken === "string" && options.githubToken.trim().length > 0) {
+        requestHeaders.authorization = `Bearer ${options.githubToken.trim()}`;
+      }
     }
 
     try {
