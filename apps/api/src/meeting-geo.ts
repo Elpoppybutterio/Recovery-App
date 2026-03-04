@@ -429,6 +429,8 @@ export function buildGeocodeQuery(parts: AddressParts): string | null {
   if (isOnlineAddress(normalized.formattedAddress)) {
     return null;
   }
+  const geocodeFormattedAddress = stripUnitSuffix(normalized.formattedAddress);
+  const geocodeAddress = stripUnitSuffix(normalized.address);
 
   const segments: string[] = [];
   const pushIfMissing = (value: string | null | undefined) => {
@@ -458,8 +460,8 @@ export function buildGeocodeQuery(parts: AddressParts): string | null {
 
   // Many feeds provide formattedAddress as street-only (for example "510 Cook Ave").
   // Keep it, but append missing city/state/postal context so geocoding does not drift to other states.
-  pushIfMissing(normalized.formattedAddress);
-  pushIfMissing(normalized.address);
+  pushIfMissing(geocodeFormattedAddress);
+  pushIfMissing(geocodeAddress);
   pushIfMissing(normalized.city);
   pushIfMissing(normalized.state);
   pushIfMissing(normalized.postalCode);
