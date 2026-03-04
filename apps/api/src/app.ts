@@ -60,7 +60,7 @@ const meetingsListQuerySchema = z
 const meetingsNearbyQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90),
   lng: z.coerce.number().min(-180).max(180),
-  radiusMiles: z.coerce.number().positive().max(200).default(20),
+  radiusMiles: z.coerce.number().positive().max(200).default(50),
   format: z.enum(["in_person", "online", "any"]).default("any"),
   dayOfWeek: z.coerce.number().int().min(0).max(6).optional(),
   when: z.enum(["upcoming", "all"]).default("upcoming"),
@@ -80,7 +80,7 @@ const meetingsNearbyQuerySchema = z.object({
 const meetingsIngestStatusQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90).default(45.7833),
   lng: z.coerce.number().min(-180).max(180).default(-108.5007),
-  radiusMiles: z.coerce.number().positive().max(200).default(20),
+  radiusMiles: z.coerce.number().positive().max(200).default(50),
 });
 const attendanceCheckInBodySchema = z.object({
   meetingId: z.string().min(1),
@@ -248,6 +248,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   logger.info("meeting_guide.config", {
     autoIngest: env.MEETING_GUIDE_AUTO_INGEST,
     geocodeMissingCoordinates: env.MEETING_GUIDE_GEOCODE_MISSING,
+    googleVerifyCoordinates: env.MEETING_GUIDE_GOOGLE_VERIFY,
     defaultTenantId: env.MEETING_GUIDE_DEFAULT_TENANT_ID ?? null,
     refreshIntervalMs: env.MEETING_GUIDE_REFRESH_INTERVAL_MS,
     configuredFeedsCount: configuredMeetingGuideFeeds.length,
@@ -340,6 +341,9 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       now,
       logger,
       geocodeMissingCoordinates: env.MEETING_GUIDE_GEOCODE_MISSING,
+      geocodeVerifyExistingCoordinates: env.MEETING_GUIDE_GEOCODE_VERIFY_EXISTING,
+      googleVerifyCoordinates: env.MEETING_GUIDE_GOOGLE_VERIFY,
+      googleMapsApiKey: env.GOOGLE_MAPS_API_KEY,
       geocodeUserAgent: env.MEETING_GUIDE_GEOCODE_USER_AGENT,
       githubToken: env.MEETING_GUIDE_GITHUB_TOKEN,
     });

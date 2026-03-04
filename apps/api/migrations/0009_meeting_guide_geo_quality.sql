@@ -7,10 +7,6 @@ ALTER TABLE meeting_guide_meetings
 ALTER TABLE meeting_guide_meetings
   DROP CONSTRAINT IF EXISTS meeting_guide_meetings_geo_status_check;
 
-ALTER TABLE meeting_guide_meetings
-  ADD CONSTRAINT meeting_guide_meetings_geo_status_check
-  CHECK (geo_status IN ('ok', 'missing', 'invalid', 'partial'));
-
 UPDATE meeting_guide_meetings
 SET
   geo_status = CASE
@@ -30,6 +26,10 @@ SET
     ELSE NULL
   END,
   geo_updated_at = COALESCE(geo_updated_at, NOW());
+
+ALTER TABLE meeting_guide_meetings
+  ADD CONSTRAINT meeting_guide_meetings_geo_status_check
+  CHECK (geo_status IN ('ok', 'missing', 'invalid', 'partial'));
 
 CREATE INDEX IF NOT EXISTS meeting_guide_meetings_tenant_geo_status_updated_idx
   ON meeting_guide_meetings (tenant_id, geo_status, geo_updated_at);

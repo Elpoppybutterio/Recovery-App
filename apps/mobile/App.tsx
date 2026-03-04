@@ -1208,7 +1208,7 @@ function radiusMilesFromMeetingsLocationFilter(
   if (filter === "MILES_100") {
     return 100;
   }
-  return currentRadiusMiles > 0 && currentRadiusMiles < 50 ? currentRadiusMiles : 20;
+  return currentRadiusMiles > 0 && currentRadiusMiles < 50 ? currentRadiusMiles : 50;
 }
 
 function parseDdMmYyyyToIso(value: string): string | null {
@@ -1647,7 +1647,7 @@ export default function App() {
   const defaultMeetingRadiusMiles =
     typeof extra.meetingRadiusMiles === "number" && Number.isFinite(extra.meetingRadiusMiles)
       ? extra.meetingRadiusMiles
-      : 20;
+      : 50;
 
   const authHeader = useMemo(() => `Bearer DEV_${devAuthUserId}`, [devAuthUserId]);
   const [meetingRadiusMiles, setMeetingRadiusMiles] = useState(defaultMeetingRadiusMiles);
