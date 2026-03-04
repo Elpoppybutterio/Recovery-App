@@ -709,6 +709,23 @@ function decodeBasicHtmlEntities(value: string): string {
     .replace(/&gt;/gi, ">");
 }
 
+function extractStateCodeFromAddress(value: string): string | null {
+  const normalized = value.replace(/\s+/g, " ").trim().toUpperCase();
+
+  // Accept state only when it's in a trailing context, not inside street names (for example "31ST ST").
+  const stateBeforeZip = normalized.match(/\b([A-Z]{2})\s+\d{5}(?:-\d{4})?\b/);
+  if (stateBeforeZip) {
+    return stateBeforeZip[1];
+  }
+
+  const trailingState = normalized.match(/,\s*([A-Z]{2})\s*$/);
+  if (trailingState) {
+    return trailingState[1];
+  }
+
+  return null;
+}
+
 function parseAaMontanaHtmlEntries(rawHtml: string, feedUrl: string): unknown[] {
   const cityFromUrl = parseCityFromFeedUrl(feedUrl);
   const parsedEntries: unknown[] = [];
@@ -759,7 +776,7 @@ function parseAaMontanaHtmlEntries(rawHtml: string, feedUrl: string): unknown[] 
       continue;
     }
 
-    const stateFromAddress = addressRaw.match(/\b([A-Z]{2})\b/);
+    const stateFromAddress = extractStateCodeFromAddress(addressRaw);
     const postalFromAddress = addressRaw.match(/\b\d{5}(?:-\d{4})?\b/);
     const isOnline = /virtual|zoom|online/i.test(addressRaw);
 
@@ -771,7 +788,7 @@ function parseAaMontanaHtmlEntries(rawHtml: string, feedUrl: string): unknown[] 
       formatted_address: isOnline ? "Online" : addressRaw,
       address: isOnline ? null : addressRaw,
       city: cityFromUrl,
-      state: stateFromAddress?.[1] ?? "MT",
+      state: stateFromAddress ?? "MT",
       postal_code: postalFromAddress?.[0] ?? null,
       country: "US",
       latitude: null,
