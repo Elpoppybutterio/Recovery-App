@@ -129,7 +129,11 @@ type PreparedSignatureResult = {
 
 function loadModule<T>(name: string): T | null {
   try {
-    const dynamicRequire: (moduleName: string) => unknown = require;
+    const runtime = globalThis as { require?: (moduleName: string) => unknown };
+    const dynamicRequire = runtime.require ?? (typeof require === "function" ? require : undefined);
+    if (typeof dynamicRequire !== "function") {
+      return null;
+    }
     return dynamicRequire(name) as T;
   } catch {
     return null;
@@ -402,7 +406,13 @@ async function compressSignatureIfPossible(
   runtime: SignaturePreparationRuntime,
   attendanceId: string,
   signatureUri: string,
+  options?: { allowCompression?: boolean },
 ): Promise<string> {
+  if (options?.allowCompression === false) {
+    runtime.cacheByAttendanceId.set(attendanceId, signatureUri);
+    return signatureUri;
+  }
+
   const cached = runtime.cacheByAttendanceId.get(attendanceId);
   if (cached) {
     return cached;
@@ -435,6 +445,17 @@ async function compressSignatureIfPossible(
   }
 }
 
+function hasRasterImageFileExtension(uri: string): boolean {
+  const normalizedUri = uri.split("?")[0]?.split("#")[0]?.toLowerCase() ?? uri.toLowerCase();
+  return (
+    normalizedUri.endsWith(".png") ||
+    normalizedUri.endsWith(".jpg") ||
+    normalizedUri.endsWith(".jpeg") ||
+    normalizedUri.endsWith(".webp") ||
+    normalizedUri.endsWith(".heic")
+  );
+}
+
 async function getCompressedSignatureUri(
   runtime: SignaturePreparationRuntime,
   attendanceId: string,
@@ -446,7 +467,10 @@ async function getCompressedSignatureUri(
   }
 
   if (signaturePayload.kind === "file") {
-    return compressSignatureIfPossible(runtime, attendanceId, signaturePayload.uri);
+    return compressSignatureIfPossible(runtime, attendanceId, signaturePayload.uri, {
+      // iOS can hard-crash when manipulating SVGs; only compress known raster formats.
+      allowCompression: hasRasterImageFileExtension(signaturePayload.uri),
+    });
   }
 
   const expectedBytes = estimateBase64Bytes(signaturePayload.base64);
@@ -460,7 +484,9 @@ async function getCompressedSignatureUri(
     signaturePayload.base64,
     signaturePayload.extension,
   );
-  return compressSignatureIfPossible(runtime, attendanceId, rawUri);
+  return compressSignatureIfPossible(runtime, attendanceId, rawUri, {
+    allowCompression: signaturePayload.extension !== "svg",
+  });
 }
 
 async function prepareSignatureState(
