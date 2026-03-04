@@ -1,5 +1,7 @@
 import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { useEffect, useMemo, useRef } from "react";
 import { LiquidGlassCard } from "../components/LiquidGlassCard";
+import { useDwellTimer } from "../lib/hooks/useDwellTimer";
 import { routineTheme } from "../theme/tokens";
 
 export function RoutineReaderScreen({
@@ -11,6 +13,9 @@ export function RoutineReaderScreen({
   onToggleGotOnKnees,
   onBack,
   onOpenLink,
+  requiredSeconds = 20,
+  dwellResetKey = null,
+  onDwellEligible,
 }: {
   title: string;
   url: string | null;
@@ -20,10 +25,41 @@ export function RoutineReaderScreen({
   onToggleGotOnKnees?: () => void;
   onBack: () => void;
   onOpenLink: (url: string) => void;
+  requiredSeconds?: number;
+  dwellResetKey?: string | null;
+  onDwellEligible?: () => void;
 }) {
   const hasBodyText = Boolean(bodyText && bodyText.trim().length > 0);
   const { height: windowHeight } = useWindowDimensions();
   const bodyScrollMaxHeight = Math.max(260, Math.min(windowHeight * 0.62, 560));
+  const dwellSecondsRequired = Math.max(1, Math.floor(requiredSeconds));
+  const dwellKey = useMemo(
+    () => (dwellResetKey && dwellResetKey.trim().length > 0 ? dwellResetKey : title),
+    [dwellResetKey, title],
+  );
+  const lastCompletedDwellKeyRef = useRef<string | null>(null);
+  const { secondsVisible, isEligible } = useDwellTimer({
+    requiredSeconds: dwellSecondsRequired,
+    isActive: Boolean(onDwellEligible),
+    resetOnInactive: true,
+    resetKey: dwellKey,
+  });
+
+  useEffect(() => {
+    lastCompletedDwellKeyRef.current = null;
+  }, [dwellKey]);
+
+  useEffect(() => {
+    if (!onDwellEligible || !isEligible) {
+      return;
+    }
+    if (lastCompletedDwellKeyRef.current === dwellKey) {
+      return;
+    }
+    lastCompletedDwellKeyRef.current = dwellKey;
+    onDwellEligible();
+  }, [dwellKey, isEligible, onDwellEligible]);
+
   const paragraphs = hasBodyText
     ? bodyText!
         .split(/\n\s*\n/)
@@ -51,6 +87,13 @@ export function RoutineReaderScreen({
             ? "Read below."
             : "Use your licensed source link. Full copyrighted text is not bundled in-app."}
         </Text>
+        {onDwellEligible ? (
+          <Text style={styles.meta}>
+            {isEligible
+              ? `Read complete (${dwellSecondsRequired}s reached)`
+              : `Hold to complete: ${Math.min(secondsVisible, dwellSecondsRequired)}/${dwellSecondsRequired}s`}
+          </Text>
+        ) : null}
         {hasBodyText ? (
           <ScrollView
             style={[styles.bodyContainer, { maxHeight: bodyScrollMaxHeight }]}

@@ -557,7 +557,7 @@ export function Dashboard({
                 hoveredTileId === "daily-checklist" ? styles.liquidGlassTileHover : null,
               ]}
             >
-              <Text style={styles.metricHeading}>Daily Checklist</Text>
+              <Text style={styles.metricHeading}>Sponsor Suggested Daily Checklist</Text>
               <Text style={styles.dailyChecklistInsight}>{dailyChecklistInsight}</Text>
               <View style={styles.separator} />
               <View style={styles.dailyChecklistProgressRow}>

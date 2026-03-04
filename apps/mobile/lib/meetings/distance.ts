@@ -46,13 +46,28 @@ export function normalizeCoordinates(value: {
   if (lat === null || lng === null) {
     return null;
   }
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+  const latInRange = lat >= -90 && lat <= 90;
+  const lngInRange = lng >= -180 && lng <= 180;
+
+  let normalizedLat = lat;
+  let normalizedLng = lng;
+
+  if (!latInRange || !lngInRange) {
+    const swappedLat = lng;
+    const swappedLng = lat;
+    const swappedValid =
+      swappedLat >= -90 && swappedLat <= 90 && swappedLng >= -180 && swappedLng <= 180;
+    if (!swappedValid) {
+      return null;
+    }
+    normalizedLat = swappedLat;
+    normalizedLng = swappedLng;
+  }
+
+  if (normalizedLat === 0 && normalizedLng === 0) {
     return null;
   }
-  if (lat === 0 && lng === 0) {
-    return null;
-  }
-  return { lat, lng };
+  return { lat: normalizedLat, lng: normalizedLng };
 }
 
 function toRadians(value: number): number {

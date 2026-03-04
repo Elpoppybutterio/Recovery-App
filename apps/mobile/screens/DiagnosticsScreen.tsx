@@ -66,6 +66,7 @@ type DiagnosticsScreenProps = {
   exportDebug: DiagnosticsExportDebug;
   lastExportAttempt: DiagnosticsExportAttempt | null;
   onRunExportDryRun: () => void;
+  onCreateCompletedTestMeeting: () => void;
   onBack: () => void;
 };
 
@@ -98,6 +99,7 @@ export function DiagnosticsScreen({
   exportDebug,
   lastExportAttempt,
   onRunExportDryRun,
+  onCreateCompletedTestMeeting,
   onBack,
 }: DiagnosticsScreenProps) {
   return (
@@ -224,6 +226,13 @@ export function DiagnosticsScreen({
         </Text>
         <View style={styles.buttonRow}>
           <AppButton title="Run Export Dry-Run" onPress={onRunExportDryRun} variant="secondary" />
+        </View>
+        <View style={styles.buttonRow}>
+          <AppButton
+            title="Create completed test meeting"
+            onPress={onCreateCompletedTestMeeting}
+            variant="secondary"
+          />
         </View>
         <Text style={styles.meta}>Dry-run: {exportDebug.dryRunStatus ?? "Not run yet"}</Text>
         <Text style={styles.meta}>

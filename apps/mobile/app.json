@@ -8,12 +8,12 @@
     "userInterfaceStyle": "light",
     "ios": {
       "icon": "./assets/icon.png",
-      "bundleIdentifier": "com.sober.ai.dev",
+      "bundleIdentifier": "com.rabbithole.soberai.dev",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "We use your location to show distance to meetings.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "We use your location to show distance to meetings and enable geofence features if you turn them on.",
         "NSLocationAlwaysUsageDescription": "We use your location to show distance to meetings and enable geofence features if you turn them on.",
-        "UIBackgroundModes": ["location"],
+        "UIBackgroundModes": ["location", "location"],
         "ITSAppUsesNonExemptEncryption": false
       },
       "buildNumber": "1",
@@ -24,8 +24,11 @@
         "foregroundImage": "./assets/icon-foreground.png",
         "backgroundImage": "./assets/icon-background.png"
       },
-      "package": "com.sober.ai.dev",
+      "package": "com.rabbithole.soberai.dev",
       "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION"
@@ -49,6 +52,7 @@
     },
     "updates": {
       "url": "https://u.expo.dev/b4ee8eed-aaa7-4aa9-870a-e796c31c8f51"
-    }
+    },
+    "runtimeVersion": "1.0.0"
   }
 }

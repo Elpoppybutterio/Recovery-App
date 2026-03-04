@@ -1,4 +1,10 @@
-import { normalizeCoordinates } from "./distance";
+import {
+  classifyGeo,
+  distanceMiles,
+  isTrustedGeoStatus,
+  type MeetingGeoSource,
+  type MeetingGeoStatus,
+} from "../geo/geoTrust";
 
 export type MeetingFormat = "IN_PERSON" | "ONLINE" | "HYBRID";
 export type MeetingOpenness = "OPEN" | "CLOSED" | "UNKNOWN";
@@ -15,7 +21,8 @@ export type MeetingRecord = {
   lng: number | null;
   onlineUrl: string | null;
   distanceMeters?: number | null;
-  geoStatus?: "ok" | "missing" | "invalid" | "partial";
+  geoStatus?: MeetingGeoStatus;
+  geoSource?: MeetingGeoSource;
   geoReason?: string | null;
   geoUpdatedAt?: string | null;
 };
@@ -270,18 +277,40 @@ function normalizeMeetingFormat(
   return "IN_PERSON";
 }
 
-function normalizeGeoStatus(value: unknown): "ok" | "missing" | "invalid" | "partial" | null {
+function normalizeGeoStatus(value: unknown): MeetingGeoStatus | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "ok" || normalized === "verified") {
+    return "verified";
+  }
+  if (normalized === "estimated") {
+    return "estimated";
+  }
+  if (normalized === "missing") {
+    return "missing";
+  }
+  if (normalized === "invalid" || normalized === "partial" || normalized === "suspect") {
+    return "suspect";
+  }
+  return null;
+}
+
+function normalizeGeoSource(value: unknown): MeetingGeoSource | null {
   if (typeof value !== "string") {
     return null;
   }
   const normalized = value.trim().toLowerCase();
   if (
-    normalized === "ok" ||
-    normalized === "missing" ||
-    normalized === "invalid" ||
-    normalized === "partial"
+    normalized === "feed" ||
+    normalized === "api" ||
+    normalized === "device_geocode" ||
+    normalized === "backend_geocode" ||
+    normalized === "nominatim" ||
+    normalized === "unknown"
   ) {
-    return normalized;
+    return normalized as MeetingGeoSource;
   }
   return null;
 }
@@ -303,9 +332,6 @@ function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecor
 
   const rawLat = asNumber(input.lat ?? input.latitude);
   const rawLng = asNumber(input.lng ?? input.longitude);
-  const coords = normalizeCoordinates({ lat: rawLat, lng: rawLng });
-  const lat = coords?.lat ?? null;
-  const lng = coords?.lng ?? null;
   const onlineUrl =
     asString(input.onlineUrl) ??
     asString(input.virtual_meeting_link) ??
@@ -317,6 +343,9 @@ function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecor
     asString(input.formatted_address) ??
     asString(input.location_text) ??
     (onlineUrl ? "Online" : "Address unavailable");
+  const geo = classifyGeo({ lat: rawLat, lng: rawLng, address });
+  const lat = isTrustedGeoStatus(geo.geoStatus) ? geo.lat : null;
+  const lng = isTrustedGeoStatus(geo.geoStatus) ? geo.lng : null;
 
   const dayOfWeek = normalizeDayOfWeek(
     input.dayOfWeek ?? input.day ?? input.weekday_tinyint,
@@ -342,16 +371,9 @@ function normalizeFeedMeeting(value: unknown, fallbackDay: number): MeetingRecor
     lng,
     onlineUrl,
     distanceMeters: null,
-    geoStatus:
-      lat !== null && lng !== null ? "ok" : lat === null && lng === null ? "missing" : "partial",
-    geoReason:
-      lat !== null && lng !== null
-        ? null
-        : lat === null && lng === null
-          ? "missing_coordinates"
-          : lat === null
-            ? "missing_latitude"
-            : "missing_longitude",
+    geoStatus: geo.geoStatus,
+    geoSource: "feed",
+    geoReason: geo.geoReason,
     geoUpdatedAt: null,
   };
 }
@@ -371,9 +393,15 @@ function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): Meeting
   const address = asString(input.address) ?? "Address unavailable";
   const rawLat = asNumber(input.lat ?? input.latitude);
   const rawLng = asNumber(input.lng ?? input.longitude);
-  const coords = normalizeCoordinates({ lat: rawLat, lng: rawLng });
-  const lat = coords?.lat ?? null;
-  const lng = coords?.lng ?? null;
+  const geo = classifyGeo({ lat: rawLat, lng: rawLng, address });
+  const normalizedIncomingGeoStatus = normalizeGeoStatus(input.geoStatus ?? input.geo_status);
+  const incomingGeoReason = asString(input.geoReason ?? input.geo_reason);
+  const geoStatus: MeetingGeoStatus =
+    normalizedIncomingGeoStatus === "missing" || normalizedIncomingGeoStatus === "suspect"
+      ? normalizedIncomingGeoStatus
+      : geo.geoStatus;
+  const lat = isTrustedGeoStatus(geoStatus) ? geo.lat : null;
+  const lng = isTrustedGeoStatus(geoStatus) ? geo.lng : null;
   const onlineUrl = asString(input.onlineUrl);
   const distanceMeters =
     asNumber(input.distanceMeters ?? input.distance_meters) ??
@@ -383,11 +411,11 @@ function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): Meeting
     })();
   const format = normalizeMeetingFormat(onlineUrl, lat, lng, address);
   const openness = normalizeOpenness(input.openness, input.types);
-  const geoStatus =
-    normalizeGeoStatus(input.geoStatus ?? input.geo_status) ??
-    (lat !== null && lng !== null ? "ok" : lat === null && lng === null ? "missing" : "partial");
-  const geoReason = asString(input.geoReason ?? input.geo_reason);
+  const geoReason = incomingGeoReason ?? geo.geoReason;
   const geoUpdatedAt = asString(input.geoUpdatedAt ?? input.geo_updated_at);
+  const geoSource =
+    normalizeGeoSource(input.geoSource ?? input.geo_source) ??
+    (isTrustedGeoStatus(geoStatus) ? "api" : "unknown");
 
   return {
     id,
@@ -402,6 +430,7 @@ function normalizeApiMeeting(value: unknown, fallbackDayOfWeek: number): Meeting
     onlineUrl,
     distanceMeters,
     geoStatus,
+    geoSource,
     geoReason,
     geoUpdatedAt,
   };
@@ -429,6 +458,90 @@ function endpointPathFromUrl(url: string): string {
   } catch {
     return url;
   }
+}
+
+function resolveUserRegionHint(lat: number, lng: number): string | null {
+  const inMontanaBounds = lat >= 44 && lat <= 49.5 && lng >= -116 && lng <= -104;
+  return inMontanaBounds ? "MT" : null;
+}
+
+function normalizeMeetingsForLocationContext(
+  meetings: MeetingRecord[],
+  context: { lat: number; lng: number; radiusMiles: number },
+): MeetingRecord[] {
+  const userRegionHint = resolveUserRegionHint(context.lat, context.lng);
+  const radiusMiles = Math.max(1, context.radiusMiles);
+
+  const normalized: MeetingRecord[] = meetings.map((meeting) => {
+    const meetingStatus = normalizeGeoStatus(meeting.geoStatus) ?? "missing";
+
+    if (!isTrustedGeoStatus(meetingStatus)) {
+      return {
+        ...meeting,
+        geoStatus: meetingStatus,
+        distanceMeters: null,
+      };
+    }
+    if (meeting.lat === null || meeting.lng === null) {
+      return {
+        ...meeting,
+        geoStatus: "missing",
+        geoReason: "missing_coordinates",
+        distanceMeters: null,
+      };
+    }
+
+    const miles = distanceMiles(
+      { lat: context.lat, lng: context.lng },
+      { lat: meeting.lat, lng: meeting.lng },
+    );
+    const geoTrust = classifyGeo({
+      lat: meeting.lat,
+      lng: meeting.lng,
+      address: meeting.address,
+      userRegionHint,
+      distanceFromUserMiles: miles,
+    });
+
+    if (!isTrustedGeoStatus(geoTrust.geoStatus) || geoTrust.lat === null || geoTrust.lng === null) {
+      return {
+        ...meeting,
+        lat: null,
+        lng: null,
+        geoStatus: geoTrust.geoStatus as MeetingGeoStatus,
+        geoReason: geoTrust.geoReason,
+        distanceMeters: null,
+      };
+    }
+
+    return {
+      ...meeting,
+      lat: geoTrust.lat,
+      lng: geoTrust.lng,
+      geoStatus: geoTrust.geoStatus as MeetingGeoStatus,
+      geoReason: geoTrust.geoReason,
+      distanceMeters: miles * 1609.344,
+    };
+  });
+
+  const nearbyTrusted = normalized.filter((meeting) => {
+    const status = normalizeGeoStatus(meeting.geoStatus) ?? "missing";
+    if (!isTrustedGeoStatus(status) || meeting.lat === null || meeting.lng === null) {
+      return false;
+    }
+    const miles = distanceMiles(
+      { lat: context.lat, lng: context.lng },
+      { lat: meeting.lat, lng: meeting.lng },
+    );
+    return miles <= radiusMiles;
+  });
+
+  const unresolved = normalized.filter((meeting) => {
+    const status = normalizeGeoStatus(meeting.geoStatus) ?? "missing";
+    return status === "missing" || status === "suspect";
+  });
+
+  return dedupeMeetings([...nearbyTrusted, ...unresolved]);
 }
 
 export function createMeetingsSource(config: SourceConfig): MeetingsSource {
@@ -625,7 +738,14 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           );
 
           const meetings = hasLocation
-            ? dedupeMeetings([...nearbyMeetings, ...allMeetingsForDay])
+            ? normalizeMeetingsForLocationContext(
+                dedupeMeetings([...nearbyMeetings, ...allMeetingsForDay]),
+                {
+                  lat: params.lat as number,
+                  lng: params.lng as number,
+                  radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
+                },
+              )
             : allMeetingsForDay;
 
           if (__DEV__) {

@@ -1,9 +1,10 @@
 export const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
-const MAX_SIGNATURE_EMBED_SINGLE_BYTES = 900_000;
-const MAX_SIGNATURE_EMBED_TOTAL_BYTES = 6_500_000;
+const MAX_SIGNATURE_EMBED_SINGLE_BYTES = 350 * 1024;
+const MAX_SIGNATURE_EMBED_TOTAL_BYTES_PER_CHUNK = 2 * 1024 * 1024;
 const DEFAULT_RECORDS_PER_CHUNK = 5;
 const MAX_SIGNATURE_WIDTH_PX = 800;
 const SIGNATURE_COMPRESS_QUALITY = 0.7;
+const CHUNK_FALLBACK_RECORD_COUNTS = [DEFAULT_RECORDS_PER_CHUNK, 3, 1] as const;
 
 type LocationStamp = {
   lat: number | null;
@@ -102,6 +103,7 @@ type PreparedAttendanceSlipRecord = {
   startLocation: LocationStamp;
   endLocation: LocationStamp;
   signatureState: PreparedSignatureState;
+  signatureImageBytes: number;
 };
 
 type SignaturePayload =
@@ -118,7 +120,11 @@ type SignaturePreparationRuntime = {
   imageManipulator: ImageManipulatorModule | null;
   signatureDirectory: string;
   cacheByAttendanceId: Map<string, string>;
-  embeddedBytes: number;
+};
+
+type PreparedSignatureResult = {
+  signatureState: PreparedSignatureState;
+  imageBytes: number;
 };
 
 function loadModule<T>(name: string): T | null {
@@ -347,14 +353,6 @@ function toSafeFileNamePart(value: string): string {
   return cleaned.length > 0 ? cleaned : "attendance";
 }
 
-function chunkRecords<T>(items: T[], chunkSize: number): T[][] {
-  const chunks: T[][] = [];
-  for (let index = 0; index < items.length; index += chunkSize) {
-    chunks.push(items.slice(index, index + chunkSize));
-  }
-  return chunks;
-}
-
 async function ensureDirectory(fileSystem: FileSystemModule, directoryUri: string): Promise<void> {
   try {
     await fileSystem.makeDirectoryAsync(directoryUri, { intermediates: true });
@@ -437,55 +435,142 @@ async function compressSignatureIfPossible(
   }
 }
 
+async function getCompressedSignatureUri(
+  runtime: SignaturePreparationRuntime,
+  attendanceId: string,
+  signaturePngBase64: unknown,
+): Promise<string | null> {
+  const signaturePayload = parseSignaturePayload(signaturePngBase64);
+  if (signaturePayload.kind === "none") {
+    return null;
+  }
+
+  if (signaturePayload.kind === "file") {
+    return compressSignatureIfPossible(runtime, attendanceId, signaturePayload.uri);
+  }
+
+  const expectedBytes = estimateBase64Bytes(signaturePayload.base64);
+  if (expectedBytes <= 0) {
+    return null;
+  }
+
+  const rawUri = await writeBase64SignatureToFile(
+    runtime,
+    attendanceId,
+    signaturePayload.base64,
+    signaturePayload.extension,
+  );
+  return compressSignatureIfPossible(runtime, attendanceId, rawUri);
+}
+
 async function prepareSignatureState(
   runtime: SignaturePreparationRuntime,
   attendanceId: string,
   rawSignature: unknown,
-): Promise<PreparedSignatureState> {
+): Promise<PreparedSignatureResult> {
   const signaturePayload = parseSignaturePayload(rawSignature);
   if (signaturePayload.kind === "none") {
-    return { state: "unsigned" };
+    return { signatureState: { state: "unsigned" }, imageBytes: 0 };
   }
 
-  let candidateUri: string | null = null;
   let expectedBytes: number | null = null;
 
   if (signaturePayload.kind === "file") {
-    candidateUri = signaturePayload.uri;
-    expectedBytes = await getFileSizeBytes(runtime.fileSystem, candidateUri);
+    expectedBytes = await getFileSizeBytes(runtime.fileSystem, signaturePayload.uri);
   } else {
     expectedBytes = estimateBase64Bytes(signaturePayload.base64);
     if (expectedBytes <= 0) {
-      return { state: "on_file" };
+      return { signatureState: { state: "on_file" }, imageBytes: 0 };
     }
-    candidateUri = await writeBase64SignatureToFile(
-      runtime,
-      attendanceId,
-      signaturePayload.base64,
-      signaturePayload.extension,
-    );
   }
 
-  if (!candidateUri) {
-    return { state: "on_file" };
+  const compressedUri = await getCompressedSignatureUri(runtime, attendanceId, rawSignature);
+  if (!compressedUri) {
+    return { signatureState: { state: "on_file" }, imageBytes: 0 };
   }
-
-  const compressedUri = await compressSignatureIfPossible(runtime, attendanceId, candidateUri);
   const compressedSize = await getFileSizeBytes(runtime.fileSystem, compressedUri);
   const estimatedSize = compressedSize ?? expectedBytes ?? 0;
 
   if (estimatedSize <= 0) {
-    return { state: "on_file" };
+    return { signatureState: { state: "on_file" }, imageBytes: 0 };
   }
   if (estimatedSize > MAX_SIGNATURE_EMBED_SINGLE_BYTES) {
-    return { state: "on_file" };
-  }
-  if (runtime.embeddedBytes + estimatedSize > MAX_SIGNATURE_EMBED_TOTAL_BYTES) {
-    return { state: "on_file" };
+    return { signatureState: { state: "on_file" }, imageBytes: 0 };
   }
 
-  runtime.embeddedBytes += estimatedSize;
-  return { state: "image", src: compressedUri };
+  return { signatureState: { state: "image", src: compressedUri }, imageBytes: estimatedSize };
+}
+
+function sumEmbeddedSignatureBytes(records: PreparedAttendanceSlipRecord[]): number {
+  return records.reduce((sum, record) => {
+    if (record.signatureState.state !== "image" || record.signatureImageBytes <= 0) {
+      return sum;
+    }
+    return sum + record.signatureImageBytes;
+  }, 0);
+}
+
+function countEmbeddedSignatures(records: PreparedAttendanceSlipRecord[]): number {
+  return records.reduce((sum, record) => {
+    if (record.signatureState.state !== "image" || record.signatureImageBytes <= 0) {
+      return sum;
+    }
+    return sum + 1;
+  }, 0);
+}
+
+function enforceChunkSignatureBudget(
+  records: PreparedAttendanceSlipRecord[],
+): PreparedAttendanceSlipRecord[] {
+  let runningTotal = 0;
+  return records.map((record) => {
+    if (record.signatureState.state !== "image" || record.signatureImageBytes <= 0) {
+      return record;
+    }
+    if (runningTotal + record.signatureImageBytes > MAX_SIGNATURE_EMBED_TOTAL_BYTES_PER_CHUNK) {
+      return {
+        ...record,
+        signatureState: { state: "on_file" },
+        signatureImageBytes: 0,
+      };
+    }
+    runningTotal += record.signatureImageBytes;
+    return record;
+  });
+}
+
+function buildChunkPlan(
+  records: PreparedAttendanceSlipRecord[],
+  preferredChunkSize: number,
+): PreparedAttendanceSlipRecord[][] {
+  const fallbackSizes = Array.from(new Set([preferredChunkSize, ...CHUNK_FALLBACK_RECORD_COUNTS]))
+    .filter((size) => Number.isFinite(size) && size >= 1)
+    .sort((left, right) => right - left);
+
+  const chunks: PreparedAttendanceSlipRecord[][] = [];
+  let cursor = 0;
+
+  while (cursor < records.length) {
+    const remaining = records.length - cursor;
+    let selectedCount = 1;
+
+    for (const candidate of fallbackSizes) {
+      const bounded = Math.max(1, Math.min(candidate, remaining));
+      const tentative = records.slice(cursor, cursor + bounded);
+      if (sumEmbeddedSignatureBytes(tentative) <= MAX_SIGNATURE_EMBED_TOTAL_BYTES_PER_CHUNK) {
+        selectedCount = bounded;
+        break;
+      }
+      if (bounded === 1) {
+        selectedCount = 1;
+      }
+    }
+
+    chunks.push(records.slice(cursor, cursor + selectedCount));
+    cursor += selectedCount;
+  }
+
+  return chunks;
 }
 
 function buildSignatureMarkup(
@@ -579,7 +664,6 @@ async function prepareRecordsForExport(
     imageManipulator,
     signatureDirectory,
     cacheByAttendanceId: new Map<string, string>(),
-    embeddedBytes: 0,
   };
 
   const prepared: PreparedAttendanceSlipRecord[] = [];
@@ -594,7 +678,7 @@ async function prepareRecordsForExport(
         ? normalizedEndAtIso
         : null;
 
-    const signatureState = await prepareSignatureState(
+    const signatureResult = await prepareSignatureState(
       runtime,
       asSafeText(sourceRecord.id, `attendance-${prepared.length + 1}`),
       sourceRecord.signatureSvgBase64,
@@ -612,7 +696,8 @@ async function prepareRecordsForExport(
       signatureCapturedAtIso: sourceRecord.signatureCapturedAtIso ?? null,
       startLocation: normalizeLocationStamp(sourceRecord.startLocation),
       endLocation: normalizeLocationStamp(sourceRecord.endLocation),
-      signatureState,
+      signatureState: signatureResult.signatureState,
+      signatureImageBytes: signatureResult.imageBytes,
     });
   }
 
@@ -648,7 +733,7 @@ export async function generateAttendanceSlipPdf(
   const defaultFileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
   const fileName = sanitizePdfFileName(options?.fileName ?? defaultFileName);
   const baseFileName = fileNameWithoutPdfExtension(fileName);
-  const chunkSize = Math.max(
+  const preferredChunkSize = Math.max(
     1,
     Math.floor(options?.maxRecordsPerChunk ?? DEFAULT_RECORDS_PER_CHUNK),
   );
@@ -659,15 +744,24 @@ export async function generateAttendanceSlipPdf(
     imageManipulatorModule,
     outputDirectory,
   );
-  const recordChunks = chunkRecords(preparedRecords, chunkSize);
+  const recordChunks = buildChunkPlan(preparedRecords, preferredChunkSize).map((chunk) =>
+    enforceChunkSignatureBudget(chunk),
+  );
   const outputUris: string[] = [];
+  const chunkEmbeddedBytes: number[] = [];
+  const chunkEmbeddedCount: number[] = [];
+  const finalPdfBytes: number[] = [];
+  let processedRecords = 0;
 
   for (let chunkIndex = 0; chunkIndex < recordChunks.length; chunkIndex += 1) {
     const chunkRecordsForPdf = recordChunks[chunkIndex];
+    processedRecords += chunkRecordsForPdf.length;
+    chunkEmbeddedBytes.push(sumEmbeddedSignatureBytes(chunkRecordsForPdf));
+    chunkEmbeddedCount.push(countEmbeddedSignatures(chunkRecordsForPdf));
     options?.onProgress?.({
       chunkIndex: chunkIndex + 1,
       chunkCount: recordChunks.length,
-      processedRecords: Math.min((chunkIndex + 1) * chunkSize, preparedRecords.length),
+      processedRecords,
       totalRecords: preparedRecords.length,
     });
 
@@ -692,6 +786,18 @@ export async function generateAttendanceSlipPdf(
     }
     await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
     outputUris.push(targetUri);
+    finalPdfBytes.push((await getFileSizeBytes(fileSystemModule, targetUri)) ?? 0);
+  }
+
+  if (typeof __DEV__ !== "undefined" && __DEV__) {
+    console.log("[attendance-export][pdf-debug]", {
+      selectedCount: records.length,
+      chunkCount: recordChunks.length,
+      signaturesEmbedded: chunkEmbeddedCount.reduce((sum, value) => sum + value, 0),
+      chunkEmbeddedBytes,
+      finalPdfBytes,
+      totalFinalPdfBytes: finalPdfBytes.reduce((sum, value) => sum + value, 0),
+    });
   }
 
   return outputUris;
