@@ -102,6 +102,17 @@ describe("meeting geo helpers", () => {
     ).toBe("510 Cook Ave, Billings, MT");
   });
 
+  it("strips unit markers from geocode query addresses", () => {
+    expect(
+      buildGeocodeQuery({
+        formattedAddress: "848 Main Street, #8",
+        address: "848 Main Street, #8",
+        city: "Billings",
+        state: "MT",
+      }),
+    ).toBe("848 Main Street, Billings, MT");
+  });
+
   it("accepts geocode results when address context matches", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,
