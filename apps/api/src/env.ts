@@ -30,15 +30,18 @@ const apiEnvSchema = z.object({
   LOG_LEVEL: z.enum(["info", "warn", "error"]).default("info"),
   MEETING_FEEDS_AA: z.string().default(""),
   MEETING_FEEDS_NA: z.string().default(""),
-  MEETING_IMPORT_RADIUS_MILES: z.coerce.number().positive().default(20),
+  MEETING_IMPORT_RADIUS_MILES: z.coerce.number().positive().default(50),
   MEETING_GUIDE_FEEDS_JSON: z.string().default("[]"),
   MEETING_GUIDE_DEFAULT_TENANT_ID: z.string().optional(),
   MEETING_GUIDE_REFRESH_INTERVAL_MS: z.coerce.number().positive().default(43_200_000),
   MEETING_GUIDE_AUTO_INGEST: z.preprocess(parseBooleanString, z.boolean().optional()),
   MEETING_GUIDE_GEOCODE_MISSING: z.preprocess(parseBooleanString, z.boolean().optional()),
+  MEETING_GUIDE_GEOCODE_VERIFY_EXISTING: z.preprocess(parseBooleanString, z.boolean().optional()),
+  MEETING_GUIDE_GOOGLE_VERIFY: z.preprocess(parseBooleanString, z.boolean().optional()),
   MEETING_GUIDE_GEOCODE_USER_AGENT: z
     .string()
     .default("Recovery-Accountability/0.1 (+https://sober-ai.app)"),
+  GOOGLE_MAPS_API_KEY: z.string().optional(),
   MEETING_GUIDE_GITHUB_TOKEN: z.string().optional(),
 });
 
@@ -48,6 +51,8 @@ export type ApiEnv = ParsedApiEnv & {
   ENABLE_DEV_AUTH: boolean;
   MEETING_GUIDE_AUTO_INGEST: boolean;
   MEETING_GUIDE_GEOCODE_MISSING: boolean;
+  MEETING_GUIDE_GEOCODE_VERIFY_EXISTING: boolean;
+  MEETING_GUIDE_GOOGLE_VERIFY: boolean;
 };
 
 export function loadApiEnv(env: Record<string, unknown> = process.env): ApiEnv {
@@ -58,5 +63,8 @@ export function loadApiEnv(env: Record<string, unknown> = process.env): ApiEnv {
     MEETING_GUIDE_AUTO_INGEST: parsed.MEETING_GUIDE_AUTO_INGEST ?? parsed.NODE_ENV !== "test",
     MEETING_GUIDE_GEOCODE_MISSING:
       parsed.MEETING_GUIDE_GEOCODE_MISSING ?? parsed.NODE_ENV !== "test",
+    MEETING_GUIDE_GEOCODE_VERIFY_EXISTING:
+      parsed.MEETING_GUIDE_GEOCODE_VERIFY_EXISTING ?? parsed.NODE_ENV !== "test",
+    MEETING_GUIDE_GOOGLE_VERIFY: parsed.MEETING_GUIDE_GOOGLE_VERIFY ?? false,
   };
 }

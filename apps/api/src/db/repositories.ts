@@ -1135,26 +1135,31 @@ export function createRepositories(db: DbClient) {
                 conference_phone = EXCLUDED.conference_phone,
                 lat = CASE
                   WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.lat
+                  WHEN EXCLUDED.geo_reason LIKE 'geocode_context_%' THEN EXCLUDED.lat
                   WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.lat
                   ELSE EXCLUDED.lat
                 END,
                 lng = CASE
                   WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.lng
+                  WHEN EXCLUDED.geo_reason LIKE 'geocode_context_%' THEN EXCLUDED.lng
                   WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.lng
                   ELSE EXCLUDED.lng
                 END,
                 geo_status = CASE
                   WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_status
+                  WHEN EXCLUDED.geo_reason LIKE 'geocode_context_%' THEN EXCLUDED.geo_status
                   WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_status
                   ELSE EXCLUDED.geo_status
                 END,
                 geo_reason = CASE
                   WHEN EXCLUDED.geo_status = 'ok' THEN NULL
+                  WHEN EXCLUDED.geo_reason LIKE 'geocode_context_%' THEN EXCLUDED.geo_reason
                   WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_reason
                   ELSE EXCLUDED.geo_reason
                 END,
                 geo_updated_at = CASE
                   WHEN EXCLUDED.geo_status = 'ok' THEN EXCLUDED.geo_updated_at
+                  WHEN EXCLUDED.geo_reason LIKE 'geocode_context_%' THEN EXCLUDED.geo_updated_at
                   WHEN meeting_guide_meetings.geo_status = 'ok' THEN meeting_guide_meetings.geo_updated_at
                   ELSE EXCLUDED.geo_updated_at
                 END,

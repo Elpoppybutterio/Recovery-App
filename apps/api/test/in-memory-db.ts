@@ -784,7 +784,10 @@ export class InMemoryDb implements DbPool {
       );
 
       if (existing) {
-        const preserveExistingGeo = existing.geo_status === "ok" && geoStatus !== "ok";
+        const hasContextMismatchReason =
+          typeof geoReason === "string" && geoReason.startsWith("geocode_context_");
+        const preserveExistingGeo =
+          existing.geo_status === "ok" && geoStatus !== "ok" && !hasContextMismatchReason;
         existing.id = id;
         existing.name = name;
         existing.day = day;

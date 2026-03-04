@@ -6,6 +6,7 @@ import {
 } from "./meeting-guide";
 import {
   buildGeocodeQuery,
+  geocodeWithGoogleMaps,
   geocodeWithOpenStreetMap,
   normalizeAddressParts,
   resolveMeetingGeoStatus,
@@ -874,6 +875,9 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
   fetchImpl?: FetchLike;
   logger?: LoggerLike;
   geocodeMissingCoordinates?: boolean;
+  geocodeVerifyExistingCoordinates?: boolean;
+  googleVerifyCoordinates?: boolean;
+  googleMapsApiKey?: string;
   geocodeUserAgent?: string;
   githubToken?: string;
 }): Promise<IngestMeetingGuideResult> {
@@ -881,6 +885,7 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
   const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   const logger = options.logger;
   const geocodeCache = new Map<string, GeocodeResult>();
+  const googleVerificationCache = new Map<string, GeocodeResult>();
 
   for (const configured of options.configuredFeeds) {
     await options.repositories.meetingFeeds.upsert(options.tenantId, {
@@ -903,6 +908,14 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
   let geocodeAttemptsTotal = 0;
   let geocodeSuccessTotal = 0;
   let geocodeFailedTotal = 0;
+  let googleVerifyAttemptsTotal = 0;
+  let googleVerifySuccessTotal = 0;
+  let googleVerifyFailedTotal = 0;
+
+  const shouldGoogleVerify =
+    options.googleVerifyCoordinates === true &&
+    typeof options.googleMapsApiKey === "string" &&
+    options.googleMapsApiKey.trim().length > 0;
 
   const ingestEntriesForFeed = async (feedId: string, entries: unknown[], feedUrl: string) => {
     meetingsFetched += entries.length;
@@ -918,10 +931,12 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
       missingReasonCounts.set(key, (missingReasonCounts.get(key) ?? 0) + 1);
     };
 
-    if (options.geocodeMissingCoordinates !== false) {
+    const shouldGeocodeMissingCoordinates = options.geocodeMissingCoordinates !== false;
+    const shouldVerifyExistingCoordinates = options.geocodeVerifyExistingCoordinates === true;
+    if (shouldGeocodeMissingCoordinates) {
       const geocodedEntries: NormalizedMeeting[] = [];
       for (const entry of normalized) {
-        if (entry.geoStatus === "ok") {
+        if (entry.geoStatus === "ok" && !shouldVerifyExistingCoordinates) {
           geocodedEntries.push(entry);
           continue;
         }
@@ -948,6 +963,14 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
               fetchImpl,
               userAgent:
                 options.geocodeUserAgent ?? "Recovery-Accountability/0.1 (+https://sober-ai.app)",
+              expectedAddressParts: {
+                formattedAddress: entry.formattedAddress,
+                address: entry.address,
+                city: entry.city,
+                state: entry.state,
+                postalCode: entry.postalCode,
+                country: entry.country,
+              },
             });
           } catch (error) {
             geocodeResult = {
@@ -961,6 +984,50 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
             geocodeFailedTotal += 1;
           }
           geocodeCache.set(geocodeQuery, geocodeResult);
+        }
+
+        if (shouldGoogleVerify && geocodeResult.coords) {
+          const googleCacheKey = geocodeQuery;
+          let googleVerifiedResult = googleVerificationCache.get(googleCacheKey);
+          if (googleVerifiedResult === undefined) {
+            googleVerifyAttemptsTotal += 1;
+            try {
+              googleVerifiedResult = await geocodeWithGoogleMaps({
+                query: geocodeQuery,
+                fetchImpl,
+                apiKey: options.googleMapsApiKey as string,
+                expectedAddressParts: {
+                  formattedAddress: entry.formattedAddress,
+                  address: entry.address,
+                  city: entry.city,
+                  state: entry.state,
+                  postalCode: entry.postalCode,
+                  country: entry.country,
+                },
+              });
+            } catch (error) {
+              googleVerifiedResult = {
+                coords: null,
+                reason: error instanceof Error ? "provider_exception" : "provider_unknown_error",
+              };
+            }
+            if (googleVerifiedResult.coords) {
+              googleVerifySuccessTotal += 1;
+            } else {
+              googleVerifyFailedTotal += 1;
+            }
+            googleVerificationCache.set(googleCacheKey, googleVerifiedResult);
+          }
+
+          if (googleVerifiedResult.coords) {
+            geocodeResult = googleVerifiedResult;
+          } else {
+            const reason = googleVerifiedResult.reason ?? "no_trusted_results";
+            geocodeResult = {
+              coords: null,
+              reason: reason.startsWith("google_verify_") ? reason : `google_verify_${reason}`,
+            };
+          }
         }
 
         if (geocodeResult.coords) {
@@ -979,6 +1046,18 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
           });
         } else {
           const fallbackReason = geocodeResult.reason ? `geocode_${geocodeResult.reason}` : null;
+          const contextMismatch = geocodeResult.reason?.includes("context_") ?? false;
+          if (entry.geoStatus === "ok" && contextMismatch) {
+            geocodedEntries.push({
+              ...entry,
+              lat: null,
+              lng: null,
+              geoStatus: "partial",
+              geoReason: fallbackReason ?? "geocode_context_mismatch",
+              geoUpdatedAt: now().toISOString(),
+            });
+            continue;
+          }
           geocodedEntries.push({
             ...entry,
             geoReason: fallbackReason ?? entry.geoReason,
@@ -1026,6 +1105,9 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
       geocode_attempts_total: geocodeAttemptsTotal,
       geocode_success_total: geocodeSuccessTotal,
       geocode_failed_total: geocodeFailedTotal,
+      google_verify_attempts_total: googleVerifyAttemptsTotal,
+      google_verify_success_total: googleVerifySuccessTotal,
+      google_verify_failed_total: googleVerifyFailedTotal,
     });
 
     if (withoutCoordinates > 0) {
@@ -1137,6 +1219,9 @@ export async function ingestMeetingGuideFeedsForTenant(options: {
     geocode_attempts_total: geocodeAttemptsTotal,
     geocode_success_total: geocodeSuccessTotal,
     geocode_failed_total: geocodeFailedTotal,
+    google_verify_attempts_total: googleVerifyAttemptsTotal,
+    google_verify_success_total: googleVerifySuccessTotal,
+    google_verify_failed_total: googleVerifyFailedTotal,
   });
   return result;
 }

@@ -371,7 +371,22 @@ describe("meeting-guide ingest", () => {
         ok: true,
         status: 200,
         headers: { get: () => null },
-        json: async () => [{ lat: "45.7895", lon: "-108.4928" }],
+        json: async () => [
+          {
+            lat: "45.7895",
+            lon: "-108.4928",
+            display_name:
+              "510 Cook Ave, Billings, Yellowstone County, Montana, 59101, United States",
+            address: {
+              house_number: "510",
+              road: "Cook Ave",
+              city: "Billings",
+              state: "Montana",
+              state_code: "US-MT",
+              postcode: "59101",
+            },
+          },
+        ],
         text: async () => "",
       });
 

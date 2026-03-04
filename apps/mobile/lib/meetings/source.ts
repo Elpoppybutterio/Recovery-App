@@ -629,7 +629,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           nearbyQuery.set("lat", String(params.lat));
           nearbyQuery.set("lng", String(params.lng));
           nearbyQuery.set("dayOfWeek", String(params.dayOfWeek));
-          nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 20));
+          nearbyQuery.set("radiusMiles", String(params.radiusMiles ?? config.radiusMiles ?? 50));
           nearbyQuery.set("when", "all");
 
           const nearbyUrl = `${apiBaseUrl}/v1/meetings/nearby?${nearbyQuery.toString()}`;
@@ -638,7 +638,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
               url: nearbyUrl,
               lat: params.lat,
               lng: params.lng,
-              radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
+              radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 50,
             });
           }
 
@@ -743,7 +743,7 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
                 {
                   lat: params.lat as number,
                   lng: params.lng as number,
-                  radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 20,
+                  radiusMiles: params.radiusMiles ?? config.radiusMiles ?? 50,
                 },
               )
             : allMeetingsForDay;
