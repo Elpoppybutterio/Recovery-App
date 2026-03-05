@@ -6775,9 +6775,8 @@ export default function App() {
     attendanceExportInFlightRef.current = true;
     setExportingPdf(true);
     try {
-      const payloadRecords = [toAttendanceSlipRecord(activeAttendance)];
       const exportedUris = await generateAttendanceSlipPdf(
-        payloadRecords,
+        [toAttendanceSlipRecord(activeAttendance)],
         { participantName: devUserDisplayName },
         { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
       );
@@ -6863,9 +6862,8 @@ export default function App() {
     setExportingAttendanceSelectionPdf(true);
     setAttendanceExportProgressLabel(null);
     try {
-      const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
       const exportedUris = await generateAttendanceSlipPdf(
-        payloadRecords,
+        selectedRecords.map(toAttendanceSlipRecord),
         { participantName: devUserDisplayName },
         {
           fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`,
@@ -6935,9 +6933,8 @@ export default function App() {
       setExportingAttendanceSelectionPdf(true);
       setAttendanceExportProgressLabel(null);
       try {
-        const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
         const exportedUris = await generateAttendanceSlipPdf(
-          payloadRecords,
+          selectedRecords.map(toAttendanceSlipRecord),
           { participantName: devUserDisplayName },
           {
             fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`,
