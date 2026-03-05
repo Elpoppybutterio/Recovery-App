@@ -3321,17 +3321,23 @@ export default function App() {
             const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
             cacheKey = candidateKey;
             try {
-              const geocoded = await geocodeAsync(candidate);
-              const first = geocoded[0];
-              const geo = classifyGeo({
-                lat: first?.latitude ?? null,
-                lng: first?.longitude ?? null,
-                address: candidate,
-              });
-              cached =
-                isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null
-                  ? { lat: geo.lat, lng: geo.lng, source: "device_geocode" }
-                  : null;
+              if (Platform.OS === "ios") {
+                // iOS 18.x has shown unstable native crashes in TurboModule exception conversion.
+                // Avoid device geocoder on iOS and use network fallback instead.
+                cached = await geocodeFromNetwork(candidate);
+              } else {
+                const geocoded = await geocodeAsync(candidate);
+                const first = geocoded[0];
+                const geo = classifyGeo({
+                  lat: first?.latitude ?? null,
+                  lng: first?.longitude ?? null,
+                  address: candidate,
+                });
+                cached =
+                  isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null
+                    ? { lat: geo.lat, lng: geo.lng, source: "device_geocode" }
+                    : null;
+              }
             } catch {
               cached = await geocodeFromNetwork(candidate);
             }
@@ -6783,9 +6789,17 @@ export default function App() {
         { participantName: devUserDisplayName },
         { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
       );
-      await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+      if (Platform.OS === "ios") {
+        setAttendanceStatus(
+          "Export complete. PDF saved in-app (share disabled on iOS stability mode).",
+        );
+      } else {
+        await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+      }
       recordLastExportAttempt(true);
-      setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
+      if (Platform.OS !== "ios") {
+        setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
+      }
     } catch (error) {
       logSafeExportFailure("EXPORT_SINGLE", error);
       recordLastExportAttempt(false, error);
@@ -6876,12 +6890,18 @@ export default function App() {
           },
         },
       );
-      await shareAttendanceSlipPdf(
-        exportedUris,
-        `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
-      );
+      if (Platform.OS !== "ios") {
+        await shareAttendanceSlipPdf(
+          exportedUris,
+          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
+        );
+      }
       recordLastExportAttempt(true);
-      setAttendanceStatus(`Export complete for ${selectedRecords.length} meeting record(s).`);
+      setAttendanceStatus(
+        Platform.OS === "ios"
+          ? `Export complete for ${selectedRecords.length} meeting record(s). PDF saved in-app.`
+          : `Export complete for ${selectedRecords.length} meeting record(s).`,
+      );
     } catch (error) {
       logSafeExportFailure("EXPORT_SELECTED", error);
       recordLastExportAttempt(false, error);
@@ -6948,13 +6968,17 @@ export default function App() {
             },
           },
         );
-        await shareAttendanceSlipPdf(
-          exportedUris,
-          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
-        );
+        if (Platform.OS !== "ios") {
+          await shareAttendanceSlipPdf(
+            exportedUris,
+            `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
+          );
+        }
         recordLastExportAttempt(true);
         setAttendanceStatus(
-          `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
+          Platform.OS === "ios"
+            ? `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}. PDF saved in-app.`
+            : `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
         );
       } catch (error) {
         logSafeExportFailure("EXPORT_RANGE", error);
