@@ -60,12 +60,30 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function formatDateTimeLocal(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    return "";
+  }
+  const month = pad2(value.getMonth() + 1);
+  const day = pad2(value.getDate());
+  const year = value.getFullYear();
+  const hour24 = value.getHours();
+  const minute = pad2(value.getMinutes());
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${month}/${day}/${year} ${hour12}:${minute} ${meridiem}`;
+}
+
 function formatDateTime(valueIso: string | null): string {
   if (!valueIso) {
     return "Not marked complete";
   }
   const date = new Date(valueIso);
-  return Number.isNaN(date.getTime()) ? valueIso : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? valueIso : formatDateTimeLocal(date);
 }
 
 function buildFileName(dateKey: string): string {

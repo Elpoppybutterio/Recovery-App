@@ -38,7 +38,21 @@ export function loadSignatureFileSystemModule(): SignatureFileSystemModule | nul
 }
 
 export function looksLikeFileUri(value: string): boolean {
-  return value.startsWith("file://") || value.startsWith("/");
+  const trimmed = value.trim();
+  if (trimmed.startsWith("file://")) {
+    return true;
+  }
+  if (!trimmed.startsWith("/")) {
+    return false;
+  }
+  // Guard against legacy raw base64 payloads that can begin with "/" (for example JPEG).
+  if (trimmed.length > 4096) {
+    return false;
+  }
+  if (/^[A-Za-z0-9+/=]+$/.test(trimmed)) {
+    return false;
+  }
+  return true;
 }
 
 function looksLikeSvgMarkup(value: string): boolean {
@@ -208,7 +222,10 @@ function parseInput(
   }
 
   if (looksLikeFileUri(trimmed)) {
-    return { kind: "file", uri: trimmed };
+    return {
+      kind: "file",
+      uri: trimmed.startsWith("file://") ? trimmed : `file://${trimmed}`,
+    };
   }
 
   if (looksLikeSvgMarkup(trimmed)) {

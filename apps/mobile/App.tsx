@@ -522,6 +522,38 @@ function formatDistance(distanceMeters: number | null): string {
   return formatDistanceMiles(distanceMeters);
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function formatTimeLabel(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    return "--:--";
+  }
+  const hour24 = value.getHours();
+  const minute = pad2(value.getMinutes());
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${hour12}:${minute} ${meridiem}`;
+}
+
+function formatDateLabel(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    return "--/--/----";
+  }
+  const month = pad2(value.getMonth() + 1);
+  const day = pad2(value.getDate());
+  const year = value.getFullYear();
+  return `${month}/${day}/${year}`;
+}
+
+function formatDateTimeLabel(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    return "--/--/---- --:--";
+  }
+  return `${formatDateLabel(value)} ${formatTimeLabel(value)}`;
+}
+
 function isMeetingInProgress(startsAtLocal: string, nowMinutes: number): boolean {
   const startMinutes = parseMinutesFromHhmm(startsAtLocal);
   const endMinutes = startMinutes + DEFAULT_MEETING_DURATION_MINUTES;
@@ -571,7 +603,7 @@ function leaveByLabel(
   if (Number.isNaN(leaveBy.getTime())) {
     return null;
   }
-  return leaveBy.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return formatTimeLabel(leaveBy);
 }
 
 function formatCoordinate(value: number): string {
@@ -831,34 +863,11 @@ function dateKeyForDate(value: Date): string {
 }
 
 function resolveDeviceTimeZone(): string {
-  try {
-    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (typeof timeZone === "string" && timeZone.trim().length > 0) {
-      return timeZone;
-    }
-  } catch {
-    // fall through to UTC
-  }
-  return "UTC";
+  return "local";
 }
 
 function dateKeyForTimeZone(value: Date, timeZone: string): string {
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(value);
-    const year = parts.find((entry) => entry.type === "year")?.value;
-    const month = parts.find((entry) => entry.type === "month")?.value;
-    const day = parts.find((entry) => entry.type === "day")?.value;
-    if (year && month && day) {
-      return `${year}-${month}-${day}`;
-    }
-  } catch {
-    // fall through to UTC date key
-  }
+  void timeZone;
   return dateKeyForDate(value);
 }
 
@@ -2536,7 +2545,7 @@ export default function App() {
         ? "Monthly"
         : `${sponsorRepeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdays(sponsorRepeatDaysSorted)}`;
 
-    return `Next scheduled call: ${next.nextAt.toLocaleString()} • Due today: ${
+    return `Next scheduled call: ${formatDateTimeLabel(next.nextAt)} • Due today: ${
       next.dueToday ? "Yes" : "No"
     } • ${repeatSummary}`;
   }, [
@@ -5040,7 +5049,6 @@ export default function App() {
         endDate,
         alarms: [{ relativeOffset: 0 }],
         recurrenceRule,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       };
 
       const storedEventId = await AsyncStorage.getItem(sponsorCalendarEventStorage);
@@ -5067,7 +5075,7 @@ export default function App() {
         startAt: nextStart.toISOString(),
         recurrenceSummary,
       });
-      setCalendarStatus(`Calendar synced (${nextStart.toLocaleString()}).`);
+      setCalendarStatus(`Calendar synced (${formatDateTimeLabel(nextStart)}).`);
     },
     [
       normalizedSponsorName,
@@ -5156,7 +5164,6 @@ export default function App() {
             notes: `Sobriety milestone from start date ${sobrietyDateLabel}.`,
             startDate: milestone.at,
             endDate: new Date(milestone.at.getTime() + 60 * 60 * 1000),
-            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           });
           createdIds.push(eventId);
         }
@@ -5278,7 +5285,7 @@ export default function App() {
       });
 
       setNotificationStatus(
-        `Scheduled sponsor notifications (${scheduledIds.length}) for ${nextCall.toLocaleString()}.`,
+        `Scheduled sponsor notifications (${scheduledIds.length}) for ${formatDateTimeLabel(nextCall)}.`,
       );
     },
     [
@@ -5346,7 +5353,7 @@ export default function App() {
         }
         const id = await scheduleAt(fireAt, {
           title: `Leave in 10 minutes for ${meeting.name}`,
-          body: `${standardPreview.travelMinutes}m travel • depart ${standardPreview.departAt.toLocaleTimeString()}`,
+          body: `${standardPreview.travelMinutes}m travel • depart ${formatTimeLabel(standardPreview.departAt)}`,
           categoryIdentifier: DRIVE_NOTIFICATION_CATEGORY_ID,
           data: {
             type: "drive",
@@ -5382,7 +5389,7 @@ export default function App() {
             }
             const serviceId = await scheduleAt(serviceFireAt, {
               title: `Service commitment: leave in 10 minutes for ${meeting.name}`,
-              body: `${servicePreview.travelMinutes}m travel • depart ${servicePreview.departAt.toLocaleTimeString()}`,
+              body: `${servicePreview.travelMinutes}m travel • depart ${formatTimeLabel(servicePreview.departAt)}`,
               categoryIdentifier: DRIVE_NOTIFICATION_CATEGORY_ID,
               data: {
                 type: "drive",
@@ -5788,7 +5795,6 @@ export default function App() {
             ? sourceRecord.meetingAddress
             : undefined,
         notes: "Signature required",
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         alarms: [{ relativeOffset: -10 }],
       });
 
@@ -5887,14 +5893,8 @@ export default function App() {
         const scheduledAt = leavePlan.notifyImmediately
           ? fallbackImmediate
           : (applyScheduleTime(leavePlan.leaveAt) ?? fallbackImmediate);
-        const leaveTimeLabel = leavePlan.leaveAt.toLocaleTimeString([], {
-          hour: "numeric",
-          minute: "2-digit",
-        });
-        const arrivalTimeLabel = leavePlan.arrivalTargetAt.toLocaleTimeString([], {
-          hour: "numeric",
-          minute: "2-digit",
-        });
+        const leaveTimeLabel = formatTimeLabel(leavePlan.leaveAt);
+        const arrivalTimeLabel = formatTimeLabel(leavePlan.arrivalTargetAt);
 
         const leaveNotificationId = await scheduleAt(scheduledAt, {
           title: leavePlan.notifyImmediately
@@ -6050,7 +6050,7 @@ export default function App() {
         setActiveAttendance(next);
         setSignatureCaptureMeeting(null);
         upsertAttendanceRecord(next);
-        setAttendanceStatus(`Attendance started at ${new Date(nowIso).toLocaleTimeString()}.`);
+        setAttendanceStatus(`Attendance started at ${formatTimeLabel(new Date(nowIso))}.`);
         setScreen("SESSION");
         void syncAttendCalendarAndLeaveAlert(next.id, meeting, location);
       } finally {
@@ -6468,8 +6468,8 @@ export default function App() {
       return [
         `• ${record.meetingName}`,
         `  Meeting time: ${formatHhmmForDisplay(record.scheduledStartsAtLocal)}`,
-        `  Start: ${Number.isNaN(started.getTime()) ? record.startAt : started.toLocaleString()}`,
-        `  End: ${ended ? ended.toLocaleString() : "In progress"}`,
+        `  Start: ${Number.isNaN(started.getTime()) ? record.startAt : formatDateTimeLabel(started)}`,
+        `  End: ${ended ? formatDateTimeLabel(ended) : "In progress"}`,
         `  Duration: ${formatDuration(record.durationSeconds)}`,
         `  Address: ${record.meetingAddress}`,
       ].join("\n");
@@ -7226,7 +7226,7 @@ export default function App() {
           setSelectedMeeting(meeting);
           setHomeScreen("MEETINGS");
           await startAttendance(meeting);
-          const startedAtLabel = new Date().toLocaleTimeString();
+          const startedAtLabel = formatTimeLabel(new Date());
           Alert.alert(
             "Meeting log started",
             `${meeting.name} start time logged at ${startedAtLabel}.`,
@@ -8649,7 +8649,7 @@ export default function App() {
       setHomeScreen("MEETINGS");
       await startAttendance(meeting);
       if (!cancelled) {
-        const startedAtLabel = new Date().toLocaleTimeString();
+        const startedAtLabel = formatTimeLabel(new Date());
         Alert.alert(
           "Meeting log started",
           `${meeting.name} start time logged at ${startedAtLabel}.`,
@@ -10123,11 +10123,13 @@ export default function App() {
                             </Text>
                           </View>
                           <Text style={styles.sectionMeta}>
-                            Start: {new Date(record.startAt).toLocaleString()}
+                            Start: {formatDateTimeLabel(new Date(record.startAt))}
                           </Text>
                           <Text style={styles.sectionMeta}>
                             End:{" "}
-                            {record.endAt ? new Date(record.endAt).toLocaleString() : "In progress"}
+                            {record.endAt
+                              ? formatDateTimeLabel(new Date(record.endAt))
+                              : "In progress"}
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Status: {validationStatusLabel} • {validationReason}
@@ -11128,10 +11130,10 @@ export default function App() {
                                       {preview.usesServiceCommitment
                                         ? "Service commitment override"
                                         : "Standard early arrival"}
-                                      : start {preview.meetingStartAt.toLocaleTimeString()}, travel{" "}
+                                      : start {formatTimeLabel(preview.meetingStartAt)}, travel{" "}
                                       {preview.travelMinutes}m, depart{" "}
-                                      {preview.departAt.toLocaleTimeString()}, notify{" "}
-                                      {preview.notifyAt.toLocaleTimeString()}
+                                      {formatTimeLabel(preview.departAt)}, notify{" "}
+                                      {formatTimeLabel(preview.notifyAt)}
                                     </Text>
                                   ) : null}
                                 </>
@@ -11336,14 +11338,14 @@ export default function App() {
                         Meeting: {activeAttendance.meetingName}
                       </Text>
                       <Text style={styles.sectionMeta}>
-                        Started: {new Date(activeAttendance.startAt).toLocaleString()}
+                        Started: {formatDateTimeLabel(new Date(activeAttendance.startAt))}
                       </Text>
                       <Text style={styles.sectionMeta}>
                         Duration: {formatDuration(openSessionDurationSeconds)}
                       </Text>
                       {activeAttendance.endAt ? (
                         <Text style={styles.sectionMeta}>
-                          Ended: {new Date(activeAttendance.endAt).toLocaleString()}
+                          Ended: {formatDateTimeLabel(new Date(activeAttendance.endAt))}
                         </Text>
                       ) : null}
                       <Text style={styles.sectionMeta}>
@@ -11412,7 +11414,7 @@ export default function App() {
                       <View key={record.id} style={styles.historyCard}>
                         <Text style={styles.meetingName}>{record.meetingName}</Text>
                         <Text style={styles.sectionMeta}>
-                          {new Date(record.startAt).toLocaleString()} •{" "}
+                          {formatDateTimeLabel(new Date(record.startAt))} •{" "}
                           {formatDuration(record.durationSeconds)}
                         </Text>
                         <Text style={styles.sectionMeta}>
