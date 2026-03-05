@@ -7359,12 +7359,13 @@ export default function App() {
 
     try {
       Notifications.setNotificationHandler({
-        handleNotification: async () =>
-          ({
-            shouldShowAlert: true,
-            shouldPlaySound: false,
-            shouldSetBadge: false,
-          }) as unknown as Notifications.NotificationBehavior,
+        handleNotification: async () => ({
+          shouldShowAlert: true,
+          shouldPlaySound: false,
+          shouldSetBadge: false,
+          shouldShowBanner: true,
+          shouldShowList: true,
+        }),
       });
     } catch (error) {
       console.log("[notifications] setNotificationHandler failed", error);
