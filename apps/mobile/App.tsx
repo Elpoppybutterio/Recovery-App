@@ -42,7 +42,8 @@ import {
 } from "./lib/geo/geoTrust";
 import {
   ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
-  printAttendanceSlipPdf,
+  generateAttendanceSlipPdf,
+  shareAttendanceSlipPdf,
 } from "./lib/pdf/attendanceSlipPdf";
 import { exportMorningRoutinePdf } from "./lib/pdf/exportMorningRoutinePdf";
 import { exportNightlyInventoryPdf } from "./lib/pdf/exportNightlyInventoryPdf";
@@ -6651,19 +6652,20 @@ export default function App() {
 
     setExportingPdf(true);
     try {
-      await printAttendanceSlipPdf(
+      const exportedUris = await generateAttendanceSlipPdf(
         [toAttendanceSlipRecord(activeAttendance)],
         { participantName: devUserDisplayName },
         { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
       );
+      await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
       recordLastExportAttempt(true);
-      setAttendanceStatus("Print dialog opened. Choose Print or Save as PDF.");
+      setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
     } catch (error) {
       console.log("[attendance-export] failed", error);
       recordLastExportAttempt(false, error);
-      const message = `PDF print failed: ${formatError(error)}`;
+      const message = `PDF export failed: ${formatError(error)}`;
       setAttendanceStatus(message);
-      Alert.alert("Print failed", "Try exporting fewer meetings.");
+      Alert.alert("Export failed", "Try exporting fewer meetings.");
     } finally {
       setExportingPdf(false);
     }
@@ -6725,7 +6727,7 @@ export default function App() {
     setExportingAttendanceSelectionPdf(true);
     setAttendanceExportProgressLabel(null);
     try {
-      await printAttendanceSlipPdf(
+      const exportedUris = await generateAttendanceSlipPdf(
         selectedRecords.map(toAttendanceSlipRecord),
         { participantName: devUserDisplayName },
         {
@@ -6735,14 +6737,18 @@ export default function App() {
           },
         },
       );
+      await shareAttendanceSlipPdf(
+        exportedUris,
+        `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
+      );
       recordLastExportAttempt(true);
-      setAttendanceStatus(`Print dialog opened for ${selectedRecords.length} meeting record(s).`);
+      setAttendanceStatus(`Export complete for ${selectedRecords.length} meeting record(s).`);
     } catch (error) {
       console.log("[attendance-export-selected] failed", error);
       recordLastExportAttempt(false, error);
-      const message = `Failed to print selected attendance: ${formatError(error)}`;
+      const message = `Failed to export selected attendance: ${formatError(error)}`;
       setAttendanceStatus(message);
-      Alert.alert("Print failed", "Try exporting fewer meetings.");
+      Alert.alert("Export failed", "Try exporting fewer meetings.");
     } finally {
       setAttendanceExportProgressLabel(null);
       setExportingAttendanceSelectionPdf(false);
@@ -6786,7 +6792,7 @@ export default function App() {
       setExportingAttendanceSelectionPdf(true);
       setAttendanceExportProgressLabel(null);
       try {
-        await printAttendanceSlipPdf(
+        const exportedUris = await generateAttendanceSlipPdf(
           selectedRecords.map(toAttendanceSlipRecord),
           { participantName: devUserDisplayName },
           {
@@ -6796,16 +6802,20 @@ export default function App() {
             },
           },
         );
+        await shareAttendanceSlipPdf(
+          exportedUris,
+          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
+        );
         recordLastExportAttempt(true);
         setAttendanceStatus(
-          `Print dialog opened for ${selectedRecords.length} attendance slip(s) for ${label}.`,
+          `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
         );
       } catch (error) {
         console.log("[attendance-export-range] failed", error);
         recordLastExportAttempt(false, error);
-        const message = `Failed to print attendance range: ${formatError(error)}`;
+        const message = `Failed to export attendance range: ${formatError(error)}`;
         setAttendanceStatus(message);
-        Alert.alert("Print failed", "Try exporting fewer meetings.");
+        Alert.alert("Export failed", "Try exporting fewer meetings.");
       } finally {
         setAttendanceExportProgressLabel(null);
         setExportingAttendanceSelectionPdf(false);
