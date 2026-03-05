@@ -7587,13 +7587,23 @@ export default function App() {
     bootstrapStartedRef.current = true;
 
     void (async () => {
-      try {
-        if (iosLaunchSafeMode) {
+      if (iosLaunchSafeMode) {
+        try {
           await refreshMeetings();
-        } else {
-          const position = await requestLocationPermission();
-          await refreshMeetings({ location: position });
+          setAttendanceStatus(
+            "iOS safe boot mode enabled: attendance history loads after app stabilization.",
+          );
+        } catch {
+          setMeetingsStatus("Unable to load meetings.");
+        } finally {
+          setBootstrapped(true);
         }
+        return;
+      }
+
+      try {
+        const position = await requestLocationPermission();
+        await refreshMeetings({ location: position });
 
         const [
           modeRaw,
