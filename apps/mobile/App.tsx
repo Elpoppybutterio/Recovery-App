@@ -7927,8 +7927,14 @@ export default function App() {
     if (!bootstrapped) {
       return;
     }
-    void syncSobrietyMilestoneCalendarEvents("sobriety-date-change");
-  }, [bootstrapped, sobrietyDateIso, syncSobrietyMilestoneCalendarEvents]);
+    if (Platform.OS !== "ios") {
+      return;
+    }
+    if (homeScreen !== "SETTINGS") {
+      return;
+    }
+    void syncSobrietyMilestoneCalendarEvents("settings-open");
+  }, [bootstrapped, homeScreen, sobrietyDateIso, syncSobrietyMilestoneCalendarEvents]);
 
   useEffect(() => {
     if (!bootstrapped || !sponsorEnabledAtIso) {
