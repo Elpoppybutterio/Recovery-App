@@ -85,6 +85,14 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const iosBuildNumber = resolveIosBuildNumber(appEnv);
   const androidVersionCode = resolveAndroidVersionCode(appEnv);
   const apiUrl = resolveApiUrl(appEnv);
+  const updatesConfig =
+    appEnv === "production"
+      ? config.updates
+      : {
+          enabled: false,
+          checkAutomatically: "NEVER" as const,
+          fallbackToCacheTimeout: 0,
+        };
 
   return {
     ...config,
@@ -122,6 +130,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       permissions: ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "ACCESS_BACKGROUND_LOCATION"],
     },
     assetBundlePatterns: ["**/*"],
+    updates: updatesConfig,
     extra: {
       ...config.extra,
       apiUrl,
