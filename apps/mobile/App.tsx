@@ -7211,15 +7211,18 @@ export default function App() {
   }, [ensureNotificationPermission, loadNotificationBuckets, saveNotificationBuckets, scheduleAt]);
 
   useEffect(() => {
-    Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowAlert: true,
-        shouldPlaySound: false,
-        shouldSetBadge: false,
-        shouldShowBanner: true,
-        shouldShowList: true,
-      }),
-    });
+    try {
+      Notifications.setNotificationHandler({
+        handleNotification: async () =>
+          ({
+            shouldShowAlert: true,
+            shouldPlaySound: false,
+            shouldSetBadge: false,
+          }) as unknown as Notifications.NotificationBehavior,
+      });
+    } catch (error) {
+      console.log("[notifications] setNotificationHandler failed", error);
+    }
 
     void Notifications.setNotificationCategoryAsync(SPONSOR_NOTIFICATION_CATEGORY_ID, [
       {
@@ -7227,14 +7230,18 @@ export default function App() {
         buttonTitle: "Call",
         options: { opensAppToForeground: true },
       },
-    ]);
+    ]).catch((error) => {
+      console.log("[notifications] sponsor category setup failed", error);
+    });
     void Notifications.setNotificationCategoryAsync(DRIVE_NOTIFICATION_CATEGORY_ID, [
       {
         identifier: DRIVE_ACTION_ID,
         buttonTitle: "Drive",
         options: { opensAppToForeground: true },
       },
-    ]);
+    ]).catch((error) => {
+      console.log("[notifications] drive category setup failed", error);
+    });
 
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
       const action = response.actionIdentifier;
