@@ -2873,8 +2873,12 @@ export default function App() {
     },
     [isLocalhostApiUrl],
   );
+  const notificationsRuntimeEnabled = Platform.OS !== "ios";
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
+    if (!notificationsRuntimeEnabled) {
+      return false;
+    }
     const existing = await Notifications.getPermissionsAsync();
     if (existing.granted || existing.status === Notifications.PermissionStatus.GRANTED) {
       return true;
@@ -2882,7 +2886,7 @@ export default function App() {
 
     const requested = await Notifications.requestPermissionsAsync();
     return requested.granted || requested.status === Notifications.PermissionStatus.GRANTED;
-  }, []);
+  }, [notificationsRuntimeEnabled]);
 
   const ensureCalendarPermission = useCallback(async (): Promise<boolean> => {
     try {
@@ -2945,6 +2949,12 @@ export default function App() {
 
   const cancelNotificationBucket = useCallback(
     async (bucket: keyof NotificationBuckets) => {
+      if (!notificationsRuntimeEnabled) {
+        const buckets = await loadNotificationBuckets();
+        buckets[bucket] = [];
+        await saveNotificationBuckets(buckets);
+        return buckets;
+      }
       const buckets = await loadNotificationBuckets();
       const ids = buckets[bucket];
       await Promise.all(
@@ -2960,11 +2970,14 @@ export default function App() {
       await saveNotificationBuckets(buckets);
       return buckets;
     },
-    [loadNotificationBuckets, saveNotificationBuckets],
+    [loadNotificationBuckets, notificationsRuntimeEnabled, saveNotificationBuckets],
   );
 
   const scheduleAt = useCallback(
     async (date: Date, content: Notifications.NotificationContentInput): Promise<string> => {
+      if (!notificationsRuntimeEnabled) {
+        throw new Error("notifications_disabled");
+      }
       const trigger: Notifications.DateTriggerInput = {
         type: Notifications.SchedulableTriggerInputTypes.DATE,
         date,
@@ -2975,29 +2988,35 @@ export default function App() {
         trigger,
       });
     },
-    [],
+    [notificationsRuntimeEnabled],
   );
 
-  const cancelScheduledNotificationsByType = useCallback(async (type: "sponsor" | "drive") => {
-    try {
-      const scheduled = await Notifications.getAllScheduledNotificationsAsync();
-      await Promise.all(
-        scheduled.map(async (request) => {
-          const data = request.content.data as { type?: string } | undefined;
-          if (data?.type !== type) {
-            return;
-          }
-          try {
-            await Notifications.cancelScheduledNotificationAsync(request.identifier);
-          } catch {
-            // ignore stale ids
-          }
-        }),
-      );
-    } catch {
-      // ignore lookup failures
-    }
-  }, []);
+  const cancelScheduledNotificationsByType = useCallback(
+    async (type: "sponsor" | "drive") => {
+      if (!notificationsRuntimeEnabled) {
+        return;
+      }
+      try {
+        const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+        await Promise.all(
+          scheduled.map(async (request) => {
+            const data = request.content.data as { type?: string } | undefined;
+            if (data?.type !== type) {
+              return;
+            }
+            try {
+              await Notifications.cancelScheduledNotificationAsync(request.identifier);
+            } catch {
+              // ignore stale ids
+            }
+          }),
+        );
+      } catch {
+        // ignore lookup failures
+      }
+    },
+    [notificationsRuntimeEnabled],
+  );
 
   const requestLocationPermission = useCallback(async (): Promise<LocationStamp | null> => {
     const position = await readCurrentLocation(true);
@@ -7264,6 +7283,10 @@ export default function App() {
   }, [ensureNotificationPermission, loadNotificationBuckets, saveNotificationBuckets, scheduleAt]);
 
   useEffect(() => {
+    if (!notificationsRuntimeEnabled) {
+      return;
+    }
+
     try {
       Notifications.setNotificationHandler({
         handleNotification: async () => ({
@@ -7331,7 +7354,7 @@ export default function App() {
     return () => {
       subscription.remove();
     };
-  }, [openMeetingDestination, openPhoneCall]);
+  }, [notificationsRuntimeEnabled, openMeetingDestination, openPhoneCall]);
 
   useEffect(() => {
     if (
