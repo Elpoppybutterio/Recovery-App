@@ -43,9 +43,14 @@ import {
 import {
   ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
   generateAttendanceSlipPdf,
-  printAttendanceSlipPdf,
   shareAttendanceSlipPdf,
 } from "./lib/pdf/attendanceSlipPdf";
+import {
+  estimateBase64Bytes as estimateSignatureBase64Bytes,
+  loadSignatureFileSystemModule,
+  looksLikeFileUri as looksLikeSignatureFileUri,
+  normalizeSignatureValueToRef,
+} from "./lib/signatures/signatureStore";
 import { exportMorningRoutinePdf } from "./lib/pdf/exportMorningRoutinePdf";
 import { exportNightlyInventoryPdf } from "./lib/pdf/exportNightlyInventoryPdf";
 import {
@@ -176,6 +181,7 @@ type LocationStamp = {
 };
 
 type AttendanceRecord = {
+  schemaVersion?: number;
   id: string;
   meetingId: string;
   meetingName: string;
@@ -356,10 +362,12 @@ const SIGNATURE_PROMPT_AFTER_MS = SIGNATURE_PROMPT_AFTER_MINUTES * 60 * 1000;
 const SIGNATURE_WINDOW_HELP_TEXT =
   "Signature is available from meeting start until 90 minutes after start.";
 const MAX_SIGNATURE_POINTS_FOR_STORAGE = 1400;
-const MAX_SIGNATURE_PAYLOAD_CHARS = 120_000;
 const MAX_BOOTSTRAP_ATTENDANCE_RAW_CHARS = 4_000_000;
 const MAX_BOOTSTRAP_ATTENDANCE_RECORDS = 1200;
+const ATTENDANCE_SCHEMA_VERSION = 1;
+const SIGNATURE_MIGRATION_BATCH_SIZE = 25;
 const ATTENDANCE_STORAGE_KEY_PREFIX = "recovery:verifiedAttendance:";
+const ATTENDANCE_SIGNATURE_MIGRATION_KEY_PREFIX = "recovery:attendanceSignaturesMigrationV1:";
 const MEETING_PLAN_STORAGE_KEY_PREFIX = "recovery:meetingPlans:";
 const NOTIFICATION_STORAGE_KEY_PREFIX = "recovery:notificationIds:";
 const MODE_STORAGE_KEY_PREFIX = "recovery:mode:";
@@ -1107,6 +1115,10 @@ function attendanceStorageKey(userId: string): string {
   return `${ATTENDANCE_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+function attendanceSignatureMigrationStorageKey(userId: string): string {
+  return `${ATTENDANCE_SIGNATURE_MIGRATION_KEY_PREFIX}${userId}`;
+}
+
 function meetingPlanStorageKey(userId: string): string {
   return `${MEETING_PLAN_STORAGE_KEY_PREFIX}${userId}`;
 }
@@ -1340,17 +1352,18 @@ function truncateText(value: string, maxLength: number): string {
   return `${value.slice(0, maxLength)}...`;
 }
 
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
 function looksLikeFileUri(value: string): boolean {
-  return value.startsWith("file://") || value.startsWith("/");
+  return looksLikeSignatureFileUri(value);
 }
 
 function estimateBase64Bytes(value: string): number {
-  const normalized = value.trim();
-  if (normalized.length === 0) {
-    return 0;
-  }
-  const paddingLength = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
-  return Math.max(0, Math.floor((normalized.length * 3) / 4) - paddingLength);
+  return estimateSignatureBase64Bytes(value);
 }
 
 function estimateUtf8Bytes(value: string): number {
@@ -1380,24 +1393,6 @@ function looksLikeSvgDataUri(value: string): boolean {
 
 function looksLikeInlineSvgSignature(value: string): boolean {
   return looksLikeSvgMarkup(value) || looksLikeSvgDataUri(value);
-}
-
-function sanitizeSignaturePayload(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_SIGNATURE_PAYLOAD_CHARS) {
-    return null;
-  }
-  if (looksLikeFileUri(trimmed) || looksLikeInlineSvgSignature(trimmed)) {
-    return trimmed;
-  }
-  const cleanedBase64 = trimmed.replace(/[^A-Za-z0-9+/=]/g, "");
-  if (cleanedBase64.length === 0 || cleanedBase64.length > MAX_SIGNATURE_PAYLOAD_CHARS) {
-    return null;
-  }
-  return cleanedBase64;
 }
 
 function invalidMeetingCoordsReason(lat: number | null, lng: number | null): string | null {
@@ -1731,6 +1726,14 @@ export default function App() {
 
   const dayOptions = useMemo(() => createDayOptions(), []);
   const attendanceStorage = useMemo(() => attendanceStorageKey(devAuthUserId), [devAuthUserId]);
+  const attendanceSignatureMigrationStorage = useMemo(
+    () => attendanceSignatureMigrationStorageKey(devAuthUserId),
+    [devAuthUserId],
+  );
+  const signatureStorageSubdirectory = useMemo(
+    () => `signatures/${devAuthUserId}`,
+    [devAuthUserId],
+  );
   const meetingPlansStorage = useMemo(() => meetingPlanStorageKey(devAuthUserId), [devAuthUserId]);
   const notificationStorage = useMemo(() => notificationStorageKey(devAuthUserId), [devAuthUserId]);
   const modeStorage = useMemo(() => modeStorageKey(devAuthUserId), [devAuthUserId]);
@@ -1930,6 +1933,7 @@ export default function App() {
 
   const activeAttendanceRef = useRef<AttendanceRecord | null>(null);
   const attendanceRecordsRef = useRef<AttendanceRecord[]>([]);
+  const attendanceExportInFlightRef = useRef(false);
   const startAttendanceInFlightRef = useRef(false);
   const arrivalPromptedMeetingRef = useRef<string | null>(null);
   const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
@@ -3514,8 +3518,20 @@ export default function App() {
 
   const upsertAttendanceRecord = useCallback(
     (record: AttendanceRecord) => {
+      const normalizedRecord: AttendanceRecord = {
+        ...record,
+        schemaVersion: ATTENDANCE_SCHEMA_VERSION,
+        signaturePngBase64:
+          typeof record.signaturePngBase64 === "string" &&
+          record.signaturePngBase64.trim().length > 0
+            ? record.signaturePngBase64.trim()
+            : null,
+      };
       setAttendanceRecords((previous) => {
-        const next = [record, ...previous.filter((item) => item.id !== record.id)].sort(
+        const next = [
+          normalizedRecord,
+          ...previous.filter((item) => item.id !== normalizedRecord.id),
+        ].sort(
           (left, right) => new Date(right.startAt).getTime() - new Date(left.startAt).getTime(),
         );
         void persistAttendanceRecords(next);
@@ -6296,6 +6312,20 @@ export default function App() {
     [activeAttendance],
   );
 
+  const persistSignaturePayloadAsFileRef = useCallback(
+    async (rawSignature: string, recordId: string): Promise<string | null> => {
+      const fileSystemModule = loadSignatureFileSystemModule();
+      const normalized = await normalizeSignatureValueToRef(rawSignature, {
+        fileSystem: fileSystemModule,
+        recordId,
+        subdirectory: signatureStorageSubdirectory,
+        verifyFileExists: true,
+      });
+      return normalized.ref?.uri ?? null;
+    },
+    [signatureStorageSubdirectory],
+  );
+
   const saveSignature = useCallback(async () => {
     const targetActiveAttendance = activeAttendanceRef.current ?? activeAttendance;
     if (!targetActiveAttendance && !signatureCaptureMeeting) {
@@ -6314,9 +6344,13 @@ export default function App() {
       return;
     }
 
-    const sanitizedSignature = sanitizeSignaturePayload(signatureSvgMarkup);
-    if (!sanitizedSignature) {
-      setAttendanceStatus("Signature payload is too large. Clear and sign again.");
+    const signatureRecordId = targetActiveAttendance?.id ?? createId("attendance-signature");
+    const persistedSignatureRef = await persistSignaturePayloadAsFileRef(
+      signatureSvgMarkup,
+      signatureRecordId,
+    );
+    if (!persistedSignatureRef) {
+      setAttendanceStatus("Unable to save signature file. Clear and sign again.");
       return;
     }
 
@@ -6324,7 +6358,8 @@ export default function App() {
       const nowIso = new Date().toISOString();
       const next: AttendanceRecord = {
         ...targetActiveAttendance,
-        signaturePngBase64: sanitizedSignature,
+        schemaVersion: ATTENDANCE_SCHEMA_VERSION,
+        signaturePngBase64: persistedSignatureRef,
         signaturePromptShown: true,
         chairName:
           signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
@@ -6361,6 +6396,7 @@ export default function App() {
       lng: signatureCaptureMeeting.lng,
     });
     const signatureOnlyRecord: AttendanceRecord = {
+      schemaVersion: ATTENDANCE_SCHEMA_VERSION,
       id: createId("attendance"),
       meetingId: signatureCaptureMeeting.id,
       meetingName: signatureCaptureMeeting.name,
@@ -6393,7 +6429,7 @@ export default function App() {
       chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
       signatureCapturedAtIso: nowIso,
       calendarEventId: null,
-      signaturePngBase64: sanitizedSignature,
+      signaturePngBase64: persistedSignatureRef,
       pdfUri: null,
     };
 
@@ -6420,6 +6456,7 @@ export default function App() {
     upsertAttendanceRecord,
     appendMeetingAttendanceLog,
     readCurrentLocation,
+    persistSignaturePayloadAsFileRef,
   ]);
 
   const buildAttendanceShareMessage = useCallback((records: AttendanceRecord[]): string => {
@@ -6520,6 +6557,27 @@ export default function App() {
     });
   }, []);
 
+  const logSafeExportFailure = useCallback(
+    (
+      stage:
+        | "EXPORT_SINGLE"
+        | "EXPORT_SELECTED"
+        | "EXPORT_RANGE"
+        | "EXPORT_GENERATE"
+        | "EXPORT_SHARE",
+      error: unknown,
+    ) => {
+      console.log("[attendance-export][safe-error]", {
+        stage,
+        message: truncateText(formatError(error), 240),
+        platform: Platform.OS,
+        appVersion,
+        buildNumber,
+      });
+    },
+    [appVersion, buildNumber],
+  );
+
   const runDiagnosticsExportDryRun = useCallback(() => {
     if (diagnosticsSelectedAttendanceRecords.length === 0) {
       setDiagnosticsExportDryRunStatus("Dry-run failed: select at least one attendance record.");
@@ -6604,80 +6662,92 @@ export default function App() {
     );
   }, [diagnosticsSelectedAttendanceRecords]);
 
-  const createDiagnosticsCompletedTestMeeting = useCallback(() => {
+  const createDiagnosticsCompletedTestMeeting = useCallback(async () => {
     if (!isDiagnosticsEnabled) {
       return;
     }
 
-    const now = new Date();
-    const start = new Date(now.getTime() - 65 * 60 * 1000);
-    const candidateMeeting = selectedMeeting ?? allMeetings[0] ?? null;
-    const candidateCoords = normalizeCoordinates({
-      lat: candidateMeeting?.lat ?? currentLocation?.lat ?? null,
-      lng: candidateMeeting?.lng ?? currentLocation?.lng ?? null,
-    });
+    try {
+      const now = new Date();
+      const start = new Date(now.getTime() - 65 * 60 * 1000);
+      const candidateMeeting = selectedMeeting ?? allMeetings[0] ?? null;
+      const candidateCoords = normalizeCoordinates({
+        lat: candidateMeeting?.lat ?? currentLocation?.lat ?? null,
+        lng: candidateMeeting?.lng ?? currentLocation?.lng ?? null,
+      });
 
-    const fallbackLat = 39.7392;
-    const fallbackLng = -104.9903;
-    const lat = candidateCoords?.lat ?? currentLocation?.lat ?? fallbackLat;
-    const lng = candidateCoords?.lng ?? currentLocation?.lng ?? fallbackLng;
-    const accuracyM = currentLocation?.accuracyM ?? 18;
+      const fallbackLat = 39.7392;
+      const fallbackLng = -104.9903;
+      const lat = candidateCoords?.lat ?? currentLocation?.lat ?? fallbackLat;
+      const lng = candidateCoords?.lng ?? currentLocation?.lng ?? fallbackLng;
+      const accuracyM = currentLocation?.accuracyM ?? 18;
 
-    const sampleSignature = buildSignatureSvgMarkup(
-      [
-        { x: 16, y: 90, isStrokeStart: true },
-        { x: 68, y: 64, isStrokeStart: false },
-        { x: 118, y: 92, isStrokeStart: false },
-        { x: 178, y: 58, isStrokeStart: false },
-        { x: 232, y: 88, isStrokeStart: false },
-      ],
-      320,
-      180,
-    );
+      const sampleSignature = buildSignatureSvgMarkup(
+        [
+          { x: 16, y: 90, isStrokeStart: true },
+          { x: 68, y: 64, isStrokeStart: false },
+          { x: 118, y: 92, isStrokeStart: false },
+          { x: 178, y: 58, isStrokeStart: false },
+          { x: 232, y: 88, isStrokeStart: false },
+        ],
+        320,
+        180,
+      );
 
-    const recordId = createId("attendance-diagnostic");
-    const scheduledStartsAtLocal = `${String(start.getHours()).padStart(2, "0")}:${String(
-      start.getMinutes(),
-    ).padStart(2, "0")}`;
+      const recordId = createId("attendance-diagnostic");
+      const scheduledStartsAtLocal = `${String(start.getHours()).padStart(2, "0")}:${String(
+        start.getMinutes(),
+      ).padStart(2, "0")}`;
 
-    const diagnosticRecord: AttendanceRecord = {
-      id: recordId,
-      meetingId: candidateMeeting?.id ?? "diagnostic-meeting",
-      meetingName: candidateMeeting?.name ?? "Diagnostics Test Meeting",
-      meetingAddress: candidateMeeting?.address ?? "Diagnostics Address",
-      scheduledStartsAtLocal,
-      meetingLat: lat,
-      meetingLng: lng,
-      meetingGeoStatus: "verified",
-      meetingGeoSource: "device_geocode",
-      meetingGeoReason: null,
-      meetingFormat: candidateMeeting?.format ?? "IN_PERSON",
-      captureMethod: "signature",
-      startAt: start.toISOString(),
-      endAt: now.toISOString(),
-      durationSeconds: Math.max(0, Math.floor((now.getTime() - start.getTime()) / 1000)),
-      startLat: lat,
-      startLng: lng,
-      startAccuracyM: accuracyM,
-      endLat: lat,
-      endLng: lng,
-      endAccuracyM: accuracyM,
-      signaturePromptShown: true,
-      chairName: "Diagnostics Chair",
-      chairRole: "Chairperson",
-      signatureCapturedAtIso: now.toISOString(),
-      calendarEventId: null,
-      signaturePngBase64: sampleSignature,
-      pdfUri: null,
-    };
+      const persistedSignatureRef =
+        sampleSignature && sampleSignature.trim().length > 0
+          ? await persistSignaturePayloadAsFileRef(sampleSignature, recordId)
+          : null;
 
-    upsertAttendanceRecord(diagnosticRecord);
-    setSelectedAttendanceIds((previous) => Array.from(new Set([recordId, ...previous])));
-    setHomeScreen("ATTENDANCE");
-    setAttendanceViewFilter("ALL");
-    setShowInactiveAttendance(false);
-    setScreen("LIST");
-    setAttendanceStatus("Diagnostics: added a completed test meeting and selected it for export.");
+      const diagnosticRecord: AttendanceRecord = {
+        schemaVersion: ATTENDANCE_SCHEMA_VERSION,
+        id: recordId,
+        meetingId: candidateMeeting?.id ?? "diagnostic-meeting",
+        meetingName: candidateMeeting?.name ?? "Diagnostics Test Meeting",
+        meetingAddress: candidateMeeting?.address ?? "Diagnostics Address",
+        scheduledStartsAtLocal,
+        meetingLat: lat,
+        meetingLng: lng,
+        meetingGeoStatus: "verified",
+        meetingGeoSource: "device_geocode",
+        meetingGeoReason: null,
+        meetingFormat: candidateMeeting?.format ?? "IN_PERSON",
+        captureMethod: "signature",
+        startAt: start.toISOString(),
+        endAt: now.toISOString(),
+        durationSeconds: Math.max(0, Math.floor((now.getTime() - start.getTime()) / 1000)),
+        startLat: lat,
+        startLng: lng,
+        startAccuracyM: accuracyM,
+        endLat: lat,
+        endLng: lng,
+        endAccuracyM: accuracyM,
+        signaturePromptShown: true,
+        chairName: "Diagnostics Chair",
+        chairRole: "Chairperson",
+        signatureCapturedAtIso: now.toISOString(),
+        calendarEventId: null,
+        signaturePngBase64: persistedSignatureRef,
+        pdfUri: null,
+      };
+
+      upsertAttendanceRecord(diagnosticRecord);
+      setSelectedAttendanceIds((previous) => Array.from(new Set([recordId, ...previous])));
+      setHomeScreen("ATTENDANCE");
+      setAttendanceViewFilter("ALL");
+      setShowInactiveAttendance(false);
+      setScreen("LIST");
+      setAttendanceStatus(
+        "Diagnostics: added a completed test meeting and selected it for export.",
+      );
+    } catch (error) {
+      setAttendanceStatus(`Diagnostics meeting creation failed: ${formatError(error)}`);
+    }
   }, [
     allMeetings,
     currentLocation,
@@ -6689,6 +6759,7 @@ export default function App() {
     setShowInactiveAttendance,
     setScreen,
     upsertAttendanceRecord,
+    persistSignaturePayloadAsFileRef,
   ]);
 
   const exportAttendance = useCallback(async () => {
@@ -6696,36 +6767,39 @@ export default function App() {
       setAttendanceStatus("Complete attendance session before exporting.");
       return;
     }
+    if (attendanceExportInFlightRef.current) {
+      setAttendanceStatus("Export already in progress.");
+      return;
+    }
 
+    attendanceExportInFlightRef.current = true;
     setExportingPdf(true);
     try {
       const payloadRecords = [toAttendanceSlipRecord(activeAttendance)];
-      if (Platform.OS === "ios") {
-        await printAttendanceSlipPdf(payloadRecords, { participantName: devUserDisplayName });
-      } else {
-        const exportedUris = await generateAttendanceSlipPdf(
-          payloadRecords,
-          { participantName: devUserDisplayName },
-          { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
-        );
-        await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
-      }
-      recordLastExportAttempt(true);
-      setAttendanceStatus(
-        Platform.OS === "ios"
-          ? "Export ready. Print dialog opened."
-          : "Export complete. Share sheet opened for your PDF.",
+      const exportedUris = await generateAttendanceSlipPdf(
+        payloadRecords,
+        { participantName: devUserDisplayName },
+        { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
       );
+      await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+      recordLastExportAttempt(true);
+      setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
     } catch (error) {
-      console.log("[attendance-export] failed", error);
+      logSafeExportFailure("EXPORT_SINGLE", error);
       recordLastExportAttempt(false, error);
-      const message = `PDF export failed: ${formatError(error)}`;
-      setAttendanceStatus(message);
-      Alert.alert("Export failed", "Try exporting fewer meetings.");
+      setAttendanceStatus("Couldn't generate PDF. Try again.");
+      Alert.alert("Export failed", "Couldn't generate PDF. Try again.");
     } finally {
+      attendanceExportInFlightRef.current = false;
       setExportingPdf(false);
     }
-  }, [activeAttendance, devUserDisplayName, recordLastExportAttempt, toAttendanceSlipRecord]);
+  }, [
+    activeAttendance,
+    devUserDisplayName,
+    logSafeExportFailure,
+    recordLastExportAttempt,
+    toAttendanceSlipRecord,
+  ]);
 
   const toggleAttendanceSelection = useCallback((recordId: string) => {
     setSelectedAttendanceIds((current) =>
@@ -6780,47 +6854,46 @@ export default function App() {
       );
       return;
     }
+    if (attendanceExportInFlightRef.current) {
+      setAttendanceStatus("Export already in progress.");
+      return;
+    }
+
+    attendanceExportInFlightRef.current = true;
     setExportingAttendanceSelectionPdf(true);
     setAttendanceExportProgressLabel(null);
     try {
       const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
-      if (Platform.OS === "ios") {
-        await printAttendanceSlipPdf(payloadRecords, { participantName: devUserDisplayName });
-      } else {
-        const exportedUris = await generateAttendanceSlipPdf(
-          payloadRecords,
-          { participantName: devUserDisplayName },
-          {
-            fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`,
-            onProgress: ({ chunkIndex, chunkCount }) => {
-              setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
-            },
+      const exportedUris = await generateAttendanceSlipPdf(
+        payloadRecords,
+        { participantName: devUserDisplayName },
+        {
+          fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`,
+          onProgress: ({ chunkIndex, chunkCount }) => {
+            setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
           },
-        );
-        await shareAttendanceSlipPdf(
-          exportedUris,
-          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
-        );
-      }
-      recordLastExportAttempt(true);
-      setAttendanceStatus(
-        Platform.OS === "ios"
-          ? `Print dialog opened for ${selectedRecords.length} meeting record(s).`
-          : `Export complete for ${selectedRecords.length} meeting record(s).`,
+        },
       );
+      await shareAttendanceSlipPdf(
+        exportedUris,
+        `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
+      );
+      recordLastExportAttempt(true);
+      setAttendanceStatus(`Export complete for ${selectedRecords.length} meeting record(s).`);
     } catch (error) {
-      console.log("[attendance-export-selected] failed", error);
+      logSafeExportFailure("EXPORT_SELECTED", error);
       recordLastExportAttempt(false, error);
-      const message = `Failed to export selected attendance: ${formatError(error)}`;
-      setAttendanceStatus(message);
-      Alert.alert("Export failed", "Try exporting fewer meetings.");
+      setAttendanceStatus("Couldn't generate PDF. Try again.");
+      Alert.alert("Export failed", "Couldn't generate PDF. Try again.");
     } finally {
+      attendanceExportInFlightRef.current = false;
       setAttendanceExportProgressLabel(null);
       setExportingAttendanceSelectionPdf(false);
     }
   }, [
     attendanceRecordsForView,
     selectedAttendanceIds,
+    logSafeExportFailure,
     setAttendanceExportProgressLabel,
     devUserDisplayName,
     recordLastExportAttempt,
@@ -6853,42 +6926,41 @@ export default function App() {
         );
         return;
       }
+      if (attendanceExportInFlightRef.current) {
+        setAttendanceStatus("Export already in progress.");
+        return;
+      }
 
+      attendanceExportInFlightRef.current = true;
       setExportingAttendanceSelectionPdf(true);
       setAttendanceExportProgressLabel(null);
       try {
         const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
-        if (Platform.OS === "ios") {
-          await printAttendanceSlipPdf(payloadRecords, { participantName: devUserDisplayName });
-        } else {
-          const exportedUris = await generateAttendanceSlipPdf(
-            payloadRecords,
-            { participantName: devUserDisplayName },
-            {
-              fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`,
-              onProgress: ({ chunkIndex, chunkCount }) => {
-                setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
-              },
+        const exportedUris = await generateAttendanceSlipPdf(
+          payloadRecords,
+          { participantName: devUserDisplayName },
+          {
+            fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`,
+            onProgress: ({ chunkIndex, chunkCount }) => {
+              setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
             },
-          );
-          await shareAttendanceSlipPdf(
-            exportedUris,
-            `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
-          );
-        }
+          },
+        );
+        await shareAttendanceSlipPdf(
+          exportedUris,
+          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
+        );
         recordLastExportAttempt(true);
         setAttendanceStatus(
-          Platform.OS === "ios"
-            ? `Print dialog opened for ${selectedRecords.length} attendance slip(s) for ${label}.`
-            : `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
+          `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
         );
       } catch (error) {
-        console.log("[attendance-export-range] failed", error);
+        logSafeExportFailure("EXPORT_RANGE", error);
         recordLastExportAttempt(false, error);
-        const message = `Failed to export attendance range: ${formatError(error)}`;
-        setAttendanceStatus(message);
-        Alert.alert("Export failed", "Try exporting fewer meetings.");
+        setAttendanceStatus("Couldn't generate PDF. Try again.");
+        Alert.alert("Export failed", "Couldn't generate PDF. Try again.");
       } finally {
+        attendanceExportInFlightRef.current = false;
         setAttendanceExportProgressLabel(null);
         setExportingAttendanceSelectionPdf(false);
       }
@@ -6896,6 +6968,7 @@ export default function App() {
     [
       attendanceRecords,
       devUserDisplayName,
+      logSafeExportFailure,
       recordLastExportAttempt,
       setAttendanceExportProgressLabel,
       toAttendanceSlipRecord,
@@ -7486,6 +7559,7 @@ export default function App() {
           modeRaw,
           sponsorUiPrefsRaw,
           attendanceRaw,
+          attendanceSignatureMigrationRaw,
           planRaw,
           setupCompleteRaw,
           sobrietyDateRaw,
@@ -7499,6 +7573,7 @@ export default function App() {
           AsyncStorage.getItem(modeStorage),
           AsyncStorage.getItem(sponsorUiPrefsStorage),
           AsyncStorage.getItem(attendanceStorage),
+          AsyncStorage.getItem(attendanceSignatureMigrationStorage),
           AsyncStorage.getItem(meetingPlansStorage),
           AsyncStorage.getItem(setupCompleteStorage),
           AsyncStorage.getItem(sobrietyDateStorage),
@@ -7534,81 +7609,211 @@ export default function App() {
               "Local attendance cache was reset because it exceeded size limits.",
             );
           } else {
-            const parsedAttendance = JSON.parse(attendanceRaw) as AttendanceRecord[];
+            const parsedAttendance = JSON.parse(attendanceRaw) as unknown;
             if (Array.isArray(parsedAttendance)) {
+              const migrationDone = attendanceSignatureMigrationRaw === "true";
+              const fileSystemModule = loadSignatureFileSystemModule();
+              const cappedAttendance = parsedAttendance.slice(0, MAX_BOOTSTRAP_ATTENDANCE_RECORDS);
+              const normalizedAttendance: AttendanceRecord[] = [];
               let droppedSignatureCount = 0;
-              const normalizedAttendance = parsedAttendance
-                .slice(0, MAX_BOOTSTRAP_ATTENDANCE_RECORDS)
-                .map((record) => ({
-                  ...record,
-                  inactive: Boolean(record.inactive),
-                  signaturePromptShown: Boolean(record.signaturePromptShown),
-                  chairName:
-                    typeof record.chairName === "string" && record.chairName.trim().length > 0
-                      ? record.chairName.trim()
-                      : null,
-                  chairRole:
-                    typeof record.chairRole === "string" && record.chairRole.trim().length > 0
-                      ? record.chairRole.trim()
-                      : null,
-                  signatureCapturedAtIso:
-                    typeof record.signatureCapturedAtIso === "string"
-                      ? record.signatureCapturedAtIso
-                      : null,
-                  signaturePngBase64: (() => {
-                    const nextSignature = sanitizeSignaturePayload(record.signaturePngBase64);
-                    if (record.signaturePngBase64 && !nextSignature) {
-                      droppedSignatureCount += 1;
+              let migratedSignatureCount = 0;
+              let skippedRecordCount = 0;
+              let missingFileSignatureCount = 0;
+
+              for (let index = 0; index < cappedAttendance.length; index += 1) {
+                const rawRecord = cappedAttendance[index];
+                if (!rawRecord || typeof rawRecord !== "object") {
+                  skippedRecordCount += 1;
+                  continue;
+                }
+
+                const record = rawRecord as Record<string, unknown>;
+                const schemaVersion =
+                  typeof record.schemaVersion === "number" && Number.isFinite(record.schemaVersion)
+                    ? Math.floor(record.schemaVersion)
+                    : 0;
+                if (schemaVersion > ATTENDANCE_SCHEMA_VERSION) {
+                  skippedRecordCount += 1;
+                  continue;
+                }
+
+                try {
+                  const recordId =
+                    typeof record.id === "string" && record.id.trim().length > 0
+                      ? record.id
+                      : createId("attendance-recovered");
+                  const rawSignature =
+                    typeof record.signaturePngBase64 === "string"
+                      ? record.signaturePngBase64
+                      : null;
+
+                  const normalizedSignature = await normalizeSignatureValueToRef(rawSignature, {
+                    fileSystem: fileSystemModule,
+                    recordId,
+                    subdirectory: signatureStorageSubdirectory,
+                    verifyFileExists: true,
+                  });
+
+                  if (rawSignature && !normalizedSignature.ref) {
+                    droppedSignatureCount += 1;
+                    if (normalizedSignature.reason === "missing_file") {
+                      missingFileSignatureCount += 1;
                     }
-                    return nextSignature;
-                  })(),
-                  meetingDayOfWeek: normalizeMeetingDayOfWeek(record.meetingDayOfWeek),
-                  calendarEventId:
-                    typeof record.calendarEventId === "string" && record.calendarEventId.length > 0
-                      ? record.calendarEventId
-                      : null,
-                  leaveNotificationId:
-                    typeof record.leaveNotificationId === "string" &&
-                    record.leaveNotificationId.length > 0
-                      ? record.leaveNotificationId
-                      : null,
-                  leaveNotificationAtIso:
-                    typeof record.leaveNotificationAtIso === "string" &&
-                    record.leaveNotificationAtIso.trim().length > 0
-                      ? record.leaveNotificationAtIso
-                      : null,
-                  meetingLat: asFiniteNumber(record.meetingLat) ?? null,
-                  meetingLng: asFiniteNumber(record.meetingLng) ?? null,
-                  meetingGeoStatus:
-                    normalizeMeetingGeoStatus(record.meetingGeoStatus) ??
-                    (isValidLatLng(record.meetingLat, record.meetingLng) ? "verified" : "missing"),
-                  meetingGeoSource: normalizeMeetingGeoSource(record.meetingGeoSource) ?? "unknown",
-                  meetingGeoReason:
-                    typeof record.meetingGeoReason === "string" &&
-                    record.meetingGeoReason.trim().length > 0
-                      ? record.meetingGeoReason
-                      : null,
-                  startLat: asFiniteNumber(record.startLat) ?? null,
-                  startLng: asFiniteNumber(record.startLng) ?? null,
-                  endLat: asFiniteNumber(record.endLat) ?? null,
-                  endLng: asFiniteNumber(record.endLng) ?? null,
-                }))
-                .sort(
-                  (left, right) =>
-                    new Date(right.startAt).getTime() - new Date(left.startAt).getTime(),
-                );
-              setAttendanceRecords(normalizedAttendance);
-              if (
-                parsedAttendance.length > MAX_BOOTSTRAP_ATTENDANCE_RECORDS ||
-                droppedSignatureCount > 0
-              ) {
-                await AsyncStorage.setItem(attendanceStorage, JSON.stringify(normalizedAttendance));
-                if (droppedSignatureCount > 0) {
-                  setAttendanceStatus(
-                    `Recovered local data: removed ${droppedSignatureCount} invalid signature payload(s).`,
-                  );
+                  }
+                  if (normalizedSignature.migrated && normalizedSignature.ref) {
+                    migratedSignatureCount += 1;
+                  }
+
+                  const startAt =
+                    typeof record.startAt === "string" && record.startAt.trim().length > 0
+                      ? record.startAt
+                      : new Date().toISOString();
+                  const endAt =
+                    typeof record.endAt === "string" && record.endAt.trim().length > 0
+                      ? record.endAt
+                      : null;
+                  const meetingLat = asFiniteNumber(record.meetingLat);
+                  const meetingLng = asFiniteNumber(record.meetingLng);
+                  const startLat = asFiniteNumber(record.startLat);
+                  const startLng = asFiniteNumber(record.startLng);
+                  const endLat = asFiniteNumber(record.endLat);
+                  const endLng = asFiniteNumber(record.endLng);
+                  const meetingName =
+                    typeof record.meetingName === "string" && record.meetingName.trim().length > 0
+                      ? record.meetingName.trim()
+                      : "Recovery Meeting";
+                  const meetingAddress =
+                    typeof record.meetingAddress === "string" &&
+                    record.meetingAddress.trim().length > 0
+                      ? record.meetingAddress.trim()
+                      : "Address unavailable";
+
+                  normalizedAttendance.push({
+                    schemaVersion: ATTENDANCE_SCHEMA_VERSION,
+                    id: recordId,
+                    meetingId:
+                      typeof record.meetingId === "string" && record.meetingId.trim().length > 0
+                        ? record.meetingId
+                        : "unknown",
+                    meetingName,
+                    meetingAddress,
+                    meetingDayOfWeek: normalizeMeetingDayOfWeek(record.meetingDayOfWeek),
+                    scheduledStartsAtLocal:
+                      typeof record.scheduledStartsAtLocal === "string"
+                        ? record.scheduledStartsAtLocal
+                        : null,
+                    meetingLat: meetingLat ?? null,
+                    meetingLng: meetingLng ?? null,
+                    meetingGeoStatus:
+                      normalizeMeetingGeoStatus(record.meetingGeoStatus) ??
+                      (isValidLatLng(meetingLat, meetingLng) ? "verified" : "missing"),
+                    meetingGeoSource:
+                      normalizeMeetingGeoSource(record.meetingGeoSource) ?? "unknown",
+                    meetingGeoReason:
+                      typeof record.meetingGeoReason === "string" &&
+                      record.meetingGeoReason.trim().length > 0
+                        ? record.meetingGeoReason
+                        : null,
+                    meetingFormat:
+                      record.meetingFormat === "IN_PERSON" ||
+                      record.meetingFormat === "ONLINE" ||
+                      record.meetingFormat === "HYBRID"
+                        ? record.meetingFormat
+                        : undefined,
+                    captureMethod:
+                      record.captureMethod === "attend-log" || record.captureMethod === "signature"
+                        ? record.captureMethod
+                        : undefined,
+                    startAt,
+                    endAt,
+                    durationSeconds: asFiniteNumber(record.durationSeconds),
+                    startLat: startLat ?? null,
+                    startLng: startLng ?? null,
+                    startAccuracyM: asFiniteNumber(record.startAccuracyM) ?? null,
+                    endLat: endLat ?? null,
+                    endLng: endLng ?? null,
+                    endAccuracyM: asFiniteNumber(record.endAccuracyM) ?? null,
+                    inactive: Boolean(record.inactive),
+                    signaturePromptShown: Boolean(record.signaturePromptShown),
+                    chairName:
+                      typeof record.chairName === "string" && record.chairName.trim().length > 0
+                        ? record.chairName.trim()
+                        : null,
+                    chairRole:
+                      typeof record.chairRole === "string" && record.chairRole.trim().length > 0
+                        ? record.chairRole.trim()
+                        : null,
+                    signatureCapturedAtIso:
+                      typeof record.signatureCapturedAtIso === "string"
+                        ? record.signatureCapturedAtIso
+                        : null,
+                    calendarEventId:
+                      typeof record.calendarEventId === "string" &&
+                      record.calendarEventId.trim().length > 0
+                        ? record.calendarEventId
+                        : null,
+                    leaveNotificationId:
+                      typeof record.leaveNotificationId === "string" &&
+                      record.leaveNotificationId.trim().length > 0
+                        ? record.leaveNotificationId
+                        : null,
+                    leaveNotificationAtIso:
+                      typeof record.leaveNotificationAtIso === "string" &&
+                      record.leaveNotificationAtIso.trim().length > 0
+                        ? record.leaveNotificationAtIso
+                        : null,
+                    signaturePngBase64: normalizedSignature.ref?.uri ?? null,
+                    pdfUri:
+                      typeof record.pdfUri === "string" && record.pdfUri.trim().length > 0
+                        ? record.pdfUri
+                        : null,
+                  });
+                } catch {
+                  skippedRecordCount += 1;
+                }
+
+                if (index > 0 && index % SIGNATURE_MIGRATION_BATCH_SIZE === 0) {
+                  await yieldToEventLoop();
                 }
               }
+
+              normalizedAttendance.sort(
+                (left, right) =>
+                  new Date(right.startAt).getTime() - new Date(left.startAt).getTime(),
+              );
+              setAttendanceRecords(normalizedAttendance);
+
+              const shouldPersistAttendance =
+                parsedAttendance.length > MAX_BOOTSTRAP_ATTENDANCE_RECORDS ||
+                droppedSignatureCount > 0 ||
+                migratedSignatureCount > 0 ||
+                skippedRecordCount > 0 ||
+                !migrationDone;
+
+              if (shouldPersistAttendance) {
+                await AsyncStorage.setItem(attendanceStorage, JSON.stringify(normalizedAttendance));
+              }
+              if (!migrationDone) {
+                await AsyncStorage.setItem(attendanceSignatureMigrationStorage, "true");
+              }
+
+              const recoveryMessages: string[] = [];
+              if (migratedSignatureCount > 0) {
+                recoveryMessages.push(`migrated ${migratedSignatureCount} signature file(s)`);
+              }
+              if (droppedSignatureCount > 0) {
+                recoveryMessages.push(`dropped ${droppedSignatureCount} invalid signature(s)`);
+              }
+              if (missingFileSignatureCount > 0) {
+                recoveryMessages.push(`${missingFileSignatureCount} signature file(s) missing`);
+              }
+              if (skippedRecordCount > 0) {
+                recoveryMessages.push(`skipped ${skippedRecordCount} corrupt record(s)`);
+              }
+              if (recoveryMessages.length > 0) {
+                setAttendanceStatus(`Recovered local data: ${recoveryMessages.join("; ")}.`);
+              }
+
               const latestOpenRecord = normalizedAttendance.find((record) => !record.endAt) ?? null;
               if (latestOpenRecord) {
                 setActiveAttendance(latestOpenRecord);
@@ -7806,6 +8011,7 @@ export default function App() {
     modeStorage,
     sponsorUiPrefsStorage,
     attendanceStorage,
+    attendanceSignatureMigrationStorage,
     meetingPlansStorage,
     setupCompleteStorage,
     sobrietyDateStorage,
@@ -7819,6 +8025,7 @@ export default function App() {
     fetchSponsorConfig,
     refreshMeetings,
     requestLocationPermission,
+    signatureStorageSubdirectory,
   ]);
 
   useEffect(() => {
