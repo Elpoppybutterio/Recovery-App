@@ -355,6 +355,9 @@ const SIGNATURE_PROMPT_AFTER_MS = SIGNATURE_PROMPT_AFTER_MINUTES * 60 * 1000;
 const SIGNATURE_WINDOW_HELP_TEXT =
   "Signature is available from meeting start until 90 minutes after start.";
 const MAX_SIGNATURE_POINTS_FOR_STORAGE = 1400;
+const MAX_SIGNATURE_PAYLOAD_CHARS = 120_000;
+const MAX_BOOTSTRAP_ATTENDANCE_RAW_CHARS = 4_000_000;
+const MAX_BOOTSTRAP_ATTENDANCE_RECORDS = 1200;
 const ATTENDANCE_STORAGE_KEY_PREFIX = "recovery:verifiedAttendance:";
 const MEETING_PLAN_STORAGE_KEY_PREFIX = "recovery:meetingPlans:";
 const NOTIFICATION_STORAGE_KEY_PREFIX = "recovery:notificationIds:";
@@ -1376,6 +1379,24 @@ function looksLikeSvgDataUri(value: string): boolean {
 
 function looksLikeInlineSvgSignature(value: string): boolean {
   return looksLikeSvgMarkup(value) || looksLikeSvgDataUri(value);
+}
+
+function sanitizeSignaturePayload(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_SIGNATURE_PAYLOAD_CHARS) {
+    return null;
+  }
+  if (looksLikeFileUri(trimmed) || looksLikeInlineSvgSignature(trimmed)) {
+    return trimmed;
+  }
+  const cleanedBase64 = trimmed.replace(/[^A-Za-z0-9+/=]/g, "");
+  if (cleanedBase64.length === 0 || cleanedBase64.length > MAX_SIGNATURE_PAYLOAD_CHARS) {
+    return null;
+  }
+  return cleanedBase64;
 }
 
 function invalidMeetingCoordsReason(lat: number | null, lng: number | null): string | null {
@@ -6273,11 +6294,17 @@ export default function App() {
       return;
     }
 
+    const sanitizedSignature = sanitizeSignaturePayload(signatureSvgMarkup);
+    if (!sanitizedSignature) {
+      setAttendanceStatus("Signature payload is too large. Clear and sign again.");
+      return;
+    }
+
     if (targetActiveAttendance) {
       const nowIso = new Date().toISOString();
       const next: AttendanceRecord = {
         ...targetActiveAttendance,
-        signaturePngBase64: signatureSvgMarkup,
+        signaturePngBase64: sanitizedSignature,
         signaturePromptShown: true,
         chairName:
           signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
@@ -6346,7 +6373,7 @@ export default function App() {
       chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
       signatureCapturedAtIso: nowIso,
       calendarEventId: null,
-      signaturePngBase64: signatureSvgMarkup,
+      signaturePngBase64: sanitizedSignature,
       pdfUri: null,
     };
 
@@ -7402,10 +7429,10 @@ export default function App() {
     bootstrapStartedRef.current = true;
 
     void (async () => {
-      const position = await requestLocationPermission();
-      await refreshMeetings({ location: position });
-
       try {
+        const position = await requestLocationPermission();
+        await refreshMeetings({ location: position });
+
         const [
           modeRaw,
           sponsorUiPrefsRaw,
@@ -7452,72 +7479,94 @@ export default function App() {
         }
 
         if (attendanceRaw) {
-          const parsedAttendance = JSON.parse(attendanceRaw) as AttendanceRecord[];
-          if (Array.isArray(parsedAttendance)) {
-            const normalizedAttendance = parsedAttendance
-              .map((record) => ({
-                ...record,
-                inactive: Boolean(record.inactive),
-                signaturePromptShown: Boolean(record.signaturePromptShown),
-                chairName:
-                  typeof record.chairName === "string" && record.chairName.trim().length > 0
-                    ? record.chairName.trim()
-                    : null,
-                chairRole:
-                  typeof record.chairRole === "string" && record.chairRole.trim().length > 0
-                    ? record.chairRole.trim()
-                    : null,
-                signatureCapturedAtIso:
-                  typeof record.signatureCapturedAtIso === "string"
-                    ? record.signatureCapturedAtIso
-                    : null,
-                signaturePngBase64:
-                  typeof record.signaturePngBase64 === "string" &&
-                  record.signaturePngBase64.trim().length > 0
-                    ? record.signaturePngBase64.trim()
-                    : null,
-                meetingDayOfWeek: normalizeMeetingDayOfWeek(record.meetingDayOfWeek),
-                calendarEventId:
-                  typeof record.calendarEventId === "string" && record.calendarEventId.length > 0
-                    ? record.calendarEventId
-                    : null,
-                leaveNotificationId:
-                  typeof record.leaveNotificationId === "string" &&
-                  record.leaveNotificationId.length > 0
-                    ? record.leaveNotificationId
-                    : null,
-                leaveNotificationAtIso:
-                  typeof record.leaveNotificationAtIso === "string" &&
-                  record.leaveNotificationAtIso.trim().length > 0
-                    ? record.leaveNotificationAtIso
-                    : null,
-                meetingLat: asFiniteNumber(record.meetingLat) ?? null,
-                meetingLng: asFiniteNumber(record.meetingLng) ?? null,
-                meetingGeoStatus:
-                  normalizeMeetingGeoStatus(record.meetingGeoStatus) ??
-                  (isValidLatLng(record.meetingLat, record.meetingLng) ? "verified" : "missing"),
-                meetingGeoSource: normalizeMeetingGeoSource(record.meetingGeoSource) ?? "unknown",
-                meetingGeoReason:
-                  typeof record.meetingGeoReason === "string" &&
-                  record.meetingGeoReason.trim().length > 0
-                    ? record.meetingGeoReason
-                    : null,
-                startLat: asFiniteNumber(record.startLat) ?? null,
-                startLng: asFiniteNumber(record.startLng) ?? null,
-                endLat: asFiniteNumber(record.endLat) ?? null,
-                endLng: asFiniteNumber(record.endLng) ?? null,
-              }))
-              .sort(
-                (left, right) =>
-                  new Date(right.startAt).getTime() - new Date(left.startAt).getTime(),
-              );
-            setAttendanceRecords(normalizedAttendance);
-            const latestOpenRecord = normalizedAttendance.find((record) => !record.endAt) ?? null;
-            if (latestOpenRecord) {
-              setActiveAttendance(latestOpenRecord);
-              setAttendanceStatus(
-                `Attendance in progress for ${latestOpenRecord.meetingName}. End meeting when complete.`,
-              );
+          if (attendanceRaw.length > MAX_BOOTSTRAP_ATTENDANCE_RAW_CHARS) {
+            await AsyncStorage.removeItem(attendanceStorage);
+            setAttendanceStatus(
+              "Local attendance cache was reset because it exceeded size limits.",
+            );
+          } else {
+            const parsedAttendance = JSON.parse(attendanceRaw) as AttendanceRecord[];
+            if (Array.isArray(parsedAttendance)) {
+              let droppedSignatureCount = 0;
+              const normalizedAttendance = parsedAttendance
+                .slice(0, MAX_BOOTSTRAP_ATTENDANCE_RECORDS)
+                .map((record) => ({
+                  ...record,
+                  inactive: Boolean(record.inactive),
+                  signaturePromptShown: Boolean(record.signaturePromptShown),
+                  chairName:
+                    typeof record.chairName === "string" && record.chairName.trim().length > 0
+                      ? record.chairName.trim()
+                      : null,
+                  chairRole:
+                    typeof record.chairRole === "string" && record.chairRole.trim().length > 0
+                      ? record.chairRole.trim()
+                      : null,
+                  signatureCapturedAtIso:
+                    typeof record.signatureCapturedAtIso === "string"
+                      ? record.signatureCapturedAtIso
+                      : null,
+                  signaturePngBase64: (() => {
+                    const nextSignature = sanitizeSignaturePayload(record.signaturePngBase64);
+                    if (record.signaturePngBase64 && !nextSignature) {
+                      droppedSignatureCount += 1;
+                    }
+                    return nextSignature;
+                  })(),
+                  meetingDayOfWeek: normalizeMeetingDayOfWeek(record.meetingDayOfWeek),
+                  calendarEventId:
+                    typeof record.calendarEventId === "string" && record.calendarEventId.length > 0
+                      ? record.calendarEventId
+                      : null,
+                  leaveNotificationId:
+                    typeof record.leaveNotificationId === "string" &&
+                    record.leaveNotificationId.length > 0
+                      ? record.leaveNotificationId
+                      : null,
+                  leaveNotificationAtIso:
+                    typeof record.leaveNotificationAtIso === "string" &&
+                    record.leaveNotificationAtIso.trim().length > 0
+                      ? record.leaveNotificationAtIso
+                      : null,
+                  meetingLat: asFiniteNumber(record.meetingLat) ?? null,
+                  meetingLng: asFiniteNumber(record.meetingLng) ?? null,
+                  meetingGeoStatus:
+                    normalizeMeetingGeoStatus(record.meetingGeoStatus) ??
+                    (isValidLatLng(record.meetingLat, record.meetingLng) ? "verified" : "missing"),
+                  meetingGeoSource: normalizeMeetingGeoSource(record.meetingGeoSource) ?? "unknown",
+                  meetingGeoReason:
+                    typeof record.meetingGeoReason === "string" &&
+                    record.meetingGeoReason.trim().length > 0
+                      ? record.meetingGeoReason
+                      : null,
+                  startLat: asFiniteNumber(record.startLat) ?? null,
+                  startLng: asFiniteNumber(record.startLng) ?? null,
+                  endLat: asFiniteNumber(record.endLat) ?? null,
+                  endLng: asFiniteNumber(record.endLng) ?? null,
+                }))
+                .sort(
+                  (left, right) =>
+                    new Date(right.startAt).getTime() - new Date(left.startAt).getTime(),
+                );
+              setAttendanceRecords(normalizedAttendance);
+              if (
+                parsedAttendance.length > MAX_BOOTSTRAP_ATTENDANCE_RECORDS ||
+                droppedSignatureCount > 0
+              ) {
+                await AsyncStorage.setItem(attendanceStorage, JSON.stringify(normalizedAttendance));
+                if (droppedSignatureCount > 0) {
+                  setAttendanceStatus(
+                    `Recovered local data: removed ${droppedSignatureCount} invalid signature payload(s).`,
+                  );
+                }
+              }
+              const latestOpenRecord = normalizedAttendance.find((record) => !record.endAt) ?? null;
+              if (latestOpenRecord) {
+                setActiveAttendance(latestOpenRecord);
+                setAttendanceStatus(
+                  `Attendance in progress for ${latestOpenRecord.meetingName}. End meeting when complete.`,
+                );
+              }
             }
           }
         }
