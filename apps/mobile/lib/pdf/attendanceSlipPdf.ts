@@ -705,7 +705,9 @@ function buildAttendancePage(
   totalPages: number,
 ): string {
   const rowCountPerPage = 22;
-  const pageRows = pageRecords.map((entry) => buildAttendanceRow(entry, forceOnFileFallback)).join("\n");
+  const pageRows = pageRecords
+    .map((entry) => buildAttendanceRow(entry, forceOnFileFallback))
+    .join("\n");
   const blankRows = buildBlankRows(Math.max(0, rowCountPerPage - pageRecords.length));
   const participantName = escapeHtml(asSafeText(profile.participantName, ""));
   const officerName = escapeHtml(asSafeText(profile.officerName, ""));
@@ -907,7 +909,6 @@ export async function generateAttendanceSlipPdf(
 
   const printModule = loadModule<PrintModule>("expo-print");
   const fileSystemModule = loadModule<FileSystemModule>("expo-file-system");
-  const imageManipulatorModule = loadModule<ImageManipulatorModule>("expo-image-manipulator");
 
   if (!printModule || !fileSystemModule) {
     throw new Error(
@@ -928,15 +929,11 @@ export async function generateAttendanceSlipPdf(
     Math.floor(options?.maxRecordsPerChunk ?? DEFAULT_RECORDS_PER_CHUNK),
   );
 
-  const preparedRecords = await prepareRecordsForExport(
-    records,
-    fileSystemModule,
-    imageManipulatorModule,
-    outputDirectory,
-  );
-  const recordChunks = buildChunkPlan(preparedRecords, preferredChunkSize).map((chunk) =>
-    enforceChunkSignatureBudget(chunk),
-  );
+  // iOS stability mode:
+  // Avoid native signature image processing during export (this has been a crash hot path
+  // on some devices). We still export all meeting rows and mark signatures as "On file".
+  const preparedRecords = prepareRecordsForPrint(records);
+  const recordChunks = buildChunkPlan(preparedRecords, preferredChunkSize);
   const outputUris: string[] = [];
   const chunkEmbeddedBytes: number[] = [];
   const chunkEmbeddedCount: number[] = [];
@@ -955,15 +952,8 @@ export async function generateAttendanceSlipPdf(
       totalRecords: preparedRecords.length,
     });
 
-    let printed = null as { uri: string } | null;
-    try {
-      const html = buildAttendanceHtml(chunkRecordsForPdf, profile, false);
-      printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
-    } catch {
-      // Retry this chunk in explicit fallback mode so export succeeds without crashing.
-      const fallbackHtml = buildAttendanceHtml(chunkRecordsForPdf, profile, true);
-      printed = await printModule.printToFileAsync({ html: fallbackHtml, width: 612, height: 792 });
-    }
+    const html = buildAttendanceHtml(chunkRecordsForPdf, profile, true);
+    const printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
 
     const chunkFileName =
       recordChunks.length === 1
