@@ -1665,6 +1665,7 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
 }
 
 export default function App() {
+  const iosLaunchSafeMode = Platform.OS === "ios";
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
   const appEnvFromProcess = typeof process.env.APP_ENV === "string" ? process.env.APP_ENV : "";
   const appEnvFromConfig = typeof extra.appEnv === "string" ? extra.appEnv : "";
@@ -3102,6 +3103,9 @@ export default function App() {
   }, []);
 
   const refreshDeviceLocationOnFocus = useCallback(async (): Promise<LocationStamp | null> => {
+    if (iosLaunchSafeMode) {
+      return null;
+    }
     const permissionState = await readLocationPermissionStates();
     setLocationPermission(permissionState.permissionStatus);
     setLocationAlwaysPermission(permissionState.alwaysPermissionStatus);
@@ -3123,7 +3127,7 @@ export default function App() {
       await refreshMeetingsRef.current?.({ location: position });
     }
     return position;
-  }, [readCurrentLocation]);
+  }, [iosLaunchSafeMode, readCurrentLocation]);
 
   const refreshDiagnosticsLocation = useCallback(async () => {
     const permissions = await readLocationPermissionStates();
@@ -7556,10 +7560,16 @@ export default function App() {
   }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter, updateMapCenter]);
 
   useEffect(() => {
+    if (iosLaunchSafeMode) {
+      return;
+    }
     void refreshDeviceLocationOnFocus();
-  }, [refreshDeviceLocationOnFocus]);
+  }, [iosLaunchSafeMode, refreshDeviceLocationOnFocus]);
 
   useEffect(() => {
+    if (iosLaunchSafeMode) {
+      return;
+    }
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         void refreshDeviceLocationOnFocus();
@@ -7568,7 +7578,7 @@ export default function App() {
     return () => {
       subscription.remove();
     };
-  }, [refreshDeviceLocationOnFocus]);
+  }, [iosLaunchSafeMode, refreshDeviceLocationOnFocus]);
 
   useEffect(() => {
     if (bootstrapStartedRef.current) {
@@ -7578,8 +7588,12 @@ export default function App() {
 
     void (async () => {
       try {
-        const position = await requestLocationPermission();
-        await refreshMeetings({ location: position });
+        if (iosLaunchSafeMode) {
+          await refreshMeetings();
+        } else {
+          const position = await requestLocationPermission();
+          await refreshMeetings({ location: position });
+        }
 
         const [
           modeRaw,
@@ -8052,6 +8066,7 @@ export default function App() {
     refreshMeetings,
     requestLocationPermission,
     signatureStorageSubdirectory,
+    iosLaunchSafeMode,
   ]);
 
   useEffect(() => {
