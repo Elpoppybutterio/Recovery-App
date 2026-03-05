@@ -17,7 +17,7 @@
         "ITSAppUsesNonExemptEncryption": false
       },
       "buildNumber": "1",
-      "runtimeVersion": "1.0.0"
+      "runtimeVersion": "1.0.1"
     },
     "android": {
       "adaptiveIcon": {
@@ -53,6 +53,6 @@
     "updates": {
       "url": "https://u.expo.dev/b4ee8eed-aaa7-4aa9-870a-e796c31c8f51"
     },
-    "runtimeVersion": "1.0.0"
+    "runtimeVersion": "1.0.1"
   }
 }
