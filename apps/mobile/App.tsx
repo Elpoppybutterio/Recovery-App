@@ -414,6 +414,7 @@ const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }
   { code: "SAT", label: "Sat", jsDay: 6 },
   { code: "SUN", label: "Sun", jsDay: 0 },
 ];
+const WEEKDAY_SHORT_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const WEEKDAY_CODES = WEEKDAY_OPTIONS.map((item) => item.code);
 
 const SPONSOR_REPEAT_OPTIONS: Array<{ value: RepeatPreset; label: string }> = [
@@ -891,9 +892,10 @@ function createDayOptions(): DayOption[] {
   for (let offset = 0; offset < 7; offset += 1) {
     const next = new Date(today);
     next.setDate(today.getDate() + offset);
+    const weekdayShort = WEEKDAY_SHORT_LABELS[next.getDay()] ?? "Day";
     result.push({
       offset,
-      label: offset === 0 ? "Today" : next.toLocaleDateString(undefined, { weekday: "short" }),
+      label: offset === 0 ? "Today" : weekdayShort,
       dayOfWeek: next.getDay(),
       date: next,
       dateKey: dateKeyForDate(next),

@@ -134,12 +134,33 @@ function sanitizePdfFileName(fileName: string): string {
   return stripped.toLowerCase().endsWith(".pdf") ? stripped : `${stripped}.pdf`;
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function formatDateTimeLocal(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    return "";
+  }
+  const month = pad2(value.getMonth() + 1);
+  const day = pad2(value.getDate());
+  const year = value.getFullYear();
+  const hour24 = value.getHours();
+  const minute = pad2(value.getMinutes());
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${month}/${day}/${year} ${hour12}:${minute} ${meridiem}`;
+}
+
 function formatDateOnly(valueIso: string): string {
   const date = new Date(valueIso);
   if (Number.isNaN(date.getTime())) {
     return valueIso;
   }
-  return date.toLocaleDateString();
+  const month = pad2(date.getMonth() + 1);
+  const day = pad2(date.getDate());
+  const year = date.getFullYear();
+  return `${month}/${day}/${year}`;
 }
 
 function formatTimeOnly(valueIso: string): string {
@@ -147,7 +168,11 @@ function formatTimeOnly(valueIso: string): string {
   if (Number.isNaN(date.getTime())) {
     return "";
   }
-  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const hour24 = date.getHours();
+  const minute = pad2(date.getMinutes());
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${hour12}:${minute} ${meridiem}`;
 }
 
 function formatDuration(durationSeconds: number | null): string {
@@ -226,7 +251,7 @@ function buildAttendanceHtml(
 ): string {
   const participantName = escapeHtml(asSafeText(profile.participantName, ""));
   const officerName = escapeHtml(asSafeText(profile.officerName, ""));
-  const generatedAt = escapeHtml(new Date().toLocaleString());
+  const generatedAt = escapeHtml(formatDateTimeLocal(new Date()));
 
   const rows = records.map((entry) => buildAttendanceRow(entry)).join("\n");
 
