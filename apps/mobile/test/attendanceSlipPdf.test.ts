@@ -11,7 +11,7 @@ describe("attendance slip html", () => {
         startAtIso: "2026-03-05T01:00:00.000Z",
         endAtIso: "2026-03-05T01:45:00.000Z",
         durationSeconds: 45 * 60,
-        signatureSvgBase64: "file:///documents/signatures/att-1.svg",
+        signatureRefUri: "file:///documents/signatures/att-1.svg",
         chairName: "Chair Name",
         chairRole: "Chair",
         signatureCapturedAtIso: "2026-03-05T01:45:00.000Z",

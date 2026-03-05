@@ -14,7 +14,9 @@ export type AttendanceSlipRecord = {
   startAtIso: string;
   endAtIso: string | null;
   durationSeconds: number | null;
-  signatureSvgBase64: string | null;
+  signatureRefUri: string | null;
+  // Legacy compatibility for historical callers.
+  legacySignatureSvgBase64?: string | null;
   chairName?: string | null;
   chairRole?: string | null;
   signatureCapturedAtIso?: string | null;
@@ -93,6 +95,9 @@ type PreparedRecord = {
   chairRole: string | null;
   signatureState: SignatureRenderState;
 };
+
+let attendanceSlipExportInFlight = false;
+let attendanceSlipShareInFlight = false;
 
 function loadModule<T>(name: string): T | null {
   try {
@@ -318,21 +323,22 @@ async function resolveSignatureState(
   record: AttendanceSlipRecord,
   subdirectory: string,
 ): Promise<SignatureRenderState> {
-  if (
-    typeof record.signatureSvgBase64 !== "string" ||
-    record.signatureSvgBase64.trim().length === 0
-  ) {
+  const rawSignature = [record.signatureRefUri, record.legacySignatureSvgBase64]
+    .find((entry) => typeof entry === "string" && entry.trim().length > 0)
+    ?.trim();
+  if (!rawSignature) {
     return { state: "unsigned" };
   }
   if (!fileSystemModule) {
     return { state: "on_file" };
   }
 
-  const normalized = await normalizeSignatureValueToRef(record.signatureSvgBase64, {
+  const shouldVerifyFileExists = rawSignature.startsWith("file://") || rawSignature.startsWith("/");
+  const normalized = await normalizeSignatureValueToRef(rawSignature, {
     fileSystem: fileSystemModule,
     recordId: asSafeText(record.id, "signature"),
     subdirectory,
-    verifyFileExists: true,
+    verifyFileExists: shouldVerifyFileExists,
   });
   if (!normalized.ref) {
     return { state: "unsigned" };
@@ -399,63 +405,72 @@ export async function generateAttendanceSlipPdf(
   profile: AttendanceSlipUserProfile,
   options?: GenerateAttendanceSlipOptions,
 ): Promise<string[]> {
-  if (!Array.isArray(records) || records.length === 0) {
-    throw new Error("No attendance records selected for export.");
+  if (attendanceSlipExportInFlight) {
+    throw new Error("Export already in progress.");
   }
+  attendanceSlipExportInFlight = true;
 
-  const printModule = loadModule<PrintModule>("expo-print");
-  const fileSystemModule = loadModule<FileSystemModule>("expo-file-system");
-
-  if (!printModule || !fileSystemModule) {
-    throw new Error(
-      "PDF export module unavailable. Install expo-print and expo-file-system then restart Metro.",
-    );
-  }
-
-  const outputDirectory = fileSystemModule.cacheDirectory ?? fileSystemModule.documentDirectory;
-  if (!outputDirectory) {
-    throw new Error("No writable directory available for attendance export.");
-  }
-
-  const defaultFileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
-  const fileName = sanitizePdfFileName(options?.fileName ?? defaultFileName);
-
-  options?.onProgress?.({
-    chunkIndex: 1,
-    chunkCount: 1,
-    processedRecords: 0,
-    totalRecords: records.length,
-  });
-
-  const preparedRecords = await prepareRecordsForExport(records, fileSystemModule);
-  const html = buildAttendanceHtml(preparedRecords, profile);
-
-  let printed: { uri: string };
   try {
-    printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
-  } catch {
-    throw new Error("PDF export failed during print rendering.");
-  }
-
-  const targetUri = `${outputDirectory}${fileName}`;
-  try {
-    const existing = await fileSystemModule.getInfoAsync(targetUri);
-    if (existing.exists) {
-      await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
+    if (!Array.isArray(records) || records.length === 0) {
+      throw new Error("No attendance records selected for export.");
     }
-    await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
-  } catch {
-    throw new Error("PDF export failed while writing output file.");
+
+    const printModule = loadModule<PrintModule>("expo-print");
+    const fileSystemModule = loadModule<FileSystemModule>("expo-file-system");
+
+    if (!printModule || !fileSystemModule) {
+      throw new Error(
+        "PDF export module unavailable. Install expo-print and expo-file-system then restart Metro.",
+      );
+    }
+
+    const outputDirectory = fileSystemModule.documentDirectory ?? fileSystemModule.cacheDirectory;
+    if (!outputDirectory) {
+      throw new Error("No writable directory available for attendance export.");
+    }
+
+    const defaultFileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
+    const fileName = sanitizePdfFileName(options?.fileName ?? defaultFileName);
+
+    options?.onProgress?.({
+      chunkIndex: 1,
+      chunkCount: 1,
+      processedRecords: 0,
+      totalRecords: records.length,
+    });
+
+    const preparedRecords = await prepareRecordsForExport(records, fileSystemModule);
+    const html = buildAttendanceHtml(preparedRecords, profile);
+
+    let printed: { uri: string };
+    try {
+      printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
+    } catch {
+      throw new Error("PDF export failed during print rendering.");
+    }
+
+    const targetUri = `${outputDirectory}${fileName}`;
+    try {
+      const existing = await fileSystemModule.getInfoAsync(targetUri);
+      if (existing.exists) {
+        await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
+      }
+      await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
+    } catch {
+      throw new Error("PDF export failed while writing output file.");
+    }
+
+    options?.onProgress?.({
+      chunkIndex: 1,
+      chunkCount: 1,
+      processedRecords: records.length,
+      totalRecords: records.length,
+    });
+
+    return [targetUri];
+  } finally {
+    attendanceSlipExportInFlight = false;
   }
-
-  options?.onProgress?.({
-    chunkIndex: 1,
-    chunkCount: 1,
-    processedRecords: records.length,
-    totalRecords: records.length,
-  });
-
-  return [targetUri];
 }
 
 export async function printAttendanceSlipPdf(
@@ -480,44 +495,53 @@ export async function shareAttendanceSlipPdf(
   uriOrUris: string | string[],
   fileName?: string,
 ): Promise<void> {
-  const sharingModule = loadModule<SharingModule>("expo-sharing");
-  if (!sharingModule) {
-    throw new Error("Share module unavailable. Install expo-sharing then restart Metro.");
+  if (attendanceSlipShareInFlight) {
+    throw new Error("Share already in progress.");
   }
+  attendanceSlipShareInFlight = true;
 
-  const uris = Array.isArray(uriOrUris)
-    ? uriOrUris.filter((uri) => uri.trim().length > 0)
-    : [uriOrUris];
-  if (uris.length === 0) {
-    throw new Error("No exported PDF file available to share.");
-  }
-
-  let canShare = false;
   try {
-    canShare = await sharingModule.isAvailableAsync();
-  } catch {
-    throw new Error("Share sheet unavailable on this device.");
-  }
-  if (!canShare) {
-    throw new Error("Share sheet unavailable on this device.");
-  }
-
-  for (let index = 0; index < uris.length; index += 1) {
-    const uri = uris[index];
-    const dialogTitle =
-      uris.length === 1
-        ? (fileName ?? ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX)
-        : `${fileName ?? ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} (${index + 1}/${uris.length})`;
-
-    try {
-      await sharingModule.shareAsync(uri, {
-        UTI: "com.adobe.pdf",
-        mimeType: "application/pdf",
-        dialogTitle,
-      });
-    } catch {
-      throw new Error("PDF export failed while opening share sheet.");
+    const sharingModule = loadModule<SharingModule>("expo-sharing");
+    if (!sharingModule) {
+      throw new Error("Share module unavailable. Install expo-sharing then restart Metro.");
     }
+
+    const uris = Array.isArray(uriOrUris)
+      ? uriOrUris.filter((uri) => uri.trim().length > 0)
+      : [uriOrUris];
+    if (uris.length === 0) {
+      throw new Error("No exported PDF file available to share.");
+    }
+
+    let canShare = false;
+    try {
+      canShare = await sharingModule.isAvailableAsync();
+    } catch {
+      throw new Error("Share sheet unavailable on this device.");
+    }
+    if (!canShare) {
+      throw new Error("Share sheet unavailable on this device.");
+    }
+
+    for (let index = 0; index < uris.length; index += 1) {
+      const uri = uris[index];
+      const dialogTitle =
+        uris.length === 1
+          ? (fileName ?? ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX)
+          : `${fileName ?? ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} (${index + 1}/${uris.length})`;
+
+      try {
+        await sharingModule.shareAsync(uri, {
+          UTI: "com.adobe.pdf",
+          mimeType: "application/pdf",
+          dialogTitle,
+        });
+      } catch {
+        throw new Error("PDF export failed while opening share sheet.");
+      }
+    }
+  } finally {
+    attendanceSlipShareInFlight = false;
   }
 }
 
@@ -536,7 +560,9 @@ export function buildAttendanceSlipHtmlForTest(records: AttendanceSlipRecord[]):
     chairName: record.chairName ?? null,
     chairRole: record.chairRole ?? null,
     signatureState:
-      typeof record.signatureSvgBase64 === "string" && record.signatureSvgBase64.trim().length > 0
+      (typeof record.signatureRefUri === "string" && record.signatureRefUri.trim().length > 0) ||
+      (typeof record.legacySignatureSvgBase64 === "string" &&
+        record.legacySignatureSvgBase64.trim().length > 0)
         ? { state: "on_file" }
         : { state: "unsigned" },
   }));

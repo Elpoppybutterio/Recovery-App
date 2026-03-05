@@ -1,6 +1,7 @@
 import type { ConfigContext, ExpoConfig } from "expo/config";
 
 type AppEnv = "development" | "preview" | "production";
+type JsEngine = "hermes" | "jsc";
 
 const DEFAULT_PROD_BUNDLE_ID = "com.rabbithole.soberai";
 const DEFAULT_RENDER_API_URL = "https://sober-ai-api.onrender.com";
@@ -79,12 +80,30 @@ function resolveApiUrl(appEnv: AppEnv): string {
   return "";
 }
 
+function resolveJsEngine(): JsEngine {
+  const raw = process.env.EXPO_JS_ENGINE?.trim().toLowerCase();
+  if (raw === "jsc") {
+    return "jsc";
+  }
+  return "hermes";
+}
+
+function resolveNewArchEnabled(): boolean {
+  const raw = process.env.EXPO_NEW_ARCH_ENABLED?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "no") {
+    return false;
+  }
+  return true;
+}
+
 export default ({ config }: ConfigContext): ExpoConfig => {
   const appEnv = resolveAppEnv(process.env.APP_ENV);
   const bundleIdentifier = resolveBundleIdentifier(appEnv);
   const iosBuildNumber = resolveIosBuildNumber(appEnv);
   const androidVersionCode = resolveAndroidVersionCode(appEnv);
   const apiUrl = resolveApiUrl(appEnv);
+  const jsEngine = resolveJsEngine();
+  const newArchEnabled = resolveNewArchEnabled();
   const updatesConfig =
     appEnv === "production"
       ? config.updates
@@ -103,6 +122,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     orientation: "portrait",
     scheme: APP_SCHEME,
     userInterfaceStyle: "light",
+    jsEngine,
+    newArchEnabled,
     ios: {
       ...config.ios,
       icon: "./assets/icon.png",
@@ -116,7 +137,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "We use your location to show distance to meetings and enable geofence features if you turn them on.",
         NSLocationAlwaysUsageDescription:
           "We use your location to show distance to meetings and enable geofence features if you turn them on.",
-        UIBackgroundModes: ["location"],
+        UIBackgroundModes: ["location", "fetch", "remote-notification"],
       },
     },
     android: {

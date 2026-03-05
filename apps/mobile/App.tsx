@@ -41,15 +41,11 @@ import {
   type MeetingGeoStatus,
 } from "./lib/geo/geoTrust";
 import {
-  ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
-  generateAttendanceSlipPdf,
-  shareAttendanceSlipPdf,
-} from "./lib/pdf/attendanceSlipPdf";
-import {
   estimateBase64Bytes as estimateSignatureBase64Bytes,
   loadSignatureFileSystemModule,
   looksLikeFileUri as looksLikeSignatureFileUri,
   normalizeSignatureValueToRef,
+  type SignatureRef,
 } from "./lib/signatures/signatureStore";
 import { exportMorningRoutinePdf } from "./lib/pdf/exportMorningRoutinePdf";
 import { exportNightlyInventoryPdf } from "./lib/pdf/exportNightlyInventoryPdf";
@@ -212,7 +208,9 @@ type AttendanceRecord = {
   calendarEventId?: string | null;
   leaveNotificationId?: string | null;
   leaveNotificationAtIso?: string | null;
-  signaturePngBase64: string | null;
+  signatureRef?: SignatureRef | null;
+  // Legacy field kept for one-way migration from historical local storage.
+  signaturePngBase64?: string | null;
   pdfUri: string | null;
 };
 
@@ -385,6 +383,7 @@ const SPONSOR_ENABLED_AT_STORAGE_KEY_PREFIX = "recovery:sponsorEnabledAt:";
 const NINETY_DAY_GOAL_STORAGE_KEY_PREFIX = "recovery:ninetyDayGoal:";
 const SOBRIETY_MILESTONE_EVENT_IDS_STORAGE_KEY_PREFIX = "recovery:sobrietyMilestoneEventIds:";
 const SOBRIETY_MILESTONE_SYNC_DATE_STORAGE_KEY_PREFIX = "recovery:sobrietyMilestoneSyncDate:";
+const BOOT_GUARD_STORAGE_KEY_PREFIX = "recovery:bootGuard:";
 
 const SPONSOR_NOTIFICATION_CATEGORY_ID = "SPONSOR_CALL";
 const DRIVE_NOTIFICATION_CATEGORY_ID = "DRIVE_LEAVE";
@@ -404,6 +403,7 @@ const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for 
 const DEFAULT_MAP_LATITUDE_DELTA = 0.22;
 const DEFAULT_MAP_LONGITUDE_DELTA = 0.22;
 const ATTENDANCE_EXPORT_MAX_RECORDS = 25;
+const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
 
 const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }> = [
   { code: "MON", label: "Mon", jsDay: 1 },
@@ -805,7 +805,7 @@ function validateAttendanceRecord(
     return invalid(`Duration must be at least ${MIN_VALID_MEETING_MINUTES} minutes`);
   }
 
-  if (requiresSignature && !record.signaturePngBase64) {
+  if (requiresSignature && !hasAttendanceSignature(record)) {
     return invalid("Signature required");
   }
 
@@ -1186,6 +1186,10 @@ function ninetyDayGoalStorageKey(userId: string): string {
   return `${NINETY_DAY_GOAL_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+function bootGuardStorageKey(userId: string): string {
+  return `${BOOT_GUARD_STORAGE_KEY_PREFIX}${userId}`;
+}
+
 function sobrietyMilestoneEventIdsStorageKey(userId: string): string {
   return `${SOBRIETY_MILESTONE_EVENT_IDS_STORAGE_KEY_PREFIX}${userId}`;
 }
@@ -1404,6 +1408,32 @@ function looksLikeSvgDataUri(value: string): boolean {
 
 function looksLikeInlineSvgSignature(value: string): boolean {
   return looksLikeSvgMarkup(value) || looksLikeSvgDataUri(value);
+}
+
+function normalizeSignatureUri(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function getAttendanceSignatureUri(record: AttendanceRecord): string | null {
+  const fromRef = normalizeSignatureUri(record.signatureRef?.uri);
+  if (fromRef) {
+    return fromRef;
+  }
+  return normalizeSignatureUri(record.signaturePngBase64);
+}
+
+function hasAttendanceSignature(record: AttendanceRecord): boolean {
+  return getAttendanceSignatureUri(record) !== null;
+}
+
+type AttendanceSlipPdfModule = typeof import("./lib/pdf/attendanceSlipPdf");
+
+async function loadAttendanceSlipPdfModule(): Promise<AttendanceSlipPdfModule> {
+  return import("./lib/pdf/attendanceSlipPdf");
 }
 
 function invalidMeetingCoordsReason(lat: number | null, lng: number | null): string | null {
@@ -1783,6 +1813,7 @@ export default function App() {
     () => ninetyDayGoalStorageKey(devAuthUserId),
     [devAuthUserId],
   );
+  const bootGuardStorage = useMemo(() => bootGuardStorageKey(devAuthUserId), [devAuthUserId]);
   const sobrietyMilestoneEventIdsStorage = useMemo(
     () => sobrietyMilestoneEventIdsStorageKey(devAuthUserId),
     [devAuthUserId],
@@ -2247,8 +2278,7 @@ export default function App() {
     let signatureUriCount = 0;
 
     for (const record of diagnosticsSelectedAttendanceRecords) {
-      const signature =
-        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64 : "";
+      const signature = getAttendanceSignatureUri(record) ?? "";
       const trimmed = signature.trim();
       if (trimmed.length === 0) {
         continue;
@@ -2315,9 +2345,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const signatures = diagnosticsSelectedAttendanceRecords
-      .map((record) =>
-        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64.trim() : "",
-      )
+      .map((record) => getAttendanceSignatureUri(record) ?? "")
       .filter((signature) => signature.length > 0 && looksLikeFileUri(signature));
 
     if (signatures.length === 0) {
@@ -3539,14 +3567,19 @@ export default function App() {
 
   const upsertAttendanceRecord = useCallback(
     (record: AttendanceRecord) => {
+      const normalizedSignatureUri = getAttendanceSignatureUri(record);
       const normalizedRecord: AttendanceRecord = {
         ...record,
         schemaVersion: ATTENDANCE_SCHEMA_VERSION,
-        signaturePngBase64:
-          typeof record.signaturePngBase64 === "string" &&
-          record.signaturePngBase64.trim().length > 0
-            ? record.signaturePngBase64.trim()
-            : null,
+        signatureRef: normalizedSignatureUri
+          ? {
+              uri: normalizedSignatureUri,
+              mimeType: normalizedSignatureUri.toLowerCase().endsWith(".svg")
+                ? "image/svg+xml"
+                : "image/png",
+            }
+          : null,
+        signaturePngBase64: null,
       };
       setAttendanceRecords((previous) => {
         const next = [
@@ -6053,7 +6086,7 @@ export default function App() {
           calendarEventId: null,
           leaveNotificationId: null,
           leaveNotificationAtIso: null,
-          signaturePngBase64: null,
+          signatureRef: null,
           pdfUri: null,
         };
 
@@ -6088,7 +6121,7 @@ export default function App() {
       }
       if (
         meetingSignatureRequired &&
-        !baseRecord.signaturePngBase64 &&
+        !hasAttendanceSignature(baseRecord) &&
         !options?.skipSignaturePrompt
       ) {
         const promptedRecord = baseRecord.signaturePromptShown
@@ -6193,7 +6226,7 @@ export default function App() {
         return;
       }
 
-      if (next.signaturePngBase64) {
+      if (hasAttendanceSignature(next)) {
         setAttendanceStatus("Attendance ended.");
         if (homeScreen === "MEETINGS") {
           setScreen("LIST");
@@ -6371,7 +6404,13 @@ export default function App() {
       const next: AttendanceRecord = {
         ...targetActiveAttendance,
         schemaVersion: ATTENDANCE_SCHEMA_VERSION,
-        signaturePngBase64: persistedSignatureRef,
+        signatureRef: {
+          uri: persistedSignatureRef,
+          mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
+            ? "image/svg+xml"
+            : "image/png",
+        },
+        signaturePngBase64: null,
         signaturePromptShown: true,
         chairName:
           signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
@@ -6441,7 +6480,13 @@ export default function App() {
       chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
       signatureCapturedAtIso: nowIso,
       calendarEventId: null,
-      signaturePngBase64: persistedSignatureRef,
+      signatureRef: {
+        uri: persistedSignatureRef,
+        mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
+          ? "image/svg+xml"
+          : "image/png",
+      },
+      signaturePngBase64: null,
       pdfUri: null,
     };
 
@@ -6495,7 +6540,7 @@ export default function App() {
       startAtIso: record.startAt,
       endAtIso: record.endAt,
       durationSeconds: record.durationSeconds,
-      signatureSvgBase64: record.signaturePngBase64,
+      signatureRefUri: getAttendanceSignatureUri(record),
       chairName: record.chairName ?? null,
       chairRole: record.chairRole ?? null,
       signatureCapturedAtIso: record.signatureCapturedAtIso ?? null,
@@ -6650,8 +6695,7 @@ export default function App() {
         setDiagnosticsExportDryRunStatus(reason);
         return;
       }
-      const signature =
-        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64 : "";
+      const signature = getAttendanceSignatureUri(record) ?? "";
       if (signature.trim().length > 0 && !looksLikeFileUri(signature.trim())) {
         if (looksLikeInlineSvgSignature(signature)) {
           continue;
@@ -6744,7 +6788,15 @@ export default function App() {
         chairRole: "Chairperson",
         signatureCapturedAtIso: now.toISOString(),
         calendarEventId: null,
-        signaturePngBase64: persistedSignatureRef,
+        signatureRef: persistedSignatureRef
+          ? {
+              uri: persistedSignatureRef,
+              mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
+                ? "image/svg+xml"
+                : "image/png",
+            }
+          : null,
+        signaturePngBase64: null,
         pdfUri: null,
       };
 
@@ -6787,8 +6839,9 @@ export default function App() {
     attendanceExportInFlightRef.current = true;
     setExportingPdf(true);
     try {
+      const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
       const payloadRecords = [toAttendanceSlipRecord(activeAttendance)];
-      const exportedUris = await generateAttendanceSlipPdf(
+      const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
         { participantName: devUserDisplayName },
         { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
@@ -6798,7 +6851,10 @@ export default function App() {
           "Export complete. PDF saved in-app (share disabled on iOS stability mode).",
         );
       } else {
-        await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+        await attendanceSlipPdf.shareAttendanceSlipPdf(
+          exportedUris,
+          ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
+        );
       }
       recordLastExportAttempt(true);
       if (Platform.OS !== "ios") {
@@ -6883,8 +6939,9 @@ export default function App() {
     setExportingAttendanceSelectionPdf(true);
     setAttendanceExportProgressLabel(null);
     try {
+      const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
       const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
-      const exportedUris = await generateAttendanceSlipPdf(
+      const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
         { participantName: devUserDisplayName },
         {
@@ -6895,7 +6952,7 @@ export default function App() {
         },
       );
       if (Platform.OS !== "ios") {
-        await shareAttendanceSlipPdf(
+        await attendanceSlipPdf.shareAttendanceSlipPdf(
           exportedUris,
           `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
         );
@@ -6961,8 +7018,9 @@ export default function App() {
       setExportingAttendanceSelectionPdf(true);
       setAttendanceExportProgressLabel(null);
       try {
+        const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
         const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
-        const exportedUris = await generateAttendanceSlipPdf(
+        const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
           payloadRecords,
           { participantName: devUserDisplayName },
           {
@@ -6973,7 +7031,7 @@ export default function App() {
           },
         );
         if (Platform.OS !== "ios") {
-          await shareAttendanceSlipPdf(
+          await attendanceSlipPdf.shareAttendanceSlipPdf(
             exportedUris,
             `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
           );
@@ -7587,16 +7645,73 @@ export default function App() {
     bootstrapStartedRef.current = true;
 
     void (async () => {
-      if (iosLaunchSafeMode) {
+      let recoveredModeFromPreviousCrash = false;
+      let bootstrapCompletedSuccessfully = false;
+      const startedAtIso = new Date().toISOString();
+
+      try {
+        const guardRaw = await AsyncStorage.getItem(bootGuardStorage);
+        if (guardRaw) {
+          const parsedGuard = JSON.parse(guardRaw) as {
+            inProgress?: unknown;
+            lastBootOk?: unknown;
+          };
+          if (parsedGuard?.inProgress === true && parsedGuard?.lastBootOk !== true) {
+            recoveredModeFromPreviousCrash = true;
+          }
+        }
+      } catch {
+        // Ignore guard read failures and continue boot.
+      }
+
+      if (recoveredModeFromPreviousCrash) {
+        setAttendanceStatus("Recovered mode enabled after the previous startup failed.");
+      }
+
+      try {
+        await AsyncStorage.setItem(
+          bootGuardStorage,
+          JSON.stringify({
+            inProgress: true,
+            lastBootOk: false,
+            startedAtIso,
+            appVersion,
+            buildNumber,
+          }),
+        );
+      } catch {
+        // Ignore guard write failures and continue boot.
+      }
+
+      if (iosLaunchSafeMode || recoveredModeFromPreviousCrash) {
         try {
           await refreshMeetings();
           setAttendanceStatus(
-            "iOS safe boot mode enabled: attendance history loads after app stabilization.",
+            recoveredModeFromPreviousCrash
+              ? "Recovered mode enabled: local attendance history loads after app stabilization."
+              : "iOS safe boot mode enabled: attendance history loads after app stabilization.",
           );
+          bootstrapCompletedSuccessfully = true;
         } catch {
           setMeetingsStatus("Unable to load meetings.");
         } finally {
           setBootstrapped(true);
+          try {
+            await AsyncStorage.setItem(
+              bootGuardStorage,
+              JSON.stringify({
+                inProgress: false,
+                lastBootOk: bootstrapCompletedSuccessfully,
+                startedAtIso,
+                finishedAtIso: new Date().toISOString(),
+                appVersion,
+                buildNumber,
+                recoveredMode: recoveredModeFromPreviousCrash || iosLaunchSafeMode,
+              }),
+            );
+          } catch {
+            // Ignore guard write failures and continue.
+          }
         }
         return;
       }
@@ -7693,9 +7808,14 @@ export default function App() {
                       ? record.id
                       : createId("attendance-recovered");
                   const rawSignature =
-                    typeof record.signaturePngBase64 === "string"
+                    (typeof record.signatureRef === "object" &&
+                    record.signatureRef !== null &&
+                    typeof (record.signatureRef as { uri?: unknown }).uri === "string"
+                      ? ((record.signatureRef as { uri: string }).uri ?? null)
+                      : null) ??
+                    (typeof record.signaturePngBase64 === "string"
                       ? record.signaturePngBase64
-                      : null;
+                      : null);
 
                   const normalizedSignature = await normalizeSignatureValueToRef(rawSignature, {
                     fileSystem: fileSystemModule,
@@ -7812,7 +7932,8 @@ export default function App() {
                       record.leaveNotificationAtIso.trim().length > 0
                         ? record.leaveNotificationAtIso
                         : null,
-                    signaturePngBase64: normalizedSignature.ref?.uri ?? null,
+                    signatureRef: normalizedSignature.ref ?? null,
+                    signaturePngBase64: null,
                     pdfUri:
                       typeof record.pdfUri === "string" && record.pdfUri.trim().length > 0
                         ? record.pdfUri
@@ -8050,10 +8171,27 @@ export default function App() {
         } else {
           setHomeScreen("SETTINGS");
         }
+        bootstrapCompletedSuccessfully = true;
       } catch {
         setAttendanceStatus("Unable to load local attendance history.");
       } finally {
         setBootstrapped(true);
+        try {
+          await AsyncStorage.setItem(
+            bootGuardStorage,
+            JSON.stringify({
+              inProgress: false,
+              lastBootOk: bootstrapCompletedSuccessfully,
+              startedAtIso,
+              finishedAtIso: new Date().toISOString(),
+              appVersion,
+              buildNumber,
+              recoveredMode: recoveredModeFromPreviousCrash,
+            }),
+          );
+        } catch {
+          // Ignore guard write failures and continue.
+        }
       }
     })();
     // TODO(auth): replace DEV auth headers with real session auth tokens.
@@ -8070,6 +8208,7 @@ export default function App() {
     sponsorCallLogStorage,
     sponsorEnabledAtStorage,
     meetingAttendanceLogStorage,
+    bootGuardStorage,
     devAuthUserId,
     enableSponsorApiSync,
     fetchSponsorConfig,
@@ -8077,6 +8216,8 @@ export default function App() {
     requestLocationPermission,
     signatureStorageSubdirectory,
     iosLaunchSafeMode,
+    appVersion,
+    buildNumber,
   ]);
 
   useEffect(() => {
@@ -8484,7 +8625,7 @@ export default function App() {
     if (!activeAttendance || activeAttendance.endAt) {
       return;
     }
-    if (activeAttendance.signaturePngBase64 || activeAttendance.signaturePromptShown) {
+    if (hasAttendanceSignature(activeAttendance) || activeAttendance.signaturePromptShown) {
       return;
     }
 
@@ -10185,7 +10326,7 @@ export default function App() {
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Duration: {formatDuration(record.durationSeconds)} • Signature:{" "}
-                            {record.signaturePngBase64 ? "Yes" : "No"}
+                            {hasAttendanceSignature(record) ? "Yes" : "No"}
                           </Text>
                           {!signatureWindow.eligible ? (
                             <Text style={styles.sectionMeta}>
@@ -10207,7 +10348,9 @@ export default function App() {
                               <View style={styles.buttonSpacer} />
                               <AppButton
                                 title={
-                                  record.signaturePngBase64 ? "Update signature" : "Add signature"
+                                  hasAttendanceSignature(record)
+                                    ? "Update signature"
+                                    : "Add signature"
                                 }
                                 onPress={() => openAttendanceRecordSignatureCapture(record.id)}
                                 variant="secondary"
@@ -10218,7 +10361,9 @@ export default function App() {
                             <View style={styles.buttonRow}>
                               <AppButton
                                 title={
-                                  record.signaturePngBase64 ? "Update signature" : "Add signature"
+                                  hasAttendanceSignature(record)
+                                    ? "Update signature"
+                                    : "Add signature"
                                 }
                                 onPress={() => openAttendanceRecordSignatureCapture(record.id)}
                                 variant="secondary"
@@ -11398,7 +11543,7 @@ export default function App() {
                         </Text>
                       ) : null}
                       <Text style={styles.sectionMeta}>
-                        Signature: {activeAttendance.signaturePngBase64 ? "Saved" : "Missing"}
+                        Signature: {hasAttendanceSignature(activeAttendance) ? "Saved" : "Missing"}
                       </Text>
                       {activeAttendanceSignatureWindow &&
                       !activeAttendanceSignatureWindow.eligible ? (
@@ -11412,7 +11557,7 @@ export default function App() {
                       <View style={styles.buttonRow}>
                         <AppButton
                           title={
-                            activeAttendance.signaturePngBase64
+                            hasAttendanceSignature(activeAttendance)
                               ? "Update signature"
                               : "Get signature"
                           }
@@ -11468,7 +11613,7 @@ export default function App() {
                         </Text>
                         <Text style={styles.sectionMeta}>
                           {record.endAt ? "Completed" : "In progress"} • Signature:{" "}
-                          {record.signaturePngBase64 ? "Yes" : "No"}
+                          {hasAttendanceSignature(record) ? "Yes" : "No"}
                         </Text>
                       </View>
                     ))}
