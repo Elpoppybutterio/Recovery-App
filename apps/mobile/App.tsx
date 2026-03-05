@@ -178,6 +178,7 @@ type AttendanceRecord = {
   meetingId: string;
   meetingName: string;
   meetingAddress: string;
+  meetingDayOfWeek?: number | null;
   scheduledStartsAtLocal?: string | null;
   meetingLat?: number | null;
   meetingLng?: number | null;
@@ -389,6 +390,7 @@ const DASHBOARD_NEARBY_RADIUS_METERS = DASHBOARD_NEARBY_RADIUS_MILES * 1609.344;
 const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for simulator/device.";
 const DEFAULT_MAP_LATITUDE_DELTA = 0.22;
 const DEFAULT_MAP_LONGITUDE_DELTA = 0.22;
+const ATTENDANCE_EXPORT_MAX_RECORDS = 25;
 
 const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }> = [
   { code: "MON", label: "Mon", jsDay: 1 },
@@ -572,6 +574,28 @@ function parseMinutesFromHhmm(value: string): number {
   return Math.max(0, Math.min(23, hours)) * 60 + Math.max(0, Math.min(59, minutes));
 }
 
+function normalizeMeetingDayOfWeek(dayOfWeek: unknown): number | null {
+  if (typeof dayOfWeek !== "number" || !Number.isFinite(dayOfWeek)) {
+    return null;
+  }
+  return Math.max(0, Math.min(6, Math.round(dayOfWeek)));
+}
+
+function resolveScheduledDateForAttendance(record: AttendanceRecord, base: Date): Date {
+  const scheduledDate = new Date(base);
+  const meetingDayOfWeek = normalizeMeetingDayOfWeek(record.meetingDayOfWeek);
+  if (meetingDayOfWeek === null) {
+    return scheduledDate;
+  }
+
+  const currentDayOfWeek = scheduledDate.getDay();
+  const dayOffset = (meetingDayOfWeek - currentDayOfWeek + 7) % 7;
+  if (dayOffset > 0) {
+    scheduledDate.setDate(scheduledDate.getDate() + dayOffset);
+  }
+  return scheduledDate;
+}
+
 function parseScheduledStartForAttendance(record: AttendanceRecord): number | null {
   const scheduled = record.scheduledStartsAtLocal;
   if (!scheduled) {
@@ -590,7 +614,7 @@ function parseScheduledStartForAttendance(record: AttendanceRecord): number | nu
   if (!Number.isFinite(hours) || !Number.isFinite(minutes)) {
     return null;
   }
-  const scheduledDate = new Date(base);
+  const scheduledDate = resolveScheduledDateForAttendance(record, base);
   scheduledDate.setHours(
     Math.max(0, Math.min(23, hours)),
     Math.max(0, Math.min(59, minutes)),
@@ -1033,7 +1057,7 @@ function buildSignatureSvgMarkup(
   width: number,
   height: number,
 ): string | null {
-  if (points.length < 2) {
+  if (points.length < 1) {
     return null;
   }
 
@@ -1048,7 +1072,19 @@ function buildSignatureSvgMarkup(
     );
   };
 
-  const normalizedPoints = reducePoints(points, MAX_SIGNATURE_POINTS_FOR_STORAGE);
+  const sourcePoints =
+    points.length === 1
+      ? [
+          points[0],
+          {
+            ...points[0],
+            x: points[0].x + 0.1,
+            y: points[0].y + 0.1,
+            isStrokeStart: false,
+          },
+        ]
+      : points;
+  const normalizedPoints = reducePoints(sourcePoints, MAX_SIGNATURE_POINTS_FOR_STORAGE);
 
   const path = normalizedPoints
     .map(
@@ -5621,29 +5657,15 @@ export default function App() {
   const getScheduledWindowForAttendance = useCallback((record: AttendanceRecord) => {
     const startedAt = new Date(record.startAt);
     const fallbackStart = Number.isNaN(startedAt.getTime()) ? new Date() : startedAt;
+    const resolvedScheduledStartMs = parseScheduledStartForAttendance(record);
 
-    if (!record.scheduledStartsAtLocal) {
+    if (resolvedScheduledStartMs === null) {
       const fallbackEnd = new Date(
         fallbackStart.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000,
       );
       return { startDate: fallbackStart, endDate: fallbackEnd };
     }
-
-    const match = record.scheduledStartsAtLocal.match(/^(\d{1,2}):(\d{2})$/);
-    if (!match) {
-      const fallbackEnd = new Date(
-        fallbackStart.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000,
-      );
-      return { startDate: fallbackStart, endDate: fallbackEnd };
-    }
-
-    const startDate = new Date(fallbackStart);
-    startDate.setHours(
-      Math.max(0, Math.min(23, Number(match[1]))),
-      Math.max(0, Math.min(59, Number(match[2]))),
-      0,
-      0,
-    );
+    const startDate = new Date(resolvedScheduledStartMs);
     const endDate = new Date(startDate.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000);
     return { startDate, endDate };
   }, []);
@@ -5930,6 +5952,7 @@ export default function App() {
           meetingId: meeting.id,
           meetingName: meeting.name,
           meetingAddress: meeting.address,
+          meetingDayOfWeek: normalizeMeetingDayOfWeek(meeting.dayOfWeek),
           scheduledStartsAtLocal: meeting.startsAtLocal ?? null,
           meetingLat: resolvedMeetingCoords?.lat ?? null,
           meetingLng: resolvedMeetingCoords?.lng ?? null,
@@ -6173,6 +6196,7 @@ export default function App() {
         setAttendanceStatus("End current attendance before capturing another signature.");
         return;
       }
+      activeAttendanceRef.current = record;
       setActiveAttendance(record);
       setSignatureCaptureMeeting(null);
       setSignaturePoints([]);
@@ -6231,7 +6255,8 @@ export default function App() {
   );
 
   const saveSignature = useCallback(async () => {
-    if (!activeAttendance && !signatureCaptureMeeting) {
+    const targetActiveAttendance = activeAttendanceRef.current ?? activeAttendance;
+    if (!targetActiveAttendance && !signatureCaptureMeeting) {
       setAttendanceStatus("Open signature capture from a meeting first.");
       return;
     }
@@ -6247,15 +6272,10 @@ export default function App() {
       return;
     }
 
-    if (activeAttendance) {
-      const signatureWindow = getSignatureWindowForAttendance(activeAttendance);
-      if (!signatureWindow.eligible) {
-        setAttendanceStatus(signatureWindow.reason ?? SIGNATURE_WINDOW_HELP_TEXT);
-        return;
-      }
+    if (targetActiveAttendance) {
       const nowIso = new Date().toISOString();
       const next: AttendanceRecord = {
-        ...activeAttendance,
+        ...targetActiveAttendance,
         signaturePngBase64: signatureSvgMarkup,
         signaturePromptShown: true,
         chairName:
@@ -6265,6 +6285,7 @@ export default function App() {
         signatureCapturedAtIso: nowIso,
       };
 
+      activeAttendanceRef.current = next;
       setActiveAttendance(next);
       upsertAttendanceRecord(next);
       setSignatureCaptureMeeting(null);
@@ -6272,7 +6293,7 @@ export default function App() {
       setSignatureChairNameInput(next.chairName ?? "");
       setSignatureChairRoleInput(next.chairRole ?? "");
       setAttendanceStatus(
-        activeAttendance.endAt
+        targetActiveAttendance.endAt
           ? "Signature saved."
           : "Signature saved. Meeting remains in progress until ended.",
       );
@@ -6296,6 +6317,7 @@ export default function App() {
       meetingId: signatureCaptureMeeting.id,
       meetingName: signatureCaptureMeeting.name,
       meetingAddress: signatureCaptureMeeting.address,
+      meetingDayOfWeek: normalizeMeetingDayOfWeek(signatureCaptureMeeting.dayOfWeek),
       scheduledStartsAtLocal: signatureCaptureMeeting.startsAtLocal ?? null,
       meetingLat: signatureMeetingCoords?.lat ?? null,
       meetingLng: signatureMeetingCoords?.lng ?? null,
@@ -6352,8 +6374,24 @@ export default function App() {
     readCurrentLocation,
   ]);
 
-  const toAttendanceSlipRecord = useCallback(
-    (record: AttendanceRecord) => ({
+  const buildAttendanceShareMessage = useCallback((records: AttendanceRecord[]): string => {
+    const lines = records.map((record) => {
+      const started = new Date(record.startAt);
+      const ended = record.endAt ? new Date(record.endAt) : null;
+      return [
+        `• ${record.meetingName}`,
+        `  Meeting time: ${formatHhmmForDisplay(record.scheduledStartsAtLocal)}`,
+        `  Start: ${Number.isNaN(started.getTime()) ? record.startAt : started.toLocaleString()}`,
+        `  End: ${ended ? ended.toLocaleString() : "In progress"}`,
+        `  Duration: ${formatDuration(record.durationSeconds)}`,
+        `  Address: ${record.meetingAddress}`,
+      ].join("\n");
+    });
+    return [`AA/NA Attendance Export (${records.length})`, ...lines].join("\n\n");
+  }, []);
+
+  const toAttendanceSlipRecord = useCallback((record: AttendanceRecord) => {
+    return {
       id: record.id,
       meetingName: record.meetingName,
       meetingAddress: record.meetingAddress,
@@ -6374,9 +6412,8 @@ export default function App() {
         lng: record.endLng,
         accuracyM: record.endAccuracyM,
       },
-    }),
-    [],
-  );
+    };
+  }, []);
 
   const diagnosticsBuildInfo = useMemo(
     () => ({
@@ -6679,6 +6716,12 @@ export default function App() {
       setAttendanceStatus("Select at least one attendance record to export.");
       return;
     }
+    if (selectedRecords.length > ATTENDANCE_EXPORT_MAX_RECORDS) {
+      setAttendanceStatus(
+        `Select ${ATTENDANCE_EXPORT_MAX_RECORDS} or fewer records per PDF export.`,
+      );
+      return;
+    }
     setExportingAttendanceSelectionPdf(true);
     setAttendanceExportProgressLabel(null);
     try {
@@ -6731,6 +6774,12 @@ export default function App() {
 
       if (selectedRecords.length === 0) {
         setAttendanceStatus(`No attendance records found for ${label}.`);
+        return;
+      }
+      if (selectedRecords.length > ATTENDANCE_EXPORT_MAX_RECORDS) {
+        setAttendanceStatus(
+          `${label} has ${selectedRecords.length} records. Export ${ATTENDANCE_EXPORT_MAX_RECORDS} or fewer at a time.`,
+        );
         return;
       }
 
@@ -6813,19 +6862,7 @@ export default function App() {
       return;
     }
 
-    const lines = selectedRecords.map((record) => {
-      const started = new Date(record.startAt);
-      const ended = record.endAt ? new Date(record.endAt) : null;
-      return [
-        `• ${record.meetingName}`,
-        `  Meeting time: ${formatHhmmForDisplay(record.scheduledStartsAtLocal)}`,
-        `  Start: ${Number.isNaN(started.getTime()) ? record.startAt : started.toLocaleString()}`,
-        `  End: ${ended ? ended.toLocaleString() : "In progress"}`,
-        `  Duration: ${formatDuration(record.durationSeconds)}`,
-      ].join("\n");
-    });
-
-    const message = [`Meetings Attended (${selectedRecords.length})`, ...lines].join("\n\n");
+    const message = buildAttendanceShareMessage(selectedRecords);
 
     try {
       await Share.share({ message });
@@ -6833,7 +6870,7 @@ export default function App() {
     } catch (error) {
       setAttendanceStatus(`Failed to share selected attendance text: ${formatError(error)}`);
     }
-  }, [attendanceRecordsForView, selectedAttendanceIds]);
+  }, [attendanceRecordsForView, selectedAttendanceIds, buildAttendanceShareMessage]);
 
   const updateSelectedDayPlan = useCallback(
     (updater: (current: DayPlanState) => DayPlanState, callback?: (next: DayPlanState) => void) => {
@@ -7421,6 +7458,7 @@ export default function App() {
                   record.signaturePngBase64.trim().length > 0
                     ? record.signaturePngBase64.trim()
                     : null,
+                meetingDayOfWeek: normalizeMeetingDayOfWeek(record.meetingDayOfWeek),
                 calendarEventId:
                   typeof record.calendarEventId === "string" && record.calendarEventId.length > 0
                     ? record.calendarEventId

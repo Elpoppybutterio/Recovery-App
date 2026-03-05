@@ -29,6 +29,7 @@ export type AttendanceSlipRecord = {
 
 export type AttendanceSlipUserProfile = {
   participantName: string;
+  officerName?: string | null;
   tenantLabel?: string | null;
 };
 
@@ -40,12 +41,12 @@ export type AttendanceSlipExportProgress = {
 };
 
 type PrintModule = {
+  printAsync(input: { html?: string; uri?: string; printerUrl?: string }): Promise<void>;
   printToFileAsync(input: {
     html: string;
     width?: number;
     height?: number;
   }): Promise<{ uri: string }>;
-  printAsync?(input: { html: string }): Promise<void>;
 };
 
 type SharingModule = {
@@ -630,48 +631,127 @@ function buildChunkPlan(
   return chunks;
 }
 
-function buildSignatureMarkup(
-  signatureState: PreparedSignatureState,
+function formatTimeOnly(valueIso: string): string {
+  const date = new Date(valueIso);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function chunkRecords<T>(records: T[], chunkSize: number): T[][] {
+  if (records.length === 0) {
+    return [[]];
+  }
+  const chunks: T[][] = [];
+  for (let index = 0; index < records.length; index += chunkSize) {
+    chunks.push(records.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+function buildSignatureCell(
+  record: PreparedAttendanceSlipRecord,
   forceOnFileFallback: boolean,
 ): string {
-  if (signatureState.state === "unsigned") {
-    return '<p class="muted">Unsigned</p>';
+  const chairBits = [record.chairName?.trim() ?? "", record.chairRole?.trim() ?? ""].filter(
+    (entry) => entry.length > 0,
+  );
+  const hasSignature = record.signatureState.state !== "unsigned";
+
+  if (hasSignature && chairBits.length > 0) {
+    return `${escapeHtml(chairBits.join(" - "))} (signed)`;
   }
-  if (forceOnFileFallback || signatureState.state === "on_file") {
-    return '<p class="muted">Signature: On file (image unavailable)</p>';
+  if (hasSignature) {
+    return forceOnFileFallback || record.signatureState.state === "on_file"
+      ? "Signature on file"
+      : "Signed (digital)";
   }
-  return `<img alt="Chair signature" src="${escapeHtml(signatureState.src)}" style="width:100%;max-width:460px;border:1px solid #d5d9e4;border-radius:6px;"/>`;
+  if (chairBits.length > 0) {
+    return escapeHtml(chairBits.join(" - "));
+  }
+  return "";
+}
+
+function buildAttendanceRow(
+  record: PreparedAttendanceSlipRecord,
+  forceOnFileFallback: boolean,
+): string {
+  const meetingName = asSafeText(record.meetingName, "Recovery Meeting");
+  const meetingAddress = asSafeText(record.meetingAddress, "");
+  const groupCell = meetingAddress.length > 0 ? `${meetingName} - ${meetingAddress}` : meetingName;
+  return `<tr>
+    <td>${escapeHtml(formatDateOnly(record.startAtIso))}</td>
+    <td>${escapeHtml(formatTimeOnly(record.startAtIso))}</td>
+    <td>${escapeHtml(groupCell)}</td>
+    <td>${buildSignatureCell(record, forceOnFileFallback)}</td>
+  </tr>`;
+}
+
+function buildBlankRows(count: number): string {
+  if (count <= 0) {
+    return "";
+  }
+  return Array.from({ length: count })
+    .map(() => "<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>")
+    .join("");
 }
 
 function buildAttendancePage(
-  record: PreparedAttendanceSlipRecord,
+  pageRecords: PreparedAttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
   forceOnFileFallback: boolean,
+  pageNumber: number,
+  totalPages: number,
 ): string {
-  const chairIdentity = [record.chairName?.trim() ?? "", record.chairRole?.trim() ?? ""]
-    .filter((entry) => entry.length > 0)
-    .join(" • ");
+  const rowCountPerPage = 22;
+  const pageRows = pageRecords.map((entry) => buildAttendanceRow(entry, forceOnFileFallback)).join("\n");
+  const blankRows = buildBlankRows(Math.max(0, rowCountPerPage - pageRecords.length));
+  const participantName = escapeHtml(asSafeText(profile.participantName, ""));
+  const officerName = escapeHtml(asSafeText(profile.officerName, ""));
+  const generatedAt = escapeHtml(new Date().toLocaleString());
 
   return `<section class="page">
-    <h1>AA/NA Attendance Slip</h1>
-    <p class="muted">Generated ${escapeHtml(new Date().toLocaleString())}</p>
+    <h1>AA/NA ATTENDANCE SHEET</h1>
+    <div class="header-lines">
+      <div class="line-item">
+        <span class="label">Name:</span>
+        <span class="line-value">${participantName}</span>
+      </div>
+      <div class="line-item">
+        <span class="label">Officer's Name:</span>
+        <span class="line-value">${officerName}</span>
+      </div>
+    </div>
 
-    <table>
-      <tr><td><strong>Participant</strong></td><td>${escapeHtml(asSafeText(profile.participantName, "Unknown"))}</td></tr>
-      <tr><td><strong>Date</strong></td><td>${escapeHtml(formatDateOnly(record.startAtIso))}</td></tr>
-      <tr><td><strong>Meeting</strong></td><td>${escapeHtml(asSafeText(record.meetingName, "Recovery Meeting"))}</td></tr>
-      <tr><td><strong>Location</strong></td><td>${escapeHtml(asSafeText(record.meetingAddress, "Address unavailable"))}</td></tr>
-      <tr><td><strong>Start</strong></td><td>${escapeHtml(formatDateTime(record.startAtIso))}</td></tr>
-      <tr><td><strong>End</strong></td><td>${escapeHtml(formatDateTime(record.endAtIso))}</td></tr>
-      <tr><td><strong>Duration</strong></td><td>${escapeHtml(formatDuration(record.durationSeconds))}</td></tr>
-      <tr><td><strong>GPS Snapshot (start)</strong></td><td>${escapeHtml(formatLocation(record.startLocation))}</td></tr>
-      <tr><td><strong>GPS Snapshot (end)</strong></td><td>${escapeHtml(formatLocation(record.endLocation))}</td></tr>
+    <p class="attestation">
+      The following record is an accurate account of the AA meeting(s) I have attended. I understand
+      that falsifying or altering this document may constitute a criminal offense if legally required.
+    </p>
+
+    <table class="attendance-table">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Time</th>
+          <th>Group Name</th>
+          <th>Signature</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${pageRows}
+        ${blankRows}
+      </tbody>
     </table>
 
-    <h2>Chair Signature</h2>
-    ${buildSignatureMarkup(record.signatureState, forceOnFileFallback)}
-    <p><strong>Chair Printed Name</strong>: ${escapeHtml(chairIdentity || "Not provided")}</p>
-    <p class="muted">Electronically captured signature${record.signatureCapturedAtIso ? ` at ${escapeHtml(formatDateTime(record.signatureCapturedAtIso))}` : ""}.</p>
+    <div class="footer-line">
+      <span class="label">Meeting Person's Signature</span>
+      <span class="line"></span>
+    </div>
+
+    <p class="meta">
+      Generated ${generatedAt} • Page ${pageNumber} of ${totalPages}
+    </p>
   </section>`;
 }
 
@@ -680,8 +760,12 @@ function buildAttendanceHtml(
   profile: AttendanceSlipUserProfile,
   forceOnFileFallback: boolean,
 ): string {
-  const pages = records
-    .map((record) => buildAttendancePage(record, profile, forceOnFileFallback))
+  const rowCountPerPage = 22;
+  const pagesData = chunkRecords(records, rowCountPerPage);
+  const pages = pagesData
+    .map((pageRecords, index) =>
+      buildAttendancePage(pageRecords, profile, forceOnFileFallback, index + 1, pagesData.length),
+    )
     .join("\n");
   return `<!doctype html>
 <html>
@@ -689,16 +773,27 @@ function buildAttendanceHtml(
     <meta charset="UTF-8" />
     <title>${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}</title>
     <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #101828; margin: 0; padding: 0; }
-      .page { page-break-after: always; padding: 24px; }
+      body { font-family: 'Times New Roman', serif; color: #111111; margin: 0; padding: 0; }
+      .page { page-break-after: always; padding: 26px 28px; }
       .page:last-child { page-break-after: auto; }
-      h1 { margin: 0 0 8px 0; font-size: 22px; }
-      h2 { margin: 18px 0 8px 0; font-size: 16px; }
-      p { margin: 6px 0; font-size: 13px; }
-      .muted { color: #667085; font-size: 12px; }
-      table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-      td { border: 1px solid #e4e7ec; padding: 8px; font-size: 12px; vertical-align: top; }
-      strong { font-weight: 600; }
+      h1 { margin: 0 0 14px 0; font-size: 26px; letter-spacing: 0.6px; text-align: center; }
+      .header-lines { display: flex; gap: 24px; margin-bottom: 12px; }
+      .line-item { display: flex; align-items: center; flex: 1; gap: 8px; }
+      .line-item .label { font-size: 13px; font-weight: 700; white-space: nowrap; }
+      .line-value { border-bottom: 1px solid #111111; min-height: 18px; flex: 1; font-size: 12px; line-height: 18px; }
+      .attestation { margin: 10px 0 14px 0; font-size: 11px; line-height: 1.35; }
+      .attendance-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+      .attendance-table th, .attendance-table td { border: 1px solid #111111; font-size: 10px; padding: 4px 5px; vertical-align: middle; }
+      .attendance-table th { background: #efefef; text-align: center; font-size: 10px; }
+      .attendance-table td:nth-child(1), .attendance-table th:nth-child(1) { width: 16%; }
+      .attendance-table td:nth-child(2), .attendance-table th:nth-child(2) { width: 12%; text-align: center; }
+      .attendance-table td:nth-child(3), .attendance-table th:nth-child(3) { width: 42%; }
+      .attendance-table td:nth-child(4), .attendance-table th:nth-child(4) { width: 30%; }
+      .attendance-table tbody td { height: 19px; }
+      .footer-line { margin-top: 14px; display: flex; align-items: center; gap: 10px; }
+      .footer-line .label { font-size: 13px; font-weight: 700; white-space: nowrap; }
+      .footer-line .line { border-bottom: 1px solid #111111; flex: 1; min-height: 16px; }
+      .meta { margin-top: 8px; color: #444444; font-size: 10px; text-align: right; }
     </style>
   </head>
   <body>
