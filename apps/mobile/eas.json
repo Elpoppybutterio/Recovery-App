@@ -12,6 +12,16 @@
         "APP_ENV": "development"
       }
     },
+    "development-stability": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "channel": "development-stability",
+      "env": {
+        "APP_ENV": "development",
+        "EXPO_JS_ENGINE": "jsc",
+        "EXPO_NEW_ARCH_ENABLED": "false"
+      }
+    },
     "preview": {
       "distribution": "internal",
       "autoIncrement": true,

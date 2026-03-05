@@ -78,7 +78,14 @@ function formatTime(value: string | null): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return date.toLocaleString();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const year = date.getFullYear();
+  const hour24 = date.getHours();
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${month}/${day}/${year} ${hour12}:${minute} ${meridiem}`;
 }
 
 function formatCoords(lat: number | null, lng: number | null): string {

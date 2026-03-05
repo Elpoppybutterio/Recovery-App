@@ -41,15 +41,11 @@ import {
   type MeetingGeoStatus,
 } from "./lib/geo/geoTrust";
 import {
-  ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
-  generateAttendanceSlipPdf,
-  shareAttendanceSlipPdf,
-} from "./lib/pdf/attendanceSlipPdf";
-import {
   estimateBase64Bytes as estimateSignatureBase64Bytes,
   loadSignatureFileSystemModule,
   looksLikeFileUri as looksLikeSignatureFileUri,
   normalizeSignatureValueToRef,
+  type SignatureRef,
 } from "./lib/signatures/signatureStore";
 import { exportMorningRoutinePdf } from "./lib/pdf/exportMorningRoutinePdf";
 import { exportNightlyInventoryPdf } from "./lib/pdf/exportNightlyInventoryPdf";
@@ -212,7 +208,9 @@ type AttendanceRecord = {
   calendarEventId?: string | null;
   leaveNotificationId?: string | null;
   leaveNotificationAtIso?: string | null;
-  signaturePngBase64: string | null;
+  signatureRef?: SignatureRef | null;
+  // Legacy field kept for one-way migration from historical local storage.
+  signaturePngBase64?: string | null;
   pdfUri: string | null;
 };
 
@@ -385,6 +383,7 @@ const SPONSOR_ENABLED_AT_STORAGE_KEY_PREFIX = "recovery:sponsorEnabledAt:";
 const NINETY_DAY_GOAL_STORAGE_KEY_PREFIX = "recovery:ninetyDayGoal:";
 const SOBRIETY_MILESTONE_EVENT_IDS_STORAGE_KEY_PREFIX = "recovery:sobrietyMilestoneEventIds:";
 const SOBRIETY_MILESTONE_SYNC_DATE_STORAGE_KEY_PREFIX = "recovery:sobrietyMilestoneSyncDate:";
+const BOOT_GUARD_STORAGE_KEY_PREFIX = "recovery:bootGuard:";
 
 const SPONSOR_NOTIFICATION_CATEGORY_ID = "SPONSOR_CALL";
 const DRIVE_NOTIFICATION_CATEGORY_ID = "DRIVE_LEAVE";
@@ -404,6 +403,7 @@ const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for 
 const DEFAULT_MAP_LATITUDE_DELTA = 0.22;
 const DEFAULT_MAP_LONGITUDE_DELTA = 0.22;
 const ATTENDANCE_EXPORT_MAX_RECORDS = 25;
+const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
 
 const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }> = [
   { code: "MON", label: "Mon", jsDay: 1 },
@@ -414,6 +414,7 @@ const WEEKDAY_OPTIONS: Array<{ code: WeekdayCode; label: string; jsDay: number }
   { code: "SAT", label: "Sat", jsDay: 6 },
   { code: "SUN", label: "Sun", jsDay: 0 },
 ];
+const WEEKDAY_SHORT_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const WEEKDAY_CODES = WEEKDAY_OPTIONS.map((item) => item.code);
 
 const SPONSOR_REPEAT_OPTIONS: Array<{ value: RepeatPreset; label: string }> = [
@@ -521,6 +522,38 @@ function formatDistance(distanceMeters: number | null): string {
   return formatDistanceMiles(distanceMeters);
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function formatTimeLabel(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    return "--:--";
+  }
+  const hour24 = value.getHours();
+  const minute = pad2(value.getMinutes());
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${hour12}:${minute} ${meridiem}`;
+}
+
+function formatDateLabel(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    return "--/--/----";
+  }
+  const month = pad2(value.getMonth() + 1);
+  const day = pad2(value.getDate());
+  const year = value.getFullYear();
+  return `${month}/${day}/${year}`;
+}
+
+function formatDateTimeLabel(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    return "--/--/---- --:--";
+  }
+  return `${formatDateLabel(value)} ${formatTimeLabel(value)}`;
+}
+
 function isMeetingInProgress(startsAtLocal: string, nowMinutes: number): boolean {
   const startMinutes = parseMinutesFromHhmm(startsAtLocal);
   const endMinutes = startMinutes + DEFAULT_MEETING_DURATION_MINUTES;
@@ -570,7 +603,7 @@ function leaveByLabel(
   if (Number.isNaN(leaveBy.getTime())) {
     return null;
   }
-  return leaveBy.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return formatTimeLabel(leaveBy);
 }
 
 function formatCoordinate(value: number): string {
@@ -772,7 +805,7 @@ function validateAttendanceRecord(
     return invalid(`Duration must be at least ${MIN_VALID_MEETING_MINUTES} minutes`);
   }
 
-  if (requiresSignature && !record.signaturePngBase64) {
+  if (requiresSignature && !hasAttendanceSignature(record)) {
     return invalid("Signature required");
   }
 
@@ -830,34 +863,11 @@ function dateKeyForDate(value: Date): string {
 }
 
 function resolveDeviceTimeZone(): string {
-  try {
-    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (typeof timeZone === "string" && timeZone.trim().length > 0) {
-      return timeZone;
-    }
-  } catch {
-    // fall through to UTC
-  }
-  return "UTC";
+  return "local";
 }
 
 function dateKeyForTimeZone(value: Date, timeZone: string): string {
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(value);
-    const year = parts.find((entry) => entry.type === "year")?.value;
-    const month = parts.find((entry) => entry.type === "month")?.value;
-    const day = parts.find((entry) => entry.type === "day")?.value;
-    if (year && month && day) {
-      return `${year}-${month}-${day}`;
-    }
-  } catch {
-    // fall through to UTC date key
-  }
+  void timeZone;
   return dateKeyForDate(value);
 }
 
@@ -891,9 +901,10 @@ function createDayOptions(): DayOption[] {
   for (let offset = 0; offset < 7; offset += 1) {
     const next = new Date(today);
     next.setDate(today.getDate() + offset);
+    const weekdayShort = WEEKDAY_SHORT_LABELS[next.getDay()] ?? "Day";
     result.push({
       offset,
-      label: offset === 0 ? "Today" : next.toLocaleDateString(undefined, { weekday: "short" }),
+      label: offset === 0 ? "Today" : weekdayShort,
       dayOfWeek: next.getDay(),
       date: next,
       dateKey: dateKeyForDate(next),
@@ -1175,6 +1186,10 @@ function ninetyDayGoalStorageKey(userId: string): string {
   return `${NINETY_DAY_GOAL_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+function bootGuardStorageKey(userId: string): string {
+  return `${BOOT_GUARD_STORAGE_KEY_PREFIX}${userId}`;
+}
+
 function sobrietyMilestoneEventIdsStorageKey(userId: string): string {
   return `${SOBRIETY_MILESTONE_EVENT_IDS_STORAGE_KEY_PREFIX}${userId}`;
 }
@@ -1393,6 +1408,32 @@ function looksLikeSvgDataUri(value: string): boolean {
 
 function looksLikeInlineSvgSignature(value: string): boolean {
   return looksLikeSvgMarkup(value) || looksLikeSvgDataUri(value);
+}
+
+function normalizeSignatureUri(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function getAttendanceSignatureUri(record: AttendanceRecord): string | null {
+  const fromRef = normalizeSignatureUri(record.signatureRef?.uri);
+  if (fromRef) {
+    return fromRef;
+  }
+  return normalizeSignatureUri(record.signaturePngBase64);
+}
+
+function hasAttendanceSignature(record: AttendanceRecord): boolean {
+  return getAttendanceSignatureUri(record) !== null;
+}
+
+type AttendanceSlipPdfModule = typeof import("./lib/pdf/attendanceSlipPdf");
+
+async function loadAttendanceSlipPdfModule(): Promise<AttendanceSlipPdfModule> {
+  return import("./lib/pdf/attendanceSlipPdf");
 }
 
 function invalidMeetingCoordsReason(lat: number | null, lng: number | null): string | null {
@@ -1654,6 +1695,7 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
 }
 
 export default function App() {
+  const iosLaunchSafeMode = Platform.OS === "ios";
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
   const appEnvFromProcess = typeof process.env.APP_ENV === "string" ? process.env.APP_ENV : "";
   const appEnvFromConfig = typeof extra.appEnv === "string" ? extra.appEnv : "";
@@ -1771,6 +1813,7 @@ export default function App() {
     () => ninetyDayGoalStorageKey(devAuthUserId),
     [devAuthUserId],
   );
+  const bootGuardStorage = useMemo(() => bootGuardStorageKey(devAuthUserId), [devAuthUserId]);
   const sobrietyMilestoneEventIdsStorage = useMemo(
     () => sobrietyMilestoneEventIdsStorageKey(devAuthUserId),
     [devAuthUserId],
@@ -2235,8 +2278,7 @@ export default function App() {
     let signatureUriCount = 0;
 
     for (const record of diagnosticsSelectedAttendanceRecords) {
-      const signature =
-        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64 : "";
+      const signature = getAttendanceSignatureUri(record) ?? "";
       const trimmed = signature.trim();
       if (trimmed.length === 0) {
         continue;
@@ -2303,9 +2345,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const signatures = diagnosticsSelectedAttendanceRecords
-      .map((record) =>
-        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64.trim() : "",
-      )
+      .map((record) => getAttendanceSignatureUri(record) ?? "")
       .filter((signature) => signature.length > 0 && looksLikeFileUri(signature));
 
     if (signatures.length === 0) {
@@ -2534,7 +2574,7 @@ export default function App() {
         ? "Monthly"
         : `${sponsorRepeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdays(sponsorRepeatDaysSorted)}`;
 
-    return `Next scheduled call: ${next.nextAt.toLocaleString()} • Due today: ${
+    return `Next scheduled call: ${formatDateTimeLabel(next.nextAt)} • Due today: ${
       next.dueToday ? "Yes" : "No"
     } • ${repeatSummary}`;
   }, [
@@ -3091,6 +3131,9 @@ export default function App() {
   }, []);
 
   const refreshDeviceLocationOnFocus = useCallback(async (): Promise<LocationStamp | null> => {
+    if (iosLaunchSafeMode) {
+      return null;
+    }
     const permissionState = await readLocationPermissionStates();
     setLocationPermission(permissionState.permissionStatus);
     setLocationAlwaysPermission(permissionState.alwaysPermissionStatus);
@@ -3112,7 +3155,7 @@ export default function App() {
       await refreshMeetingsRef.current?.({ location: position });
     }
     return position;
-  }, [readCurrentLocation]);
+  }, [iosLaunchSafeMode, readCurrentLocation]);
 
   const refreshDiagnosticsLocation = useCallback(async () => {
     const permissions = await readLocationPermissionStates();
@@ -3310,17 +3353,23 @@ export default function App() {
             const candidateKey = candidate.toLowerCase().replace(/\s+/g, " ").trim();
             cacheKey = candidateKey;
             try {
-              const geocoded = await geocodeAsync(candidate);
-              const first = geocoded[0];
-              const geo = classifyGeo({
-                lat: first?.latitude ?? null,
-                lng: first?.longitude ?? null,
-                address: candidate,
-              });
-              cached =
-                isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null
-                  ? { lat: geo.lat, lng: geo.lng, source: "device_geocode" }
-                  : null;
+              if (Platform.OS === "ios") {
+                // iOS 18.x has shown unstable native crashes in TurboModule exception conversion.
+                // Avoid device geocoder on iOS and use network fallback instead.
+                cached = await geocodeFromNetwork(candidate);
+              } else {
+                const geocoded = await geocodeAsync(candidate);
+                const first = geocoded[0];
+                const geo = classifyGeo({
+                  lat: first?.latitude ?? null,
+                  lng: first?.longitude ?? null,
+                  address: candidate,
+                });
+                cached =
+                  isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null
+                    ? { lat: geo.lat, lng: geo.lng, source: "device_geocode" }
+                    : null;
+              }
             } catch {
               cached = await geocodeFromNetwork(candidate);
             }
@@ -3518,14 +3567,19 @@ export default function App() {
 
   const upsertAttendanceRecord = useCallback(
     (record: AttendanceRecord) => {
+      const normalizedSignatureUri = getAttendanceSignatureUri(record);
       const normalizedRecord: AttendanceRecord = {
         ...record,
         schemaVersion: ATTENDANCE_SCHEMA_VERSION,
-        signaturePngBase64:
-          typeof record.signaturePngBase64 === "string" &&
-          record.signaturePngBase64.trim().length > 0
-            ? record.signaturePngBase64.trim()
-            : null,
+        signatureRef: normalizedSignatureUri
+          ? {
+              uri: normalizedSignatureUri,
+              mimeType: normalizedSignatureUri.toLowerCase().endsWith(".svg")
+                ? "image/svg+xml"
+                : "image/png",
+            }
+          : null,
+        signaturePngBase64: null,
       };
       setAttendanceRecords((previous) => {
         const next = [
@@ -5038,7 +5092,6 @@ export default function App() {
         endDate,
         alarms: [{ relativeOffset: 0 }],
         recurrenceRule,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       };
 
       const storedEventId = await AsyncStorage.getItem(sponsorCalendarEventStorage);
@@ -5065,7 +5118,7 @@ export default function App() {
         startAt: nextStart.toISOString(),
         recurrenceSummary,
       });
-      setCalendarStatus(`Calendar synced (${nextStart.toLocaleString()}).`);
+      setCalendarStatus(`Calendar synced (${formatDateTimeLabel(nextStart)}).`);
     },
     [
       normalizedSponsorName,
@@ -5154,7 +5207,6 @@ export default function App() {
             notes: `Sobriety milestone from start date ${sobrietyDateLabel}.`,
             startDate: milestone.at,
             endDate: new Date(milestone.at.getTime() + 60 * 60 * 1000),
-            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           });
           createdIds.push(eventId);
         }
@@ -5276,7 +5328,7 @@ export default function App() {
       });
 
       setNotificationStatus(
-        `Scheduled sponsor notifications (${scheduledIds.length}) for ${nextCall.toLocaleString()}.`,
+        `Scheduled sponsor notifications (${scheduledIds.length}) for ${formatDateTimeLabel(nextCall)}.`,
       );
     },
     [
@@ -5344,7 +5396,7 @@ export default function App() {
         }
         const id = await scheduleAt(fireAt, {
           title: `Leave in 10 minutes for ${meeting.name}`,
-          body: `${standardPreview.travelMinutes}m travel • depart ${standardPreview.departAt.toLocaleTimeString()}`,
+          body: `${standardPreview.travelMinutes}m travel • depart ${formatTimeLabel(standardPreview.departAt)}`,
           categoryIdentifier: DRIVE_NOTIFICATION_CATEGORY_ID,
           data: {
             type: "drive",
@@ -5380,7 +5432,7 @@ export default function App() {
             }
             const serviceId = await scheduleAt(serviceFireAt, {
               title: `Service commitment: leave in 10 minutes for ${meeting.name}`,
-              body: `${servicePreview.travelMinutes}m travel • depart ${servicePreview.departAt.toLocaleTimeString()}`,
+              body: `${servicePreview.travelMinutes}m travel • depart ${formatTimeLabel(servicePreview.departAt)}`,
               categoryIdentifier: DRIVE_NOTIFICATION_CATEGORY_ID,
               data: {
                 type: "drive",
@@ -5786,7 +5838,6 @@ export default function App() {
             ? sourceRecord.meetingAddress
             : undefined,
         notes: "Signature required",
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         alarms: [{ relativeOffset: -10 }],
       });
 
@@ -5885,14 +5936,8 @@ export default function App() {
         const scheduledAt = leavePlan.notifyImmediately
           ? fallbackImmediate
           : (applyScheduleTime(leavePlan.leaveAt) ?? fallbackImmediate);
-        const leaveTimeLabel = leavePlan.leaveAt.toLocaleTimeString([], {
-          hour: "numeric",
-          minute: "2-digit",
-        });
-        const arrivalTimeLabel = leavePlan.arrivalTargetAt.toLocaleTimeString([], {
-          hour: "numeric",
-          minute: "2-digit",
-        });
+        const leaveTimeLabel = formatTimeLabel(leavePlan.leaveAt);
+        const arrivalTimeLabel = formatTimeLabel(leavePlan.arrivalTargetAt);
 
         const leaveNotificationId = await scheduleAt(scheduledAt, {
           title: leavePlan.notifyImmediately
@@ -6041,14 +6086,14 @@ export default function App() {
           calendarEventId: null,
           leaveNotificationId: null,
           leaveNotificationAtIso: null,
-          signaturePngBase64: null,
+          signatureRef: null,
           pdfUri: null,
         };
 
         setActiveAttendance(next);
         setSignatureCaptureMeeting(null);
         upsertAttendanceRecord(next);
-        setAttendanceStatus(`Attendance started at ${new Date(nowIso).toLocaleTimeString()}.`);
+        setAttendanceStatus(`Attendance started at ${formatTimeLabel(new Date(nowIso))}.`);
         setScreen("SESSION");
         void syncAttendCalendarAndLeaveAlert(next.id, meeting, location);
       } finally {
@@ -6076,7 +6121,7 @@ export default function App() {
       }
       if (
         meetingSignatureRequired &&
-        !baseRecord.signaturePngBase64 &&
+        !hasAttendanceSignature(baseRecord) &&
         !options?.skipSignaturePrompt
       ) {
         const promptedRecord = baseRecord.signaturePromptShown
@@ -6181,7 +6226,7 @@ export default function App() {
         return;
       }
 
-      if (next.signaturePngBase64) {
+      if (hasAttendanceSignature(next)) {
         setAttendanceStatus("Attendance ended.");
         if (homeScreen === "MEETINGS") {
           setScreen("LIST");
@@ -6359,7 +6404,13 @@ export default function App() {
       const next: AttendanceRecord = {
         ...targetActiveAttendance,
         schemaVersion: ATTENDANCE_SCHEMA_VERSION,
-        signaturePngBase64: persistedSignatureRef,
+        signatureRef: {
+          uri: persistedSignatureRef,
+          mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
+            ? "image/svg+xml"
+            : "image/png",
+        },
+        signaturePngBase64: null,
         signaturePromptShown: true,
         chairName:
           signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
@@ -6429,7 +6480,13 @@ export default function App() {
       chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
       signatureCapturedAtIso: nowIso,
       calendarEventId: null,
-      signaturePngBase64: persistedSignatureRef,
+      signatureRef: {
+        uri: persistedSignatureRef,
+        mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
+          ? "image/svg+xml"
+          : "image/png",
+      },
+      signaturePngBase64: null,
       pdfUri: null,
     };
 
@@ -6466,8 +6523,8 @@ export default function App() {
       return [
         `• ${record.meetingName}`,
         `  Meeting time: ${formatHhmmForDisplay(record.scheduledStartsAtLocal)}`,
-        `  Start: ${Number.isNaN(started.getTime()) ? record.startAt : started.toLocaleString()}`,
-        `  End: ${ended ? ended.toLocaleString() : "In progress"}`,
+        `  Start: ${Number.isNaN(started.getTime()) ? record.startAt : formatDateTimeLabel(started)}`,
+        `  End: ${ended ? formatDateTimeLabel(ended) : "In progress"}`,
         `  Duration: ${formatDuration(record.durationSeconds)}`,
         `  Address: ${record.meetingAddress}`,
       ].join("\n");
@@ -6483,7 +6540,7 @@ export default function App() {
       startAtIso: record.startAt,
       endAtIso: record.endAt,
       durationSeconds: record.durationSeconds,
-      signatureSvgBase64: record.signaturePngBase64,
+      signatureRefUri: getAttendanceSignatureUri(record),
       chairName: record.chairName ?? null,
       chairRole: record.chairRole ?? null,
       signatureCapturedAtIso: record.signatureCapturedAtIso ?? null,
@@ -6638,8 +6695,7 @@ export default function App() {
         setDiagnosticsExportDryRunStatus(reason);
         return;
       }
-      const signature =
-        typeof record.signaturePngBase64 === "string" ? record.signaturePngBase64 : "";
+      const signature = getAttendanceSignatureUri(record) ?? "";
       if (signature.trim().length > 0 && !looksLikeFileUri(signature.trim())) {
         if (looksLikeInlineSvgSignature(signature)) {
           continue;
@@ -6732,7 +6788,15 @@ export default function App() {
         chairRole: "Chairperson",
         signatureCapturedAtIso: now.toISOString(),
         calendarEventId: null,
-        signaturePngBase64: persistedSignatureRef,
+        signatureRef: persistedSignatureRef
+          ? {
+              uri: persistedSignatureRef,
+              mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
+                ? "image/svg+xml"
+                : "image/png",
+            }
+          : null,
+        signaturePngBase64: null,
         pdfUri: null,
       };
 
@@ -6775,15 +6839,27 @@ export default function App() {
     attendanceExportInFlightRef.current = true;
     setExportingPdf(true);
     try {
+      const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
       const payloadRecords = [toAttendanceSlipRecord(activeAttendance)];
-      const exportedUris = await generateAttendanceSlipPdf(
+      const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
         { participantName: devUserDisplayName },
         { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
       );
-      await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+      if (Platform.OS === "ios") {
+        setAttendanceStatus(
+          "Export complete. PDF saved in-app (share disabled on iOS stability mode).",
+        );
+      } else {
+        await attendanceSlipPdf.shareAttendanceSlipPdf(
+          exportedUris,
+          ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
+        );
+      }
       recordLastExportAttempt(true);
-      setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
+      if (Platform.OS !== "ios") {
+        setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
+      }
     } catch (error) {
       logSafeExportFailure("EXPORT_SINGLE", error);
       recordLastExportAttempt(false, error);
@@ -6863,8 +6939,9 @@ export default function App() {
     setExportingAttendanceSelectionPdf(true);
     setAttendanceExportProgressLabel(null);
     try {
+      const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
       const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
-      const exportedUris = await generateAttendanceSlipPdf(
+      const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
         { participantName: devUserDisplayName },
         {
@@ -6874,12 +6951,18 @@ export default function App() {
           },
         },
       );
-      await shareAttendanceSlipPdf(
-        exportedUris,
-        `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
-      );
+      if (Platform.OS !== "ios") {
+        await attendanceSlipPdf.shareAttendanceSlipPdf(
+          exportedUris,
+          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
+        );
+      }
       recordLastExportAttempt(true);
-      setAttendanceStatus(`Export complete for ${selectedRecords.length} meeting record(s).`);
+      setAttendanceStatus(
+        Platform.OS === "ios"
+          ? `Export complete for ${selectedRecords.length} meeting record(s). PDF saved in-app.`
+          : `Export complete for ${selectedRecords.length} meeting record(s).`,
+      );
     } catch (error) {
       logSafeExportFailure("EXPORT_SELECTED", error);
       recordLastExportAttempt(false, error);
@@ -6935,8 +7018,9 @@ export default function App() {
       setExportingAttendanceSelectionPdf(true);
       setAttendanceExportProgressLabel(null);
       try {
+        const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
         const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
-        const exportedUris = await generateAttendanceSlipPdf(
+        const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
           payloadRecords,
           { participantName: devUserDisplayName },
           {
@@ -6946,13 +7030,17 @@ export default function App() {
             },
           },
         );
-        await shareAttendanceSlipPdf(
-          exportedUris,
-          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
-        );
+        if (Platform.OS !== "ios") {
+          await attendanceSlipPdf.shareAttendanceSlipPdf(
+            exportedUris,
+            `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
+          );
+        }
         recordLastExportAttempt(true);
         setAttendanceStatus(
-          `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
+          Platform.OS === "ios"
+            ? `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}. PDF saved in-app.`
+            : `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
         );
       } catch (error) {
         logSafeExportFailure("EXPORT_RANGE", error);
@@ -7224,7 +7312,7 @@ export default function App() {
           setSelectedMeeting(meeting);
           setHomeScreen("MEETINGS");
           await startAttendance(meeting);
-          const startedAtLabel = new Date().toLocaleTimeString();
+          const startedAtLabel = formatTimeLabel(new Date());
           Alert.alert(
             "Meeting log started",
             `${meeting.name} start time logged at ${startedAtLabel}.`,
@@ -7530,10 +7618,16 @@ export default function App() {
   }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter, updateMapCenter]);
 
   useEffect(() => {
+    if (iosLaunchSafeMode) {
+      return;
+    }
     void refreshDeviceLocationOnFocus();
-  }, [refreshDeviceLocationOnFocus]);
+  }, [iosLaunchSafeMode, refreshDeviceLocationOnFocus]);
 
   useEffect(() => {
+    if (iosLaunchSafeMode) {
+      return;
+    }
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         void refreshDeviceLocationOnFocus();
@@ -7542,7 +7636,7 @@ export default function App() {
     return () => {
       subscription.remove();
     };
-  }, [refreshDeviceLocationOnFocus]);
+  }, [iosLaunchSafeMode, refreshDeviceLocationOnFocus]);
 
   useEffect(() => {
     if (bootstrapStartedRef.current) {
@@ -7551,6 +7645,77 @@ export default function App() {
     bootstrapStartedRef.current = true;
 
     void (async () => {
+      let recoveredModeFromPreviousCrash = false;
+      let bootstrapCompletedSuccessfully = false;
+      const startedAtIso = new Date().toISOString();
+
+      try {
+        const guardRaw = await AsyncStorage.getItem(bootGuardStorage);
+        if (guardRaw) {
+          const parsedGuard = JSON.parse(guardRaw) as {
+            inProgress?: unknown;
+            lastBootOk?: unknown;
+          };
+          if (parsedGuard?.inProgress === true && parsedGuard?.lastBootOk !== true) {
+            recoveredModeFromPreviousCrash = true;
+          }
+        }
+      } catch {
+        // Ignore guard read failures and continue boot.
+      }
+
+      if (recoveredModeFromPreviousCrash) {
+        setAttendanceStatus("Recovered mode enabled after the previous startup failed.");
+      }
+
+      try {
+        await AsyncStorage.setItem(
+          bootGuardStorage,
+          JSON.stringify({
+            inProgress: true,
+            lastBootOk: false,
+            startedAtIso,
+            appVersion,
+            buildNumber,
+          }),
+        );
+      } catch {
+        // Ignore guard write failures and continue boot.
+      }
+
+      if (iosLaunchSafeMode || recoveredModeFromPreviousCrash) {
+        try {
+          await refreshMeetings();
+          setAttendanceStatus(
+            recoveredModeFromPreviousCrash
+              ? "Recovered mode enabled: local attendance history loads after app stabilization."
+              : "iOS safe boot mode enabled: attendance history loads after app stabilization.",
+          );
+          bootstrapCompletedSuccessfully = true;
+        } catch {
+          setMeetingsStatus("Unable to load meetings.");
+        } finally {
+          setBootstrapped(true);
+          try {
+            await AsyncStorage.setItem(
+              bootGuardStorage,
+              JSON.stringify({
+                inProgress: false,
+                lastBootOk: bootstrapCompletedSuccessfully,
+                startedAtIso,
+                finishedAtIso: new Date().toISOString(),
+                appVersion,
+                buildNumber,
+                recoveredMode: recoveredModeFromPreviousCrash || iosLaunchSafeMode,
+              }),
+            );
+          } catch {
+            // Ignore guard write failures and continue.
+          }
+        }
+        return;
+      }
+
       try {
         const position = await requestLocationPermission();
         await refreshMeetings({ location: position });
@@ -7643,9 +7808,14 @@ export default function App() {
                       ? record.id
                       : createId("attendance-recovered");
                   const rawSignature =
-                    typeof record.signaturePngBase64 === "string"
+                    (typeof record.signatureRef === "object" &&
+                    record.signatureRef !== null &&
+                    typeof (record.signatureRef as { uri?: unknown }).uri === "string"
+                      ? ((record.signatureRef as { uri: string }).uri ?? null)
+                      : null) ??
+                    (typeof record.signaturePngBase64 === "string"
                       ? record.signaturePngBase64
-                      : null;
+                      : null);
 
                   const normalizedSignature = await normalizeSignatureValueToRef(rawSignature, {
                     fileSystem: fileSystemModule,
@@ -7762,7 +7932,8 @@ export default function App() {
                       record.leaveNotificationAtIso.trim().length > 0
                         ? record.leaveNotificationAtIso
                         : null,
-                    signaturePngBase64: normalizedSignature.ref?.uri ?? null,
+                    signatureRef: normalizedSignature.ref ?? null,
+                    signaturePngBase64: null,
                     pdfUri:
                       typeof record.pdfUri === "string" && record.pdfUri.trim().length > 0
                         ? record.pdfUri
@@ -8000,10 +8171,27 @@ export default function App() {
         } else {
           setHomeScreen("SETTINGS");
         }
+        bootstrapCompletedSuccessfully = true;
       } catch {
         setAttendanceStatus("Unable to load local attendance history.");
       } finally {
         setBootstrapped(true);
+        try {
+          await AsyncStorage.setItem(
+            bootGuardStorage,
+            JSON.stringify({
+              inProgress: false,
+              lastBootOk: bootstrapCompletedSuccessfully,
+              startedAtIso,
+              finishedAtIso: new Date().toISOString(),
+              appVersion,
+              buildNumber,
+              recoveredMode: recoveredModeFromPreviousCrash,
+            }),
+          );
+        } catch {
+          // Ignore guard write failures and continue.
+        }
       }
     })();
     // TODO(auth): replace DEV auth headers with real session auth tokens.
@@ -8020,12 +8208,16 @@ export default function App() {
     sponsorCallLogStorage,
     sponsorEnabledAtStorage,
     meetingAttendanceLogStorage,
+    bootGuardStorage,
     devAuthUserId,
     enableSponsorApiSync,
     fetchSponsorConfig,
     refreshMeetings,
     requestLocationPermission,
     signatureStorageSubdirectory,
+    iosLaunchSafeMode,
+    appVersion,
+    buildNumber,
   ]);
 
   useEffect(() => {
@@ -8433,7 +8625,7 @@ export default function App() {
     if (!activeAttendance || activeAttendance.endAt) {
       return;
     }
-    if (activeAttendance.signaturePngBase64 || activeAttendance.signaturePromptShown) {
+    if (hasAttendanceSignature(activeAttendance) || activeAttendance.signaturePromptShown) {
       return;
     }
 
@@ -8647,7 +8839,7 @@ export default function App() {
       setHomeScreen("MEETINGS");
       await startAttendance(meeting);
       if (!cancelled) {
-        const startedAtLabel = new Date().toLocaleTimeString();
+        const startedAtLabel = formatTimeLabel(new Date());
         Alert.alert(
           "Meeting log started",
           `${meeting.name} start time logged at ${startedAtLabel}.`,
@@ -10121,18 +10313,20 @@ export default function App() {
                             </Text>
                           </View>
                           <Text style={styles.sectionMeta}>
-                            Start: {new Date(record.startAt).toLocaleString()}
+                            Start: {formatDateTimeLabel(new Date(record.startAt))}
                           </Text>
                           <Text style={styles.sectionMeta}>
                             End:{" "}
-                            {record.endAt ? new Date(record.endAt).toLocaleString() : "In progress"}
+                            {record.endAt
+                              ? formatDateTimeLabel(new Date(record.endAt))
+                              : "In progress"}
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Status: {validationStatusLabel} • {validationReason}
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Duration: {formatDuration(record.durationSeconds)} • Signature:{" "}
-                            {record.signaturePngBase64 ? "Yes" : "No"}
+                            {hasAttendanceSignature(record) ? "Yes" : "No"}
                           </Text>
                           {!signatureWindow.eligible ? (
                             <Text style={styles.sectionMeta}>
@@ -10154,7 +10348,9 @@ export default function App() {
                               <View style={styles.buttonSpacer} />
                               <AppButton
                                 title={
-                                  record.signaturePngBase64 ? "Update signature" : "Add signature"
+                                  hasAttendanceSignature(record)
+                                    ? "Update signature"
+                                    : "Add signature"
                                 }
                                 onPress={() => openAttendanceRecordSignatureCapture(record.id)}
                                 variant="secondary"
@@ -10165,7 +10361,9 @@ export default function App() {
                             <View style={styles.buttonRow}>
                               <AppButton
                                 title={
-                                  record.signaturePngBase64 ? "Update signature" : "Add signature"
+                                  hasAttendanceSignature(record)
+                                    ? "Update signature"
+                                    : "Add signature"
                                 }
                                 onPress={() => openAttendanceRecordSignatureCapture(record.id)}
                                 variant="secondary"
@@ -11126,10 +11324,10 @@ export default function App() {
                                       {preview.usesServiceCommitment
                                         ? "Service commitment override"
                                         : "Standard early arrival"}
-                                      : start {preview.meetingStartAt.toLocaleTimeString()}, travel{" "}
+                                      : start {formatTimeLabel(preview.meetingStartAt)}, travel{" "}
                                       {preview.travelMinutes}m, depart{" "}
-                                      {preview.departAt.toLocaleTimeString()}, notify{" "}
-                                      {preview.notifyAt.toLocaleTimeString()}
+                                      {formatTimeLabel(preview.departAt)}, notify{" "}
+                                      {formatTimeLabel(preview.notifyAt)}
                                     </Text>
                                   ) : null}
                                 </>
@@ -11334,18 +11532,18 @@ export default function App() {
                         Meeting: {activeAttendance.meetingName}
                       </Text>
                       <Text style={styles.sectionMeta}>
-                        Started: {new Date(activeAttendance.startAt).toLocaleString()}
+                        Started: {formatDateTimeLabel(new Date(activeAttendance.startAt))}
                       </Text>
                       <Text style={styles.sectionMeta}>
                         Duration: {formatDuration(openSessionDurationSeconds)}
                       </Text>
                       {activeAttendance.endAt ? (
                         <Text style={styles.sectionMeta}>
-                          Ended: {new Date(activeAttendance.endAt).toLocaleString()}
+                          Ended: {formatDateTimeLabel(new Date(activeAttendance.endAt))}
                         </Text>
                       ) : null}
                       <Text style={styles.sectionMeta}>
-                        Signature: {activeAttendance.signaturePngBase64 ? "Saved" : "Missing"}
+                        Signature: {hasAttendanceSignature(activeAttendance) ? "Saved" : "Missing"}
                       </Text>
                       {activeAttendanceSignatureWindow &&
                       !activeAttendanceSignatureWindow.eligible ? (
@@ -11359,7 +11557,7 @@ export default function App() {
                       <View style={styles.buttonRow}>
                         <AppButton
                           title={
-                            activeAttendance.signaturePngBase64
+                            hasAttendanceSignature(activeAttendance)
                               ? "Update signature"
                               : "Get signature"
                           }
@@ -11410,12 +11608,12 @@ export default function App() {
                       <View key={record.id} style={styles.historyCard}>
                         <Text style={styles.meetingName}>{record.meetingName}</Text>
                         <Text style={styles.sectionMeta}>
-                          {new Date(record.startAt).toLocaleString()} •{" "}
+                          {formatDateTimeLabel(new Date(record.startAt))} •{" "}
                           {formatDuration(record.durationSeconds)}
                         </Text>
                         <Text style={styles.sectionMeta}>
                           {record.endAt ? "Completed" : "In progress"} • Signature:{" "}
-                          {record.signaturePngBase64 ? "Yes" : "No"}
+                          {hasAttendanceSignature(record) ? "Yes" : "No"}
                         </Text>
                       </View>
                     ))}
