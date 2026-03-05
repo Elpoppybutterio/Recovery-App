@@ -43,6 +43,7 @@ import {
 import {
   ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
   generateAttendanceSlipPdf,
+  printAttendanceSlipPdf,
   shareAttendanceSlipPdf,
 } from "./lib/pdf/attendanceSlipPdf";
 import {
@@ -6775,14 +6776,23 @@ export default function App() {
     attendanceExportInFlightRef.current = true;
     setExportingPdf(true);
     try {
-      const exportedUris = await generateAttendanceSlipPdf(
-        [toAttendanceSlipRecord(activeAttendance)],
-        { participantName: devUserDisplayName },
-        { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
-      );
-      await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+      const payloadRecords = [toAttendanceSlipRecord(activeAttendance)];
+      if (Platform.OS === "ios") {
+        await printAttendanceSlipPdf(payloadRecords, { participantName: devUserDisplayName });
+      } else {
+        const exportedUris = await generateAttendanceSlipPdf(
+          payloadRecords,
+          { participantName: devUserDisplayName },
+          { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
+        );
+        await shareAttendanceSlipPdf(exportedUris, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+      }
       recordLastExportAttempt(true);
-      setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
+      setAttendanceStatus(
+        Platform.OS === "ios"
+          ? "Export ready. Print dialog opened."
+          : "Export complete. Share sheet opened for your PDF.",
+      );
     } catch (error) {
       logSafeExportFailure("EXPORT_SINGLE", error);
       recordLastExportAttempt(false, error);
@@ -6862,22 +6872,31 @@ export default function App() {
     setExportingAttendanceSelectionPdf(true);
     setAttendanceExportProgressLabel(null);
     try {
-      const exportedUris = await generateAttendanceSlipPdf(
-        selectedRecords.map(toAttendanceSlipRecord),
-        { participantName: devUserDisplayName },
-        {
-          fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`,
-          onProgress: ({ chunkIndex, chunkCount }) => {
-            setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
+      const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
+      if (Platform.OS === "ios") {
+        await printAttendanceSlipPdf(payloadRecords, { participantName: devUserDisplayName });
+      } else {
+        const exportedUris = await generateAttendanceSlipPdf(
+          payloadRecords,
+          { participantName: devUserDisplayName },
+          {
+            fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`,
+            onProgress: ({ chunkIndex, chunkCount }) => {
+              setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
+            },
           },
-        },
-      );
-      await shareAttendanceSlipPdf(
-        exportedUris,
-        `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
-      );
+        );
+        await shareAttendanceSlipPdf(
+          exportedUris,
+          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
+        );
+      }
       recordLastExportAttempt(true);
-      setAttendanceStatus(`Export complete for ${selectedRecords.length} meeting record(s).`);
+      setAttendanceStatus(
+        Platform.OS === "ios"
+          ? `Print dialog opened for ${selectedRecords.length} meeting record(s).`
+          : `Export complete for ${selectedRecords.length} meeting record(s).`,
+      );
     } catch (error) {
       logSafeExportFailure("EXPORT_SELECTED", error);
       recordLastExportAttempt(false, error);
@@ -6933,23 +6952,30 @@ export default function App() {
       setExportingAttendanceSelectionPdf(true);
       setAttendanceExportProgressLabel(null);
       try {
-        const exportedUris = await generateAttendanceSlipPdf(
-          selectedRecords.map(toAttendanceSlipRecord),
-          { participantName: devUserDisplayName },
-          {
-            fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`,
-            onProgress: ({ chunkIndex, chunkCount }) => {
-              setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
+        const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
+        if (Platform.OS === "ios") {
+          await printAttendanceSlipPdf(payloadRecords, { participantName: devUserDisplayName });
+        } else {
+          const exportedUris = await generateAttendanceSlipPdf(
+            payloadRecords,
+            { participantName: devUserDisplayName },
+            {
+              fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`,
+              onProgress: ({ chunkIndex, chunkCount }) => {
+                setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
+              },
             },
-          },
-        );
-        await shareAttendanceSlipPdf(
-          exportedUris,
-          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
-        );
+          );
+          await shareAttendanceSlipPdf(
+            exportedUris,
+            `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
+          );
+        }
         recordLastExportAttempt(true);
         setAttendanceStatus(
-          `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
+          Platform.OS === "ios"
+            ? `Print dialog opened for ${selectedRecords.length} attendance slip(s) for ${label}.`
+            : `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
         );
       } catch (error) {
         logSafeExportFailure("EXPORT_RANGE", error);
