@@ -7,10 +7,11 @@ import {
 } from "../signatures/signatureStore";
 
 export const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
+const MAX_EXPORT_RECORDS = 25;
 const MAX_SIGNATURE_SVG_BYTES = 150_000;
 const MAX_SIGNATURE_PNG_BYTES = 250_000;
 const MAX_TOTAL_HTML_BYTES = 1_200_000;
-const MAX_SIGNATURE_EMBED_BUDGET_BYTES = MAX_SIGNATURE_PNG_BYTES;
+const MAX_SIGNATURE_EMBED_BUDGET_BYTES = 700_000;
 const MAX_CHUNK_COUNT = 5;
 
 export type AttendanceSlipRecord = {
@@ -93,6 +94,23 @@ type SignatureModeCounts = {
   inline_svg: number;
   base64_png: number;
   placeholder: number;
+};
+
+export type AttendanceExportDiagnostics = {
+  safeMode: boolean;
+  forcedPlaceholderSignatures: boolean;
+  records: number;
+  htmlBytes: number;
+  maxHtmlBytes: number;
+  htmlUtilizationPct: number;
+  signatureEmbedBudgetUsedBytes: number;
+  signatureEmbedBudgetMaxBytes: number;
+  signatureBudgetUtilizationPct: number;
+  signatureModes: SignatureModeCounts;
+  caps: {
+    maxSignatureSvgBytes: number;
+    maxSignaturePngBytes: number;
+  };
 };
 
 type SignatureRenderState =
@@ -727,7 +745,7 @@ export async function generateAttendanceSlipPdf(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
   options?: GenerateAttendanceSlipOptions,
-): Promise<string[]> {
+): Promise<{ uri: string; diagnostics: AttendanceExportDiagnostics }> {
   if (attendanceSlipExportInFlight) {
     throw new Error("Export already in progress.");
   }
@@ -738,6 +756,9 @@ export async function generateAttendanceSlipPdf(
   try {
     if (!Array.isArray(records) || records.length === 0) {
       throw new Error("No attendance records selected for export.");
+    }
+    if (records.length > MAX_EXPORT_RECORDS) {
+      throw new Error(`Select ${MAX_EXPORT_RECORDS} or fewer attendance records per export.`);
     }
 
     const printModule = loadModule<PrintModule>("expo-print");
@@ -851,7 +872,42 @@ export async function generateAttendanceSlipPdf(
       totalRecords: records.length,
     });
 
-    return [targetUri];
+    const diagnostics: AttendanceExportDiagnostics = {
+      safeMode: summary.signatureModes.placeholder > 0,
+      forcedPlaceholderSignatures: summary.signatureModes.placeholder > 0,
+      records: records.length,
+      htmlBytes: summary.totalHtmlBytes,
+      maxHtmlBytes: MAX_TOTAL_HTML_BYTES,
+      htmlUtilizationPct:
+        MAX_TOTAL_HTML_BYTES > 0
+          ? Number(((summary.totalHtmlBytes / MAX_TOTAL_HTML_BYTES) * 100).toFixed(1))
+          : 0,
+      signatureEmbedBudgetUsedBytes: Math.min(
+        peakSignatureUsage(preparedRecords).bytes,
+        MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+      ),
+      signatureEmbedBudgetMaxBytes: MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+      signatureBudgetUtilizationPct:
+        MAX_SIGNATURE_EMBED_BUDGET_BYTES > 0
+          ? Number(
+              (
+                (Math.min(
+                  peakSignatureUsage(preparedRecords).bytes,
+                  MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+                ) /
+                  MAX_SIGNATURE_EMBED_BUDGET_BYTES) *
+                100
+              ).toFixed(1),
+            )
+          : 0,
+      signatureModes: summary.signatureModes,
+      caps: {
+        maxSignatureSvgBytes: MAX_SIGNATURE_SVG_BYTES,
+        maxSignaturePngBytes: MAX_SIGNATURE_PNG_BYTES,
+      },
+    };
+
+    return { uri: targetUri, diagnostics };
   } catch (error) {
     logExportFail(error, lastPlan);
     throw error;
@@ -865,14 +921,14 @@ export async function printAttendanceSlipPdf(
   profile: AttendanceSlipUserProfile,
   options?: GenerateAttendanceSlipOptions,
 ): Promise<void> {
-  const uris = await generateAttendanceSlipPdf(records, profile, options);
+  const exported = await generateAttendanceSlipPdf(records, profile, options);
   const printModule = loadModule<PrintModule>("expo-print");
   if (!printModule || typeof printModule.printAsync !== "function") {
     throw new Error("Print module unavailable. Install expo-print then restart Metro.");
   }
 
   try {
-    await printModule.printAsync({ uri: uris[0] });
+    await printModule.printAsync({ uri: exported.uri });
   } catch {
     throw new Error("PDF export failed while opening print dialog.");
   }

@@ -6826,6 +6826,17 @@ export default function App() {
     persistSignaturePayloadAsFileRef,
   ]);
 
+  const settleBeforePdfShare = useCallback(async () => {
+    if (Platform.OS !== "ios") {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      });
+    });
+  }, []);
+
   const exportAttendance = useCallback(async () => {
     if (!activeAttendance || !activeAttendance.endAt || activeAttendance.durationSeconds === null) {
       setAttendanceStatus("Complete attendance session before exporting.");
@@ -6841,25 +6852,21 @@ export default function App() {
     try {
       const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
       const payloadRecords = [toAttendanceSlipRecord(activeAttendance)];
-      const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
+      const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf`;
+      const { uri, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
         { participantName: devUserDisplayName },
-        { fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf` },
+        { fileName },
       );
-      if (Platform.OS === "ios") {
-        setAttendanceStatus(
-          "Export complete. PDF saved in-app (share disabled on iOS stability mode).",
-        );
+      await settleBeforePdfShare();
+      if (Platform.OS === "ios" && diagnostics.safeMode) {
+        console.log("[attendance-export] share skipped (safe mode)", diagnostics);
+        setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
       } else {
-        await attendanceSlipPdf.shareAttendanceSlipPdf(
-          exportedUris,
-          ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX,
-        );
-      }
-      recordLastExportAttempt(true);
-      if (Platform.OS !== "ios") {
+        await attendanceSlipPdf.shareAttendanceSlipPdf(uri, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
         setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
       }
+      recordLastExportAttempt(true);
     } catch (error) {
       logSafeExportFailure("EXPORT_SINGLE", error);
       recordLastExportAttempt(false, error);
@@ -6874,6 +6881,7 @@ export default function App() {
     devUserDisplayName,
     logSafeExportFailure,
     recordLastExportAttempt,
+    settleBeforePdfShare,
     toAttendanceSlipRecord,
   ]);
 
@@ -6941,28 +6949,29 @@ export default function App() {
     try {
       const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
       const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
-      const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
+      const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`;
+      const { uri, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
         { participantName: devUserDisplayName },
         {
-          fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`,
+          fileName,
           onProgress: ({ chunkIndex, chunkCount }) => {
             setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
           },
         },
       );
-      if (Platform.OS !== "ios") {
+      await settleBeforePdfShare();
+      if (Platform.OS === "ios" && diagnostics.safeMode) {
+        console.log("[attendance-export] share skipped (safe mode)", diagnostics);
+        setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
+      } else {
         await attendanceSlipPdf.shareAttendanceSlipPdf(
-          exportedUris,
+          uri,
           `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
         );
+        setAttendanceStatus(`Export complete for ${selectedRecords.length} meeting record(s).`);
       }
       recordLastExportAttempt(true);
-      setAttendanceStatus(
-        Platform.OS === "ios"
-          ? `Export complete for ${selectedRecords.length} meeting record(s). PDF saved in-app.`
-          : `Export complete for ${selectedRecords.length} meeting record(s).`,
-      );
     } catch (error) {
       logSafeExportFailure("EXPORT_SELECTED", error);
       recordLastExportAttempt(false, error);
@@ -6980,6 +6989,7 @@ export default function App() {
     setAttendanceExportProgressLabel,
     devUserDisplayName,
     recordLastExportAttempt,
+    settleBeforePdfShare,
     toAttendanceSlipRecord,
   ]);
 
@@ -7020,28 +7030,31 @@ export default function App() {
       try {
         const attendanceSlipPdf = await loadAttendanceSlipPdfModule();
         const payloadRecords = selectedRecords.map(toAttendanceSlipRecord);
-        const exportedUris = await attendanceSlipPdf.generateAttendanceSlipPdf(
+        const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
+        const { uri, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
           payloadRecords,
           { participantName: devUserDisplayName },
           {
-            fileName: `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`,
+            fileName,
             onProgress: ({ chunkIndex, chunkCount }) => {
               setAttendanceExportProgressLabel(`Generating ${chunkIndex}/${chunkCount}`);
             },
           },
         );
-        if (Platform.OS !== "ios") {
+        await settleBeforePdfShare();
+        if (Platform.OS === "ios" && diagnostics.safeMode) {
+          console.log("[attendance-export] share skipped (safe mode)", diagnostics);
+          setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
+        } else {
           await attendanceSlipPdf.shareAttendanceSlipPdf(
-            exportedUris,
+            uri,
             `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
+          );
+          setAttendanceStatus(
+            `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
           );
         }
         recordLastExportAttempt(true);
-        setAttendanceStatus(
-          Platform.OS === "ios"
-            ? `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}. PDF saved in-app.`
-            : `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
-        );
       } catch (error) {
         logSafeExportFailure("EXPORT_RANGE", error);
         recordLastExportAttempt(false, error);
@@ -7059,6 +7072,7 @@ export default function App() {
       logSafeExportFailure,
       recordLastExportAttempt,
       setAttendanceExportProgressLabel,
+      settleBeforePdfShare,
       toAttendanceSlipRecord,
     ],
   );
