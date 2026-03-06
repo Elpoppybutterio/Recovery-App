@@ -1,10 +1,10 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as Calendar from "expo-calendar";
 import { geocodeAsync } from "expo-location";
-import * as Notifications from "expo-notifications";
+import type * as CalendarTypes from "expo-calendar";
+import type * as NotificationsTypes from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import MapView, { Marker, type Region } from "react-native-maps";
+import type { Region } from "react-native-maps";
 import Svg, { Path } from "react-native-svg";
 import {
   AppState,
@@ -112,9 +112,6 @@ import {
   getWisdomCacheKey,
   type DailyWisdomPayload,
 } from "./lib/wisdom/daily";
-
-const MapViewCompat: any = MapView;
-const MarkerCompat: any = Marker;
 const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
 const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
 const THIRD_STEP_PRAYER_READ_TEXT =
@@ -293,6 +290,10 @@ type NotificationBuckets = {
   drive: string[];
   attendLeave: string[];
 };
+
+type NotificationContentInputCompat = NotificationsTypes.NotificationContentInput;
+type NotificationDateTriggerInputCompat = NotificationsTypes.DateTriggerInput;
+type CalendarEventInputCompat = Omit<Partial<CalendarTypes.Event>, "id">;
 
 type TravelTimeProvider = {
   estimateMinutes(distanceMeters: number | null): number;
@@ -1333,7 +1334,7 @@ function buildSobrietyMilestones(dateIso: string): SobrietyMilestoneSpec[] {
   ];
 }
 
-function toCalendarDayOfWeek(code: WeekdayCode): Calendar.DayOfTheWeek {
+function toCalendarDayOfWeek(code: WeekdayCode): CalendarTypes.DayOfTheWeek {
   switch (code) {
     case "MON":
       return Calendar.DayOfTheWeek.Monday;
@@ -1513,6 +1514,78 @@ function loadOptionalModule<T>(moduleName: string): T | null {
     return null;
   }
 }
+
+const mapsModule = loadOptionalModule<typeof import("react-native-maps")>("react-native-maps");
+const MapViewCompat: any = mapsModule?.default ?? null;
+const MarkerCompat: any = mapsModule?.Marker ?? null;
+const mapsRuntimeAvailable = Boolean(MapViewCompat && MarkerCompat);
+
+const calendarModuleRaw = loadOptionalModule<typeof import("expo-calendar")>("expo-calendar");
+const calendarModule =
+  calendarModuleRaw ??
+  ({
+    DayOfTheWeek: {
+      Monday: 1,
+      Tuesday: 2,
+      Wednesday: 3,
+      Thursday: 4,
+      Friday: 5,
+      Saturday: 6,
+      Sunday: 7,
+    },
+    Frequency: {
+      WEEKLY: "weekly",
+      MONTHLY: "monthly",
+    },
+    EntityTypes: {
+      EVENT: "event",
+    },
+    getCalendarPermissionsAsync: async () => ({ granted: false }),
+    requestCalendarPermissionsAsync: async () => ({ granted: false }),
+    getCalendarsAsync: async () => [],
+    getEventAsync: async () => {
+      throw new Error("calendar_unavailable");
+    },
+    updateEventAsync: async () => {
+      throw new Error("calendar_unavailable");
+    },
+    createEventAsync: async () => {
+      throw new Error("calendar_unavailable");
+    },
+    deleteEventAsync: async () => {
+      throw new Error("calendar_unavailable");
+    },
+  } as const);
+const Calendar: any = calendarModule;
+const calendarRuntimeAvailable = Boolean(calendarModuleRaw);
+
+const notificationsModuleRaw =
+  loadOptionalModule<typeof import("expo-notifications")>("expo-notifications");
+const notificationsModule =
+  notificationsModuleRaw ??
+  ({
+    PermissionStatus: {
+      GRANTED: "granted",
+    },
+    SchedulableTriggerInputTypes: {
+      DATE: "date",
+    },
+    DEFAULT_ACTION_IDENTIFIER: "expo.modules.notifications.actions.DEFAULT",
+    getPermissionsAsync: async () => ({ granted: false, status: "denied" }),
+    requestPermissionsAsync: async () => ({ granted: false, status: "denied" }),
+    cancelScheduledNotificationAsync: async () => {},
+    scheduleNotificationAsync: async () => {
+      throw new Error("notifications_unavailable");
+    },
+    getAllScheduledNotificationsAsync: async () => [],
+    setNotificationHandler: () => {},
+    setNotificationCategoryAsync: async () => {},
+    addNotificationResponseReceivedListener: () => ({
+      remove: () => {},
+    }),
+  } as const);
+const Notifications: any = notificationsModule;
+const notificationsModuleAvailable = Boolean(notificationsModuleRaw);
 
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, "");
@@ -1712,18 +1785,8 @@ export default function App() {
   );
   const appVersion = typeof appJson.expo.version === "string" ? appJson.expo.version : "unknown";
   const buildNumber = useMemo(() => {
-    type ConstantsLike = {
-      expoConfig?: {
-        ios?: { buildNumber?: string | number };
-        android?: { versionCode?: string | number };
-      };
-    };
-    const constantsModule = loadOptionalModule<{ default?: ConstantsLike } & ConstantsLike>(
-      "expo-constants",
-    );
-    const constants = constantsModule?.default ?? constantsModule;
-    const iosBuild = constants?.expoConfig?.ios?.buildNumber;
-    const androidBuild = constants?.expoConfig?.android?.versionCode;
+    const iosBuild = appJson.expo.ios?.buildNumber;
+    const androidBuild = appJson.expo.android?.versionCode;
     if (iosBuild !== undefined && iosBuild !== null) {
       return String(iosBuild);
     }
@@ -2917,7 +2980,8 @@ export default function App() {
     },
     [isLocalhostApiUrl],
   );
-  const notificationsRuntimeEnabled = Platform.OS !== "ios";
+  const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
+  const calendarRuntimeEnabled = Platform.OS === "ios" && calendarRuntimeAvailable;
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
     if (!notificationsRuntimeEnabled) {
@@ -2933,6 +2997,9 @@ export default function App() {
   }, [notificationsRuntimeEnabled]);
 
   const ensureCalendarPermission = useCallback(async (): Promise<boolean> => {
+    if (!calendarRuntimeEnabled) {
+      return false;
+    }
     try {
       const existing = await Calendar.getCalendarPermissionsAsync();
       if (existing.granted) {
@@ -2943,13 +3010,19 @@ export default function App() {
     } catch {
       return false;
     }
-  }, []);
+  }, [calendarRuntimeEnabled]);
 
   const findWritableCalendarId = useCallback(async (): Promise<string | null> => {
-    const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
-    const writable = calendars.find((item) => item.allowsModifications);
+    if (!calendarRuntimeEnabled) {
+      return null;
+    }
+    const calendars = (await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT)) as Array<{
+      id?: string;
+      allowsModifications?: boolean;
+    }>;
+    const writable = calendars.find((item) => item.allowsModifications === true);
     return writable?.id ?? null;
-  }, []);
+  }, [calendarRuntimeEnabled]);
 
   const applyScheduleTime = useCallback(
     (target: Date): Date | null => {
@@ -3018,11 +3091,11 @@ export default function App() {
   );
 
   const scheduleAt = useCallback(
-    async (date: Date, content: Notifications.NotificationContentInput): Promise<string> => {
+    async (date: Date, content: NotificationContentInputCompat): Promise<string> => {
       if (!notificationsRuntimeEnabled) {
         throw new Error("notifications_disabled");
       }
-      const trigger: Notifications.DateTriggerInput = {
+      const trigger: NotificationDateTriggerInputCompat = {
         type: Notifications.SchedulableTriggerInputTypes.DATE,
         date,
       };
@@ -3043,7 +3116,7 @@ export default function App() {
       try {
         const scheduled = await Notifications.getAllScheduledNotificationsAsync();
         await Promise.all(
-          scheduled.map(async (request) => {
+          scheduled.map(async (request: NotificationsTypes.NotificationRequest) => {
             const data = request.content.data as { type?: string } | undefined;
             if (data?.type !== type) {
               return;
@@ -5033,6 +5106,10 @@ export default function App() {
         setCalendarStatus("Calendar sync is iOS-only in this MVP.");
         return;
       }
+      if (!calendarRuntimeEnabled) {
+        setCalendarStatus("Calendar module unavailable in this build. Reinstall the app.");
+        return;
+      }
 
       if (!normalizedSponsorName || sponsorPhoneE164 === null) {
         setCalendarStatus("Calendar sync skipped: sponsor name/phone incomplete.");
@@ -5065,7 +5142,7 @@ export default function App() {
           ? "Monthly"
           : `${sponsorRepeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdays(sponsorRepeatDaysSorted)}`;
 
-      const recurrenceRule: Calendar.RecurrenceRule =
+      const recurrenceRule: CalendarTypes.RecurrenceRule =
         sponsorRepeatUnit === "MONTHLY"
           ? {
               frequency: Calendar.Frequency.MONTHLY,
@@ -5085,7 +5162,7 @@ export default function App() {
         `Schedule: ${sponsorCallTimeLocalHhmm} ${recurrenceSummary}`,
       ].join("\n");
 
-      const eventDetails: Omit<Partial<Calendar.Event>, "id"> = {
+      const eventDetails: CalendarEventInputCompat = {
         title: "Call Sponsor",
         notes,
         startDate: nextStart,
@@ -5121,6 +5198,7 @@ export default function App() {
       setCalendarStatus(`Calendar synced (${formatDateTimeLabel(nextStart)}).`);
     },
     [
+      calendarRuntimeEnabled,
       normalizedSponsorName,
       sponsorPhoneE164,
       ensureCalendarPermission,
@@ -5138,6 +5216,10 @@ export default function App() {
       try {
         if (Platform.OS !== "ios") {
           setMilestoneCalendarStatus("Sobriety milestones are iOS-only in this MVP.");
+          return;
+        }
+        if (!calendarRuntimeEnabled) {
+          setMilestoneCalendarStatus("Calendar module unavailable in this build.");
           return;
         }
 
@@ -5227,6 +5309,7 @@ export default function App() {
       }
     },
     [
+      calendarRuntimeEnabled,
       sobrietyDateIso,
       ensureCalendarPermission,
       findWritableCalendarId,
@@ -5782,6 +5865,11 @@ export default function App() {
 
   const attachCalendarEventToAttendance = useCallback(
     async (recordId: string): Promise<boolean> => {
+      if (!calendarRuntimeEnabled) {
+        setAttendanceStatus("Calendar module unavailable in this build.");
+        return false;
+      }
+
       const sourceRecord =
         (activeAttendanceRef.current && activeAttendanceRef.current.id === recordId
           ? activeAttendanceRef.current
@@ -5853,6 +5941,7 @@ export default function App() {
       return true;
     },
     [
+      calendarRuntimeEnabled,
       ensureCalendarPermission,
       findWritableCalendarId,
       getScheduledWindowForAttendance,
@@ -7482,7 +7571,7 @@ export default function App() {
         buttonTitle: "Call",
         options: { opensAppToForeground: true },
       },
-    ]).catch((error) => {
+    ]).catch((error: unknown) => {
       console.log("[notifications] sponsor category setup failed", error);
     });
     void Notifications.setNotificationCategoryAsync(DRIVE_NOTIFICATION_CATEGORY_ID, [
@@ -7491,40 +7580,42 @@ export default function App() {
         buttonTitle: "Drive",
         options: { opensAppToForeground: true },
       },
-    ]).catch((error) => {
+    ]).catch((error: unknown) => {
       console.log("[notifications] drive category setup failed", error);
     });
 
-    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      const action = response.actionIdentifier;
-      const data = response.notification.request.content.data as {
-        type?: string;
-        phoneE164?: string | null;
-        meetingId?: string;
-      };
+    const subscription = Notifications.addNotificationResponseReceivedListener(
+      (response: NotificationsTypes.NotificationResponse) => {
+        const action = response.actionIdentifier;
+        const data = response.notification.request.content.data as {
+          type?: string;
+          phoneE164?: string | null;
+          meetingId?: string;
+        };
 
-      if (data.type === "sponsor") {
-        const phone = typeof data.phoneE164 === "string" ? data.phoneE164 : null;
-        setMode("A");
-        setScreen("LIST");
-        setSelectedMeeting(null);
-        if (phone) {
-          setNotificationOpenPhone(phone);
-        }
-        if (action === SPONSOR_CALL_ACTION_ID && phone) {
-          void openPhoneCall(phone, "notification");
-        }
-      }
-
-      if (data.type === "drive") {
-        const meetingId = typeof data.meetingId === "string" ? data.meetingId : null;
-        if (meetingId && meetingsByIdRef.current[meetingId]) {
-          if (action === DRIVE_ACTION_ID || action === Notifications.DEFAULT_ACTION_IDENTIFIER) {
-            void openMeetingDestination(meetingsByIdRef.current[meetingId]);
+        if (data.type === "sponsor") {
+          const phone = typeof data.phoneE164 === "string" ? data.phoneE164 : null;
+          setMode("A");
+          setScreen("LIST");
+          setSelectedMeeting(null);
+          if (phone) {
+            setNotificationOpenPhone(phone);
+          }
+          if (action === SPONSOR_CALL_ACTION_ID && phone) {
+            void openPhoneCall(phone, "notification");
           }
         }
-      }
-    });
+
+        if (data.type === "drive") {
+          const meetingId = typeof data.meetingId === "string" ? data.meetingId : null;
+          if (meetingId && meetingsByIdRef.current[meetingId]) {
+            if (action === DRIVE_ACTION_ID || action === Notifications.DEFAULT_ACTION_IDENTIFIER) {
+              void openMeetingDestination(meetingsByIdRef.current[meetingId]);
+            }
+          }
+        }
+      },
+    );
 
     return () => {
       subscription.remove();
@@ -11022,6 +11113,10 @@ export default function App() {
                       <Pressable
                         style={styles.viewModeButton}
                         onPress={() => {
+                          if (!mapsRuntimeAvailable) {
+                            setMeetingsStatus("Map view unavailable in this build.");
+                            return;
+                          }
                           setMeetingsViewMode((current) => (current === "LIST" ? "MAP" : "LIST"));
                           setSelectedLocationKey(null);
                         }}
@@ -11140,7 +11235,11 @@ export default function App() {
                           Map view shows in-person meetings with location coordinates for the
                           selected day.
                         </Text>
-                        {mapRegion ? (
+                        {!mapsRuntimeAvailable ? (
+                          <Text style={styles.sectionMeta}>
+                            Map module unavailable in this build. Reinstall the latest app build.
+                          </Text>
+                        ) : mapRegion ? (
                           <View style={styles.mapContainer}>
                             <MapViewCompat
                               ref={mapRef}
