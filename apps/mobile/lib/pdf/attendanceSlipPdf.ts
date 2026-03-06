@@ -5,7 +5,11 @@ import {
 } from "../signatures/signatureStore";
 
 export const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
-const MAX_SIGNATURE_EMBED_BYTES = 300 * 1024;
+const MAX_EXPORT_RECORDS = 25;
+const MAX_SIGNATURE_SVG_BYTES = 150_000;
+const MAX_SIGNATURE_PNG_BYTES = 250_000;
+const MAX_TOTAL_HTML_BYTES = 1_200_000;
+const MAX_SIGNATURE_EMBED_BUDGET_BYTES = 700_000;
 
 export type AttendanceSlipRecord = {
   id: string;
@@ -79,10 +83,55 @@ type GenerateAttendanceSlipOptions = {
   onProgress?: (progress: AttendanceSlipExportProgress) => void;
 };
 
+type SignatureMode = "inline_svg" | "png_base64" | "placeholder" | "missing_file";
+
+type SignatureModeCounts = {
+  inline_svg: number;
+  png_base64: number;
+  placeholder: number;
+  missing_file: number;
+};
+
+export type AttendanceExportDiagnostics = {
+  safeMode: boolean;
+  forcedPlaceholderSignatures: boolean;
+  records: number;
+  htmlBytes: number;
+  maxHtmlBytes: number;
+  htmlUtilizationPct: number;
+  signatureEmbedBudgetUsedBytes: number;
+  signatureEmbedBudgetMaxBytes: number;
+  signatureBudgetUtilizationPct: number;
+  signatureModes: SignatureModeCounts;
+  caps: {
+    maxSignatureSvgBytes: number;
+    maxSignaturePngBytes: number;
+  };
+};
+
 type SignatureRenderState =
-  | { state: "unsigned" }
-  | { state: "on_file" }
-  | { state: "image"; dataUri: string };
+  | {
+      state: "unsigned";
+      mode: "placeholder";
+      embeddedBytes: 0;
+      hadSignatureInput: false;
+      forcedPlaceholder: false;
+    }
+  | {
+      state: "on_file";
+      mode: "placeholder" | "missing_file";
+      embeddedBytes: 0;
+      hadSignatureInput: true;
+      forcedPlaceholder: boolean;
+    }
+  | {
+      state: "image";
+      dataUri: string;
+      mode: "inline_svg" | "png_base64";
+      embeddedBytes: number;
+      hadSignatureInput: true;
+      forcedPlaceholder: false;
+    };
 
 type PreparedRecord = {
   id: string;
@@ -94,6 +143,18 @@ type PreparedRecord = {
   chairName: string | null;
   chairRole: string | null;
   signatureState: SignatureRenderState;
+};
+
+type SignatureEmbedBudget = {
+  usedBytes: number;
+  maxBytes: number;
+};
+
+type PrepareRecordsResult = {
+  records: PreparedRecord[];
+  signatureModes: SignatureModeCounts;
+  embedBudgetUsedBytes: number;
+  forcedPlaceholderSignatures: boolean;
 };
 
 let attendanceSlipExportInFlight = false;
@@ -126,6 +187,14 @@ function asSafeText(value: unknown, fallback: string): string {
     return String(value);
   }
   return fallback;
+}
+
+function utf8ByteLength(value: string): number {
+  try {
+    return new TextEncoder().encode(value).length;
+  } catch {
+    return value.length;
+  }
 }
 
 function sanitizePdfFileName(fileName: string): string {
@@ -322,15 +391,28 @@ async function resolveSignatureState(
   fileSystemModule: SignatureFileSystemModule | null,
   record: AttendanceSlipRecord,
   subdirectory: string,
+  embedBudget: SignatureEmbedBudget,
 ): Promise<SignatureRenderState> {
   const rawSignature = [record.signatureRefUri, record.legacySignatureSvgBase64]
     .find((entry) => typeof entry === "string" && entry.trim().length > 0)
     ?.trim();
   if (!rawSignature) {
-    return { state: "unsigned" };
+    return {
+      state: "unsigned",
+      mode: "placeholder",
+      embeddedBytes: 0,
+      hadSignatureInput: false,
+      forcedPlaceholder: false,
+    };
   }
   if (!fileSystemModule) {
-    return { state: "on_file" };
+    return {
+      state: "on_file",
+      mode: "missing_file",
+      embeddedBytes: 0,
+      hadSignatureInput: true,
+      forcedPlaceholder: false,
+    };
   }
 
   const shouldVerifyFileExists = rawSignature.startsWith("file://") || rawSignature.startsWith("/");
@@ -341,26 +423,74 @@ async function resolveSignatureState(
     verifyFileExists: shouldVerifyFileExists,
   });
   if (!normalized.ref) {
-    return { state: "unsigned" };
+    return {
+      state: "on_file",
+      mode: "missing_file",
+      embeddedBytes: 0,
+      hadSignatureInput: true,
+      forcedPlaceholder: false,
+    };
   }
 
+  const isSvg = normalized.ref.mimeType === "image/svg+xml";
+  const maxBytesForSignature = isSvg ? MAX_SIGNATURE_SVG_BYTES : MAX_SIGNATURE_PNG_BYTES;
   const encoded = await signatureRefToDataUri({
     fileSystem: fileSystemModule,
     ref: normalized.ref,
-    maxBytes: MAX_SIGNATURE_EMBED_BYTES,
+    maxBytes: maxBytesForSignature,
   });
   if (!encoded.dataUri) {
-    return { state: "on_file" };
+    return {
+      state: "on_file",
+      mode: encoded.bytes > maxBytesForSignature ? "placeholder" : "missing_file",
+      embeddedBytes: 0,
+      hadSignatureInput: true,
+      forcedPlaceholder: encoded.bytes > maxBytesForSignature,
+    };
   }
-  return { state: "image", dataUri: encoded.dataUri };
+
+  if (embedBudget.usedBytes + encoded.bytes > embedBudget.maxBytes) {
+    return {
+      state: "on_file",
+      mode: "placeholder",
+      embeddedBytes: 0,
+      hadSignatureInput: true,
+      forcedPlaceholder: true,
+    };
+  }
+
+  embedBudget.usedBytes += encoded.bytes;
+  return {
+    state: "image",
+    dataUri: encoded.dataUri,
+    mode: isSvg ? "inline_svg" : "png_base64",
+    embeddedBytes: encoded.bytes,
+    hadSignatureInput: true,
+    forcedPlaceholder: false,
+  };
+}
+
+function emptySignatureModeCounts(): SignatureModeCounts {
+  return {
+    inline_svg: 0,
+    png_base64: 0,
+    placeholder: 0,
+    missing_file: 0,
+  };
 }
 
 async function prepareRecordsForExport(
   records: AttendanceSlipRecord[],
   fileSystemModule: SignatureFileSystemModule | null,
-): Promise<PreparedRecord[]> {
+): Promise<PrepareRecordsResult> {
   const prepared: PreparedRecord[] = [];
   const signatureSubdirectory = "attendance-signatures";
+  const signatureModes = emptySignatureModeCounts();
+  const embedBudget: SignatureEmbedBudget = {
+    usedBytes: 0,
+    maxBytes: MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+  };
+  let forcedPlaceholderSignatures = false;
 
   for (const sourceRecord of records) {
     const startAtIso = normalizeIsoDate(sourceRecord.startAtIso, new Date().toISOString());
@@ -391,28 +521,111 @@ async function prepareRecordsForExport(
         fileSystemModule,
         sourceRecord,
         signatureSubdirectory,
+        embedBudget,
       ),
     });
+
+    const state = prepared[prepared.length - 1]?.signatureState;
+    if (state) {
+      signatureModes[state.mode] += 1;
+      if (state.forcedPlaceholder) {
+        forcedPlaceholderSignatures = true;
+      }
+    }
   }
 
-  return prepared.sort(
+  const sorted = prepared.sort(
     (left, right) => new Date(left.startAtIso).getTime() - new Date(right.startAtIso).getTime(),
   );
+  return {
+    records: sorted,
+    signatureModes,
+    embedBudgetUsedBytes: embedBudget.usedBytes,
+    forcedPlaceholderSignatures,
+  };
+}
+
+function summarizeExportPlan(input: {
+  recordsCount: number;
+  htmlBytes: number;
+  signatureModes: SignatureModeCounts;
+  embedBudgetUsedBytes: number;
+  forcedPlaceholderSignatures: boolean;
+  safeMode: boolean;
+}): {
+  records: number;
+  htmlBytes: number;
+  maxHtmlBytes: number;
+  htmlUtilizationPct: number;
+  signatureEmbedBudgetUsedBytes: number;
+  signatureEmbedBudgetMaxBytes: number;
+  signatureBudgetUtilizationPct: number;
+  signatureModes: SignatureModeCounts;
+  caps: {
+    maxTotalHtmlBytes: number;
+    maxSignatureEmbedBudgetBytes: number;
+    maxSignatureSvgBytes: number;
+    maxSignaturePngBytes: number;
+  };
+  approachingCaps: {
+    approachingHtmlCap: boolean;
+    approachingSigCap: boolean;
+  };
+  safeMode: boolean;
+  forcedPlaceholderSignatures: boolean;
+} {
+  const htmlUtilizationPct =
+    MAX_TOTAL_HTML_BYTES > 0 ? Number(((input.htmlBytes / MAX_TOTAL_HTML_BYTES) * 100).toFixed(1)) : 0;
+  const signatureBudgetUtilizationPct =
+    MAX_SIGNATURE_EMBED_BUDGET_BYTES > 0
+      ? Number(((input.embedBudgetUsedBytes / MAX_SIGNATURE_EMBED_BUDGET_BYTES) * 100).toFixed(1))
+      : 0;
+
+  return {
+    records: input.recordsCount,
+    htmlBytes: input.htmlBytes,
+    maxHtmlBytes: MAX_TOTAL_HTML_BYTES,
+    htmlUtilizationPct,
+    signatureEmbedBudgetUsedBytes: input.embedBudgetUsedBytes,
+    signatureEmbedBudgetMaxBytes: MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+    signatureBudgetUtilizationPct,
+    signatureModes: input.signatureModes,
+    caps: {
+      maxTotalHtmlBytes: MAX_TOTAL_HTML_BYTES,
+      maxSignatureEmbedBudgetBytes: MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+      maxSignatureSvgBytes: MAX_SIGNATURE_SVG_BYTES,
+      maxSignaturePngBytes: MAX_SIGNATURE_PNG_BYTES,
+    },
+    approachingCaps: {
+      approachingHtmlCap: input.htmlBytes >= Math.floor(MAX_TOTAL_HTML_BYTES * 0.85),
+      approachingSigCap:
+        input.embedBudgetUsedBytes >= Math.floor(MAX_SIGNATURE_EMBED_BUDGET_BYTES * 0.85),
+    },
+    safeMode: input.safeMode,
+    forcedPlaceholderSignatures: input.forcedPlaceholderSignatures,
+  };
 }
 
 export async function generateAttendanceSlipPdf(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
   options?: GenerateAttendanceSlipOptions,
-): Promise<string[]> {
+): Promise<{ uri: string; diagnostics: AttendanceExportDiagnostics }> {
   if (attendanceSlipExportInFlight) {
     throw new Error("Export already in progress.");
   }
   attendanceSlipExportInFlight = true;
 
+  let planForLogs:
+    | ReturnType<typeof summarizeExportPlan>
+    | null = null;
+
   try {
     if (!Array.isArray(records) || records.length === 0) {
       throw new Error("No attendance records selected for export.");
+    }
+    if (records.length > MAX_EXPORT_RECORDS) {
+      throw new Error(`Select ${MAX_EXPORT_RECORDS} or fewer attendance records per export.`);
     }
 
     const printModule = loadModule<PrintModule>("expo-print");
@@ -439,8 +652,44 @@ export async function generateAttendanceSlipPdf(
       totalRecords: records.length,
     });
 
-    const preparedRecords = await prepareRecordsForExport(records, fileSystemModule);
-    const html = buildAttendanceHtml(preparedRecords, profile);
+    const prepared = await prepareRecordsForExport(records, fileSystemModule);
+    const html = buildAttendanceHtml(prepared.records, profile);
+    const htmlBytes = utf8ByteLength(html);
+    const safeMode =
+      prepared.forcedPlaceholderSignatures ||
+      htmlBytes >= MAX_TOTAL_HTML_BYTES * 0.9 ||
+      prepared.embedBudgetUsedBytes >= MAX_SIGNATURE_EMBED_BUDGET_BYTES * 0.9;
+
+    planForLogs = summarizeExportPlan({
+      recordsCount: prepared.records.length,
+      htmlBytes,
+      signatureModes: prepared.signatureModes,
+      embedBudgetUsedBytes: prepared.embedBudgetUsedBytes,
+      forcedPlaceholderSignatures: prepared.forcedPlaceholderSignatures,
+      safeMode,
+    });
+    console.log("[attendance-export] plan", planForLogs);
+
+    if (htmlBytes > MAX_TOTAL_HTML_BYTES) {
+      throw new Error("Export payload too large. Reduce selection and try again.");
+    }
+
+    const diagnostics: AttendanceExportDiagnostics = {
+      safeMode,
+      forcedPlaceholderSignatures: prepared.forcedPlaceholderSignatures,
+      records: prepared.records.length,
+      htmlBytes,
+      maxHtmlBytes: MAX_TOTAL_HTML_BYTES,
+      htmlUtilizationPct: planForLogs.htmlUtilizationPct,
+      signatureEmbedBudgetUsedBytes: prepared.embedBudgetUsedBytes,
+      signatureEmbedBudgetMaxBytes: MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+      signatureBudgetUtilizationPct: planForLogs.signatureBudgetUtilizationPct,
+      signatureModes: prepared.signatureModes,
+      caps: {
+        maxSignatureSvgBytes: MAX_SIGNATURE_SVG_BYTES,
+        maxSignaturePngBytes: MAX_SIGNATURE_PNG_BYTES,
+      },
+    };
 
     let printed: { uri: string };
     try {
@@ -467,7 +716,13 @@ export async function generateAttendanceSlipPdf(
       totalRecords: records.length,
     });
 
-    return [targetUri];
+    return { uri: targetUri, diagnostics };
+  } catch (error) {
+    console.log("[attendance-export] fail", {
+      message: error instanceof Error ? error.message : String(error),
+      plan: planForLogs,
+    });
+    throw error;
   } finally {
     attendanceSlipExportInFlight = false;
   }
@@ -478,14 +733,14 @@ export async function printAttendanceSlipPdf(
   profile: AttendanceSlipUserProfile,
   options?: GenerateAttendanceSlipOptions,
 ): Promise<void> {
-  const uris = await generateAttendanceSlipPdf(records, profile, options);
+  const exported = await generateAttendanceSlipPdf(records, profile, options);
   const printModule = loadModule<PrintModule>("expo-print");
   if (!printModule || typeof printModule.printAsync !== "function") {
     throw new Error("Print module unavailable. Install expo-print then restart Metro.");
   }
 
   try {
-    await printModule.printAsync({ uri: uris[0] });
+    await printModule.printAsync({ uri: exported.uri });
   } catch {
     throw new Error("PDF export failed while opening print dialog.");
   }
@@ -563,8 +818,20 @@ export function buildAttendanceSlipHtmlForTest(records: AttendanceSlipRecord[]):
       (typeof record.signatureRefUri === "string" && record.signatureRefUri.trim().length > 0) ||
       (typeof record.legacySignatureSvgBase64 === "string" &&
         record.legacySignatureSvgBase64.trim().length > 0)
-        ? { state: "on_file" }
-        : { state: "unsigned" },
+        ? {
+            state: "on_file",
+            mode: "placeholder",
+            embeddedBytes: 0,
+            hadSignatureInput: true,
+            forcedPlaceholder: false,
+          }
+        : {
+            state: "unsigned",
+            mode: "placeholder",
+            embeddedBytes: 0,
+            hadSignatureInput: false,
+            forcedPlaceholder: false,
+          },
   }));
   return buildAttendanceHtml(prepared, { participantName: "Test Participant" });
 }
