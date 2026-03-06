@@ -1,11 +1,17 @@
 import {
+  estimateBase64Bytes,
+  looksLikeFileUri,
   normalizeSignatureValueToRef,
   signatureRefToDataUri,
   type SignatureFileSystemModule,
 } from "../signatures/signatureStore";
 
 export const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
-const MAX_SIGNATURE_EMBED_BYTES = 300 * 1024;
+const MAX_SIGNATURE_SVG_BYTES = 150_000;
+const MAX_SIGNATURE_PNG_BYTES = 250_000;
+const MAX_TOTAL_HTML_BYTES = 1_200_000;
+const MAX_SIGNATURE_EMBED_BUDGET_BYTES = MAX_SIGNATURE_PNG_BYTES;
+const MAX_CHUNK_COUNT = 5;
 
 export type AttendanceSlipRecord = {
   id: string;
@@ -79,10 +85,21 @@ type GenerateAttendanceSlipOptions = {
   onProgress?: (progress: AttendanceSlipExportProgress) => void;
 };
 
+type SignatureMode = "file_svg" | "file_png" | "inline_svg" | "base64_png" | "placeholder";
+
+type SignatureModeCounts = {
+  file_svg: number;
+  file_png: number;
+  inline_svg: number;
+  base64_png: number;
+  placeholder: number;
+};
+
 type SignatureRenderState =
   | { state: "unsigned" }
   | { state: "on_file" }
-  | { state: "image"; dataUri: string };
+  | { state: "image_data_uri"; dataUri: string }
+  | { state: "image_inline_svg"; svgMarkup: string };
 
 type PreparedRecord = {
   id: string;
@@ -94,6 +111,18 @@ type PreparedRecord = {
   chairName: string | null;
   chairRole: string | null;
   signatureState: SignatureRenderState;
+  signatureMode: SignatureMode;
+  signatureBytes: number;
+  signatureCapBytes: number;
+};
+
+type HtmlChunkPlan = {
+  chunkCount: number;
+  chunks: { records: PreparedRecord[]; html: string; bytes: number }[];
+  htmlBytesByChunk: number[];
+  totalHtmlBytes: number;
+  exceedsPerChunkCap: boolean;
+  exceedsTotalCap: boolean;
 };
 
 let attendanceSlipExportInFlight = false;
@@ -105,6 +134,14 @@ function loadModule<T>(name: string): T | null {
     return dynamicRequire(name) as T;
   } catch {
     return null;
+  }
+}
+
+function utf8ByteLength(value: string): number {
+  try {
+    return new TextEncoder().encode(value).length;
+  } catch {
+    return value.length;
   }
 }
 
@@ -137,6 +174,14 @@ function sanitizePdfFileName(fileName: string): string {
     return `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf`;
   }
   return stripped.toLowerCase().endsWith(".pdf") ? stripped : `${stripped}.pdf`;
+}
+
+function withChunkSuffix(fileName: string, chunkIndex: number, chunkCount: number): string {
+  if (chunkCount <= 1) {
+    return fileName;
+  }
+  const normalized = fileName.toLowerCase().endsWith(".pdf") ? fileName.slice(0, -4) : fileName;
+  return sanitizePdfFileName(`${normalized} - Part ${chunkIndex}/${chunkCount}.pdf`);
 }
 
 function pad2(value: number): string {
@@ -225,14 +270,143 @@ function normalizeDurationSeconds(
   return Math.floor((endMs - startMs) / 1000);
 }
 
+function sanitizeBase64(value: string): string | null {
+  const cleaned = value.replace(/[^A-Za-z0-9+/=]/g, "");
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+function sanitizeSvgMarkup(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed.toLowerCase().includes("<svg")) {
+    return null;
+  }
+  const withoutScripts = trimmed.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "");
+  const withoutHandlers = withoutScripts
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "")
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, "")
+    .replace(/javascript:/gi, "");
+  return withoutHandlers.length > 0 ? withoutHandlers : null;
+}
+
+function detectSignatureSourceMode(rawSignature: string): SignatureMode {
+  const trimmed = rawSignature.trim();
+  const lower = trimmed.toLowerCase();
+
+  if (looksLikeFileUri(trimmed)) {
+    return lower.endsWith(".svg") ? "file_svg" : "file_png";
+  }
+  if (
+    lower.startsWith("<svg") ||
+    lower.startsWith("<?xml") ||
+    lower.startsWith("data:image/svg+xml") ||
+    lower.startsWith("phn2zy") ||
+    lower.startsWith("pd94bw")
+  ) {
+    return "inline_svg";
+  }
+  if (lower.startsWith("data:image/png") || lower.startsWith("data:image/jpeg")) {
+    return "base64_png";
+  }
+
+  const cleaned = sanitizeBase64(trimmed);
+  if (!cleaned) {
+    return "placeholder";
+  }
+  return cleaned.startsWith("iVBOR") || cleaned.startsWith("/9j/") ? "base64_png" : "inline_svg";
+}
+
+function countSignatureModes(records: PreparedRecord[]): SignatureModeCounts {
+  const counts: SignatureModeCounts = {
+    file_svg: 0,
+    file_png: 0,
+    inline_svg: 0,
+    base64_png: 0,
+    placeholder: 0,
+  };
+  for (const record of records) {
+    counts[record.signatureMode] += 1;
+  }
+  return counts;
+}
+
+function peakSignatureUsage(records: PreparedRecord[]): { bytes: number; cap: number } {
+  return records.reduce(
+    (acc, record) => {
+      const ratio =
+        record.signatureCapBytes > 0 ? record.signatureBytes / record.signatureCapBytes : 0;
+      return ratio > acc.ratio
+        ? { ratio, bytes: record.signatureBytes, cap: record.signatureCapBytes }
+        : acc;
+    },
+    { ratio: 0, bytes: 0, cap: MAX_SIGNATURE_PNG_BYTES },
+  );
+}
+
+function summarizeExportPlan(input: {
+  recordsCount: number;
+  htmlBytesByChunk: number[];
+  signatureModes: SignatureModeCounts;
+  maxSignatureBytes: number;
+  maxSignatureCapBytes: number;
+}) {
+  const totalHtmlBytes = input.htmlBytesByChunk.reduce((sum, value) => sum + value, 0);
+  const maxChunkBytes = input.htmlBytesByChunk.reduce((max, value) => Math.max(max, value), 0);
+  const approachingHtmlCap = totalHtmlBytes >= Math.floor(MAX_TOTAL_HTML_BYTES * 0.85);
+  const capUsed =
+    input.maxSignatureCapBytes > 0 ? input.maxSignatureCapBytes : MAX_SIGNATURE_PNG_BYTES;
+  const approachingSigCap = input.maxSignatureBytes > Math.floor(capUsed * 0.85);
+
+  return {
+    records: input.recordsCount,
+    chunks: input.htmlBytesByChunk.length,
+    htmlBytesByChunk: input.htmlBytesByChunk,
+    totalHtmlBytes,
+    maxChunkBytes,
+    signatureModes: input.signatureModes,
+    caps: {
+      maxTotalHtmlBytes: MAX_TOTAL_HTML_BYTES,
+      maxSignatureSvgBytes: MAX_SIGNATURE_SVG_BYTES,
+      maxSignaturePngBytes: MAX_SIGNATURE_PNG_BYTES,
+      maxSignatureEmbedBudgetBytes: MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+    },
+    approachingCaps: {
+      approachingHtmlCap,
+      approachingSigCap,
+    },
+  };
+}
+
+function logExportPlan(plan: ReturnType<typeof summarizeExportPlan>) {
+  console.log("[attendance-export] plan", plan);
+}
+
+function logExportDegrade(reason: string, plan: ReturnType<typeof summarizeExportPlan>) {
+  console.log("[attendance-export] degrade", { reason, ...plan });
+}
+
+function logExportFail(error: unknown, plan: ReturnType<typeof summarizeExportPlan> | null) {
+  console.log("[attendance-export] fail", {
+    message: error instanceof Error ? error.message : String(error),
+    plan,
+  });
+}
+
+function isPlanWithinCaps(plan: HtmlChunkPlan): boolean {
+  return !plan.exceedsPerChunkCap && !plan.exceedsTotalCap;
+}
+
 function buildSignatureCell(record: PreparedRecord): string {
   const chairBits = [record.chairName ?? "", record.chairRole ?? ""].filter(
     (entry) => entry.trim().length > 0,
   );
   const chairLine = chairBits.length > 0 ? `<div>${escapeHtml(chairBits.join(" - "))}</div>` : "";
 
-  if (record.signatureState.state === "image") {
+  if (record.signatureState.state === "image_data_uri") {
     return `${chairLine}<img alt="Signature" src="${escapeHtml(record.signatureState.dataUri)}" class="sig-image" />`;
+  }
+  if (record.signatureState.state === "image_inline_svg") {
+    return `${chairLine}<div class="sig-svg">${record.signatureState.svgMarkup}</div>`;
   }
   if (record.signatureState.state === "on_file") {
     return `${chairLine}<div class="sig-text">Signature on file</div>`;
@@ -282,6 +456,7 @@ function buildAttendanceHtml(
       td:nth-child(4), th:nth-child(4) { width: 13%; text-align: center; }
       td:nth-child(5), th:nth-child(5) { width: 26%; }
       .sig-image { display: block; max-width: 100%; max-height: 52px; object-fit: contain; }
+      .sig-svg svg { display: block; max-width: 100%; max-height: 52px; }
       .sig-text { color: #444; font-size: 10px; }
       .meta { margin-top: 8px; color: #555; font-size: 10px; text-align: right; }
     </style>
@@ -318,46 +493,188 @@ function buildAttendanceHtml(
 </html>`;
 }
 
+function splitRecordsByChunkCount(
+  records: PreparedRecord[],
+  chunkCount: number,
+): PreparedRecord[][] {
+  const safeCount = Math.max(1, Math.min(chunkCount, records.length || 1));
+  const recordsPerChunk = Math.ceil(records.length / safeCount);
+  const chunks: PreparedRecord[][] = [];
+  for (let index = 0; index < records.length; index += recordsPerChunk) {
+    chunks.push(records.slice(index, index + recordsPerChunk));
+  }
+  return chunks;
+}
+
+function buildHtmlChunkPlan(
+  records: PreparedRecord[],
+  profile: AttendanceSlipUserProfile,
+  requestedChunkCount: number,
+): HtmlChunkPlan {
+  const chunksByRecord = splitRecordsByChunkCount(records, requestedChunkCount);
+  const chunks = chunksByRecord.map((chunkRecords) => {
+    const html = buildAttendanceHtml(chunkRecords, profile);
+    const bytes = utf8ByteLength(html);
+    return { records: chunkRecords, html, bytes };
+  });
+  const htmlBytesByChunk = chunks.map((chunk) => chunk.bytes);
+  const totalHtmlBytes = htmlBytesByChunk.reduce((sum, value) => sum + value, 0);
+  const perChunkLimit = MAX_TOTAL_HTML_BYTES / Math.max(1, chunks.length);
+
+  return {
+    chunkCount: chunks.length,
+    chunks,
+    htmlBytesByChunk,
+    totalHtmlBytes,
+    exceedsPerChunkCap: chunks.some((chunk) => chunk.bytes > perChunkLimit),
+    exceedsTotalCap: totalHtmlBytes > MAX_TOTAL_HTML_BYTES,
+  };
+}
+
+function estimateSignatureBytes(raw: string, mode: SignatureMode): { bytes: number; cap: number } {
+  if (mode === "file_svg" || mode === "inline_svg") {
+    return { bytes: utf8ByteLength(raw), cap: MAX_SIGNATURE_SVG_BYTES };
+  }
+  if (mode === "file_png" || mode === "base64_png") {
+    const cleaned = sanitizeBase64(raw.replace(/^data:[^,]+,/i, ""));
+    return {
+      bytes: cleaned ? estimateBase64Bytes(cleaned) : 0,
+      cap: MAX_SIGNATURE_PNG_BYTES,
+    };
+  }
+  return { bytes: 0, cap: MAX_SIGNATURE_PNG_BYTES };
+}
+
 async function resolveSignatureState(
   fileSystemModule: SignatureFileSystemModule | null,
   record: AttendanceSlipRecord,
   subdirectory: string,
-): Promise<SignatureRenderState> {
+  forcePlaceholder: boolean,
+): Promise<{
+  state: SignatureRenderState;
+  mode: SignatureMode;
+  signatureBytes: number;
+  signatureCap: number;
+}> {
   const rawSignature = [record.signatureRefUri, record.legacySignatureSvgBase64]
     .find((entry) => typeof entry === "string" && entry.trim().length > 0)
     ?.trim();
   if (!rawSignature) {
-    return { state: "unsigned" };
-  }
-  if (!fileSystemModule) {
-    return { state: "on_file" };
+    return {
+      state: { state: "unsigned" },
+      mode: "placeholder",
+      signatureBytes: 0,
+      signatureCap: MAX_SIGNATURE_PNG_BYTES,
+    };
   }
 
-  const shouldVerifyFileExists = rawSignature.startsWith("file://") || rawSignature.startsWith("/");
+  const sourceMode = detectSignatureSourceMode(rawSignature);
+  const estimated = estimateSignatureBytes(rawSignature, sourceMode);
+  if (forcePlaceholder || !fileSystemModule) {
+    return {
+      state: { state: "on_file" },
+      mode: "placeholder",
+      signatureBytes: estimated.bytes,
+      signatureCap: estimated.cap,
+    };
+  }
+
+  const shouldVerifyFileExists = looksLikeFileUri(rawSignature);
   const normalized = await normalizeSignatureValueToRef(rawSignature, {
     fileSystem: fileSystemModule,
     recordId: asSafeText(record.id, "signature"),
     subdirectory,
     verifyFileExists: shouldVerifyFileExists,
   });
+
   if (!normalized.ref) {
-    return { state: "unsigned" };
+    return {
+      state: { state: "unsigned" },
+      mode: "placeholder",
+      signatureBytes: estimated.bytes,
+      signatureCap: estimated.cap,
+    };
   }
 
-  const encoded = await signatureRefToDataUri({
-    fileSystem: fileSystemModule,
-    ref: normalized.ref,
-    maxBytes: MAX_SIGNATURE_EMBED_BYTES,
-  });
-  if (!encoded.dataUri) {
-    return { state: "on_file" };
+  try {
+    const info = await fileSystemModule.getInfoAsync(normalized.ref.uri);
+    const bytes =
+      typeof info.size === "number" && Number.isFinite(info.size) ? info.size : estimated.bytes;
+
+    if (normalized.ref.mimeType === "image/svg+xml") {
+      if (bytes > MAX_SIGNATURE_SVG_BYTES) {
+        return {
+          state: { state: "on_file" },
+          mode: "placeholder",
+          signatureBytes: bytes,
+          signatureCap: MAX_SIGNATURE_SVG_BYTES,
+        };
+      }
+
+      const svgText = await fileSystemModule.readAsStringAsync(normalized.ref.uri, {
+        encoding: fileSystemModule.EncodingType?.UTF8 ?? "utf8",
+      });
+      const sanitizedSvg = sanitizeSvgMarkup(svgText);
+      if (!sanitizedSvg) {
+        return {
+          state: { state: "on_file" },
+          mode: "placeholder",
+          signatureBytes: bytes,
+          signatureCap: MAX_SIGNATURE_SVG_BYTES,
+        };
+      }
+
+      return {
+        state: { state: "image_inline_svg", svgMarkup: sanitizedSvg },
+        mode: sourceMode === "inline_svg" ? "inline_svg" : "file_svg",
+        signatureBytes: bytes,
+        signatureCap: MAX_SIGNATURE_SVG_BYTES,
+      };
+    }
+
+    if (bytes > MAX_SIGNATURE_PNG_BYTES) {
+      return {
+        state: { state: "on_file" },
+        mode: "placeholder",
+        signatureBytes: bytes,
+        signatureCap: MAX_SIGNATURE_PNG_BYTES,
+      };
+    }
+
+    const encoded = await signatureRefToDataUri({
+      fileSystem: fileSystemModule,
+      ref: normalized.ref,
+      maxBytes: MAX_SIGNATURE_PNG_BYTES,
+    });
+    if (!encoded.dataUri) {
+      return {
+        state: { state: "on_file" },
+        mode: "placeholder",
+        signatureBytes: encoded.bytes || bytes,
+        signatureCap: MAX_SIGNATURE_PNG_BYTES,
+      };
+    }
+
+    return {
+      state: { state: "image_data_uri", dataUri: encoded.dataUri },
+      mode: sourceMode === "base64_png" ? "base64_png" : "file_png",
+      signatureBytes: encoded.bytes || bytes,
+      signatureCap: MAX_SIGNATURE_PNG_BYTES,
+    };
+  } catch {
+    return {
+      state: { state: "on_file" },
+      mode: "placeholder",
+      signatureBytes: estimated.bytes,
+      signatureCap: estimated.cap,
+    };
   }
-  return { state: "image", dataUri: encoded.dataUri };
 }
 
 async function prepareRecordsForExport(
   records: AttendanceSlipRecord[],
   fileSystemModule: SignatureFileSystemModule | null,
+  options: { forcePlaceholderSignatures: boolean },
 ): Promise<PreparedRecord[]> {
   const prepared: PreparedRecord[] = [];
   const signatureSubdirectory = "attendance-signatures";
@@ -371,6 +688,13 @@ async function prepareRecordsForExport(
       normalizedEndAtIso && Number.isFinite(new Date(normalizedEndAtIso).getTime())
         ? normalizedEndAtIso
         : null;
+
+    const signature = await resolveSignatureState(
+      fileSystemModule,
+      sourceRecord,
+      signatureSubdirectory,
+      options.forcePlaceholderSignatures,
+    );
 
     prepared.push({
       id: asSafeText(sourceRecord.id, `attendance-${prepared.length + 1}`),
@@ -387,11 +711,10 @@ async function prepareRecordsForExport(
         typeof sourceRecord.chairRole === "string" && sourceRecord.chairRole.trim().length > 0
           ? sourceRecord.chairRole.trim()
           : null,
-      signatureState: await resolveSignatureState(
-        fileSystemModule,
-        sourceRecord,
-        signatureSubdirectory,
-      ),
+      signatureState: signature.state,
+      signatureMode: signature.mode,
+      signatureBytes: signature.signatureBytes,
+      signatureCapBytes: signature.signatureCap,
     });
   }
 
@@ -409,6 +732,8 @@ export async function generateAttendanceSlipPdf(
     throw new Error("Export already in progress.");
   }
   attendanceSlipExportInFlight = true;
+
+  let lastPlan: ReturnType<typeof summarizeExportPlan> | null = null;
 
   try {
     if (!Array.isArray(records) || records.length === 0) {
@@ -432,33 +757,92 @@ export async function generateAttendanceSlipPdf(
     const defaultFileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${new Date().toISOString().slice(0, 10)}.pdf`;
     const fileName = sanitizePdfFileName(options?.fileName ?? defaultFileName);
 
+    const requestedChunkCount = Math.max(
+      1,
+      Math.min(
+        MAX_CHUNK_COUNT,
+        options?.maxRecordsPerChunk && Number.isFinite(options.maxRecordsPerChunk)
+          ? Math.ceil(records.length / Math.max(1, Math.floor(options.maxRecordsPerChunk)))
+          : 1,
+      ),
+    );
+
     options?.onProgress?.({
       chunkIndex: 1,
-      chunkCount: 1,
+      chunkCount: requestedChunkCount,
       processedRecords: 0,
       totalRecords: records.length,
     });
 
-    const preparedRecords = await prepareRecordsForExport(records, fileSystemModule);
-    const html = buildAttendanceHtml(preparedRecords, profile);
+    const buildPlanSummary = (
+      currentPlan: HtmlChunkPlan,
+      currentPrepared: PreparedRecord[],
+    ): ReturnType<typeof summarizeExportPlan> => {
+      const signatureModes = countSignatureModes(currentPrepared);
+      const peakSignature = peakSignatureUsage(currentPrepared);
+      return summarizeExportPlan({
+        recordsCount: records.length,
+        htmlBytesByChunk: currentPlan.htmlBytesByChunk,
+        signatureModes,
+        maxSignatureBytes: peakSignature.bytes,
+        maxSignatureCapBytes: peakSignature.cap,
+      });
+    };
 
-    let printed: { uri: string };
-    try {
-      printed = await printModule.printToFileAsync({ html, width: 612, height: 792 });
-    } catch {
-      throw new Error("PDF export failed during print rendering.");
+    let preparedRecords = await prepareRecordsForExport(records, fileSystemModule, {
+      forcePlaceholderSignatures: false,
+    });
+    let plan = buildHtmlChunkPlan(preparedRecords, profile, requestedChunkCount);
+    let summary = buildPlanSummary(plan, preparedRecords);
+    lastPlan = summary;
+    logExportPlan(summary);
+
+    const exceededHtmlCap = plan.totalHtmlBytes > MAX_TOTAL_HTML_BYTES || plan.exceedsPerChunkCap;
+    const gotChunked = plan.chunkCount > 1;
+
+    if (exceededHtmlCap || gotChunked) {
+      preparedRecords = await prepareRecordsForExport(records, fileSystemModule, {
+        forcePlaceholderSignatures: true,
+      });
+      plan = buildHtmlChunkPlan(preparedRecords, profile, requestedChunkCount);
+      summary = buildPlanSummary(plan, preparedRecords);
+      lastPlan = summary;
+      logExportDegrade(exceededHtmlCap ? "html_cap_exceeded" : "html_chunked", summary);
     }
 
-    const targetUri = `${outputDirectory}${fileName}`;
-    try {
-      const existing = await fileSystemModule.getInfoAsync(targetUri);
-      if (existing.exists) {
-        await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
+    if (!isPlanWithinCaps(plan)) {
+      for (
+        let chunkCount = Math.max(2, requestedChunkCount + 1);
+        chunkCount <= MAX_CHUNK_COUNT;
+        chunkCount += 1
+      ) {
+        const candidatePlan = buildHtmlChunkPlan(preparedRecords, profile, chunkCount);
+        const candidateSummary = buildPlanSummary(candidatePlan, preparedRecords);
+        logExportDegrade("increase_chunk_count", candidateSummary);
+        plan = candidatePlan;
+        lastPlan = candidateSummary;
+        if (isPlanWithinCaps(candidatePlan)) {
+          break;
+        }
       }
-      await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
-    } catch {
-      throw new Error("PDF export failed while writing output file.");
     }
+
+    // Final gate: keep a single HTML payload for expo-print.
+    if (
+      !isPlanWithinCaps(plan) ||
+      plan.chunkCount !== 1 ||
+      plan.totalHtmlBytes > MAX_TOTAL_HTML_BYTES
+    ) {
+      throw new Error("Export too large. Reduce selected records or remove signatures.");
+    }
+
+    const printed = await printModule.printToFileAsync({ html: plan.chunks[0]?.html ?? "" });
+    const targetUri = `${outputDirectory}${withChunkSuffix(fileName, 1, 1)}`;
+    const existing = await fileSystemModule.getInfoAsync(targetUri);
+    if (existing.exists) {
+      await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
+    }
+    await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
 
     options?.onProgress?.({
       chunkIndex: 1,
@@ -468,6 +852,9 @@ export async function generateAttendanceSlipPdf(
     });
 
     return [targetUri];
+  } catch (error) {
+    logExportFail(error, lastPlan);
+    throw error;
   } finally {
     attendanceSlipExportInFlight = false;
   }
@@ -502,8 +889,11 @@ export async function shareAttendanceSlipPdf(
 
   try {
     const sharingModule = loadModule<SharingModule>("expo-sharing");
-    if (!sharingModule) {
-      throw new Error("Share module unavailable. Install expo-sharing then restart Metro.");
+    const fileSystemModule = loadModule<FileSystemModule>("expo-file-system");
+    if (!sharingModule || !fileSystemModule) {
+      throw new Error(
+        "Share module unavailable. Install expo-sharing and expo-file-system then restart Metro.",
+      );
     }
 
     const uris = Array.isArray(uriOrUris)
@@ -511,6 +901,16 @@ export async function shareAttendanceSlipPdf(
       : [uriOrUris];
     if (uris.length === 0) {
       throw new Error("No exported PDF file available to share.");
+    }
+
+    for (const uri of uris) {
+      if (!uri.startsWith("file://")) {
+        throw new Error("No exported PDF file available to share.");
+      }
+      const info = await fileSystemModule.getInfoAsync(uri);
+      if (!info.exists) {
+        throw new Error("No exported PDF file available to share.");
+      }
     }
 
     let canShare = false;
@@ -565,6 +965,9 @@ export function buildAttendanceSlipHtmlForTest(records: AttendanceSlipRecord[]):
         record.legacySignatureSvgBase64.trim().length > 0)
         ? { state: "on_file" }
         : { state: "unsigned" },
+    signatureMode: "placeholder",
+    signatureBytes: 0,
+    signatureCapBytes: MAX_SIGNATURE_PNG_BYTES,
   }));
   return buildAttendanceHtml(prepared, { participantName: "Test Participant" });
 }
