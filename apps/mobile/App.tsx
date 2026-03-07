@@ -1782,7 +1782,8 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
 }
 
 export default function App() {
-  const iosLaunchSafeMode = Platform.OS === "ios";
+  const iosLaunchSafeMode =
+    Platform.OS === "ios" && process.env.EXPO_PUBLIC_IOS_SAFE_BOOT?.trim() === "1";
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
   const appEnvFromProcess = typeof process.env.APP_ENV === "string" ? process.env.APP_ENV : "";
   const appEnvFromConfig = typeof extra.appEnv === "string" ? extra.appEnv : "";
@@ -8262,9 +8263,7 @@ export default function App() {
           }
         }
 
-        const parsedSetupComplete = setupCompleteRaw === "true";
-        const hasSobrietyDate = typeof sobrietyDateRaw === "string" && sobrietyDateRaw.length > 0;
-        const resolvedSetupComplete = parsedSetupComplete && hasSobrietyDate;
+        const resolvedSetupComplete = setupCompleteRaw === "true";
         setSetupComplete(resolvedSetupComplete);
 
         if (sobrietyDateRaw) {
@@ -8497,26 +8496,6 @@ export default function App() {
       setHomeScreen("SETUP");
     }
   }, [mode, setupComplete, homeScreen]);
-
-  useEffect(() => {
-    if (mode !== "A" || !setupComplete) {
-      return;
-    }
-    const missingSobrietyDate = !sobrietyDateIso;
-    const sponsorProfileIncomplete =
-      sponsorEnabled && (!normalizedSponsorName || sponsorPhoneE164 === null);
-    if (missingSobrietyDate || sponsorProfileIncomplete) {
-      setSetupComplete(false);
-      setHomeScreen("SETUP");
-    }
-  }, [
-    mode,
-    setupComplete,
-    sobrietyDateIso,
-    sponsorEnabled,
-    normalizedSponsorName,
-    sponsorPhoneE164,
-  ]);
 
   useEffect(() => {
     if (mode === "A" && homeScreen === "DASHBOARD" && selectedDayOffset !== 0) {
