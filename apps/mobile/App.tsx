@@ -4470,17 +4470,33 @@ export default function App() {
           radiusMiles: effectiveRadiusMiles,
         };
 
-        const selectedDayResult = await source.listMeetings({
+        const selectedDayScopedResult = await source.listMeetings({
           dayOfWeek: selectedDay.dayOfWeek,
           ...requestParams,
         });
-        const selectedDayMeetings = sanitizeMeetingRecords(
-          Array.isArray(selectedDayResult.meetings) ? selectedDayResult.meetings : [],
+        const selectedDayScopedMeetings = sanitizeMeetingRecords(
+          Array.isArray(selectedDayScopedResult.meetings) ? selectedDayScopedResult.meetings : [],
         );
+        const selectedDayUnscopedResult = await source.listMeetings({
+          dayOfWeek: selectedDay.dayOfWeek,
+        });
+        const selectedDayUnscopedMeetings = sanitizeMeetingRecords(
+          Array.isArray(selectedDayUnscopedResult.meetings)
+            ? selectedDayUnscopedResult.meetings
+            : [],
+        );
+        const selectedDayById = new Map<string, MeetingRecord>();
+        for (const meeting of selectedDayUnscopedMeetings) {
+          selectedDayById.set(meeting.id, meeting);
+        }
+        for (const meeting of selectedDayScopedMeetings) {
+          selectedDayById.set(meeting.id, meeting);
+        }
+        const selectedDayMeetings = Array.from(selectedDayById.values());
 
         const todayScopedResult =
           selectedDay.dayOfWeek === todayDayOfWeek
-            ? selectedDayResult
+            ? selectedDayScopedResult
             : await source.listMeetings({
                 dayOfWeek: todayDayOfWeek,
                 ...requestParams,
@@ -4491,9 +4507,12 @@ export default function App() {
 
         // Always merge in an unscoped "today" fetch so setup can offer all meetings for today's
         // home-group selection, not only meetings inside the nearby radius.
-        const todayUnscopedResult = await source.listMeetings({
-          dayOfWeek: todayDayOfWeek,
-        });
+        const todayUnscopedResult =
+          selectedDay.dayOfWeek === todayDayOfWeek
+            ? selectedDayUnscopedResult
+            : await source.listMeetings({
+                dayOfWeek: todayDayOfWeek,
+              });
         const todayUnscopedMeetings = sanitizeMeetingRecords(
           Array.isArray(todayUnscopedResult.meetings) ? todayUnscopedResult.meetings : [],
         );
@@ -4561,7 +4580,9 @@ export default function App() {
           console.log("[meetings] normalized sample", selectedDayMeetingsWithGeo[0]);
         }
 
-        const warningSuffix = selectedDayResult.warning ? ` (${selectedDayResult.warning})` : "";
+        const selectedDayWarning =
+          selectedDayScopedResult.warning ?? selectedDayUnscopedResult.warning;
+        const warningSuffix = selectedDayWarning ? ` (${selectedDayWarning})` : "";
         setMeetingsStatus(`Meetings updated${warningSuffix}.`);
       } catch (error) {
         setMeetingsError(formatApiErrorWithHint(formatError(error)));
