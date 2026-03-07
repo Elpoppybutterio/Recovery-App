@@ -227,6 +227,7 @@ type MeetingsViewMode = "LIST" | "MAP";
 type HomeScreen =
   | "SETUP"
   | "DASHBOARD"
+  | "PRIVACY"
   | "MEETINGS"
   | "ATTENDANCE"
   | "CHAT"
@@ -4651,6 +4652,13 @@ export default function App() {
   const openSettingsHub = useCallback(() => {
     setMode("A");
     setHomeScreen("SETTINGS");
+    setScreen("LIST");
+    setSelectedMeeting(null);
+  }, []);
+
+  const openPrivacyStatement = useCallback(() => {
+    setMode("A");
+    setHomeScreen("PRIVACY");
     setScreen("LIST");
     setSelectedMeeting(null);
   }, []);
@@ -9870,6 +9878,7 @@ export default function App() {
                   onOpenChat={openChatComingSoon}
                   onOpenMeetings={openMeetingsHub}
                   onOpenRecoverySettings={openSettingsHub}
+                  onOpenPrivacyStatement={openPrivacyStatement}
                   onOpenAttendance={() => openAttendanceHub("dashboard")}
                   onOpenAttendanceToday={() => openAttendanceHub("dashboard")}
                   onOpenTools={openToolsHub}
@@ -9889,6 +9898,87 @@ export default function App() {
                   }}
                   onLearnMore={openSettingsHub}
                 />
+              ) : null}
+
+              {homeScreen === "PRIVACY" ? (
+                <>
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.sectionTitle}>Privacy Statement</Text>
+                    <Text style={styles.sectionMeta}>Effective Date: March 6th, 2026</Text>
+                    <Text style={styles.sectionMeta}>
+                      Your privacy matters. This Sober AI-Sponsor App helps you track meetings,
+                      routines, and sobriety progress. We minimize data collection and do not sell
+                      your personal information.
+                    </Text>
+                    <View style={styles.buttonRow}>
+                      <AppButton title="Back to Dashboard" onPress={openDashboard} />
+                    </View>
+                  </GlassCard>
+
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.label}>What the app may store</Text>
+                    <Text style={styles.sectionMeta}>
+                      • Recovery settings (e.g., sobriety date, routine preferences)
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      • Meeting attendance logs (meeting name, time, duration)
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      • Notes you enter (morning routine, nightly inventory, reflections)
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      • Sponsor details you choose to enter (name/phone)
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      • Chair signatures (if you use signature capture)
+                    </Text>
+                  </GlassCard>
+
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.label}>Location (optional)</Text>
+                    <Text style={styles.sectionMeta}>If you allow Location, we may use it to:</Text>
+                    <Text style={styles.sectionMeta}>• show meeting distance,</Text>
+                    <Text style={styles.sectionMeta}>
+                      • detect arrival/departure for attendance verification,
+                    </Text>
+                    <Text style={styles.sectionMeta}>• generate "leave now" alerts.</Text>
+                    <Text style={styles.sectionMeta}>
+                      You can disable Location (and Background Location) anytime in device settings.
+                    </Text>
+                  </GlassCard>
+
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.label}>Notifications & Calendar (optional)</Text>
+                    <Text style={styles.sectionMeta}>
+                      If enabled, the app may schedule notifications (sponsor reminders, leave
+                      alerts).
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      On iOS, if you grant Calendar access, the app may create events (e.g., "Call
+                      Sponsor," meeting events).
+                    </Text>
+                  </GlassCard>
+
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.label}>Data storage</Text>
+                    <Text style={styles.sectionMeta}>
+                      Most data is stored locally on your device. We do not store your recovery
+                      notes, signatures, or meeting history on our servers unless you explicitly
+                      share or export it.
+                    </Text>
+                  </GlassCard>
+
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.label}>Sharing</Text>
+                    <Text style={styles.sectionMeta}>We only share information when:</Text>
+                    <Text style={styles.sectionMeta}>• you choose to share/export (PDF/text),</Text>
+                    <Text style={styles.sectionMeta}>• required by law,</Text>
+                    <Text style={styles.sectionMeta}>
+                      • necessary to operate the app with service providers (if applicable).
+                    </Text>
+                    <Text style={styles.sectionMeta}>Contact: jason.lehman@flippos.com</Text>
+                  </GlassCard>
+                </>
               ) : null}
 
               {homeScreen === "CHAT" ? (
