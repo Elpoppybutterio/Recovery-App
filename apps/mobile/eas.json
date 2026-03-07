@@ -9,7 +9,8 @@
       "distribution": "internal",
       "channel": "development",
       "env": {
-        "APP_ENV": "development"
+        "APP_ENV": "development",
+        "EXPO_NEW_ARCH_ENABLED": "false"
       }
     },
     "development-stability": {
@@ -28,7 +29,8 @@
       "channel": "preview",
       "env": {
         "APP_ENV": "preview",
-        "EXPO_PUBLIC_API_URL": "https://sober-ai-api.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://sober-ai-api.onrender.com",
+        "EXPO_NEW_ARCH_ENABLED": "false"
       }
     },
     "production": {
@@ -36,7 +38,8 @@
       "channel": "production",
       "env": {
         "APP_ENV": "production",
-        "EXPO_PUBLIC_API_URL": "https://sober-ai-api.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://sober-ai-api.onrender.com",
+        "EXPO_NEW_ARCH_ENABLED": "false"
       }
     }
   },
