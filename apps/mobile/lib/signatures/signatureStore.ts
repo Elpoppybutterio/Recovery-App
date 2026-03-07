@@ -30,10 +30,10 @@ export type NormalizeSignatureResult = {
 
 export function loadSignatureFileSystemModule(): SignatureFileSystemModule | null {
   try {
-    return require("expo-file-system") as SignatureFileSystemModule;
+    return require("expo-file-system/legacy") as SignatureFileSystemModule;
   } catch {
     try {
-      return require("expo-file-system/legacy") as SignatureFileSystemModule;
+      return require("expo-file-system") as SignatureFileSystemModule;
     } catch {
       return null;
     }

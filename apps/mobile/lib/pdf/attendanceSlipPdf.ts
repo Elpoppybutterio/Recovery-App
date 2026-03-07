@@ -154,9 +154,9 @@ function loadModule<T>(name: string): T | null {
         return require("expo-sharing") as T;
       case "expo-file-system":
         try {
-          return require("expo-file-system") as T;
-        } catch {
           return require("expo-file-system/legacy") as T;
+        } catch {
+          return require("expo-file-system") as T;
         }
       default:
         return null;
