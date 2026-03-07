@@ -6458,150 +6458,191 @@ export default function App() {
 
   const persistSignaturePayloadAsFileRef = useCallback(
     async (rawSignature: string, recordId: string): Promise<string | null> => {
-      const fileSystemModule = loadSignatureFileSystemModule();
-      const normalized = await normalizeSignatureValueToRef(rawSignature, {
-        fileSystem: fileSystemModule,
-        recordId,
-        subdirectory: signatureStorageSubdirectory,
-        verifyFileExists: true,
-      });
-      return normalized.ref?.uri ?? null;
+      try {
+        const fileSystemModule = loadSignatureFileSystemModule();
+        const normalized = await normalizeSignatureValueToRef(rawSignature, {
+          fileSystem: fileSystemModule,
+          recordId,
+          subdirectory: signatureStorageSubdirectory,
+          verifyFileExists: true,
+        });
+        if (!normalized.ref) {
+          console.log("[signature] persist unavailable", {
+            reason: normalized.reason ?? "unknown",
+            recordId,
+          });
+        }
+        return normalized.ref?.uri ?? null;
+      } catch (error) {
+        console.log("[signature] persist error", {
+          message: error instanceof Error ? error.message : String(error),
+          recordId,
+        });
+        return null;
+      }
     },
     [signatureStorageSubdirectory],
   );
 
   const saveSignature = useCallback(async () => {
-    const targetActiveAttendance = activeAttendanceRef.current ?? activeAttendance;
-    if (!targetActiveAttendance && !signatureCaptureMeeting) {
-      setAttendanceStatus("Open signature capture from a meeting first.");
-      return;
-    }
+    try {
+      const targetActiveAttendance = activeAttendanceRef.current ?? activeAttendance;
+      if (!targetActiveAttendance && !signatureCaptureMeeting) {
+        setAttendanceStatus("Open signature capture from a meeting first.");
+        return;
+      }
 
-    const signatureSvgMarkup = buildSignatureSvgMarkup(
-      signaturePoints,
-      signatureCanvasSize.width,
-      signatureCanvasSize.height,
-    );
+      const signatureSvgMarkup = buildSignatureSvgMarkup(
+        signaturePoints,
+        signatureCanvasSize.width,
+        signatureCanvasSize.height,
+      );
 
-    if (!signatureSvgMarkup) {
-      setAttendanceStatus("Draw a signature before saving.");
-      return;
-    }
+      if (!signatureSvgMarkup) {
+        setAttendanceStatus("Draw a signature before saving.");
+        return;
+      }
 
-    const signatureRecordId = targetActiveAttendance?.id ?? createId("attendance-signature");
-    const persistedSignatureRef = await persistSignaturePayloadAsFileRef(
-      signatureSvgMarkup,
-      signatureRecordId,
-    );
-    if (!persistedSignatureRef) {
-      setAttendanceStatus("Unable to save signature file. Clear and sign again.");
-      return;
-    }
+      setAttendanceStatus("Saving signature...");
 
-    if (targetActiveAttendance) {
+      const signatureRecordId = targetActiveAttendance?.id ?? createId("attendance-signature");
+      const persistedSignatureRef = await persistSignaturePayloadAsFileRef(
+        signatureSvgMarkup,
+        signatureRecordId,
+      );
+      const signatureRefValue = persistedSignatureRef
+        ? {
+            uri: persistedSignatureRef,
+            mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
+              ? ("image/svg+xml" as const)
+              : ("image/png" as const),
+          }
+        : null;
+      const signatureInlineFallback = persistedSignatureRef ? null : signatureSvgMarkup;
+
+      if (targetActiveAttendance) {
+        const nowIso = new Date().toISOString();
+        const next: AttendanceRecord = {
+          ...targetActiveAttendance,
+          schemaVersion: ATTENDANCE_SCHEMA_VERSION,
+          signatureRef: signatureRefValue,
+          signaturePngBase64: signatureInlineFallback,
+          signaturePromptShown: true,
+          chairName:
+            signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
+          chairRole:
+            signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
+          signatureCapturedAtIso: nowIso,
+        };
+
+        activeAttendanceRef.current = next;
+        setActiveAttendance(next);
+        upsertAttendanceRecord(next);
+        setSignatureCaptureMeeting(null);
+        setSignaturePoints([]);
+        setSignatureChairNameInput(next.chairName ?? "");
+        setSignatureChairRoleInput(next.chairRole ?? "");
+        const savedMessage = targetActiveAttendance.endAt
+          ? "Signature saved."
+          : "Signature saved. Meeting remains in progress until ended.";
+        setAttendanceStatus(
+          persistedSignatureRef
+            ? savedMessage
+            : `${savedMessage} Saved inline because file storage is unavailable.`,
+        );
+        setScreen("SESSION");
+        return;
+      }
+
+      if (!signatureCaptureMeeting) {
+        setAttendanceStatus("End attendance before saving signature.");
+        return;
+      }
+
+      let location = currentLocationRef.current;
+      if (!location) {
+        location = await Promise.race<LocationStamp | null>([
+          readCurrentLocation(false),
+          new Promise<null>((resolve) => {
+            setTimeout(() => resolve(null), 1500);
+          }),
+        ]);
+      }
       const nowIso = new Date().toISOString();
-      const next: AttendanceRecord = {
-        ...targetActiveAttendance,
+      const signatureMeetingCoords = normalizeCoordinates({
+        lat: signatureCaptureMeeting.lat,
+        lng: signatureCaptureMeeting.lng,
+      });
+      const signatureOnlyRecord: AttendanceRecord = {
         schemaVersion: ATTENDANCE_SCHEMA_VERSION,
-        signatureRef: {
-          uri: persistedSignatureRef,
-          mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
-            ? "image/svg+xml"
-            : "image/png",
-        },
-        signaturePngBase64: null,
+        id: createId("attendance"),
+        meetingId: signatureCaptureMeeting.id,
+        meetingName: signatureCaptureMeeting.name,
+        meetingAddress: signatureCaptureMeeting.address,
+        meetingDayOfWeek: normalizeMeetingDayOfWeek(signatureCaptureMeeting.dayOfWeek),
+        scheduledStartsAtLocal: signatureCaptureMeeting.startsAtLocal ?? null,
+        meetingLat: signatureMeetingCoords?.lat ?? null,
+        meetingLng: signatureMeetingCoords?.lng ?? null,
+        meetingGeoStatus:
+          normalizeMeetingGeoStatus(signatureCaptureMeeting.geoStatus) ??
+          (isValidLatLng(signatureMeetingCoords?.lat ?? null, signatureMeetingCoords?.lng ?? null)
+            ? "verified"
+            : "missing"),
+        meetingGeoSource: normalizeMeetingGeoSource(signatureCaptureMeeting.geoSource) ?? "unknown",
+        meetingGeoReason: signatureCaptureMeeting.geoReason ?? null,
+        meetingFormat: signatureCaptureMeeting.format,
+        captureMethod: "signature",
+        startAt: nowIso,
+        endAt: nowIso,
+        durationSeconds: 0,
+        startLat: location?.lat ?? null,
+        startLng: location?.lng ?? null,
+        startAccuracyM: location?.accuracyM ?? null,
+        endLat: location?.lat ?? null,
+        endLng: location?.lng ?? null,
+        endAccuracyM: location?.accuracyM ?? null,
+        inactive: false,
         signaturePromptShown: true,
         chairName:
           signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
         chairRole:
           signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
         signatureCapturedAtIso: nowIso,
+        calendarEventId: null,
+        signatureRef: signatureRefValue,
+        signaturePngBase64: signatureInlineFallback,
+        pdfUri: null,
       };
 
-      activeAttendanceRef.current = next;
-      setActiveAttendance(next);
-      upsertAttendanceRecord(next);
-      setSignatureCaptureMeeting(null);
+      upsertAttendanceRecord(signatureOnlyRecord);
+      appendMeetingAttendanceLog({
+        meetingId: signatureOnlyRecord.meetingId,
+        method: "manual",
+      });
       setSignaturePoints([]);
-      setSignatureChairNameInput(next.chairName ?? "");
-      setSignatureChairRoleInput(next.chairRole ?? "");
+      setSignatureChairNameInput("");
+      setSignatureChairRoleInput("");
+      setSignatureCaptureMeeting(null);
+      const savedSignatureMessage =
+        "Signature captured and meeting log saved (provisional red X until duration and location requirements are met).";
       setAttendanceStatus(
-        targetActiveAttendance.endAt
-          ? "Signature saved."
-          : "Signature saved. Meeting remains in progress until ended.",
+        persistedSignatureRef
+          ? savedSignatureMessage
+          : `${savedSignatureMessage} Saved inline because file storage is unavailable.`,
       );
-      setScreen("SESSION");
-      return;
+      setScreen("LIST");
+    } catch (error) {
+      console.log("[signature] save failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      setAttendanceStatus("Could not save signature. Try again.");
+      Alert.alert(
+        "Could not save signature",
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : "Try again after restarting the app.",
+      );
     }
-
-    if (!signatureCaptureMeeting) {
-      setAttendanceStatus("End attendance before saving signature.");
-      return;
-    }
-
-    const location = await readCurrentLocation(false);
-    const nowIso = new Date().toISOString();
-    const signatureMeetingCoords = normalizeCoordinates({
-      lat: signatureCaptureMeeting.lat,
-      lng: signatureCaptureMeeting.lng,
-    });
-    const signatureOnlyRecord: AttendanceRecord = {
-      schemaVersion: ATTENDANCE_SCHEMA_VERSION,
-      id: createId("attendance"),
-      meetingId: signatureCaptureMeeting.id,
-      meetingName: signatureCaptureMeeting.name,
-      meetingAddress: signatureCaptureMeeting.address,
-      meetingDayOfWeek: normalizeMeetingDayOfWeek(signatureCaptureMeeting.dayOfWeek),
-      scheduledStartsAtLocal: signatureCaptureMeeting.startsAtLocal ?? null,
-      meetingLat: signatureMeetingCoords?.lat ?? null,
-      meetingLng: signatureMeetingCoords?.lng ?? null,
-      meetingGeoStatus:
-        normalizeMeetingGeoStatus(signatureCaptureMeeting.geoStatus) ??
-        (isValidLatLng(signatureMeetingCoords?.lat ?? null, signatureMeetingCoords?.lng ?? null)
-          ? "verified"
-          : "missing"),
-      meetingGeoSource: normalizeMeetingGeoSource(signatureCaptureMeeting.geoSource) ?? "unknown",
-      meetingGeoReason: signatureCaptureMeeting.geoReason ?? null,
-      meetingFormat: signatureCaptureMeeting.format,
-      captureMethod: "signature",
-      startAt: nowIso,
-      endAt: nowIso,
-      durationSeconds: 0,
-      startLat: location?.lat ?? null,
-      startLng: location?.lng ?? null,
-      startAccuracyM: location?.accuracyM ?? null,
-      endLat: location?.lat ?? null,
-      endLng: location?.lng ?? null,
-      endAccuracyM: location?.accuracyM ?? null,
-      inactive: false,
-      signaturePromptShown: true,
-      chairName: signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
-      chairRole: signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
-      signatureCapturedAtIso: nowIso,
-      calendarEventId: null,
-      signatureRef: {
-        uri: persistedSignatureRef,
-        mimeType: persistedSignatureRef.toLowerCase().endsWith(".svg")
-          ? "image/svg+xml"
-          : "image/png",
-      },
-      signaturePngBase64: null,
-      pdfUri: null,
-    };
-
-    upsertAttendanceRecord(signatureOnlyRecord);
-    appendMeetingAttendanceLog({
-      meetingId: signatureOnlyRecord.meetingId,
-      method: "manual",
-    });
-    setSignaturePoints([]);
-    setSignatureChairNameInput("");
-    setSignatureChairRoleInput("");
-    setSignatureCaptureMeeting(null);
-    setAttendanceStatus(
-      "Signature captured and meeting log saved (provisional red X until duration and location requirements are met).",
-    );
-    setScreen("LIST");
   }, [
     activeAttendance,
     signatureCaptureMeeting,
