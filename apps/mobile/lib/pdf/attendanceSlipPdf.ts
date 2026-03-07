@@ -83,8 +83,6 @@ type GenerateAttendanceSlipOptions = {
   onProgress?: (progress: AttendanceSlipExportProgress) => void;
 };
 
-type SignatureMode = "inline_svg" | "png_base64" | "placeholder" | "missing_file";
-
 type SignatureModeCounts = {
   inline_svg: number;
   png_base64: number;
@@ -575,7 +573,9 @@ function summarizeExportPlan(input: {
   forcedPlaceholderSignatures: boolean;
 } {
   const htmlUtilizationPct =
-    MAX_TOTAL_HTML_BYTES > 0 ? Number(((input.htmlBytes / MAX_TOTAL_HTML_BYTES) * 100).toFixed(1)) : 0;
+    MAX_TOTAL_HTML_BYTES > 0
+      ? Number(((input.htmlBytes / MAX_TOTAL_HTML_BYTES) * 100).toFixed(1))
+      : 0;
   const signatureBudgetUtilizationPct =
     MAX_SIGNATURE_EMBED_BUDGET_BYTES > 0
       ? Number(((input.embedBudgetUsedBytes / MAX_SIGNATURE_EMBED_BUDGET_BYTES) * 100).toFixed(1))
@@ -616,9 +616,7 @@ export async function generateAttendanceSlipPdf(
   }
   attendanceSlipExportInFlight = true;
 
-  let planForLogs:
-    | ReturnType<typeof summarizeExportPlan>
-    | null = null;
+  let planForLogs: ReturnType<typeof summarizeExportPlan> | null = null;
 
   try {
     if (!Array.isArray(records) || records.length === 0) {
