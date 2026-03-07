@@ -1504,12 +1504,22 @@ function resolveUserRegionHintFromLocation(location: LocationStamp | null): stri
 
 function loadOptionalModule<T>(moduleName: string): T | null {
   try {
-    const runtime = globalThis as { require?: (name: string) => unknown };
-    const dynamicRequire = typeof require === "function" ? require : runtime.require;
-    if (typeof dynamicRequire !== "function") {
-      return null;
+    switch (moduleName) {
+      case "react-native-maps":
+        return require("react-native-maps") as T;
+      case "expo-calendar":
+        return require("expo-calendar") as T;
+      case "expo-notifications":
+        return require("expo-notifications") as T;
+      case "expo-file-system":
+        return require("expo-file-system") as T;
+      case "expo-speech":
+        return require("expo-speech") as T;
+      case "expo-av":
+        return require("expo-av") as T;
+      default:
+        return null;
     }
-    return dynamicRequire(moduleName) as T;
   } catch {
     return null;
   }
