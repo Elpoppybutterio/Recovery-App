@@ -160,8 +160,20 @@ let attendanceSlipShareInFlight = false;
 
 function loadModule<T>(name: string): T | null {
   try {
-    const dynamicRequire: (moduleName: string) => unknown = require;
-    return dynamicRequire(name) as T;
+    switch (name) {
+      case "expo-print":
+        return require("expo-print") as T;
+      case "expo-sharing":
+        return require("expo-sharing") as T;
+      case "expo-file-system":
+        try {
+          return require("expo-file-system") as T;
+        } catch {
+          return require("expo-file-system/legacy") as T;
+        }
+      default:
+        return null;
+    }
   } catch {
     return null;
   }
