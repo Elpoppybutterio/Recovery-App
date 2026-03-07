@@ -9239,7 +9239,6 @@ export default function App() {
             <View style={styles.headerRow}>
               <View style={styles.headerTextWrap}>
                 <Text style={[styles.title, ui.title]}>Recovery Mode</Text>
-                <Text style={[styles.meta, ui.subtitle]}>DEV user: {devAuthUserId}</Text>
               </View>
               {mode === "A" && setupComplete && homeScreen === "SETTINGS" ? (
                 <Pressable
