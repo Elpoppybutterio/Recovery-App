@@ -1,28 +1,22 @@
 import React from "react";
-import { StyleSheet, View } from "react-native";
-import { LinearGradient } from "expo-linear-gradient";
+import { ImageBackground, StyleSheet, View } from "react-native";
 
 type Props = {
   children: React.ReactNode;
 };
 
 /**
- * Purple "liquid glass" background:
- * - deep multi-stop gradient
- * - large soft blobs (top-right, bottom-left, mid-right)
- * - subtle top wave highlight
+ * Full-screen dashboard background image.
  */
 export function LiquidBackground({ children }: Props) {
   return (
     <View style={styles.root}>
-      <LinearGradient
-        colors={["#160A35", "#21104A", "#2A1359"]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
+      <ImageBackground
+        source={require("../../assets/dashboard-bg.png")}
+        resizeMode="cover"
         style={StyleSheet.absoluteFill}
       />
-      <View style={styles.overlayTopRight} />
-      <View style={styles.overlayBottomLeft} />
+      <View style={styles.dimOverlay} />
       {children}
     </View>
   );
@@ -30,22 +24,5 @@ export function LiquidBackground({ children }: Props) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#12082B" },
-  overlayTopRight: {
-    position: "absolute",
-    right: -60,
-    top: -80,
-    width: 260,
-    height: 260,
-    borderRadius: 130,
-    backgroundColor: "rgba(143, 105, 255, 0.20)",
-  },
-  overlayBottomLeft: {
-    position: "absolute",
-    left: -80,
-    bottom: -100,
-    width: 300,
-    height: 300,
-    borderRadius: 150,
-    backgroundColor: "rgba(88, 214, 255, 0.14)",
-  },
+  dimOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(18, 8, 43, 0.28)" },
 });
