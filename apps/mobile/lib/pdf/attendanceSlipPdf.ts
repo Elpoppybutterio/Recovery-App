@@ -87,7 +87,6 @@ type GenerateAttendanceSlipOptions = {
 };
 
 type SignatureMode = "file_svg" | "file_png" | "inline_svg" | "base64_png" | "placeholder";
-
 type SignatureModeCounts = {
   file_svg: number;
   file_png: number;
