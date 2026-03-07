@@ -7003,15 +7003,27 @@ export default function App() {
         console.log("[attendance-export] share skipped (safe mode)", diagnostics);
         setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
       } else {
-        await attendanceSlipPdf.shareAttendanceSlipPdf(uri, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
-        setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
+        try {
+          await attendanceSlipPdf.shareAttendanceSlipPdf(uri, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+          setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
+        } catch (shareError) {
+          logSafeExportFailure("EXPORT_SHARE", shareError);
+          setAttendanceStatus("PDF generated, but share sheet is unavailable on this device.");
+          Alert.alert(
+            "PDF generated",
+            "Your PDF was generated, but the share sheet is unavailable on this device (common on Simulator).",
+          );
+          recordLastExportAttempt(true);
+          return;
+        }
       }
       recordLastExportAttempt(true);
     } catch (error) {
       logSafeExportFailure("EXPORT_SINGLE", error);
       recordLastExportAttempt(false, error);
-      setAttendanceStatus("Couldn't generate PDF. Try again.");
-      Alert.alert("Export failed", "Couldn't generate PDF. Try again.");
+      const message = formatError(error);
+      setAttendanceStatus(`Export failed: ${message}`);
+      Alert.alert("Export failed", message);
     } finally {
       attendanceExportInFlightRef.current = false;
       setExportingPdf(false);
@@ -7105,18 +7117,30 @@ export default function App() {
         console.log("[attendance-export] share skipped (safe mode)", diagnostics);
         setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
       } else {
-        await attendanceSlipPdf.shareAttendanceSlipPdf(
-          uri,
-          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
-        );
-        setAttendanceStatus(`Export complete for ${selectedRecords.length} meeting record(s).`);
+        try {
+          await attendanceSlipPdf.shareAttendanceSlipPdf(
+            uri,
+            `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
+          );
+          setAttendanceStatus(`Export complete for ${selectedRecords.length} meeting record(s).`);
+        } catch (shareError) {
+          logSafeExportFailure("EXPORT_SHARE", shareError);
+          setAttendanceStatus("PDF generated, but share sheet is unavailable on this device.");
+          Alert.alert(
+            "PDF generated",
+            "Your PDF was generated, but the share sheet is unavailable on this device (common on Simulator).",
+          );
+          recordLastExportAttempt(true);
+          return;
+        }
       }
       recordLastExportAttempt(true);
     } catch (error) {
       logSafeExportFailure("EXPORT_SELECTED", error);
       recordLastExportAttempt(false, error);
-      setAttendanceStatus("Couldn't generate PDF. Try again.");
-      Alert.alert("Export failed", "Couldn't generate PDF. Try again.");
+      const message = formatError(error);
+      setAttendanceStatus(`Export failed: ${message}`);
+      Alert.alert("Export failed", message);
     } finally {
       attendanceExportInFlightRef.current = false;
       setAttendanceExportProgressLabel(null);
@@ -7186,20 +7210,32 @@ export default function App() {
           console.log("[attendance-export] share skipped (safe mode)", diagnostics);
           setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
         } else {
-          await attendanceSlipPdf.shareAttendanceSlipPdf(
-            uri,
-            `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
-          );
-          setAttendanceStatus(
-            `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
-          );
+          try {
+            await attendanceSlipPdf.shareAttendanceSlipPdf(
+              uri,
+              `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
+            );
+            setAttendanceStatus(
+              `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
+            );
+          } catch (shareError) {
+            logSafeExportFailure("EXPORT_SHARE", shareError);
+            setAttendanceStatus("PDF generated, but share sheet is unavailable on this device.");
+            Alert.alert(
+              "PDF generated",
+              "Your PDF was generated, but the share sheet is unavailable on this device (common on Simulator).",
+            );
+            recordLastExportAttempt(true);
+            return;
+          }
         }
         recordLastExportAttempt(true);
       } catch (error) {
         logSafeExportFailure("EXPORT_RANGE", error);
         recordLastExportAttempt(false, error);
-        setAttendanceStatus("Couldn't generate PDF. Try again.");
-        Alert.alert("Export failed", "Couldn't generate PDF. Try again.");
+        const message = formatError(error);
+        setAttendanceStatus(`Export failed: ${message}`);
+        Alert.alert("Export failed", message);
       } finally {
         attendanceExportInFlightRef.current = false;
         setAttendanceExportProgressLabel(null);
