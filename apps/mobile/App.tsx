@@ -1512,7 +1512,11 @@ function loadOptionalModule<T>(moduleName: string): T | null {
       case "expo-notifications":
         return require("expo-notifications") as T;
       case "expo-file-system":
-        return require("expo-file-system") as T;
+        try {
+          return require("expo-file-system/legacy") as T;
+        } catch {
+          return require("expo-file-system") as T;
+        }
       case "expo-speech":
         return require("expo-speech") as T;
       case "expo-av":
@@ -3289,7 +3293,10 @@ export default function App() {
             ? "Billings"
             : "Billings";
         const withMontana = hasStateOrZip ? raw : `${raw}, ${hintedCity}, MT`;
-        return Array.from(new Set([raw, withMontana, `${withMontana}, USA`]));
+        // Prefer region-qualified candidates first to avoid ambiguous global street matches.
+        return hasStateOrZip
+          ? Array.from(new Set([raw, `${raw}, USA`]))
+          : Array.from(new Set([withMontana, `${withMontana}, USA`, raw]));
       };
 
       const geocodeFromNetwork = async (
@@ -3308,10 +3315,25 @@ export default function App() {
             const payload = (await apiResponse.json()) as {
               coords?: { lat?: number; lng?: number };
             };
+            const parsedLat = asFiniteNumber(payload?.coords?.lat ?? null);
+            const parsedLng = asFiniteNumber(payload?.coords?.lng ?? null);
+            const distanceFromUserMiles =
+              currentLocation &&
+              parsedLat !== null &&
+              parsedLng !== null &&
+              Number.isFinite(currentLocation.lat) &&
+              Number.isFinite(currentLocation.lng)
+                ? distanceMiles(
+                    { lat: currentLocation.lat, lng: currentLocation.lng },
+                    { lat: parsedLat, lng: parsedLng },
+                  )
+                : null;
             const geo = classifyGeo({
               lat: payload?.coords?.lat ?? null,
               lng: payload?.coords?.lng ?? null,
               address: candidate,
+              userRegionHint,
+              distanceFromUserMiles,
             });
             if (isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null) {
               return { lat: geo.lat, lng: geo.lng, source: "backend_geocode" };
@@ -3333,10 +3355,25 @@ export default function App() {
           }
           const payload = (await response.json()) as Array<{ lat?: string; lon?: string }>;
           const first = payload[0];
+          const parsedLat = asFiniteNumber(first?.lat ?? null);
+          const parsedLng = asFiniteNumber(first?.lon ?? null);
+          const distanceFromUserMiles =
+            currentLocation &&
+            parsedLat !== null &&
+            parsedLng !== null &&
+            Number.isFinite(currentLocation.lat) &&
+            Number.isFinite(currentLocation.lng)
+              ? distanceMiles(
+                  { lat: currentLocation.lat, lng: currentLocation.lng },
+                  { lat: parsedLat, lng: parsedLng },
+                )
+              : null;
           const geo = classifyGeo({
             lat: first?.lat ?? null,
             lng: first?.lon ?? null,
             address: candidate,
+            userRegionHint,
+            distanceFromUserMiles,
           });
           return isTrustedGeoStatus(geo.geoStatus) && geo.lat !== null && geo.lng !== null
             ? { lat: geo.lat, lng: geo.lng, source: "nominatim" }
@@ -3355,7 +3392,6 @@ export default function App() {
         const currentGeoStatus =
           normalizeMeetingGeoStatus(meeting.geoStatus) ??
           (meeting.lat !== null && meeting.lng !== null ? "verified" : "missing");
-        const needsRecovery = currentGeoStatus === "missing" || currentGeoStatus === "suspect";
         const hasTrustedCoords =
           isTrustedGeoStatus(currentGeoStatus) &&
           typeof meeting.lat === "number" &&
@@ -3369,19 +3405,29 @@ export default function App() {
                 { lat: meeting.lat as number, lng: meeting.lng as number },
               )
             : null;
+        const existingGeo = hasTrustedCoords
+          ? classifyGeo({
+              lat: meeting.lat,
+              lng: meeting.lng,
+              address: meeting.address,
+              userRegionHint,
+              distanceFromUserMiles: distanceFromUserToExistingMiles,
+            })
+          : null;
+        const existingTrustedLooksAbsurd =
+          hasTrustedCoords && existingGeo !== null && !isTrustedGeoStatus(existingGeo.geoStatus);
+        const needsRecovery =
+          currentGeoStatus === "missing" ||
+          currentGeoStatus === "suspect" ||
+          existingTrustedLooksAbsurd;
         const shouldSecondCheckTrusted =
           hasTrustedCoords &&
+          !needsRecovery &&
           (meeting.geoSource === "feed" ||
             meeting.geoSource === "api" ||
             meeting.geoSource === "unknown" ||
             meeting.geoSource === null ||
             meeting.geoSource === undefined) &&
-          (!currentLocation ||
-            userRegionHint === "MT" ||
-            (typeof distanceFromUserToExistingMiles === "number" &&
-              Number.isFinite(distanceFromUserToExistingMiles) &&
-              distanceFromUserToExistingMiles > ADDRESS_SECOND_CHECK_DISTANCE_ANOMALY_MILES));
-        const existingTrustedLooksAbsurd =
           typeof distanceFromUserToExistingMiles === "number" &&
           Number.isFinite(distanceFromUserToExistingMiles) &&
           distanceFromUserToExistingMiles > ADDRESS_SECOND_CHECK_DISTANCE_ANOMALY_MILES;
