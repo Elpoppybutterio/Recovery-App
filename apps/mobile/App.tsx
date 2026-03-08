@@ -404,6 +404,8 @@ const DASHBOARD_NEARBY_RADIUS_METERS = DASHBOARD_NEARBY_RADIUS_MILES * 1609.344;
 const LOCALHOST_API_HINT = "API URL is localhost; set it to your machine IP for simulator/device.";
 const DEFAULT_MAP_LATITUDE_DELTA = 0.22;
 const DEFAULT_MAP_LONGITUDE_DELTA = 0.22;
+const DEFAULT_MAP_FALLBACK_LAT = 45.7833;
+const DEFAULT_MAP_FALLBACK_LNG = -108.5007;
 const ATTENDANCE_EXPORT_MAX_RECORDS = 25;
 const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
 
@@ -2598,6 +2600,38 @@ export default function App() {
       ),
     [meetingsForDay],
   );
+
+  const mapRenderRegion = useMemo<Region>(() => {
+    if (mapRegion) {
+      return mapRegion;
+    }
+
+    const firstMeeting = mapMeetingsForDay[0];
+    if (firstMeeting && firstMeeting.lat !== null && firstMeeting.lng !== null) {
+      return {
+        latitude: firstMeeting.lat,
+        longitude: firstMeeting.lng,
+        latitudeDelta: DEFAULT_MAP_LATITUDE_DELTA,
+        longitudeDelta: DEFAULT_MAP_LONGITUDE_DELTA,
+      };
+    }
+
+    if (currentLocation) {
+      return {
+        latitude: currentLocation.lat,
+        longitude: currentLocation.lng,
+        latitudeDelta: DEFAULT_MAP_LATITUDE_DELTA,
+        longitudeDelta: DEFAULT_MAP_LONGITUDE_DELTA,
+      };
+    }
+
+    return {
+      latitude: DEFAULT_MAP_FALLBACK_LAT,
+      longitude: DEFAULT_MAP_FALLBACK_LNG,
+      latitudeDelta: DEFAULT_MAP_LATITUDE_DELTA,
+      longitudeDelta: DEFAULT_MAP_LONGITUDE_DELTA,
+    };
+  }, [mapRegion, mapMeetingsForDay, currentLocation]);
 
   const meetingLocationGroups = useMemo<MeetingLocationGroup[]>(() => {
     const byKey = new Map<string, MeetingLocationGroup>();
@@ -11461,13 +11495,13 @@ export default function App() {
                           <Text style={styles.sectionMeta}>
                             Map module unavailable in this build. Reinstall the latest app build.
                           </Text>
-                        ) : mapRegion ? (
+                        ) : (
                           <View style={styles.mapContainer}>
                             <MapViewCompat
                               ref={mapRef}
                               style={styles.map}
-                              initialRegion={mapRegion}
-                              region={mapRegion}
+                              initialRegion={mapRenderRegion}
+                              region={mapRenderRegion}
                               onRegionChangeComplete={onMapRegionChangeComplete}
                               showsUserLocation={locationPermission === "granted"}
                             >
@@ -11497,10 +11531,6 @@ export default function App() {
                               </View>
                             ) : null}
                           </View>
-                        ) : (
-                          <Text style={styles.sectionMeta}>
-                            Enable location to initialize the map view.
-                          </Text>
                         )}
 
                         {selectedLocationGroup ? (
