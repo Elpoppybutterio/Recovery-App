@@ -242,6 +242,7 @@ type MeetingsFilterDropdown = "FORMAT" | "DAY" | "TIME" | "LOCATION";
 type ToolsScreen = "HOME" | "MORNING" | "NIGHTLY" | "READER";
 type RoutineReaderBackScreen = "MORNING" | "NIGHTLY";
 type AttendanceViewFilter = "ALL" | "TODAY";
+type AttendanceValidityFilter = "ALL" | "VALID_ONLY" | "INVALID_ONLY";
 type AttendanceEntryPoint = "dashboard" | "meetings";
 type RoutineInventoryCategory = keyof Pick<
   NightlyInventoryDayState,
@@ -353,7 +354,7 @@ type MeetingAttendanceLog = {
 
 const ARRIVAL_RADIUS_METERS = 61;
 const MAX_GPS_ACCURACY_TOLERANCE_METERS = 160;
-const MIN_VALID_MEETING_MINUTES = 45;
+const MIN_VALID_MEETING_MINUTES = 50;
 const DEFAULT_MEETING_DURATION_MINUTES = 60;
 const SIGNATURE_WINDOW_MINUTES = 90;
 const SIGNATURE_WINDOW_MS = SIGNATURE_WINDOW_MINUTES * 60 * 1000;
@@ -696,6 +697,15 @@ function getSignatureWindowForAttendance(
   }
 
   const windowEndMs = windowStartMs + SIGNATURE_WINDOW_MS;
+  if (record.endAt) {
+    return {
+      eligible: true,
+      reason: null,
+      windowStartMs,
+      windowEndMs,
+    };
+  }
+
   if (nowMs < windowStartMs || nowMs > windowEndMs) {
     return {
       eligible: false,
@@ -786,15 +796,6 @@ function validateAttendanceRecord(
       return invalid("Not within geofence at check-in");
     }
     return invalid("Not within geofence at check-out");
-  }
-
-  const scheduledStartMs = parseScheduledStartForAttendance(record);
-  if (scheduledStartMs === null) {
-    return invalid("Missing scheduled meeting time");
-  }
-  const checkInWindowMs = 10 * 60 * 1000;
-  if (startAtMs - scheduledStartMs > checkInWindowMs) {
-    return invalid("Check-in was more than 10 minutes late");
   }
 
   if (!record.endAt) {
@@ -1975,6 +1976,8 @@ export default function App() {
   );
   const [lastExportAttempt, setLastExportAttempt] = useState<DiagnosticsExportAttempt | null>(null);
   const [showInactiveAttendance, setShowInactiveAttendance] = useState(false);
+  const [attendanceValidityFilter, setAttendanceValidityFilter] =
+    useState<AttendanceValidityFilter>("ALL");
   const [attendanceExportStartDateInput, setAttendanceExportStartDateInput] = useState("");
   const [attendanceExportEndDateInput, setAttendanceExportEndDateInput] = useState("");
   const [sessionNowMs, setSessionNowMs] = useState(Date.now());
@@ -2472,7 +2475,7 @@ export default function App() {
     };
   }, [diagnosticsSelectedAttendanceRecords]);
 
-  const attendanceRecordsForView = useMemo(() => {
+  const attendanceRecordsByDateAndActivity = useMemo(() => {
     const byDate =
       attendanceViewFilter === "ALL"
         ? attendanceRecords
@@ -2485,6 +2488,25 @@ export default function App() {
     return byDate.filter((record) => !record.inactive);
   }, [attendanceRecords, attendanceViewFilter, routineDateKey, showInactiveAttendance]);
 
+  const attendanceValidationById = useMemo(() => {
+    const byId = new Map<string, AttendanceValidationResult>();
+    for (const record of attendanceRecordsByDateAndActivity) {
+      byId.set(record.id, validateAttendanceRecord(record, meetingSignatureRequired));
+    }
+    return byId;
+  }, [attendanceRecordsByDateAndActivity, meetingSignatureRequired]);
+
+  const attendanceRecordsForView = useMemo(() => {
+    if (attendanceValidityFilter === "ALL") {
+      return attendanceRecordsByDateAndActivity;
+    }
+    const expectValid = attendanceValidityFilter === "VALID_ONLY";
+    return attendanceRecordsByDateAndActivity.filter((record) => {
+      const validation = attendanceValidationById.get(record.id);
+      return expectValid ? validation?.code === "VALID" : validation?.code !== "VALID";
+    });
+  }, [attendanceRecordsByDateAndActivity, attendanceValidationById, attendanceValidityFilter]);
+
   const inactiveAttendanceCount = useMemo(
     () => attendanceRecords.filter((record) => Boolean(record.inactive)).length,
     [attendanceRecords],
@@ -2495,14 +2517,6 @@ export default function App() {
       attendanceRecordsForView.filter((record) => selectedAttendanceIds.includes(record.id)).length,
     [attendanceRecordsForView, selectedAttendanceIds],
   );
-
-  const attendanceValidationById = useMemo(() => {
-    const byId = new Map<string, AttendanceValidationResult>();
-    for (const record of attendanceRecordsForView) {
-      byId.set(record.id, validateAttendanceRecord(record, meetingSignatureRequired));
-    }
-    return byId;
-  }, [attendanceRecordsForView, meetingSignatureRequired]);
   const attendanceSignatureWindowById = useMemo(() => {
     const byId = new Map<
       string,
@@ -4722,6 +4736,7 @@ export default function App() {
       setHomeScreen("ATTENDANCE");
       setAttendanceViewFilter("ALL");
       setShowInactiveAttendance(false);
+      setAttendanceValidityFilter("ALL");
       setSelectedAttendanceIds([]);
       setAttendanceStatus(
         activeAttendance && !activeAttendance.endAt
@@ -7055,6 +7070,7 @@ export default function App() {
       setHomeScreen("ATTENDANCE");
       setAttendanceViewFilter("ALL");
       setShowInactiveAttendance(false);
+      setAttendanceValidityFilter("ALL");
       setScreen("LIST");
       setAttendanceStatus(
         "Diagnostics: added a completed test meeting and selected it for export.",
@@ -7071,6 +7087,7 @@ export default function App() {
     setHomeScreen,
     setAttendanceViewFilter,
     setShowInactiveAttendance,
+    setAttendanceValidityFilter,
     setScreen,
     upsertAttendanceRecord,
     persistSignaturePayloadAsFileRef,
@@ -10573,6 +10590,69 @@ export default function App() {
                       onValueChange={setShowInactiveAttendance}
                     />
                   </View>
+                  <Text style={styles.label}>Status filter</Text>
+                  <View style={styles.attendanceFilterRow}>
+                    <Pressable
+                      style={[
+                        styles.attendanceFilterChip,
+                        attendanceValidityFilter === "ALL"
+                          ? styles.attendanceFilterChipActive
+                          : null,
+                      ]}
+                      onPress={() => setAttendanceValidityFilter("ALL")}
+                    >
+                      <Text
+                        style={[
+                          styles.attendanceFilterChipText,
+                          attendanceValidityFilter === "ALL"
+                            ? styles.attendanceFilterChipTextActive
+                            : null,
+                        ]}
+                      >
+                        Show all
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={[
+                        styles.attendanceFilterChip,
+                        attendanceValidityFilter === "VALID_ONLY"
+                          ? styles.attendanceFilterChipActive
+                          : null,
+                      ]}
+                      onPress={() => setAttendanceValidityFilter("VALID_ONLY")}
+                    >
+                      <Text
+                        style={[
+                          styles.attendanceFilterChipText,
+                          attendanceValidityFilter === "VALID_ONLY"
+                            ? styles.attendanceFilterChipTextActive
+                            : null,
+                        ]}
+                      >
+                        Valid only
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={[
+                        styles.attendanceFilterChip,
+                        attendanceValidityFilter === "INVALID_ONLY"
+                          ? styles.attendanceFilterChipActive
+                          : null,
+                      ]}
+                      onPress={() => setAttendanceValidityFilter("INVALID_ONLY")}
+                    >
+                      <Text
+                        style={[
+                          styles.attendanceFilterChipText,
+                          attendanceValidityFilter === "INVALID_ONLY"
+                            ? styles.attendanceFilterChipTextActive
+                            : null,
+                        ]}
+                      >
+                        Invalid only
+                      </Text>
+                    </Pressable>
+                  </View>
 
                   <View style={styles.buttonRow}>
                     <AppButton
@@ -10642,12 +10722,7 @@ export default function App() {
                         validation.code === "UNVERIFIED_LOCATION"
                           ? "Meeting location could not be verified"
                           : validation.reason;
-                      const validationBadgeLabel =
-                        validation.code === "VALID"
-                          ? "✓"
-                          : validation.code === "UNVERIFIED_LOCATION"
-                            ? "?"
-                            : "✕";
+                      const validationBadgeLabel = validation.code === "VALID" ? "☑" : "✕";
                       const signatureWindow = attendanceSignatureWindowById.get(record.id) ?? {
                         eligible: false,
                         reason: "Signature is unavailable because meeting start time is missing.",
@@ -10660,7 +10735,7 @@ export default function App() {
                           style={[styles.historyCard, selected ? styles.chipSelected : null]}
                           onPress={() => toggleAttendanceSelection(record.id)}
                         >
-                          <View style={styles.inlineRow}>
+                          <View style={styles.historyCardHeader}>
                             <Text style={styles.meetingName}>{record.meetingName}</Text>
                             <Text
                               style={[
@@ -12526,6 +12601,32 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
+  attendanceFilterRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  attendanceFilterChip: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.24)",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "rgba(255,255,255,0.1)",
+  },
+  attendanceFilterChipActive: {
+    borderColor: colors.neonLavender,
+    backgroundColor: "rgba(139,92,246,0.35)",
+  },
+  attendanceFilterChipText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  attendanceFilterChipTextActive: {
+    color: colors.textPrimary,
+  },
   attendanceHeaderRow: {
     gap: 8,
   },
@@ -12571,6 +12672,8 @@ const styles = StyleSheet.create({
   meetingName: {
     fontWeight: "700",
     color: colors.textPrimary,
+    flex: 1,
+    flexShrink: 1,
   },
   checkboxRow: {
     flexDirection: "row",
@@ -12796,13 +12899,19 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
   },
+  historyCardHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 8,
+  },
   validationBadge: {
-    minWidth: 24,
+    minWidth: 30,
     textAlign: "center",
     borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    fontSize: 14,
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    fontSize: 16,
     fontWeight: "800",
     overflow: "hidden",
   },
