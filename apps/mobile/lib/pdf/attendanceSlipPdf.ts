@@ -10,6 +10,7 @@ const MAX_SIGNATURE_SVG_BYTES = 150_000;
 const MAX_SIGNATURE_PNG_BYTES = 250_000;
 const MAX_TOTAL_HTML_BYTES = 1_200_000;
 const MAX_SIGNATURE_EMBED_BUDGET_BYTES = 700_000;
+const SIGNATURE_ROTATION_DEGREES = -45;
 
 export type AttendanceSlipRecord = {
   id: string;
@@ -311,7 +312,7 @@ function buildSignatureCell(record: PreparedRecord): string {
   const chairLine = chairBits.length > 0 ? `<div>${escapeHtml(chairBits.join(" - "))}</div>` : "";
 
   if (record.signatureState.state === "image") {
-    return `${chairLine}<img alt="Signature" src="${escapeHtml(record.signatureState.dataUri)}" class="sig-image" />`;
+    return `${chairLine}<div class="sig-image-wrap"><img alt="Signature" src="${escapeHtml(record.signatureState.dataUri)}" class="sig-image" /></div>`;
   }
   if (record.signatureState.state === "on_file") {
     return `${chairLine}<div class="sig-text">Signature on file</div>`;
@@ -360,7 +361,8 @@ function buildAttendanceHtml(
       td:nth-child(3), th:nth-child(3) { width: 13%; text-align: center; }
       td:nth-child(4), th:nth-child(4) { width: 13%; text-align: center; }
       td:nth-child(5), th:nth-child(5) { width: 26%; }
-      .sig-image { display: block; max-width: 100%; max-height: 52px; object-fit: contain; }
+      .sig-image-wrap { display: flex; align-items: center; justify-content: center; min-height: 56px; overflow: hidden; }
+      .sig-image { display: block; max-width: 100%; max-height: 52px; object-fit: contain; transform: rotate(${SIGNATURE_ROTATION_DEGREES}deg) scale(0.92); transform-origin: center center; }
       .sig-text { color: #444; font-size: 10px; }
       .meta { margin-top: 8px; color: #555; font-size: 10px; text-align: right; }
     </style>
