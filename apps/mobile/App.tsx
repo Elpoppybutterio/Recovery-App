@@ -11571,7 +11571,7 @@ export default function App() {
                           <Text style={styles.sectionMeta}>
                             Map module unavailable in this build. Reinstall the latest app build.
                           </Text>
-                        ) : mapRegion ? (
+                        ) : (
                           <View style={styles.mapContainer}>
                             <MapViewCompat
                               ref={mapRef}
@@ -11607,10 +11607,6 @@ export default function App() {
                               </View>
                             ) : null}
                           </View>
-                        ) : (
-                          <Text style={styles.sectionMeta}>
-                            Map region unavailable until current location and meeting coordinates load.
-                          </Text>
                         )}
 
                         {selectedLocationGroup ? (
