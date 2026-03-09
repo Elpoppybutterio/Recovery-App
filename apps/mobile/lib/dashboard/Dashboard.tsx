@@ -62,6 +62,7 @@ type DashboardProps = {
   onOpenNightlyInventory: () => void;
   onOpenChat: () => void;
   onOpenRecoverySettings: () => void;
+  onOpenPrivacyStatement: () => void;
   onOpenMeetings: () => void;
   onOpenAttendance: () => void;
   onOpenAttendanceToday: () => void;
@@ -210,6 +211,7 @@ export function Dashboard({
   onOpenNightlyInventory,
   onOpenChat,
   onOpenRecoverySettings,
+  onOpenPrivacyStatement,
   onOpenMeetings,
   onOpenAttendance,
   onOpenAttendanceToday,
@@ -319,6 +321,15 @@ export function Dashboard({
                 }}
               >
                 <Text style={styles.menuItemText}>Recovery Settings</Text>
+              </Pressable>
+              <Pressable
+                style={styles.menuItem}
+                onPress={() => {
+                  setMenuOpen(false);
+                  onOpenPrivacyStatement();
+                }}
+              >
+                <Text style={styles.menuItemText}>Privacy Statement</Text>
               </Pressable>
               <Pressable
                 style={styles.menuItem}

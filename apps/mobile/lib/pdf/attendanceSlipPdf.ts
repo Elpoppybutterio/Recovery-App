@@ -7,11 +7,13 @@ import {
 } from "../signatures/signatureStore";
 
 export const ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX = "AA-NA Attendance Slip";
+const MAX_EXPORT_RECORDS = 25;
 const MAX_SIGNATURE_SVG_BYTES = 150_000;
 const MAX_SIGNATURE_PNG_BYTES = 250_000;
 const MAX_TOTAL_HTML_BYTES = 1_200_000;
-const MAX_SIGNATURE_EMBED_BUDGET_BYTES = MAX_SIGNATURE_PNG_BYTES;
+const MAX_SIGNATURE_EMBED_BUDGET_BYTES = 700_000;
 const MAX_CHUNK_COUNT = 5;
+const SIGNATURE_ROTATION_DEGREES = 90;
 
 export type AttendanceSlipRecord = {
   id: string;
@@ -86,13 +88,29 @@ type GenerateAttendanceSlipOptions = {
 };
 
 type SignatureMode = "file_svg" | "file_png" | "inline_svg" | "base64_png" | "placeholder";
-
 type SignatureModeCounts = {
   file_svg: number;
   file_png: number;
   inline_svg: number;
   base64_png: number;
   placeholder: number;
+};
+
+export type AttendanceExportDiagnostics = {
+  safeMode: boolean;
+  forcedPlaceholderSignatures: boolean;
+  records: number;
+  htmlBytes: number;
+  maxHtmlBytes: number;
+  htmlUtilizationPct: number;
+  signatureEmbedBudgetUsedBytes: number;
+  signatureEmbedBudgetMaxBytes: number;
+  signatureBudgetUtilizationPct: number;
+  signatureModes: SignatureModeCounts;
+  caps: {
+    maxSignatureSvgBytes: number;
+    maxSignaturePngBytes: number;
+  };
 };
 
 type SignatureRenderState =
@@ -130,8 +148,20 @@ let attendanceSlipShareInFlight = false;
 
 function loadModule<T>(name: string): T | null {
   try {
-    const dynamicRequire: (moduleName: string) => unknown = require;
-    return dynamicRequire(name) as T;
+    switch (name) {
+      case "expo-print":
+        return require("expo-print") as T;
+      case "expo-sharing":
+        return require("expo-sharing") as T;
+      case "expo-file-system":
+        try {
+          return require("expo-file-system/legacy") as T;
+        } catch {
+          return require("expo-file-system") as T;
+        }
+      default:
+        return null;
+    }
   } catch {
     return null;
   }
@@ -403,7 +433,7 @@ function buildSignatureCell(record: PreparedRecord): string {
   const chairLine = chairBits.length > 0 ? `<div>${escapeHtml(chairBits.join(" - "))}</div>` : "";
 
   if (record.signatureState.state === "image_data_uri") {
-    return `${chairLine}<img alt="Signature" src="${escapeHtml(record.signatureState.dataUri)}" class="sig-image" />`;
+    return `${chairLine}<div class="sig-image-wrap"><img alt="Signature" src="${escapeHtml(record.signatureState.dataUri)}" class="sig-image" /></div>`;
   }
   if (record.signatureState.state === "image_inline_svg") {
     return `${chairLine}<div class="sig-svg">${record.signatureState.svgMarkup}</div>`;
@@ -455,7 +485,8 @@ function buildAttendanceHtml(
       td:nth-child(3), th:nth-child(3) { width: 13%; text-align: center; }
       td:nth-child(4), th:nth-child(4) { width: 13%; text-align: center; }
       td:nth-child(5), th:nth-child(5) { width: 26%; }
-      .sig-image { display: block; max-width: 100%; max-height: 52px; object-fit: contain; }
+      .sig-image-wrap { display: flex; align-items: center; justify-content: center; min-height: 56px; overflow: hidden; }
+      .sig-image { display: block; max-width: 100%; max-height: 52px; object-fit: contain; transform: rotate(${SIGNATURE_ROTATION_DEGREES}deg) scale(0.92); transform-origin: center center; }
       .sig-svg svg { display: block; max-width: 100%; max-height: 52px; }
       .sig-text { color: #444; font-size: 10px; }
       .meta { margin-top: 8px; color: #555; font-size: 10px; text-align: right; }
@@ -727,7 +758,7 @@ export async function generateAttendanceSlipPdf(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
   options?: GenerateAttendanceSlipOptions,
-): Promise<string[]> {
+): Promise<{ uri: string; diagnostics: AttendanceExportDiagnostics }> {
   if (attendanceSlipExportInFlight) {
     throw new Error("Export already in progress.");
   }
@@ -738,6 +769,9 @@ export async function generateAttendanceSlipPdf(
   try {
     if (!Array.isArray(records) || records.length === 0) {
       throw new Error("No attendance records selected for export.");
+    }
+    if (records.length > MAX_EXPORT_RECORDS) {
+      throw new Error(`Select ${MAX_EXPORT_RECORDS} or fewer attendance records per export.`);
     }
 
     const printModule = loadModule<PrintModule>("expo-print");
@@ -851,7 +885,42 @@ export async function generateAttendanceSlipPdf(
       totalRecords: records.length,
     });
 
-    return [targetUri];
+    const diagnostics: AttendanceExportDiagnostics = {
+      safeMode: summary.signatureModes.placeholder > 0,
+      forcedPlaceholderSignatures: summary.signatureModes.placeholder > 0,
+      records: records.length,
+      htmlBytes: summary.totalHtmlBytes,
+      maxHtmlBytes: MAX_TOTAL_HTML_BYTES,
+      htmlUtilizationPct:
+        MAX_TOTAL_HTML_BYTES > 0
+          ? Number(((summary.totalHtmlBytes / MAX_TOTAL_HTML_BYTES) * 100).toFixed(1))
+          : 0,
+      signatureEmbedBudgetUsedBytes: Math.min(
+        peakSignatureUsage(preparedRecords).bytes,
+        MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+      ),
+      signatureEmbedBudgetMaxBytes: MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+      signatureBudgetUtilizationPct:
+        MAX_SIGNATURE_EMBED_BUDGET_BYTES > 0
+          ? Number(
+              (
+                (Math.min(
+                  peakSignatureUsage(preparedRecords).bytes,
+                  MAX_SIGNATURE_EMBED_BUDGET_BYTES,
+                ) /
+                  MAX_SIGNATURE_EMBED_BUDGET_BYTES) *
+                100
+              ).toFixed(1),
+            )
+          : 0,
+      signatureModes: summary.signatureModes,
+      caps: {
+        maxSignatureSvgBytes: MAX_SIGNATURE_SVG_BYTES,
+        maxSignaturePngBytes: MAX_SIGNATURE_PNG_BYTES,
+      },
+    };
+
+    return { uri: targetUri, diagnostics };
   } catch (error) {
     logExportFail(error, lastPlan);
     throw error;
@@ -865,14 +934,14 @@ export async function printAttendanceSlipPdf(
   profile: AttendanceSlipUserProfile,
   options?: GenerateAttendanceSlipOptions,
 ): Promise<void> {
-  const uris = await generateAttendanceSlipPdf(records, profile, options);
+  const exported = await generateAttendanceSlipPdf(records, profile, options);
   const printModule = loadModule<PrintModule>("expo-print");
   if (!printModule || typeof printModule.printAsync !== "function") {
     throw new Error("Print module unavailable. Install expo-print then restart Metro.");
   }
 
   try {
-    await printModule.printAsync({ uri: uris[0] });
+    await printModule.printAsync({ uri: exported.uri });
   } catch {
     throw new Error("PDF export failed while opening print dialog.");
   }

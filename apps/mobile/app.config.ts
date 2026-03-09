@@ -90,10 +90,10 @@ function resolveJsEngine(): JsEngine {
 
 function resolveNewArchEnabled(): boolean {
   const raw = process.env.EXPO_NEW_ARCH_ENABLED?.trim().toLowerCase();
-  if (raw === "0" || raw === "false" || raw === "no") {
-    return false;
+  if (raw === "1" || raw === "true" || raw === "yes") {
+    return true;
   }
-  return true;
+  return false;
 }
 
 export default ({ config }: ConfigContext): ExpoConfig => {

@@ -30,10 +30,13 @@ export type NormalizeSignatureResult = {
 
 export function loadSignatureFileSystemModule(): SignatureFileSystemModule | null {
   try {
-    const dynamicRequire: (moduleName: string) => unknown = require;
-    return dynamicRequire("expo-file-system") as SignatureFileSystemModule;
+    return require("expo-file-system/legacy") as SignatureFileSystemModule;
   } catch {
-    return null;
+    try {
+      return require("expo-file-system") as SignatureFileSystemModule;
+    } catch {
+      return null;
+    }
   }
 }
 
