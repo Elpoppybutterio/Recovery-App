@@ -1,5 +1,9 @@
 import type {
   AlertPreference,
+  ChatMessage,
+  ChatMessageReceipt,
+  ChatParticipant,
+  ChatThread,
   ChoreCompletionRecord,
   CorrectiveAction,
   EvidenceItem,
@@ -44,6 +48,10 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     violations: [],
     correctiveActions: [],
     evidenceItems: [],
+    chatThreads: [],
+    chatParticipants: [],
+    chatMessages: [],
+    chatMessageReceipts: [],
     auditLogEntries: [],
   };
 }
@@ -358,6 +366,81 @@ export function createDefaultEvidenceItem(
   };
 }
 
+export function createDefaultChatThread(
+  now: string,
+  createdBy: { id: string; name: string },
+  id = createEntityId("chat-thread"),
+): ChatThread {
+  return {
+    id,
+    threadType: "DIRECT",
+    moduleContext: "SOBER_HOUSE",
+    houseId: null,
+    residentId: null,
+    linkedViolationId: null,
+    createdBy,
+    createdAt: now,
+    lastMessageAt: null,
+    active: true,
+    metadata: {},
+  };
+}
+
+export function createDefaultChatParticipant(
+  now: string,
+  threadId: string,
+  userId: string,
+  id = createEntityId("chat-participant"),
+): ChatParticipant {
+  return {
+    id,
+    threadId,
+    userId,
+    roleInThread: "SYSTEM",
+    joinedAt: now,
+    active: true,
+    lastReadAt: null,
+    notificationPreferences: {},
+  };
+}
+
+export function createDefaultChatMessage(
+  now: string,
+  threadId: string,
+  senderUserId: string,
+  id = createEntityId("chat-message"),
+): ChatMessage {
+  return {
+    id,
+    threadId,
+    senderUserId,
+    senderRole: "SYSTEM",
+    messageType: "NORMAL",
+    bodyText: "",
+    createdAt: now,
+    editedAt: null,
+    active: true,
+    linkedViolationId: null,
+    linkedCorrectiveActionId: null,
+    metadata: {},
+  };
+}
+
+export function createDefaultChatMessageReceipt(
+  messageId: string,
+  userId: string,
+  id = createEntityId("chat-receipt"),
+): ChatMessageReceipt {
+  return {
+    id,
+    messageId,
+    userId,
+    deliveredAt: null,
+    readAt: null,
+    acknowledgedAt: null,
+  };
+}
+
 export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouseSettingsStore {
   return {
     version: store.version,
@@ -427,6 +510,20 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
       createdBy: { ...item.createdBy },
       metadata: { ...item.metadata },
     })),
+    chatThreads: store.chatThreads.map((thread) => ({
+      ...thread,
+      createdBy: { ...thread.createdBy },
+      metadata: { ...thread.metadata },
+    })),
+    chatParticipants: store.chatParticipants.map((participant) => ({
+      ...participant,
+      notificationPreferences: { ...participant.notificationPreferences },
+    })),
+    chatMessages: store.chatMessages.map((message) => ({
+      ...message,
+      metadata: { ...message.metadata },
+    })),
+    chatMessageReceipts: store.chatMessageReceipts.map((receipt) => ({ ...receipt })),
     auditLogEntries: store.auditLogEntries.map((entry) => ({
       ...entry,
       actor: { ...entry.actor },

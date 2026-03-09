@@ -2,6 +2,10 @@ import { appendAuditEntries, buildAuditActionEntry, buildAuditEntriesForChange }
 import {
   cloneSoberHouseStore,
   createDefaultAlertPreference,
+  createDefaultChatMessage,
+  createDefaultChatMessageReceipt,
+  createDefaultChatParticipant,
+  createDefaultChatThread,
   createDefaultChoreCompletionRecord,
   createDefaultCorrectiveAction,
   createDefaultEvidenceItem,
@@ -16,6 +20,10 @@ import {
 import type {
   AlertPreference,
   AuditActor,
+  ChatMessage,
+  ChatMessageReceipt,
+  ChatParticipant,
+  ChatThread,
   ChoreCompletionRecord,
   CorrectiveAction,
   EvidenceItem,
@@ -26,8 +34,8 @@ import type {
   ResidentConsentRecord,
   ResidentHousingProfile,
   ResidentRequirementProfile,
-  SoberHouseEntityType,
   ResidentWizardDraft,
+  SoberHouseEntityType,
   SoberHouseSettingsStore,
   StaffAssignment,
   Violation,
@@ -747,6 +755,200 @@ export function upsertEvidenceItem(
     fieldChanged: "linkedViolationId",
     oldValue: previous?.linkedViolationId ?? null,
     newValue: nextValue.linkedViolationId,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertChatThread(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<ChatThread, "id"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.chatThreads.find((thread) => thread.id === fields.id) ?? null;
+  const base = previous ?? createDefaultChatThread(timestamp, fields.createdBy, fields.id);
+  const nextValue: ChatThread = {
+    ...base,
+    ...fields,
+    id: base.id,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "chatThread",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      chatThreads: replaceById(draftStore.chatThreads, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "chatThread",
+    entityId: nextValue.id,
+    actionTaken: previous ? "chat_thread_updated" : "chat_thread_created",
+    fieldChanged: "threadType",
+    oldValue: previous?.threadType ?? null,
+    newValue: nextValue.threadType,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertChatParticipant(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<ChatParticipant, "id"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous =
+    store.chatParticipants.find((participant) => participant.id === fields.id) ?? null;
+  const base =
+    previous ?? createDefaultChatParticipant(timestamp, fields.threadId, fields.userId, fields.id);
+  const nextValue: ChatParticipant = {
+    ...base,
+    ...fields,
+    id: base.id,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "chatParticipant",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      chatParticipants: replaceById(draftStore.chatParticipants, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "chatParticipant",
+    entityId: nextValue.id,
+    actionTaken: previous ? "chat_participant_updated" : "chat_participant_added",
+    fieldChanged: "roleInThread",
+    oldValue: previous?.roleInThread ?? null,
+    newValue: nextValue.roleInThread,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertChatMessage(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<ChatMessage, "id"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.chatMessages.find((message) => message.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultChatMessage(timestamp, fields.threadId, fields.senderUserId, fields.id);
+  const nextValue: ChatMessage = {
+    ...base,
+    ...fields,
+    id: base.id,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "chatMessage",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      chatMessages: replaceById(draftStore.chatMessages, nextValue),
+      chatThreads: draftStore.chatThreads.map((thread) =>
+        thread.id !== nextValue.threadId
+          ? thread
+          : {
+              ...thread,
+              lastMessageAt: nextValue.createdAt,
+            },
+      ),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "chatMessage",
+    entityId: nextValue.id,
+    actionTaken: previous ? "chat_message_updated" : "chat_message_sent",
+    fieldChanged: "messageType",
+    oldValue: previous?.messageType ?? null,
+    newValue: nextValue.messageType,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertChatMessageReceipt(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<ChatMessageReceipt, "id"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous =
+    store.chatMessageReceipts.find((receipt) => receipt.id === fields.id) ??
+    store.chatMessageReceipts.find(
+      (receipt) => receipt.messageId === fields.messageId && receipt.userId === fields.userId,
+    ) ??
+    null;
+  const base =
+    previous ?? createDefaultChatMessageReceipt(fields.messageId, fields.userId, fields.id);
+  const nextValue: ChatMessageReceipt = {
+    ...base,
+    ...fields,
+    id: base.id,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "chatMessageReceipt",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      chatMessageReceipts: replaceById(draftStore.chatMessageReceipts, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "chatMessageReceipt",
+    entityId: nextValue.id,
+    actionTaken: previous ? "chat_receipt_updated" : "chat_receipt_created",
+    fieldChanged: "messageId",
+    oldValue: previous?.messageId ?? null,
+    newValue: nextValue.messageId,
   });
 
   return {
