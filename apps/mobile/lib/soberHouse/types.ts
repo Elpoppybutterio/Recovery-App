@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 2 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 3 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -37,9 +37,18 @@ export type SoberHouseEntityType =
   | "residentConsentRecord"
   | "choreCompletionRecord"
   | "jobApplicationRecord"
-  | "workVerificationRecord";
+  | "workVerificationRecord"
+  | "violation"
+  | "correctiveAction"
+  | "evidenceItem";
 export type ResidentOnboardingStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
-export type ComplianceRuleType = "curfew" | "chores" | "work" | "jobSearch" | "meetings";
+export type ComplianceRuleType =
+  | "curfew"
+  | "chores"
+  | "work"
+  | "jobSearch"
+  | "meetings"
+  | "sponsorContact";
 export type ComplianceStatus =
   | "compliant"
   | "at_risk"
@@ -48,6 +57,41 @@ export type ComplianceStatus =
   | "incomplete_setup";
 export type ComplianceConfigSource = "resident" | "house" | "organization" | "none";
 export type WorkVerificationMethod = "SELF_REPORTED" | "MANAGER_CONFIRMATION";
+export type ViolationRuleType =
+  | "curfew"
+  | "chores"
+  | "work"
+  | "jobSearch"
+  | "meetings"
+  | "sponsorContact"
+  | "other";
+export type ViolationStatus =
+  | "OPEN"
+  | "UNDER_REVIEW"
+  | "CORRECTIVE_ACTION_ASSIGNED"
+  | "RESOLVED"
+  | "DISMISSED";
+export type ViolationSeverity = "INFORMATIONAL" | "WARNING" | "VIOLATION" | "CRITICAL";
+export type ViolationCreatedBy = "SYSTEM" | "MANUAL";
+export type CorrectiveActionType =
+  | "WARNING"
+  | "MAKE_UP_CHORE"
+  | "EXTRA_MEETING_REQUIREMENT"
+  | "MANAGER_CHECK_IN"
+  | "SPONSOR_CONTACT_REQUIRED"
+  | "REFLECTION_ASSIGNMENT"
+  | "PRIVILEGE_RESTRICTION"
+  | "BEHAVIOR_CONTRACT_NOTE"
+  | "OTHER";
+export type CorrectiveActionStatus = "OPEN" | "COMPLETED" | "OVERDUE" | "CANCELED";
+export type EvidenceType =
+  | "PHOTO"
+  | "SIGNATURE"
+  | "GEOFENCE_SNAPSHOT_REFERENCE"
+  | "ATTENDANCE_REFERENCE"
+  | "DOCUMENT"
+  | "NOTE"
+  | "OTHER";
 
 export type Option<Value extends string> = {
   value: Value;
@@ -123,6 +167,60 @@ export const ALERT_DELIVERY_METHOD_OPTIONS: ReadonlyArray<Option<AlertDeliveryMe
 export const ALERT_SCOPE_OPTIONS: ReadonlyArray<Option<AlertScope>> = [
   { value: "ORGANIZATION", label: "Organization-wide" },
   { value: "HOUSE", label: "House-specific" },
+];
+
+export const VIOLATION_RULE_TYPE_OPTIONS: ReadonlyArray<Option<ViolationRuleType>> = [
+  { value: "curfew", label: "Curfew" },
+  { value: "chores", label: "Chores" },
+  { value: "work", label: "Work" },
+  { value: "jobSearch", label: "Job search" },
+  { value: "meetings", label: "Meetings" },
+  { value: "sponsorContact", label: "Sponsor contact" },
+  { value: "other", label: "Other" },
+];
+
+export const VIOLATION_STATUS_OPTIONS: ReadonlyArray<Option<ViolationStatus>> = [
+  { value: "OPEN", label: "Open" },
+  { value: "UNDER_REVIEW", label: "Under review" },
+  { value: "CORRECTIVE_ACTION_ASSIGNED", label: "Corrective action assigned" },
+  { value: "RESOLVED", label: "Resolved" },
+  { value: "DISMISSED", label: "Dismissed" },
+];
+
+export const VIOLATION_SEVERITY_OPTIONS: ReadonlyArray<Option<ViolationSeverity>> = [
+  { value: "INFORMATIONAL", label: "Informational" },
+  { value: "WARNING", label: "Warning" },
+  { value: "VIOLATION", label: "Violation" },
+  { value: "CRITICAL", label: "Critical" },
+];
+
+export const CORRECTIVE_ACTION_TYPE_OPTIONS: ReadonlyArray<Option<CorrectiveActionType>> = [
+  { value: "WARNING", label: "Warning" },
+  { value: "MAKE_UP_CHORE", label: "Make-up chore" },
+  { value: "EXTRA_MEETING_REQUIREMENT", label: "Extra meeting requirement" },
+  { value: "MANAGER_CHECK_IN", label: "Manager check-in" },
+  { value: "SPONSOR_CONTACT_REQUIRED", label: "Sponsor contact required" },
+  { value: "REFLECTION_ASSIGNMENT", label: "Reflection assignment" },
+  { value: "PRIVILEGE_RESTRICTION", label: "Privilege restriction" },
+  { value: "BEHAVIOR_CONTRACT_NOTE", label: "Behavior contract note" },
+  { value: "OTHER", label: "Other" },
+];
+
+export const CORRECTIVE_ACTION_STATUS_OPTIONS: ReadonlyArray<Option<CorrectiveActionStatus>> = [
+  { value: "OPEN", label: "Open" },
+  { value: "COMPLETED", label: "Completed" },
+  { value: "OVERDUE", label: "Overdue" },
+  { value: "CANCELED", label: "Canceled" },
+];
+
+export const EVIDENCE_TYPE_OPTIONS: ReadonlyArray<Option<EvidenceType>> = [
+  { value: "PHOTO", label: "Photo" },
+  { value: "SIGNATURE", label: "Signature" },
+  { value: "GEOFENCE_SNAPSHOT_REFERENCE", label: "Geofence reference" },
+  { value: "ATTENDANCE_REFERENCE", label: "Attendance reference" },
+  { value: "DOCUMENT", label: "Document" },
+  { value: "NOTE", label: "Note" },
+  { value: "OTHER", label: "Other" },
 ];
 
 export type AuditActor = {
@@ -267,6 +365,7 @@ export type AuditLogEntry = {
   timestamp: string;
   entityType: SoberHouseEntityType;
   entityId: string;
+  actionTaken: string | null;
   fieldChanged: string;
   oldValue: string | null;
   newValue: string | null;
@@ -388,6 +487,71 @@ export type WorkVerificationRecord = {
   updatedAt: string;
 };
 
+export type Violation = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  houseId: string | null;
+  organizationId: string | null;
+  ruleType: ViolationRuleType;
+  sourceEvaluationReference: string | null;
+  sourceEvaluationSnapshot: ComplianceEvaluation | null;
+  complianceWindowKey: string;
+  triggeredAt: string;
+  effectiveAt: string;
+  dueAt: string | null;
+  gracePeriodMinutesUsed: number | null;
+  status: ViolationStatus;
+  severity: ViolationSeverity;
+  reasonSummary: string;
+  managerNotes: string;
+  resolutionNotes: string;
+  createdBy: ViolationCreatedBy;
+  reviewedBy: AuditActor | null;
+  reviewedAt: string | null;
+  resolvedBy: AuditActor | null;
+  resolvedAt: string | null;
+  correctiveActionIds: string[];
+  evidenceItemIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CorrectiveAction = {
+  id: string;
+  violationId: string;
+  residentId: string;
+  linkedUserId: string;
+  houseId: string | null;
+  organizationId: string | null;
+  actionType: CorrectiveActionType;
+  assignedBy: AuditActor;
+  assignedAt: string;
+  dueAt: string | null;
+  notes: string;
+  status: CorrectiveActionStatus;
+  completedAt: string | null;
+  completionNotes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EvidenceItem = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  houseId: string | null;
+  organizationId: string | null;
+  linkedViolationId: string | null;
+  linkedCorrectiveActionId: string | null;
+  evidenceType: EvidenceType;
+  assetReference: string | null;
+  createdAt: string;
+  createdBy: AuditActor;
+  metadata: Record<string, string | number | boolean | null>;
+  description: string;
+};
+
 export type ResidentWizardDraft = {
   linkedUserId: string;
   currentStep: ResidentOnboardingStep;
@@ -448,6 +612,9 @@ export type SoberHouseSettingsStore = {
   choreCompletionRecords: ChoreCompletionRecord[];
   jobApplicationRecords: JobApplicationRecord[];
   workVerificationRecords: WorkVerificationRecord[];
+  violations: Violation[];
+  correctiveActions: CorrectiveAction[];
+  evidenceItems: EvidenceItem[];
   auditLogEntries: AuditLogEntry[];
 };
 

@@ -19,7 +19,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     "version" in (value as Record<string, unknown>)
       ? (value as { version?: number }).version
       : undefined;
-  if (version !== 1 && version !== SOBER_HOUSE_SETTINGS_STORE_VERSION) {
+  if (version !== 1 && version !== 2 && version !== SOBER_HOUSE_SETTINGS_STORE_VERSION) {
     return createDefaultSoberHouseSettingsStore();
   }
 
@@ -43,6 +43,11 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     workVerificationRecords: Array.isArray(candidate.workVerificationRecords)
       ? candidate.workVerificationRecords
       : [],
+    violations: Array.isArray(candidate.violations) ? candidate.violations : [],
+    correctiveActions: Array.isArray(candidate.correctiveActions)
+      ? candidate.correctiveActions
+      : [],
+    evidenceItems: Array.isArray(candidate.evidenceItems) ? candidate.evidenceItems : [],
     auditLogEntries: Array.isArray(candidate.auditLogEntries) ? candidate.auditLogEntries : [],
   };
 }

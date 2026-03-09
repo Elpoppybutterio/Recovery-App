@@ -1,10 +1,13 @@
 import { createDefaultHouseRuleSet } from "./defaults";
 import type {
   AlertPreference,
+  CorrectiveAction,
+  EvidenceItem,
   House,
   HouseRuleSet,
   SoberHouseSettingsStore,
   StaffAssignment,
+  Violation,
 } from "./types";
 
 export function getActiveHouses(store: SoberHouseSettingsStore): House[] {
@@ -42,4 +45,33 @@ export function getAlertPreferencesForHouse(
       ? houseId === null || preference.houseId === null
       : preference.houseId === houseId,
   );
+}
+
+export function getViolationById(
+  store: SoberHouseSettingsStore,
+  violationId: string,
+): Violation | null {
+  return store.violations.find((violation) => violation.id === violationId) ?? null;
+}
+
+export function getCorrectiveActionsForViolation(
+  store: SoberHouseSettingsStore,
+  violationId: string,
+): CorrectiveAction[] {
+  return store.correctiveActions.filter((action) => action.violationId === violationId);
+}
+
+export function getEvidenceItemsForViolation(
+  store: SoberHouseSettingsStore,
+  violationId: string,
+): EvidenceItem[] {
+  return store.evidenceItems.filter((item) => item.linkedViolationId === violationId);
+}
+
+export function getResidentDisplayName(store: SoberHouseSettingsStore): string {
+  const housing = store.residentHousingProfile;
+  if (!housing) {
+    return "Resident";
+  }
+  return `${housing.firstName} ${housing.lastName}`.trim() || "Resident";
 }

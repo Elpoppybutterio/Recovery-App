@@ -23,6 +23,13 @@ import {
   createResidentRequirementProfileFromDraft,
 } from "../lib/soberHouse/resident";
 import { evaluateResidentCompliance } from "../lib/soberHouse/compliance";
+import {
+  addCorrectiveActionToViolation,
+  addEvidenceLink,
+  createManualViolation,
+  syncViolationFromEvaluation,
+  transitionViolationForManager,
+} from "../lib/soberHouse/interventions";
 import { getRuleSetForHouse } from "../lib/soberHouse/selectors";
 
 const ACTOR = {
@@ -914,5 +921,150 @@ describe("sober house compliance evaluation", () => {
     expect(verifiedSummary?.evaluations.find((entry) => entry.ruleType === "work")?.status).toBe(
       "compliant",
     );
+  });
+});
+
+describe("sober house interventions", () => {
+  it("dedupes repeated compliance violations into one open violation per rule window", () => {
+    const { store } = buildResidentComplianceStore();
+    const summary = evaluateResidentCompliance({
+      store,
+      nowIso: "2026-03-09T22:20:00-06:00",
+      currentLocation: { lat: 45.79, lng: -108.49, accuracyM: 15 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+    const curfewViolation = summary?.evaluations.find((entry) => entry.ruleType === "curfew");
+
+    expect(curfewViolation?.status).toBe("violation");
+    const first = syncViolationFromEvaluation(
+      store,
+      ACTOR,
+      curfewViolation!,
+      "2026-03-09T22:20:00-06:00",
+    );
+    const second = syncViolationFromEvaluation(
+      first.store,
+      ACTOR,
+      { ...curfewViolation!, evaluatedAt: "2026-03-09T22:25:00-06:00" },
+      "2026-03-09T22:25:00-06:00",
+    );
+
+    expect(first.store.violations).toHaveLength(1);
+    expect(second.store.violations).toHaveLength(1);
+    expect(second.store.violations[0]?.complianceWindowKey).toBe(
+      first.store.violations[0]?.complianceWindowKey,
+    );
+  });
+
+  it("writes audit-safe status transitions when a violation moves through review and resolution", () => {
+    const { store } = buildResidentComplianceStore();
+    const violation = createManualViolation(
+      store,
+      ACTOR,
+      {
+        ruleType: "other",
+        severity: "WARNING",
+        reasonSummary: "Manager-created note for follow-up.",
+      },
+      "2026-03-10T09:00:00-06:00",
+    );
+
+    let nextStore = violation.store;
+    const createdViolation = violation.violation!;
+    nextStore = transitionViolationForManager(
+      nextStore,
+      ACTOR,
+      createdViolation.id,
+      "UNDER_REVIEW",
+      "2026-03-10T09:10:00-06:00",
+      "Review started.",
+    ).store;
+    nextStore = transitionViolationForManager(
+      nextStore,
+      ACTOR,
+      createdViolation.id,
+      "RESOLVED",
+      "2026-03-10T09:20:00-06:00",
+      "Resident completed required follow-up.",
+    ).store;
+
+    const resolved = nextStore.violations.find((entry) => entry.id === createdViolation.id);
+    expect(resolved?.status).toBe("RESOLVED");
+    expect(
+      nextStore.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "violation" &&
+          entry.entityId === createdViolation.id &&
+          entry.actionTaken === "violation_under_review",
+      ),
+    ).toBe(true);
+    expect(
+      nextStore.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "violation" &&
+          entry.entityId === createdViolation.id &&
+          entry.actionTaken === "violation_resolved",
+      ),
+    ).toBe(true);
+  });
+
+  it("links corrective actions and evidence to a violation without losing parent history", () => {
+    const { store } = buildResidentComplianceStore();
+    const manual = createManualViolation(
+      store,
+      ACTOR,
+      {
+        ruleType: "chores",
+        severity: "VIOLATION",
+        reasonSummary: "Chore escalation for testing.",
+      },
+      "2026-03-11T10:00:00-06:00",
+    );
+    const createdViolation = manual.violation!;
+    const corrective = addCorrectiveActionToViolation(
+      manual.store,
+      ACTOR,
+      createdViolation.id,
+      {
+        actionType: "MAKE_UP_CHORE",
+        dueAt: "2026-03-12",
+        notes: "Complete kitchen deep clean.",
+      },
+      "2026-03-11T10:05:00-06:00",
+    );
+    const action = corrective.correctiveAction!;
+    const evidence = addEvidenceLink(
+      corrective.store,
+      ACTOR,
+      createdViolation.id,
+      {
+        linkedCorrectiveActionId: action.id,
+        evidenceType: "DOCUMENT",
+        assetReference: "file:///documents/makeup-chore-checklist.pdf",
+        description: "Checklist signed by manager.",
+      },
+      "2026-03-11T10:06:00-06:00",
+    );
+
+    const updatedViolation = evidence.store.violations.find(
+      (entry) => entry.id === createdViolation.id,
+    );
+    expect(updatedViolation?.correctiveActionIds).toContain(action.id);
+    expect(updatedViolation?.evidenceItemIds).toContain(evidence.evidence?.id);
+    expect(evidence.store.correctiveActions[0]?.violationId).toBe(createdViolation.id);
+    expect(evidence.store.evidenceItems[0]?.linkedCorrectiveActionId).toBe(action.id);
+    expect(
+      evidence.store.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "correctiveAction" &&
+          entry.actionTaken === "corrective_action_assigned",
+      ),
+    ).toBe(true);
+    expect(
+      evidence.store.auditLogEntries.some(
+        (entry) => entry.entityType === "evidenceItem" && entry.actionTaken === "evidence_linked",
+      ),
+    ).toBe(true);
   });
 });
