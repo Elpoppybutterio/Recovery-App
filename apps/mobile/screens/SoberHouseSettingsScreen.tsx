@@ -4,6 +4,7 @@ import { GlassCard } from "../lib/ui/GlassCard";
 import { AppButton } from "../lib/ui/AppButton";
 import { SoberHouseResidentManager } from "../components/SoberHouseResidentManager";
 import { SoberHouseComplianceSection } from "../components/SoberHouseComplianceSection";
+import { SoberHouseInterventionSection } from "../components/SoberHouseInterventionSection";
 import { colors, radius, spacing, typography } from "../lib/theme/tokens";
 import {
   ALERT_DELIVERY_METHOD_OPTIONS,
@@ -907,6 +908,10 @@ export function SoberHouseSettingsScreen({
             <Text style={styles.summaryLabel}>Staff</Text>
           </View>
           <View style={styles.summaryPill}>
+            <Text style={styles.summaryValue}>{store.violations.length}</Text>
+            <Text style={styles.summaryLabel}>Violations</Text>
+          </View>
+          <View style={styles.summaryPill}>
             <Text style={styles.summaryValue}>{store.auditLogEntries.length}</Text>
             <Text style={styles.summaryLabel}>Audit</Text>
           </View>
@@ -923,6 +928,14 @@ export function SoberHouseSettingsScreen({
       />
 
       <SoberHouseComplianceSection
+        userId={userId}
+        store={store}
+        actor={actor}
+        isSaving={isSaving}
+        onPersist={persistStore}
+      />
+
+      <SoberHouseInterventionSection
         userId={userId}
         store={store}
         actor={actor}
@@ -2080,7 +2093,7 @@ export function SoberHouseSettingsScreen({
           store.auditLogEntries.slice(0, 30).map((entry) => (
             <View key={entry.id} style={styles.auditRow}>
               <Text style={styles.auditTitle}>
-                {entry.actor.name} • {entry.entityType} • {entry.fieldChanged}
+                {entry.actor.name} • {entry.entityType} • {entry.actionTaken ?? entry.fieldChanged}
               </Text>
               <Text style={styles.entityMeta}>{new Date(entry.timestamp).toLocaleString()}</Text>
               <Text style={styles.entityMeta}>

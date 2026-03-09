@@ -1,19 +1,24 @@
-import { appendAuditEntries, buildAuditEntriesForChange } from "./audit";
+import { appendAuditEntries, buildAuditActionEntry, buildAuditEntriesForChange } from "./audit";
 import {
   cloneSoberHouseStore,
   createDefaultAlertPreference,
   createDefaultChoreCompletionRecord,
+  createDefaultCorrectiveAction,
+  createDefaultEvidenceItem,
   createDefaultHouse,
   createDefaultHouseRuleSet,
   createDefaultJobApplicationRecord,
   createDefaultOrganization,
   createDefaultStaffAssignment,
+  createDefaultViolation,
   createDefaultWorkVerificationRecord,
 } from "./defaults";
 import type {
   AlertPreference,
   AuditActor,
   ChoreCompletionRecord,
+  CorrectiveAction,
+  EvidenceItem,
   House,
   HouseRuleSet,
   JobApplicationRecord,
@@ -25,6 +30,8 @@ import type {
   ResidentWizardDraft,
   SoberHouseSettingsStore,
   StaffAssignment,
+  Violation,
+  ViolationStatus,
   WorkVerificationRecord,
 } from "./types";
 
@@ -492,6 +499,260 @@ export function upsertWorkVerificationRecord(
     }),
     timestamp,
   );
+}
+
+export function upsertViolation(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<Violation, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.violations.find((violation) => violation.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultViolation(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: Violation = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "violation",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      violations: replaceById(draftStore.violations, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "violation",
+    entityId: nextValue.id,
+    actionTaken: previous ? "violation_updated" : "violation_created",
+    fieldChanged: "status",
+    oldValue: previous?.status ?? null,
+    newValue: nextValue.status,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function setViolationStatus(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  violationId: string,
+  status: ViolationStatus,
+  timestamp: string,
+  options?: {
+    managerNotes?: string;
+    resolutionNotes?: string;
+    reviewedBy?: AuditActor | null;
+    resolvedBy?: AuditActor | null;
+    reviewedAt?: string | null;
+    resolvedAt?: string | null;
+  },
+): MutationResult {
+  const previous = store.violations.find((violation) => violation.id === violationId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  const result = upsertViolation(
+    store,
+    actor,
+    {
+      ...previous,
+      status,
+      managerNotes: options?.managerNotes ?? previous.managerNotes,
+      resolutionNotes: options?.resolutionNotes ?? previous.resolutionNotes,
+      reviewedBy: options?.reviewedBy ?? previous.reviewedBy,
+      resolvedBy: options?.resolvedBy ?? previous.resolvedBy,
+      reviewedAt: options?.reviewedAt ?? previous.reviewedAt,
+      resolvedAt: options?.resolvedAt ?? previous.resolvedAt,
+    },
+    timestamp,
+  );
+  const actionTaken =
+    status === "UNDER_REVIEW"
+      ? "violation_under_review"
+      : status === "CORRECTIVE_ACTION_ASSIGNED"
+        ? "violation_corrective_action_assigned"
+        : status === "RESOLVED"
+          ? "violation_resolved"
+          : status === "DISMISSED"
+            ? "violation_dismissed"
+            : "violation_status_changed";
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "violation",
+    entityId: violationId,
+    actionTaken,
+    fieldChanged: "status",
+    oldValue: previous.status,
+    newValue: status,
+  });
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertCorrectiveAction(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<CorrectiveAction, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous =
+    store.correctiveActions.find((correctiveAction) => correctiveAction.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultCorrectiveAction(
+      timestamp,
+      fields.violationId,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.assignedBy,
+      fields.id,
+    );
+  const nextValue: CorrectiveAction = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "correctiveAction",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      correctiveActions: replaceById(draftStore.correctiveActions, nextValue),
+      violations: draftStore.violations.map((violation) =>
+        violation.id !== nextValue.violationId
+          ? violation
+          : {
+              ...violation,
+              correctiveActionIds: violation.correctiveActionIds.includes(nextValue.id)
+                ? violation.correctiveActionIds
+                : [nextValue.id, ...violation.correctiveActionIds],
+              status:
+                nextValue.status === "CANCELED" && violation.status === "CORRECTIVE_ACTION_ASSIGNED"
+                  ? "UNDER_REVIEW"
+                  : "CORRECTIVE_ACTION_ASSIGNED",
+            },
+      ),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "correctiveAction",
+    entityId: nextValue.id,
+    actionTaken: previous ? "corrective_action_updated" : "corrective_action_assigned",
+    fieldChanged: "status",
+    oldValue: previous?.status ?? null,
+    newValue: nextValue.status,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertEvidenceItem(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<EvidenceItem, "id"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.evidenceItems.find((item) => item.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultEvidenceItem(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.createdBy,
+      fields.id,
+    );
+  const nextValue: EvidenceItem = {
+    ...base,
+    ...fields,
+    id: base.id,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "evidenceItem",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      evidenceItems: replaceById(draftStore.evidenceItems, nextValue),
+      violations: nextValue.linkedViolationId
+        ? draftStore.violations.map((violation) =>
+            violation.id !== nextValue.linkedViolationId
+              ? violation
+              : {
+                  ...violation,
+                  evidenceItemIds: violation.evidenceItemIds.includes(nextValue.id)
+                    ? violation.evidenceItemIds
+                    : [nextValue.id, ...violation.evidenceItemIds],
+                },
+          )
+        : draftStore.violations,
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "evidenceItem",
+    entityId: nextValue.id,
+    actionTaken: previous ? "evidence_updated" : "evidence_linked",
+    fieldChanged: "linkedViolationId",
+    oldValue: previous?.linkedViolationId ?? null,
+    newValue: nextValue.linkedViolationId,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
 }
 
 export function saveResidentWizardDraft(

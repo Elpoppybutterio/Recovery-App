@@ -112,6 +112,7 @@ export function buildAuditEntriesForChange(
       timestamp,
       entityType,
       entityId,
+      actionTaken: previousValue === null ? "created" : "field_changed",
       fieldChanged: key,
       oldValue,
       newValue,
@@ -119,6 +120,29 @@ export function buildAuditEntriesForChange(
   }
 
   return entries;
+}
+
+export function buildAuditActionEntry(input: {
+  actor: AuditActor;
+  timestamp: string;
+  entityType: SoberHouseEntityType;
+  entityId: string;
+  actionTaken: string;
+  fieldChanged?: string;
+  oldValue?: string | null;
+  newValue?: string | null;
+}): AuditLogEntry {
+  return {
+    id: createEntityId("audit"),
+    actor: input.actor,
+    timestamp: input.timestamp,
+    entityType: input.entityType,
+    entityId: input.entityId,
+    actionTaken: input.actionTaken,
+    fieldChanged: input.fieldChanged ?? "_action",
+    oldValue: input.oldValue ?? null,
+    newValue: input.newValue ?? null,
+  };
 }
 
 export function appendAuditEntries(

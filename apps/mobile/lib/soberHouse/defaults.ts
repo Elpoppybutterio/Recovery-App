@@ -1,12 +1,15 @@
 import type {
   AlertPreference,
   ChoreCompletionRecord,
+  CorrectiveAction,
+  EvidenceItem,
   House,
   JobApplicationRecord,
   HouseRuleSet,
   Organization,
   SoberHouseSettingsStore,
   StaffAssignment,
+  Violation,
   WorkVerificationRecord,
 } from "./types";
 import { SOBER_HOUSE_SETTINGS_STORE_VERSION } from "./types";
@@ -38,6 +41,9 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     choreCompletionRecords: [],
     jobApplicationRecords: [],
     workVerificationRecords: [],
+    violations: [],
+    correctiveActions: [],
+    evidenceItems: [],
     auditLogEntries: [],
   };
 }
@@ -257,6 +263,101 @@ export function createDefaultWorkVerificationRecord(
   };
 }
 
+export function createDefaultViolation(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("violation"),
+): Violation {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    houseId,
+    organizationId,
+    ruleType: "other",
+    sourceEvaluationReference: null,
+    sourceEvaluationSnapshot: null,
+    complianceWindowKey: `${residentId}:other:${now.slice(0, 10)}`,
+    triggeredAt: now,
+    effectiveAt: now,
+    dueAt: null,
+    gracePeriodMinutesUsed: null,
+    status: "OPEN",
+    severity: "VIOLATION",
+    reasonSummary: "",
+    managerNotes: "",
+    resolutionNotes: "",
+    createdBy: "MANUAL",
+    reviewedBy: null,
+    reviewedAt: null,
+    resolvedBy: null,
+    resolvedAt: null,
+    correctiveActionIds: [],
+    evidenceItemIds: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultCorrectiveAction(
+  now: string,
+  violationId: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  assignedBy: { id: string; name: string },
+  id = createEntityId("corrective-action"),
+): CorrectiveAction {
+  return {
+    id,
+    violationId,
+    residentId,
+    linkedUserId,
+    houseId,
+    organizationId,
+    actionType: "WARNING",
+    assignedBy,
+    assignedAt: now,
+    dueAt: null,
+    notes: "",
+    status: "OPEN",
+    completedAt: null,
+    completionNotes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultEvidenceItem(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  createdBy: { id: string; name: string },
+  id = createEntityId("evidence"),
+): EvidenceItem {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    houseId,
+    organizationId,
+    linkedViolationId: null,
+    linkedCorrectiveActionId: null,
+    evidenceType: "NOTE",
+    assetReference: null,
+    createdAt: now,
+    createdBy,
+    metadata: {},
+    description: "",
+  };
+}
+
 export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouseSettingsStore {
   return {
     version: store.version,
@@ -304,6 +405,28 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
     choreCompletionRecords: store.choreCompletionRecords.map((record) => ({ ...record })),
     jobApplicationRecords: store.jobApplicationRecords.map((record) => ({ ...record })),
     workVerificationRecords: store.workVerificationRecords.map((record) => ({ ...record })),
+    violations: store.violations.map((violation) => ({
+      ...violation,
+      sourceEvaluationSnapshot: violation.sourceEvaluationSnapshot
+        ? {
+            ...violation.sourceEvaluationSnapshot,
+            metadata: { ...violation.sourceEvaluationSnapshot.metadata },
+          }
+        : null,
+      reviewedBy: violation.reviewedBy ? { ...violation.reviewedBy } : null,
+      resolvedBy: violation.resolvedBy ? { ...violation.resolvedBy } : null,
+      correctiveActionIds: [...violation.correctiveActionIds],
+      evidenceItemIds: [...violation.evidenceItemIds],
+    })),
+    correctiveActions: store.correctiveActions.map((action) => ({
+      ...action,
+      assignedBy: { ...action.assignedBy },
+    })),
+    evidenceItems: store.evidenceItems.map((item) => ({
+      ...item,
+      createdBy: { ...item.createdBy },
+      metadata: { ...item.metadata },
+    })),
     auditLogEntries: store.auditLogEntries.map((entry) => ({
       ...entry,
       actor: { ...entry.actor },

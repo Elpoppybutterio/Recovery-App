@@ -50,6 +50,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Sober house foundation starts with persisted data models, a settings system of record, configurable rule storage, and field-level audit logging before any enforcement engines ship.
 - Sober house resident layer now adds onboarding/editable resident housing profiles, resident requirement branching, house assignment, inheritance-ready defaults, and consent acknowledgment capture with stored signature references.
 - Sober house compliance engine v1 now evaluates curfew, near-miss windows, chores, work/job-search status, and weekly meeting quotas using resident overrides, house rules, current location, persisted resident inputs, and the existing attendance source of truth.
+- Sober house intervention layer now persists deduped violations, corrective actions, evidence linkage, and manager resolution workflow on top of compliance outputs with audit-safe history.
 - Recovery UX v2: setup wizard flow, dashboard-first home experience, purple liquid-glass cards, and local recovery analytics (days sober, 90-day progress, sponsor adherence).
 - Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
 - Dashboard: add a dormant `Intranet / Group Chat` tile directly below Upcoming Meetings, feature-flagged with a Coming Soon placeholder flow.
@@ -63,7 +64,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 
 ## Futures / Backlog
 
-- [ ] Sober house follow-on slices: alerts dispatch, corrective actions, reports, and dashboards on top of the settings foundation, resident profile layer, and compliance engine v1.
+- [ ] Sober house follow-on slices: alerts dispatch, reporting, exports, and dashboards on top of the settings foundation, resident profile layer, compliance engine v1, and intervention workflow.
 - [ ] Auto-request location permission on first launch; if denied, show Settings deep-link CTA.
 - [ ] Import AA/NA meetings feeds (Meeting Guide spec) and return meetings within 20-mile radius when location is available.
 - [ ] Meeting Guide distributed feed ingest + tenant-scoped `/v1/meetings/nearby` search (20-mile default) with map/list toggle UX.
