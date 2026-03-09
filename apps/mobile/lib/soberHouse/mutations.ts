@@ -2,16 +2,21 @@ import { appendAuditEntries, buildAuditEntriesForChange } from "./audit";
 import {
   cloneSoberHouseStore,
   createDefaultAlertPreference,
+  createDefaultChoreCompletionRecord,
   createDefaultHouse,
   createDefaultHouseRuleSet,
+  createDefaultJobApplicationRecord,
   createDefaultOrganization,
   createDefaultStaffAssignment,
+  createDefaultWorkVerificationRecord,
 } from "./defaults";
 import type {
   AlertPreference,
   AuditActor,
+  ChoreCompletionRecord,
   House,
   HouseRuleSet,
+  JobApplicationRecord,
   Organization,
   ResidentConsentRecord,
   ResidentHousingProfile,
@@ -20,11 +25,21 @@ import type {
   ResidentWizardDraft,
   SoberHouseSettingsStore,
   StaffAssignment,
+  WorkVerificationRecord,
 } from "./types";
 
 type MutationResult = {
   store: SoberHouseSettingsStore;
   auditCount: number;
+};
+
+type HouseMutationFields = Omit<
+  House,
+  "id" | "createdAt" | "updatedAt" | "organizationId" | "geofenceCenterLat" | "geofenceCenterLng"
+> & {
+  id?: string;
+  geofenceCenterLat?: number | null;
+  geofenceCenterLng?: number | null;
 };
 
 function applyAuditedEntityChange<T extends { id: string }>(
@@ -107,7 +122,7 @@ function replaceById<T extends { id: string }>(items: T[], nextValue: T): T[] {
 export function upsertHouse(
   store: SoberHouseSettingsStore,
   actor: AuditActor,
-  fields: Omit<House, "id" | "createdAt" | "updatedAt" | "organizationId"> & { id?: string },
+  fields: HouseMutationFields,
   timestamp: string,
 ): MutationResult {
   const previous = store.houses.find((house) => house.id === fields.id) ?? null;
@@ -357,6 +372,123 @@ export function upsertResidentConsentRecord(
     (draftStore) => ({
       ...draftStore,
       residentConsentRecord: { ...nextValue, updatedAt: timestamp },
+    }),
+    timestamp,
+  );
+}
+
+export function upsertChoreCompletionRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<ChoreCompletionRecord, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.choreCompletionRecords.find((record) => record.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultChoreCompletionRecord(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: ChoreCompletionRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "choreCompletionRecord",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      choreCompletionRecords: replaceById(draftStore.choreCompletionRecords, nextValue),
+    }),
+    timestamp,
+  );
+}
+
+export function upsertJobApplicationRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<JobApplicationRecord, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.jobApplicationRecords.find((record) => record.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultJobApplicationRecord(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: JobApplicationRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "jobApplicationRecord",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      jobApplicationRecords: replaceById(draftStore.jobApplicationRecords, nextValue),
+    }),
+    timestamp,
+  );
+}
+
+export function upsertWorkVerificationRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<WorkVerificationRecord, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.workVerificationRecords.find((record) => record.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultWorkVerificationRecord(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: WorkVerificationRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "workVerificationRecord",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      workVerificationRecords: replaceById(draftStore.workVerificationRecords, nextValue),
     }),
     timestamp,
   );

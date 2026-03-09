@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-nati
 import { GlassCard } from "../lib/ui/GlassCard";
 import { AppButton } from "../lib/ui/AppButton";
 import { SoberHouseResidentManager } from "../components/SoberHouseResidentManager";
+import { SoberHouseComplianceSection } from "../components/SoberHouseComplianceSection";
 import { colors, radius, spacing, typography } from "../lib/theme/tokens";
 import {
   ALERT_DELIVERY_METHOD_OPTIONS,
@@ -82,6 +83,8 @@ type HouseDraft = {
   name: string;
   address: string;
   phone: string;
+  geofenceCenterLat: string;
+  geofenceCenterLng: string;
   geofenceRadiusFeetDefault: string;
   houseTypes: HouseType[];
   bedCount: string;
@@ -189,6 +192,8 @@ function createHouseDraft(value: House | null): HouseDraft {
       name: "",
       address: "",
       phone: "",
+      geofenceCenterLat: "",
+      geofenceCenterLng: "",
       geofenceRadiusFeetDefault: String(base.geofenceRadiusFeetDefault),
       houseTypes: [...base.houseTypes],
       bedCount: String(base.bedCount),
@@ -202,6 +207,8 @@ function createHouseDraft(value: House | null): HouseDraft {
     name: value.name,
     address: value.address,
     phone: value.phone,
+    geofenceCenterLat: value.geofenceCenterLat === null ? "" : String(value.geofenceCenterLat),
+    geofenceCenterLng: value.geofenceCenterLng === null ? "" : String(value.geofenceCenterLng),
     geofenceRadiusFeetDefault: String(value.geofenceRadiusFeetDefault),
     houseTypes: [...value.houseTypes],
     bedCount: String(value.bedCount),
@@ -355,6 +362,14 @@ function parseNonNegativeInt(value: string, fallback = 0): number {
     return fallback;
   }
   return parsed;
+}
+
+function parseOptionalCoordinate(value: string): number | null {
+  if (value.trim().length === 0) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function validateEmail(value: string): boolean {
@@ -611,6 +626,12 @@ export function SoberHouseSettingsScreen({
       setStatusMessage("Select at least one house type.");
       return;
     }
+    const geofenceLat = parseOptionalCoordinate(houseDraft.geofenceCenterLat);
+    const geofenceLng = parseOptionalCoordinate(houseDraft.geofenceCenterLng);
+    if ((geofenceLat === null) !== (geofenceLng === null)) {
+      setStatusMessage("Provide both house geofence latitude and longitude, or leave both blank.");
+      return;
+    }
 
     const timestamp = new Date().toISOString();
     const result = upsertHouse(
@@ -621,6 +642,8 @@ export function SoberHouseSettingsScreen({
         name: houseDraft.name.trim(),
         address: houseDraft.address.trim(),
         phone: houseDraft.phone.trim(),
+        geofenceCenterLat: geofenceLat,
+        geofenceCenterLng: geofenceLng,
         geofenceRadiusFeetDefault: parseNonNegativeInt(houseDraft.geofenceRadiusFeetDefault, 200),
         houseTypes: [...houseDraft.houseTypes],
         bedCount: parseNonNegativeInt(houseDraft.bedCount, 0),
@@ -899,6 +922,14 @@ export function SoberHouseSettingsScreen({
         onPersist={persistStore}
       />
 
+      <SoberHouseComplianceSection
+        userId={userId}
+        store={store}
+        actor={actor}
+        isSaving={isSaving}
+        onPersist={persistStore}
+      />
+
       <GlassCard style={styles.card} strong>
         <SectionHeader
           title="Organization"
@@ -1005,6 +1036,12 @@ export function SoberHouseSettingsScreen({
                   {house.geofenceRadiusFeetDefault} ft
                 </Text>
                 <Text style={styles.entityMeta}>
+                  Geofence center:{" "}
+                  {house.geofenceCenterLat !== null && house.geofenceCenterLng !== null
+                    ? `${house.geofenceCenterLat.toFixed(5)}, ${house.geofenceCenterLng.toFixed(5)}`
+                    : "Missing"}
+                </Text>
+                <Text style={styles.entityMeta}>
                   {house.status === "ACTIVE" ? "Active" : "Inactive"}
                 </Text>
                 <View style={styles.buttonRow}>
@@ -1081,6 +1118,34 @@ export function SoberHouseSettingsScreen({
               }
               keyboardType="number-pad"
               placeholder="200"
+              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+            />
+          </View>
+        </View>
+        <View style={styles.twoColumnRow}>
+          <View style={styles.column}>
+            <FieldLabel>Geofence latitude</FieldLabel>
+            <TextInput
+              style={styles.input}
+              value={houseDraft.geofenceCenterLat}
+              onChangeText={(value) =>
+                setHouseDraft((current) => ({ ...current, geofenceCenterLat: value }))
+              }
+              keyboardType="decimal-pad"
+              placeholder="45.7833"
+              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+            />
+          </View>
+          <View style={styles.column}>
+            <FieldLabel>Geofence longitude</FieldLabel>
+            <TextInput
+              style={styles.input}
+              value={houseDraft.geofenceCenterLng}
+              onChangeText={(value) =>
+                setHouseDraft((current) => ({ ...current, geofenceCenterLng: value }))
+              }
+              keyboardType="decimal-pad"
+              placeholder="-108.5007"
               placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
             />
           </View>

@@ -4,13 +4,16 @@ import {
   saveResidentWizardDraft,
   setHouseStatus,
   upsertAlertPreference,
+  upsertChoreCompletionRecord,
   upsertHouse,
   upsertHouseRuleSet,
+  upsertJobApplicationRecord,
   upsertOrganization,
   upsertResidentConsentRecord,
   upsertResidentHousingProfile,
   upsertResidentRequirementProfile,
   upsertStaffAssignment,
+  upsertWorkVerificationRecord,
 } from "../lib/soberHouse/mutations";
 import {
   applyHouseDefaultsToResidentDraft,
@@ -19,12 +22,154 @@ import {
   createResidentHousingProfileFromDraft,
   createResidentRequirementProfileFromDraft,
 } from "../lib/soberHouse/resident";
+import { evaluateResidentCompliance } from "../lib/soberHouse/compliance";
 import { getRuleSetForHouse } from "../lib/soberHouse/selectors";
 
 const ACTOR = {
   id: "admin-a",
   name: "Admin A",
 };
+
+function buildResidentComplianceStore() {
+  let store = createDefaultSoberHouseSettingsStore();
+  store = upsertOrganization(
+    store,
+    ACTOR,
+    {
+      name: "Bright Path Recovery",
+      primaryContactName: "Jordan Hayes",
+      primaryPhone: "(555) 555-1212",
+      primaryEmail: "ops@brightpath.org",
+      notes: "Pilot org",
+      status: "ACTIVE",
+    },
+    "2026-03-08T10:00:00.000Z",
+  ).store;
+
+  store = upsertHouse(
+    store,
+    ACTOR,
+    {
+      name: "Maple House",
+      address: "123 Main St",
+      phone: "(555) 555-1000",
+      geofenceCenterLat: 45.7833,
+      geofenceCenterLng: -108.5007,
+      geofenceRadiusFeetDefault: 200,
+      houseTypes: ["MEN"],
+      bedCount: 12,
+      notes: "North campus",
+      status: "ACTIVE",
+    },
+    "2026-03-08T10:05:00.000Z",
+  ).store;
+
+  const houseId = store.houses[0]!.id;
+  store = upsertHouseRuleSet(
+    store,
+    ACTOR,
+    {
+      houseId,
+      name: "Maple rules",
+      status: "ACTIVE",
+      curfew: {
+        enabled: true,
+        weekdayCurfew: "22:00",
+        fridayCurfew: "23:00",
+        saturdayCurfew: "23:00",
+        sundayCurfew: "22:00",
+        gracePeriodMinutes: 10,
+        preViolationAlertEnabled: true,
+        preViolationLeadTimeMinutes: 15,
+        alertBasis: "CLOCK_ONLY",
+      },
+      chores: {
+        enabled: true,
+        frequency: "DAILY",
+        dueTime: "18:00",
+        proofRequirement: "PHOTO",
+        gracePeriodMinutes: 10,
+        managerInstantNotificationEnabled: true,
+      },
+      employment: {
+        employmentRequired: true,
+        workplaceVerificationEnabled: true,
+        workplaceGeofenceRadiusDefault: 200,
+        managerVerificationRequired: false,
+      },
+      jobSearch: {
+        applicationsRequiredPerWeek: 4,
+        proofRequired: true,
+        managerApprovalRequired: false,
+      },
+      meetings: {
+        meetingsRequired: true,
+        meetingsPerWeek: 5,
+        allowedMeetingTypes: ["AA", "NA"],
+        proofMethod: "SIGNATURE",
+      },
+      sponsorContact: {
+        enabled: false,
+        contactsRequiredPerWeek: 0,
+        proofType: "CALL_LOG",
+      },
+    },
+    "2026-03-08T10:10:00.000Z",
+  ).store;
+
+  const draft = {
+    ...createDefaultResidentWizardDraft("enduser-a1"),
+    firstName: "Taylor",
+    lastName: "Brooks",
+    assignedHouseId: houseId,
+    moveInDate: "2026-03-01",
+    roomOrBed: "2B",
+    emergencyContactName: "Jamie Brooks",
+    emergencyContactPhone: "(555) 555-1212",
+    programPhaseOnEntry: "Phase 1",
+    workRequired: true,
+    currentlyEmployed: false,
+    jobApplicationsRequiredPerWeek: 4,
+    meetingsRequiredWeekly: true,
+    meetingsRequiredCount: 5,
+    consentToHouseRules: true,
+    consentToLocationVerification: true,
+    consentToComplianceDocumentation: true,
+    consentSignedAt: "2026-03-08T10:12:00.000Z",
+    consentSignatureRef: {
+      uri: "file:///documents/signatures/resident.svg",
+      mimeType: "image/svg+xml" as const,
+    },
+  };
+
+  const housing = createResidentHousingProfileFromDraft(
+    store,
+    "enduser-a1",
+    draft,
+    "2026-03-08T10:12:00.000Z",
+  );
+  const requirements = createResidentRequirementProfileFromDraft(
+    store,
+    "enduser-a1",
+    draft,
+    "2026-03-08T10:12:00.000Z",
+  );
+
+  store = upsertResidentHousingProfile(store, ACTOR, housing, "2026-03-08T10:12:00.000Z").store;
+  store = upsertResidentRequirementProfile(
+    store,
+    ACTOR,
+    requirements,
+    "2026-03-08T10:12:00.000Z",
+  ).store;
+
+  return {
+    store,
+    houseId,
+    residentId: housing.residentId,
+    linkedUserId: housing.linkedUserId,
+  };
+}
 
 describe("sober house settings mutations", () => {
   it("supports multi-house records and audits staff assignment changes", () => {
@@ -558,5 +703,216 @@ describe("sober house settings mutations", () => {
           entry.newValue === "5",
       ),
     ).toBe(true);
+  });
+});
+
+describe("sober house compliance evaluation", () => {
+  it("uses resident curfew overrides and returns at-risk then violation states", () => {
+    const { store } = buildResidentComplianceStore();
+    const overriddenStore = upsertResidentRequirementProfile(
+      store,
+      ACTOR,
+      {
+        ...store.residentRequirementProfile!,
+        residentCurfewOverrideEnabled: true,
+        residentCurfewWeekday: "21:00",
+        residentCurfewFriday: "21:30",
+        residentCurfewSaturday: "21:30",
+        residentCurfewSunday: "21:00",
+      },
+      "2026-03-09T20:45:00-06:00",
+    ).store;
+
+    const atRisk = evaluateResidentCompliance({
+      store: overriddenStore,
+      nowIso: "2026-03-09T20:50:00-06:00",
+      currentLocation: { lat: 45.79, lng: -108.49, accuracyM: 15 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+    const violation = evaluateResidentCompliance({
+      store: overriddenStore,
+      nowIso: "2026-03-09T21:15:00-06:00",
+      currentLocation: { lat: 45.79, lng: -108.49, accuracyM: 15 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+
+    expect(atRisk?.evaluations.find((entry) => entry.ruleType === "curfew")?.status).toBe(
+      "at_risk",
+    );
+    expect(
+      atRisk?.evaluations.find((entry) => entry.ruleType === "curfew")?.effectiveTargetValue,
+    ).toBe("21:00");
+    expect(violation?.evaluations.find((entry) => entry.ruleType === "curfew")?.status).toBe(
+      "violation",
+    );
+  });
+
+  it("distinguishes missing-proof chore completions from valid chore completions", () => {
+    const { store, residentId, linkedUserId } = buildResidentComplianceStore();
+    const invalidStore = upsertChoreCompletionRecord(
+      store,
+      ACTOR,
+      {
+        residentId,
+        linkedUserId,
+        organizationId: store.organization?.id ?? null,
+        houseId: store.residentHousingProfile?.houseId ?? null,
+        completedAt: "2026-03-09T17:30:00-06:00",
+        proofRequirement: "PHOTO",
+        proofProvided: false,
+        proofReference: null,
+        notes: "Finished kitchen wipe-down.",
+      },
+      "2026-03-09T17:30:00-06:00",
+    ).store;
+    const validStore = upsertChoreCompletionRecord(
+      invalidStore,
+      ACTOR,
+      {
+        residentId,
+        linkedUserId,
+        organizationId: invalidStore.organization?.id ?? null,
+        houseId: invalidStore.residentHousingProfile?.houseId ?? null,
+        completedAt: "2026-03-09T17:45:00-06:00",
+        proofRequirement: "PHOTO",
+        proofProvided: true,
+        proofReference: "file:///documents/chore-proof.jpg",
+        notes: "Uploaded sink photo.",
+      },
+      "2026-03-09T17:45:00-06:00",
+    ).store;
+
+    const invalidSummary = evaluateResidentCompliance({
+      store: invalidStore,
+      nowIso: "2026-03-09T18:15:00-06:00",
+      currentLocation: { lat: 45.7833, lng: -108.5007, accuracyM: 10 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+    const validSummary = evaluateResidentCompliance({
+      store: validStore,
+      nowIso: "2026-03-09T18:15:00-06:00",
+      currentLocation: { lat: 45.7833, lng: -108.5007, accuracyM: 10 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+
+    expect(invalidSummary?.evaluations.find((entry) => entry.ruleType === "chores")?.status).toBe(
+      "violation",
+    );
+    expect(validSummary?.evaluations.find((entry) => entry.ruleType === "chores")?.status).toBe(
+      "compliant",
+    );
+  });
+
+  it("routes unemployed residents through job-search and meeting quota evaluation", () => {
+    const { store, residentId, linkedUserId } = buildResidentComplianceStore();
+    const nextStore = upsertJobApplicationRecord(
+      store,
+      ACTOR,
+      {
+        residentId,
+        linkedUserId,
+        organizationId: store.organization?.id ?? null,
+        houseId: store.residentHousingProfile?.houseId ?? null,
+        employerName: "Northside Hardware",
+        appliedAt: "2026-03-13T12:00:00-06:00",
+        proofProvided: true,
+        notes: "Submitted application online.",
+      },
+      "2026-03-13T12:00:00-06:00",
+    ).store;
+    const summary = evaluateResidentCompliance({
+      store: nextStore,
+      nowIso: "2026-03-14T18:00:00-06:00",
+      currentLocation: { lat: 45.7833, lng: -108.5007, accuracyM: 10 },
+      attendanceRecords: [{ id: "att-1", meetingId: "m1", startAt: "2026-03-10T19:00:00-06:00" }],
+      meetingAttendanceLogs: [
+        {
+          id: "log-1",
+          meetingId: "m2",
+          atIso: "2026-03-11T19:00:00-06:00",
+          method: "verified",
+        },
+      ],
+    });
+
+    expect(summary?.evaluations.find((entry) => entry.ruleType === "work")?.status).toBe("at_risk");
+    expect(summary?.evaluations.find((entry) => entry.ruleType === "jobSearch")?.status).toBe(
+      "at_risk",
+    );
+    expect(summary?.evaluations.find((entry) => entry.ruleType === "meetings")?.status).toBe(
+      "at_risk",
+    );
+    expect(
+      summary?.evaluations.find((entry) => entry.ruleType === "meetings")?.metadata
+        .attendanceSource,
+    ).toBe("attendanceRecords");
+  });
+
+  it("marks employed residents incomplete until employer details exist and compliant once verified", () => {
+    const { store, residentId, linkedUserId } = buildResidentComplianceStore();
+    const employedStore = upsertResidentRequirementProfile(
+      store,
+      ACTOR,
+      {
+        ...store.residentRequirementProfile!,
+        currentlyEmployed: true,
+        employerName: "",
+        employerAddress: "",
+        employerPhone: "",
+        jobApplicationsRequiredPerWeek: 0,
+      },
+      "2026-03-12T10:00:00-06:00",
+    ).store;
+    const incompleteSummary = evaluateResidentCompliance({
+      store: employedStore,
+      nowIso: "2026-03-12T10:15:00-06:00",
+      currentLocation: { lat: 45.7833, lng: -108.5007, accuracyM: 10 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+
+    const configuredStore = upsertResidentRequirementProfile(
+      employedStore,
+      ACTOR,
+      {
+        ...employedStore.residentRequirementProfile!,
+        employerName: "Acme Recovery Works",
+        employerAddress: "500 Work Ave",
+        employerPhone: "(555) 555-8800",
+      },
+      "2026-03-12T10:20:00-06:00",
+    ).store;
+    const verifiedStore = upsertWorkVerificationRecord(
+      configuredStore,
+      ACTOR,
+      {
+        residentId,
+        linkedUserId,
+        organizationId: configuredStore.organization?.id ?? null,
+        houseId: configuredStore.residentHousingProfile?.houseId ?? null,
+        verifiedAt: "2026-03-12T11:00:00-06:00",
+        verificationMethod: "SELF_REPORTED",
+        notes: "Logged regular day shift.",
+      },
+      "2026-03-12T11:00:00-06:00",
+    ).store;
+    const verifiedSummary = evaluateResidentCompliance({
+      store: verifiedStore,
+      nowIso: "2026-03-12T12:00:00-06:00",
+      currentLocation: { lat: 45.7833, lng: -108.5007, accuracyM: 10 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+
+    expect(incompleteSummary?.evaluations.find((entry) => entry.ruleType === "work")?.status).toBe(
+      "incomplete_setup",
+    );
+    expect(verifiedSummary?.evaluations.find((entry) => entry.ruleType === "work")?.status).toBe(
+      "compliant",
+    );
   });
 });

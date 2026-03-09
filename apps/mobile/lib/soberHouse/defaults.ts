@@ -1,10 +1,13 @@
 import type {
   AlertPreference,
+  ChoreCompletionRecord,
   House,
+  JobApplicationRecord,
   HouseRuleSet,
   Organization,
   SoberHouseSettingsStore,
   StaffAssignment,
+  WorkVerificationRecord,
 } from "./types";
 import { SOBER_HOUSE_SETTINGS_STORE_VERSION } from "./types";
 
@@ -32,6 +35,9 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     residentRequirementProfile: null,
     residentConsentRecord: null,
     residentWizardDraft: null,
+    choreCompletionRecords: [],
+    jobApplicationRecords: [],
+    workVerificationRecords: [],
     auditLogEntries: [],
   };
 }
@@ -61,6 +67,8 @@ export function createDefaultHouse(
     name: "",
     address: "",
     phone: "",
+    geofenceCenterLat: null,
+    geofenceCenterLng: null,
     geofenceRadiusFeetDefault: DEFAULT_HOUSE_GEOFENCE_RADIUS_FEET,
     houseTypes: ["OTHER"],
     bedCount: 0,
@@ -180,6 +188,75 @@ export function createDefaultAlertPreference(
   };
 }
 
+export function createDefaultChoreCompletionRecord(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("chore-completion"),
+): ChoreCompletionRecord {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    organizationId,
+    houseId,
+    completedAt: now,
+    proofRequirement: "NONE",
+    proofProvided: false,
+    proofReference: null,
+    notes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultJobApplicationRecord(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("job-application"),
+): JobApplicationRecord {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    organizationId,
+    houseId,
+    employerName: "",
+    appliedAt: now,
+    proofProvided: false,
+    notes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultWorkVerificationRecord(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("work-verification"),
+): WorkVerificationRecord {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    organizationId,
+    houseId,
+    verifiedAt: now,
+    verificationMethod: "SELF_REPORTED",
+    notes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouseSettingsStore {
   return {
     version: store.version,
@@ -224,6 +301,9 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
             : null,
         }
       : null,
+    choreCompletionRecords: store.choreCompletionRecords.map((record) => ({ ...record })),
+    jobApplicationRecords: store.jobApplicationRecords.map((record) => ({ ...record })),
+    workVerificationRecords: store.workVerificationRecords.map((record) => ({ ...record })),
     auditLogEntries: store.auditLogEntries.map((entry) => ({
       ...entry,
       actor: { ...entry.actor },
