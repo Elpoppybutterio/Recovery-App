@@ -99,6 +99,7 @@ import { NightlyInventoryScreen } from "./screens/NightlyInventoryScreen";
 import { ChatComingSoonScreen } from "./screens/ChatComingSoonScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
+import { SoberHouseSettingsScreen } from "./screens/SoberHouseSettingsScreen";
 import {
   DiagnosticsScreen,
   type DiagnosticsExportAttempt,
@@ -12074,29 +12075,34 @@ export default function App() {
           ) : null}
 
           {mode !== "A" && homeScreen === "SETTINGS" ? (
-            <>
-              <GlassCard style={styles.card} strong>
-                <Text style={styles.sectionTitle}>
-                  {mode === "B" ? "Sober Housing Settings" : "Probation/Parole Settings"}
-                </Text>
-                <Text style={styles.sectionMeta}>
-                  {mode === "B"
-                    ? "Configure sober housing rules, check-ins, and reporting preferences."
-                    : "Configure probation/parole rules, reporting windows, and reminder preferences."}
-                </Text>
-                <View style={styles.buttonRow}>
-                  <AppButton title="Back to Dashboard" onPress={() => handleModeSelect("A")} />
-                </View>
-              </GlassCard>
+            mode === "B" ? (
+              <SoberHouseSettingsScreen
+                userId={devAuthUserId}
+                actorId={devAuthUserId}
+                actorName={devUserDisplayName}
+                onBack={() => handleModeSelect("A")}
+              />
+            ) : (
+              <>
+                <GlassCard style={styles.card} strong>
+                  <Text style={styles.sectionTitle}>Probation/Parole Settings</Text>
+                  <Text style={styles.sectionMeta}>
+                    Configure probation/parole rules, reporting windows, and reminder preferences.
+                  </Text>
+                  <View style={styles.buttonRow}>
+                    <AppButton title="Back to Dashboard" onPress={() => handleModeSelect("A")} />
+                  </View>
+                </GlassCard>
 
-              <GlassCard style={styles.card} strong>
-                <Text style={styles.sectionTitle}>Status</Text>
-                <Text style={styles.sectionMeta}>
-                  This settings page is active from the dashboard hamburger menu and reserved for
-                  mode-specific configuration.
-                </Text>
-              </GlassCard>
-            </>
+                <GlassCard style={styles.card} strong>
+                  <Text style={styles.sectionTitle}>Status</Text>
+                  <Text style={styles.sectionMeta}>
+                    This settings page is active from the dashboard hamburger menu and reserved for
+                    mode-specific configuration.
+                  </Text>
+                </GlassCard>
+              </>
+            )
           ) : null}
         </ScrollView>
 
