@@ -51,9 +51,10 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Sober house resident layer now adds onboarding/editable resident housing profiles, resident requirement branching, house assignment, inheritance-ready defaults, and consent acknowledgment capture with stored signature references.
 - Sober house compliance engine v1 now evaluates curfew, near-miss windows, chores, work/job-search status, and weekly meeting quotas using resident overrides, house rules, current location, persisted resident inputs, and the existing attendance source of truth.
 - Sober house intervention layer now persists deduped violations, corrective actions, evidence linkage, and manager resolution workflow on top of compliance outputs with audit-safe history.
+- Structured internal chat foundation now persists direct sober-house manager/resident threads, structured message types, violation-linked thread reuse, unread/read receipts, acknowledgment-required notices, and auditable message history.
 - Recovery UX v2: setup wizard flow, dashboard-first home experience, purple liquid-glass cards, and local recovery analytics (days sober, 90-day progress, sponsor adherence).
 - Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
-- Dashboard: add a dormant `Intranet / Group Chat` tile directly below Upcoming Meetings, feature-flagged with a Coming Soon placeholder flow.
+- Dashboard: evolve the existing direct-message foundation into broader recovery/service/probation chat flows after sober-house direct messaging proves out.
 - Dashboard: Wisdom tile uses server-driven daily rotation (`/api/wisdom/daily`) with one quote per day, pronoun normalization (`I/you -> we`), plus local cache and deterministic fallback.
 - Mobile dev correctness: API URL alignment (`localhost:3031`), no hardcoded SF map origin defaults, nearby-meetings request diagnostics, and map search-origin visibility.
 - Build readiness: Development Build workflow implemented (EAS `development` / `preview` / `production` profiles, environment-driven bundle identifiers, stable deep-link scheme, and dev-client runbook in `docs/DEV_BUILD.md`).
@@ -70,4 +71,4 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - [ ] Meeting Guide distributed feed ingest + tenant-scoped `/v1/meetings/nearby` search (20-mile default) with map/list toggle UX.
 - [ ] Dashboard + Setup Wizard + upcoming-meetings logic hardening across timezones and tenant policy controls.
 - [ ] Tools: AM routine + Nightly inventory + insights (local-first storage, optional API sync later).
-- [ ] Enable provider-backed Intranet / Group Chat (contact invites, push notifications, deep links, moderation controls).
+- [ ] Expand the structured chat foundation to provider-backed invites, push notifications, deep links, group chat, and moderation controls.

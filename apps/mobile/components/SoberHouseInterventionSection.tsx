@@ -57,6 +57,7 @@ type Props = {
   store: SoberHouseSettingsStore;
   actor: AuditActor;
   isSaving: boolean;
+  onOpenChat: (input: { violationId: string; correctiveActionId?: string | null }) => void;
   onPersist: (
     nextStore: SoberHouseSettingsStore,
     successMessage: string,
@@ -128,6 +129,7 @@ export function SoberHouseInterventionSection({
   store,
   actor,
   isSaving,
+  onOpenChat,
   onPersist,
 }: Props) {
   const [attendanceRecords, setAttendanceRecords] = useState<
@@ -726,6 +728,12 @@ export function SoberHouseInterventionSection({
               disabled={isSaving}
             />
           </View>
+          <AppButton
+            title="Open linked chat"
+            variant="secondary"
+            onPress={() => onOpenChat({ violationId: selectedViolation.id })}
+            disabled={isSaving}
+          />
 
           <Text style={styles.subsectionTitle}>Severity</Text>
           <View style={styles.chipRow}>
@@ -754,6 +762,17 @@ export function SoberHouseInterventionSection({
                   {action.status} • Due {formatIso(action.dueAt)}
                 </Text>
                 <Text style={styles.sectionMeta}>{action.notes || "No instructions."}</Text>
+                <AppButton
+                  title="Message in chat"
+                  variant="secondary"
+                  onPress={() =>
+                    onOpenChat({
+                      violationId: selectedViolation.id,
+                      correctiveActionId: action.id,
+                    })
+                  }
+                  disabled={isSaving}
+                />
                 <View style={styles.chipRow}>
                   {CORRECTIVE_ACTION_STATUS_OPTIONS.map((option) => (
                     <FilterChip

@@ -19,7 +19,12 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     "version" in (value as Record<string, unknown>)
       ? (value as { version?: number }).version
       : undefined;
-  if (version !== 1 && version !== 2 && version !== SOBER_HOUSE_SETTINGS_STORE_VERSION) {
+  if (
+    version !== 1 &&
+    version !== 2 &&
+    version !== 3 &&
+    version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
+  ) {
     return createDefaultSoberHouseSettingsStore();
   }
 
@@ -48,6 +53,12 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
       ? candidate.correctiveActions
       : [],
     evidenceItems: Array.isArray(candidate.evidenceItems) ? candidate.evidenceItems : [],
+    chatThreads: Array.isArray(candidate.chatThreads) ? candidate.chatThreads : [],
+    chatParticipants: Array.isArray(candidate.chatParticipants) ? candidate.chatParticipants : [],
+    chatMessages: Array.isArray(candidate.chatMessages) ? candidate.chatMessages : [],
+    chatMessageReceipts: Array.isArray(candidate.chatMessageReceipts)
+      ? candidate.chatMessageReceipts
+      : [],
     auditLogEntries: Array.isArray(candidate.auditLogEntries) ? candidate.auditLogEntries : [],
   };
 }

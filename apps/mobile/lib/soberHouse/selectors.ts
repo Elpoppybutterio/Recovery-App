@@ -1,6 +1,10 @@
 import { createDefaultHouseRuleSet } from "./defaults";
 import type {
   AlertPreference,
+  ChatMessage,
+  ChatMessageReceipt,
+  ChatParticipant,
+  ChatThread,
   CorrectiveAction,
   EvidenceItem,
   House,
@@ -66,6 +70,48 @@ export function getEvidenceItemsForViolation(
   violationId: string,
 ): EvidenceItem[] {
   return store.evidenceItems.filter((item) => item.linkedViolationId === violationId);
+}
+
+export function getChatThreadById(
+  store: SoberHouseSettingsStore,
+  threadId: string,
+): ChatThread | null {
+  return store.chatThreads.find((thread) => thread.id === threadId) ?? null;
+}
+
+export function getChatParticipantsForThread(
+  store: SoberHouseSettingsStore,
+  threadId: string,
+): ChatParticipant[] {
+  return store.chatParticipants.filter((participant) => participant.threadId === threadId);
+}
+
+export function getChatMessagesForThread(
+  store: SoberHouseSettingsStore,
+  threadId: string,
+): ChatMessage[] {
+  return [...store.chatMessages]
+    .filter((message) => message.threadId === threadId && message.active)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+}
+
+export function getChatReceiptsForMessage(
+  store: SoberHouseSettingsStore,
+  messageId: string,
+): ChatMessageReceipt[] {
+  return store.chatMessageReceipts.filter((receipt) => receipt.messageId === messageId);
+}
+
+export function getChatReceiptForMessageAndUser(
+  store: SoberHouseSettingsStore,
+  messageId: string,
+  userId: string,
+): ChatMessageReceipt | null {
+  return (
+    store.chatMessageReceipts.find(
+      (receipt) => receipt.messageId === messageId && receipt.userId === userId,
+    ) ?? null
+  );
 }
 
 export function getResidentDisplayName(store: SoberHouseSettingsStore): string {
