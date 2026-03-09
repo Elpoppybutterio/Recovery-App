@@ -15,7 +15,11 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
   }
 
   const candidate = value as Partial<SoberHouseSettingsStore>;
-  if (candidate.version !== SOBER_HOUSE_SETTINGS_STORE_VERSION) {
+  const version =
+    "version" in (value as Record<string, unknown>)
+      ? (value as { version?: number }).version
+      : undefined;
+  if (version !== 1 && version !== SOBER_HOUSE_SETTINGS_STORE_VERSION) {
     return createDefaultSoberHouseSettingsStore();
   }
 
@@ -30,6 +34,15 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     residentRequirementProfile: candidate.residentRequirementProfile ?? null,
     residentConsentRecord: candidate.residentConsentRecord ?? null,
     residentWizardDraft: candidate.residentWizardDraft ?? null,
+    choreCompletionRecords: Array.isArray(candidate.choreCompletionRecords)
+      ? candidate.choreCompletionRecords
+      : [],
+    jobApplicationRecords: Array.isArray(candidate.jobApplicationRecords)
+      ? candidate.jobApplicationRecords
+      : [],
+    workVerificationRecords: Array.isArray(candidate.workVerificationRecords)
+      ? candidate.workVerificationRecords
+      : [],
     auditLogEntries: Array.isArray(candidate.auditLogEntries) ? candidate.auditLogEntries : [],
   };
 }

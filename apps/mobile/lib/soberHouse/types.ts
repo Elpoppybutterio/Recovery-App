@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 1 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 2 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -34,8 +34,20 @@ export type SoberHouseEntityType =
   | "alertPreference"
   | "residentHousingProfile"
   | "residentRequirementProfile"
-  | "residentConsentRecord";
+  | "residentConsentRecord"
+  | "choreCompletionRecord"
+  | "jobApplicationRecord"
+  | "workVerificationRecord";
 export type ResidentOnboardingStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+export type ComplianceRuleType = "curfew" | "chores" | "work" | "jobSearch" | "meetings";
+export type ComplianceStatus =
+  | "compliant"
+  | "at_risk"
+  | "violation"
+  | "not_applicable"
+  | "incomplete_setup";
+export type ComplianceConfigSource = "resident" | "house" | "organization" | "none";
+export type WorkVerificationMethod = "SELF_REPORTED" | "MANAGER_CONFIRMATION";
 
 export type Option<Value extends string> = {
   value: Value;
@@ -136,6 +148,8 @@ export type House = {
   name: string;
   address: string;
   phone: string;
+  geofenceCenterLat: number | null;
+  geofenceCenterLng: number | null;
   geofenceRadiusFeetDefault: number;
   houseTypes: HouseType[];
   bedCount: number;
@@ -332,6 +346,48 @@ export type ResidentConsentRecord = {
   updatedAt: string;
 };
 
+export type ChoreCompletionRecord = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  organizationId: string | null;
+  houseId: string | null;
+  completedAt: string;
+  proofRequirement: ProofRequirement;
+  proofProvided: boolean;
+  proofReference: string | null;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type JobApplicationRecord = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  organizationId: string | null;
+  houseId: string | null;
+  employerName: string;
+  appliedAt: string;
+  proofProvided: boolean;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkVerificationRecord = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  organizationId: string | null;
+  houseId: string | null;
+  verifiedAt: string;
+  verificationMethod: WorkVerificationMethod;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ResidentWizardDraft = {
   linkedUserId: string;
   currentStep: ResidentOnboardingStep;
@@ -389,5 +445,29 @@ export type SoberHouseSettingsStore = {
   residentRequirementProfile: ResidentRequirementProfile | null;
   residentConsentRecord: ResidentConsentRecord | null;
   residentWizardDraft: ResidentWizardDraft | null;
+  choreCompletionRecords: ChoreCompletionRecord[];
+  jobApplicationRecords: JobApplicationRecord[];
+  workVerificationRecords: WorkVerificationRecord[];
   auditLogEntries: AuditLogEntry[];
+};
+
+export type ComplianceEvaluation = {
+  ruleType: ComplianceRuleType;
+  residentId: string;
+  houseId: string | null;
+  status: ComplianceStatus;
+  statusReason: string;
+  effectiveTargetValue: string | number | boolean | null;
+  actualValue: string | number | boolean | null;
+  dueAt: string | null;
+  evaluatedAt: string;
+  configSource: ComplianceConfigSource;
+  metadata: Record<string, string | number | boolean | null>;
+};
+
+export type ResidentComplianceSummary = {
+  residentId: string;
+  houseId: string | null;
+  evaluatedAt: string;
+  evaluations: ComplianceEvaluation[];
 };
