@@ -136,6 +136,10 @@ export function getMonthlyReportsForResident(
   return store.monthlyReports.filter((report) => report.residentId === residentId);
 }
 
+export function getCurrentMonthlyReports(store: SoberHouseSettingsStore): MonthlyReport[] {
+  return store.monthlyReports.filter((report) => report.isCurrentVersion);
+}
+
 export function getResidentDisplayName(store: SoberHouseSettingsStore): string {
   const housing = store.residentHousingProfile;
   if (!housing) {

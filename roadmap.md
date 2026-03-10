@@ -53,7 +53,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Sober house intervention layer now persists deduped violations, corrective actions, evidence linkage, and manager resolution workflow on top of compliance outputs with audit-safe history.
 - Structured internal chat foundation now persists direct sober-house manager/resident threads, structured message types, violation-linked thread reuse, unread/read receipts, acknowledgment-required notices, and auditable message history.
 - Sober house monthly reporting now stores immutable resident and house report snapshots with monthly KPI summaries, wins/streak summaries, report history, and in-app detail views.
-- Structured internal chat foundation now persists direct sober-house manager/resident threads, structured message types, violation-linked thread reuse, unread/read receipts, acknowledgment-required notices, and auditable message history.
+- Sober house report output workflow now adds review states, locked final manager summaries, version-safe regeneration, resident/house PDF export from stored snapshots, export history, and distribution-ready metadata without delivery automation.
 - Recovery UX v2: setup wizard flow, dashboard-first home experience, purple liquid-glass cards, and local recovery analytics (days sober, 90-day progress, sponsor adherence).
 - Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
 - Dashboard: evolve the existing direct-message foundation into broader recovery/service/probation chat flows after sober-house direct messaging proves out.
@@ -67,7 +67,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 
 ## Futures / Backlog
 
-- [ ] Sober house follow-on slices: alert delivery automation, PDF/export delivery workflows, and dashboards on top of the settings foundation, compliance/intervention layers, chat foundation, and monthly report snapshots.
+- [ ] Sober house follow-on slices: alert delivery automation, distribution workflows, and dashboards on top of the settings foundation, compliance/intervention layers, chat foundation, and monthly report exports.
 - [ ] Auto-request location permission on first launch; if denied, show Settings deep-link CTA.
 - [ ] Import AA/NA meetings feeds (Meeting Guide spec) and return meetings within 20-mile radius when location is available.
 - [ ] Meeting Guide distributed feed ingest + tenant-scoped `/v1/meetings/nearby` search (20-mile default) with map/list toggle UX.

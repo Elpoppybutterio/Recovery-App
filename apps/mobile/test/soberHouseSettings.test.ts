@@ -41,11 +41,17 @@ import {
 } from "../lib/soberHouse/chat";
 import { computeResidentMonthlyKpis } from "../lib/soberHouse/kpis";
 import { buildMonthlyWindow } from "../lib/soberHouse/monthlyWindow";
+import { buildSoberHouseMonthlyReportPdfHtml } from "../lib/pdf/exportSoberHouseMonthlyReportPdf";
 import {
   generateHouseMonthlyReport,
   generateResidentMonthlyReport,
   listMonthlyReportsForViewer,
 } from "../lib/soberHouse/reports";
+import {
+  markMonthlyReportExported,
+  transitionMonthlyReportStatus,
+  updateMonthlyReportFinalNotes,
+} from "../lib/soberHouse/reportWorkflow";
 import { getChatReceiptForMessageAndUser, getRuleSetForHouse } from "../lib/soberHouse/selectors";
 import { computeResidentMonthlyWins } from "../lib/soberHouse/wins";
 
@@ -1565,5 +1571,250 @@ describe("sober house monthly reports", () => {
     expect(residentVisible).toHaveLength(1);
     expect(residentVisible[0]?.type).toBe("RESIDENT_MONTHLY");
     expect(managerVisible).toHaveLength(2);
+  });
+
+  it("locks final notes after approval and records workflow audits", () => {
+    const { store, attendanceRecords, meetingAttendanceLogs } = buildReportingStore();
+    const generated = generateResidentMonthlyReport({
+      store,
+      actor: ACTOR,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:20:00-06:00",
+    });
+    const report = generated.report;
+    expect(report).not.toBeNull();
+
+    const noted = updateMonthlyReportFinalNotes(
+      generated.store,
+      ACTOR,
+      report!.id,
+      {
+        monthlySummary: "Resident showed consistent follow-through.",
+        progressSummary: "Improved communication and meeting consistency.",
+      },
+      "2026-03-31T22:21:00-06:00",
+    );
+    expect(noted.auditCount).toBeGreaterThan(0);
+
+    const inReview = transitionMonthlyReportStatus(
+      noted.store,
+      ACTOR,
+      report!.id,
+      "IN_REVIEW",
+      "2026-03-31T22:22:00-06:00",
+    );
+    const approved = transitionMonthlyReportStatus(
+      inReview.store,
+      ACTOR,
+      report!.id,
+      "APPROVED",
+      "2026-03-31T22:23:00-06:00",
+    );
+    const approvedReport = approved.report;
+
+    expect(approvedReport?.status).toBe("APPROVED");
+    expect(approvedReport?.lockedAt).toBe("2026-03-31T22:23:00-06:00");
+    expect(
+      approved.store.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "monthlyReport" &&
+          entry.actionTaken === "monthly_report_entered_review",
+      ),
+    ).toBe(true);
+    expect(
+      approved.store.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "monthlyReport" && entry.actionTaken === "monthly_report_approved",
+      ),
+    ).toBe(true);
+
+    const blockedEdit = updateMonthlyReportFinalNotes(
+      approved.store,
+      ACTOR,
+      report!.id,
+      { monthlySummary: "This should not overwrite the locked snapshot." },
+      "2026-03-31T22:24:00-06:00",
+    );
+
+    expect(blockedEdit.auditCount).toBe(0);
+    expect(
+      approvedReport?.summaryPayload.reportKind === "resident_monthly"
+        ? approvedReport.summaryPayload.notesSection.monthlySummary
+        : null,
+    ).toBe("Resident showed consistent follow-through.");
+  });
+
+  it("prevents resident actors from changing report workflow state", () => {
+    const { store, attendanceRecords, meetingAttendanceLogs, residentViewer } =
+      buildReportingStore();
+    const generated = generateResidentMonthlyReport({
+      store,
+      actor: ACTOR,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:25:00-06:00",
+    });
+    const report = generated.report;
+    expect(report).not.toBeNull();
+
+    const residentActor = {
+      id: residentViewer.userId,
+      name: residentViewer.label,
+    };
+    const residentAttempt = transitionMonthlyReportStatus(
+      generated.store,
+      residentActor,
+      report!.id,
+      "APPROVED",
+      "2026-03-31T22:26:00-06:00",
+    );
+
+    expect(residentAttempt.auditCount).toBe(0);
+    expect(residentAttempt.report?.status).toBe("GENERATED");
+  });
+
+  it("versions regenerated reports instead of mutating finalized history", () => {
+    const { store, attendanceRecords, meetingAttendanceLogs } = buildReportingStore();
+    const first = generateResidentMonthlyReport({
+      store,
+      actor: ACTOR,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:30:00-06:00",
+    });
+    const withNotes = updateMonthlyReportFinalNotes(
+      first.store,
+      ACTOR,
+      first.report!.id,
+      { monthlySummary: "Version one summary." },
+      "2026-03-31T22:31:00-06:00",
+    );
+    const approved = transitionMonthlyReportStatus(
+      withNotes.store,
+      ACTOR,
+      first.report!.id,
+      "APPROVED",
+      "2026-03-31T22:32:00-06:00",
+    );
+
+    const regenerated = generateResidentMonthlyReport({
+      store: approved.store,
+      actor: ACTOR,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:33:00-06:00",
+    });
+
+    const sameScopeReports = regenerated.store.monthlyReports
+      .filter(
+        (entry) =>
+          entry.type === "RESIDENT_MONTHLY" &&
+          entry.periodStart === first.report?.periodStart &&
+          entry.periodEnd === first.report?.periodEnd,
+      )
+      .sort((left, right) => left.versionNumber - right.versionNumber);
+
+    expect(sameScopeReports).toHaveLength(2);
+    expect(sameScopeReports[0]?.status).toBe("APPROVED");
+    expect(sameScopeReports[0]?.isCurrentVersion).toBe(false);
+    expect(sameScopeReports[1]?.versionNumber).toBe(2);
+    expect(sameScopeReports[1]?.isCurrentVersion).toBe(true);
+    expect(sameScopeReports[1]?.supersedesReportId).toBe(sameScopeReports[0]?.id ?? null);
+    expect(
+      sameScopeReports[0]?.summaryPayload.reportKind === "resident_monthly"
+        ? sameScopeReports[0].summaryPayload.notesSection.monthlySummary
+        : null,
+    ).toBe("Version one summary.");
+  });
+
+  it("builds resident and house export markup from stored snapshots and records export metadata", () => {
+    const { store, attendanceRecords, meetingAttendanceLogs, houseId } = buildReportingStore();
+    const residentGenerated = generateResidentMonthlyReport({
+      store,
+      actor: ACTOR,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:35:00-06:00",
+    });
+    const residentNoted = updateMonthlyReportFinalNotes(
+      residentGenerated.store,
+      ACTOR,
+      residentGenerated.report!.id,
+      {
+        monthlySummary: "Resident report export note.",
+        encouragementStrengths: "Stayed responsive to house guidance.",
+      },
+      "2026-03-31T22:36:00-06:00",
+    );
+    const residentApproved = transitionMonthlyReportStatus(
+      residentNoted.store,
+      ACTOR,
+      residentGenerated.report!.id,
+      "APPROVED",
+      "2026-03-31T22:37:00-06:00",
+    );
+    const residentHtml = buildSoberHouseMonthlyReportPdfHtml(residentApproved.report!);
+
+    expect(residentHtml).toContain("Resident report export note.");
+    expect(residentHtml).toContain("Workflow Metadata");
+    expect(residentHtml).toContain("APPROVED");
+
+    const exported = markMonthlyReportExported(
+      residentApproved.store,
+      ACTOR,
+      residentGenerated.report!.id,
+      "file:///documents/reports/resident-march-2026.pdf",
+      "2026-03-31T22:38:00-06:00",
+    );
+
+    expect(exported.report?.status).toBe("EXPORTED");
+    expect(exported.report?.exportHistory).toHaveLength(1);
+    expect(exported.report?.exportHistory[0]?.exportRef).toBe(
+      "file:///documents/reports/resident-march-2026.pdf",
+    );
+    expect(
+      exported.store.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "monthlyReport" && entry.actionTaken === "monthly_report_exported",
+      ),
+    ).toBe(true);
+
+    const houseGenerated = generateHouseMonthlyReport({
+      store: exported.store,
+      actor: ACTOR,
+      houseId,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:39:00-06:00",
+    });
+    const houseNoted = updateMonthlyReportFinalNotes(
+      houseGenerated.store,
+      ACTOR,
+      houseGenerated.report!.id,
+      {
+        monthlySummary: "House report export note.",
+        operationalConcerns: "Weekend staffing remained tight.",
+      },
+      "2026-03-31T22:40:00-06:00",
+    );
+    const houseApproved = transitionMonthlyReportStatus(
+      houseNoted.store,
+      ACTOR,
+      houseGenerated.report!.id,
+      "APPROVED",
+      "2026-03-31T22:41:00-06:00",
+    );
+    const houseHtml = buildSoberHouseMonthlyReportPdfHtml(houseApproved.report!);
+
+    expect(houseHtml).toContain("House report export note.");
+    expect(houseHtml).toContain("Operations Summary");
+    expect(houseHtml).toContain("Workflow Metadata");
   });
 });

@@ -116,8 +116,16 @@ export type ChatMessageType =
   | "SYSTEM_NOTICE";
 export type ChatMetadataValue = string | number | boolean | null;
 export type MonthlyReportType = "RESIDENT_MONTHLY" | "HOUSE_MONTHLY";
-export type MonthlyReportStatus = "DRAFT" | "GENERATED" | "EXPORTED" | "SENT";
+export type MonthlyReportStatus =
+  | "DRAFT"
+  | "GENERATED"
+  | "IN_REVIEW"
+  | "APPROVED"
+  | "EXPORTED"
+  | "SENT";
 export type MonthlyReportGeneratedBy = "SYSTEM" | "USER";
+export type ReportDistributionRecipientType = "RESIDENT" | "MANAGER" | "OWNER" | "COURT" | "OTHER";
+export type ReportDistributionMethod = "EMAIL" | "SMS" | "PORTAL" | "PRINT" | "OTHER";
 
 export type Option<Value extends string> = {
   value: Value;
@@ -720,7 +728,10 @@ export type ResidentMonthlyReportSnapshot = {
   };
   winsSummary: ReportWinSummary[];
   notesSection: {
-    managerNote: string | null;
+    monthlySummary: string | null;
+    progressSummary: string | null;
+    concernsPriorities: string | null;
+    encouragementStrengths: string | null;
   };
 };
 
@@ -754,6 +765,11 @@ export type HouseMonthlyReportSnapshot = {
     acknowledgmentRequiredCommunicationCount: number;
   };
   winsSummary: ReportWinSummary[];
+  notesSection: {
+    monthlySummary: string | null;
+    operationalConcerns: string | null;
+    followUpPriorities: string | null;
+  };
   residentHighlights: Array<{
     residentId: string;
     residentName: string;
@@ -764,6 +780,21 @@ export type HouseMonthlyReportSnapshot = {
 };
 
 export type MonthlyReportSnapshot = ResidentMonthlyReportSnapshot | HouseMonthlyReportSnapshot;
+
+export type MonthlyReportExportRecord = {
+  id: string;
+  exportedAt: string;
+  exportedBy: AuditActor;
+  exportRef: string;
+};
+
+export type MonthlyReportDistributionMetadata = {
+  recipientType: ReportDistributionRecipientType | null;
+  recipientTarget: string | null;
+  deliveryMethod: ReportDistributionMethod | null;
+  sentStatus: "READY" | "SENT" | null;
+  sentAt: string | null;
+};
 
 export type MonthlyReport = {
   id: string;
@@ -778,7 +809,17 @@ export type MonthlyReport = {
   generatedByUserId: string | null;
   status: MonthlyReportStatus;
   summaryPayload: MonthlyReportSnapshot;
+  reviewedAt: string | null;
+  reviewedBy: AuditActor | null;
+  approvedAt: string | null;
+  approvedBy: AuditActor | null;
+  lockedAt: string | null;
+  versionNumber: number;
+  isCurrentVersion: boolean;
+  supersedesReportId: string | null;
   exportRef: string | null;
+  exportHistory: MonthlyReportExportRecord[];
+  distributionMetadata: MonthlyReportDistributionMetadata;
   notes: string | null;
   createdAt: string;
   updatedAt: string;

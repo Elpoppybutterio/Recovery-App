@@ -29,6 +29,29 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     return createDefaultSoberHouseSettingsStore();
   }
 
+  const monthlyReports = Array.isArray(candidate.monthlyReports)
+    ? candidate.monthlyReports.map((report) => ({
+        ...report,
+        reviewedAt: report.reviewedAt ?? null,
+        reviewedBy: report.reviewedBy ?? null,
+        approvedAt: report.approvedAt ?? null,
+        approvedBy: report.approvedBy ?? null,
+        lockedAt: report.lockedAt ?? null,
+        versionNumber: report.versionNumber ?? 1,
+        isCurrentVersion: report.isCurrentVersion ?? true,
+        supersedesReportId: report.supersedesReportId ?? null,
+        exportRef: report.exportRef ?? null,
+        exportHistory: Array.isArray(report.exportHistory) ? report.exportHistory : [],
+        distributionMetadata: report.distributionMetadata ?? {
+          recipientType: null,
+          recipientTarget: null,
+          deliveryMethod: null,
+          sentStatus: null,
+          sentAt: null,
+        },
+      }))
+    : [];
+
   return {
     version: SOBER_HOUSE_SETTINGS_STORE_VERSION,
     organization: candidate.organization ?? null,
@@ -60,7 +83,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     chatMessageReceipts: Array.isArray(candidate.chatMessageReceipts)
       ? candidate.chatMessageReceipts
       : [],
-    monthlyReports: Array.isArray(candidate.monthlyReports) ? candidate.monthlyReports : [],
+    monthlyReports,
     auditLogEntries: Array.isArray(candidate.auditLogEntries) ? candidate.auditLogEntries : [],
   };
 }

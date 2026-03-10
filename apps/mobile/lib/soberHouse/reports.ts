@@ -180,7 +180,10 @@ function residentReportSnapshot(
     },
     winsSummary: computeResidentMonthlyWins(computation),
     notesSection: {
-      managerNote: latestManagerNote,
+      monthlySummary: latestManagerNote,
+      progressSummary: null,
+      concernsPriorities: null,
+      encouragementStrengths: null,
     },
   };
 }
@@ -222,6 +225,11 @@ function houseReportSnapshot(
     },
     operationsSummary: computation.operationsSummary,
     winsSummary: computeHouseMonthlyWins(computation),
+    notesSection: {
+      monthlySummary: null,
+      operationalConcerns: null,
+      followUpPriorities: null,
+    },
     residentHighlights: computation.residentComputation
       ? [
           {
@@ -241,17 +249,76 @@ function houseReportSnapshot(
 function saveReportRecord(
   store: SoberHouseSettingsStore,
   actor: AuditActor,
-  report: Omit<MonthlyReport, "id" | "createdAt" | "updatedAt">,
+  report: Omit<
+    MonthlyReport,
+    | "id"
+    | "createdAt"
+    | "updatedAt"
+    | "reviewedAt"
+    | "reviewedBy"
+    | "approvedAt"
+    | "approvedBy"
+    | "lockedAt"
+    | "versionNumber"
+    | "isCurrentVersion"
+    | "supersedesReportId"
+    | "exportHistory"
+    | "distributionMetadata"
+  >,
   timestamp: string,
   actionTaken: string,
 ) {
+  const currentVersions = store.monthlyReports.filter(
+    (entry) =>
+      entry.type === report.type &&
+      entry.houseId === report.houseId &&
+      entry.residentId === report.residentId &&
+      entry.periodStart === report.periodStart &&
+      entry.periodEnd === report.periodEnd &&
+      entry.isCurrentVersion,
+  );
+  const nextVersionNumber =
+    Math.max(0, ...currentVersions.map((entry) => entry.versionNumber ?? 1)) + 1;
   const createdId = createEntityId("monthly-report");
+  let nextStore = store;
+  let auditCount = 0;
+
+  for (const existing of currentVersions) {
+    const demoted = upsertMonthlyReport(
+      nextStore,
+      actor,
+      {
+        ...existing,
+        isCurrentVersion: false,
+      },
+      timestamp,
+    );
+    nextStore = demoted.store;
+    auditCount += demoted.auditCount;
+  }
+
   const result = upsertMonthlyReport(
-    store,
+    nextStore,
     actor,
     {
       ...report,
       id: createdId,
+      reviewedAt: null,
+      reviewedBy: null,
+      approvedAt: null,
+      approvedBy: null,
+      lockedAt: null,
+      versionNumber: nextVersionNumber,
+      isCurrentVersion: true,
+      supersedesReportId: currentVersions[0]?.id ?? null,
+      exportHistory: [],
+      distributionMetadata: {
+        recipientType: null,
+        recipientTarget: null,
+        deliveryMethod: null,
+        sentStatus: null,
+        sentAt: null,
+      },
     },
     timestamp,
   );
@@ -271,7 +338,7 @@ function saveReportRecord(
     report:
       result.store.monthlyReports.find((entry) => entry.id === createdId) ??
       getMonthlyReportById(result.store, createdId),
-    auditCount: result.auditCount + 1,
+    auditCount: auditCount + result.auditCount + 1,
   };
 }
 
