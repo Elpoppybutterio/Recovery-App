@@ -10,6 +10,7 @@ import type {
   House,
   JobApplicationRecord,
   HouseRuleSet,
+  MonthlyReport,
   Organization,
   SoberHouseSettingsStore,
   StaffAssignment,
@@ -52,6 +53,7 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     chatParticipants: [],
     chatMessages: [],
     chatMessageReceipts: [],
+    monthlyReports: [],
     auditLogEntries: [],
   };
 }
@@ -441,6 +443,32 @@ export function createDefaultChatMessageReceipt(
   };
 }
 
+export function createDefaultMonthlyReport(
+  now: string,
+  houseId: string,
+  snapshot: MonthlyReport["summaryPayload"],
+  id = createEntityId("monthly-report"),
+): MonthlyReport {
+  return {
+    id,
+    type: snapshot.reportKind === "resident_monthly" ? "RESIDENT_MONTHLY" : "HOUSE_MONTHLY",
+    residentId: snapshot.reportKind === "resident_monthly" ? snapshot.resident.residentId : null,
+    houseId,
+    organizationId: null,
+    periodStart: now,
+    periodEnd: now,
+    generatedAt: now,
+    generatedBy: "USER",
+    generatedByUserId: null,
+    status: "GENERATED",
+    summaryPayload: snapshot,
+    exportRef: null,
+    notes: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouseSettingsStore {
   return {
     version: store.version,
@@ -524,6 +552,12 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
       metadata: { ...message.metadata },
     })),
     chatMessageReceipts: store.chatMessageReceipts.map((receipt) => ({ ...receipt })),
+    monthlyReports: store.monthlyReports.map((report) => ({
+      ...report,
+      summaryPayload: JSON.parse(
+        JSON.stringify(report.summaryPayload),
+      ) as MonthlyReport["summaryPayload"],
+    })),
     auditLogEntries: store.auditLogEntries.map((entry) => ({
       ...entry,
       actor: { ...entry.actor },

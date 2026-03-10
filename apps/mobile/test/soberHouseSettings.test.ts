@@ -28,6 +28,7 @@ import {
   addEvidenceLink,
   createManualViolation,
   syncViolationFromEvaluation,
+  transitionCorrectiveActionStatus,
   transitionViolationForManager,
 } from "../lib/soberHouse/interventions";
 import {
@@ -38,7 +39,15 @@ import {
   markThreadRead,
   sendChatMessage,
 } from "../lib/soberHouse/chat";
+import { computeResidentMonthlyKpis } from "../lib/soberHouse/kpis";
+import { buildMonthlyWindow } from "../lib/soberHouse/monthlyWindow";
+import {
+  generateHouseMonthlyReport,
+  generateResidentMonthlyReport,
+  listMonthlyReportsForViewer,
+} from "../lib/soberHouse/reports";
 import { getChatReceiptForMessageAndUser, getRuleSetForHouse } from "../lib/soberHouse/selectors";
+import { computeResidentMonthlyWins } from "../lib/soberHouse/wins";
 
 const ACTOR = {
   id: "admin-a",
@@ -212,6 +221,201 @@ function buildChatStore() {
     ...base,
     store,
     managerContext: getManagerViewerContexts(store)[0] ?? null,
+  };
+}
+
+function buildReportingStore() {
+  const base = buildChatStore();
+  if (!base.managerContext) {
+    throw new Error("manager context should exist");
+  }
+
+  let store = base.store;
+  const resident = store.residentHousingProfile!;
+  const organizationId = store.organization?.id ?? null;
+  const houseId = resident.houseId;
+
+  store = upsertChoreCompletionRecord(
+    store,
+    ACTOR,
+    {
+      residentId: resident.residentId,
+      linkedUserId: resident.linkedUserId,
+      organizationId,
+      houseId,
+      completedAt: "2026-03-02T17:30:00-07:00",
+      proofRequirement: "PHOTO",
+      proofProvided: true,
+      proofReference: "file:///documents/chore-proof-1.jpg",
+      notes: "Kitchen deep clean complete.",
+    },
+    "2026-03-02T17:30:00-07:00",
+  ).store;
+
+  store = upsertChoreCompletionRecord(
+    store,
+    ACTOR,
+    {
+      residentId: resident.residentId,
+      linkedUserId: resident.linkedUserId,
+      organizationId,
+      houseId,
+      completedAt: "2026-03-03T17:45:00-07:00",
+      proofRequirement: "PHOTO",
+      proofProvided: true,
+      proofReference: "file:///documents/chore-proof-2.jpg",
+      notes: "Bathroom checklist completed.",
+    },
+    "2026-03-03T17:45:00-07:00",
+  ).store;
+
+  store = upsertJobApplicationRecord(
+    store,
+    ACTOR,
+    {
+      residentId: resident.residentId,
+      linkedUserId: resident.linkedUserId,
+      organizationId,
+      houseId,
+      employerName: "Northside Hardware",
+      appliedAt: "2026-03-03T12:00:00-07:00",
+      proofProvided: true,
+      notes: "Week 1 application 1",
+    },
+    "2026-03-03T12:00:00-07:00",
+  ).store;
+  store = upsertJobApplicationRecord(
+    store,
+    ACTOR,
+    {
+      residentId: resident.residentId,
+      linkedUserId: resident.linkedUserId,
+      organizationId,
+      houseId,
+      employerName: "River City Works",
+      appliedAt: "2026-03-04T12:00:00-07:00",
+      proofProvided: true,
+      notes: "Week 1 application 2",
+    },
+    "2026-03-04T12:00:00-07:00",
+  ).store;
+  store = upsertJobApplicationRecord(
+    store,
+    ACTOR,
+    {
+      residentId: resident.residentId,
+      linkedUserId: resident.linkedUserId,
+      organizationId,
+      houseId,
+      employerName: "Recovery Movers",
+      appliedAt: "2026-03-05T12:00:00-07:00",
+      proofProvided: true,
+      notes: "Week 1 application 3",
+    },
+    "2026-03-05T12:00:00-07:00",
+  ).store;
+  store = upsertJobApplicationRecord(
+    store,
+    ACTOR,
+    {
+      residentId: resident.residentId,
+      linkedUserId: resident.linkedUserId,
+      organizationId,
+      houseId,
+      employerName: "Bridge Staffing",
+      appliedAt: "2026-03-06T12:00:00-07:00",
+      proofProvided: true,
+      notes: "Week 1 application 4",
+    },
+    "2026-03-06T12:00:00-07:00",
+  ).store;
+
+  const threadResult = ensureDirectThreadForResident(
+    store,
+    ACTOR,
+    { managerStaffAssignmentId: base.managerContext.staffAssignmentId },
+    "2026-03-04T09:00:00-07:00",
+  );
+  store = threadResult.store;
+  const managerMessage = sendChatMessage(
+    store,
+    ACTOR,
+    base.managerContext,
+    {
+      threadId: threadResult.thread!.id,
+      messageType: "ACKNOWLEDGMENT_REQUIRED",
+      bodyText: "Attend one extra meeting this week.",
+    },
+    "2026-03-04T09:05:00-07:00",
+  );
+  store = managerMessage.store;
+  const residentViewer = {
+    kind: "resident" as const,
+    userId: resident.linkedUserId,
+    residentId: resident.residentId,
+    houseId: resident.houseId,
+    role: "RESIDENT" as const,
+    label: "Taylor Brooks",
+  };
+  store = markThreadRead(
+    store,
+    ACTOR,
+    residentViewer,
+    threadResult.thread!.id,
+    "2026-03-04T09:10:00-07:00",
+  ).store;
+  store = acknowledgeChatMessage(
+    store,
+    ACTOR,
+    residentViewer,
+    managerMessage.message!.id,
+    "2026-03-04T09:20:00-07:00",
+  ).store;
+
+  const violation = createManualViolation(
+    store,
+    ACTOR,
+    {
+      ruleType: "chores",
+      severity: "WARNING",
+      reasonSummary: "Missed Saturday house chore.",
+    },
+    "2026-03-07T20:00:00-07:00",
+  );
+  store = violation.store;
+  const corrective = addCorrectiveActionToViolation(
+    store,
+    ACTOR,
+    violation.violation!.id,
+    {
+      actionType: "MAKE_UP_CHORE",
+      dueAt: "2026-03-10T12:00:00-07:00",
+      notes: "Complete a make-up kitchen reset.",
+    },
+    "2026-03-07T20:05:00-07:00",
+  );
+  store = corrective.store;
+  store = transitionCorrectiveActionStatus(
+    store,
+    ACTOR,
+    corrective.correctiveAction!.id,
+    "COMPLETED",
+    "2026-03-09T09:00:00-07:00",
+    "Completed before house meeting.",
+  ).store;
+
+  return {
+    ...base,
+    store,
+    residentViewer,
+    attendanceRecords: [
+      { id: "att-1", meetingId: "m1", startAt: "2026-03-02T19:00:00-07:00" },
+      { id: "att-2", meetingId: "m2", startAt: "2026-03-03T19:00:00-07:00" },
+      { id: "att-3", meetingId: "m3", startAt: "2026-03-04T19:00:00-07:00" },
+      { id: "att-4", meetingId: "m4", startAt: "2026-03-05T19:00:00-07:00" },
+      { id: "att-5", meetingId: "m5", startAt: "2026-03-06T19:00:00-07:00" },
+    ],
+    meetingAttendanceLogs: [],
   };
 }
 
@@ -1252,5 +1456,114 @@ describe("structured sober house chat", () => {
           entry.actionTaken === "chat_message_acknowledged",
       ),
     ).toBe(true);
+  });
+});
+
+describe("sober house monthly reports", () => {
+  it("builds deterministic monthly windows", () => {
+    const window = buildMonthlyWindow("2026-03");
+
+    expect(window.periodStart).toBe("2026-03-01T07:00:00.000Z");
+    expect(window.periodEnd).toBe("2026-04-01T06:00:00.000Z");
+    expect(window.label).toContain("2026");
+  });
+
+  it("computes KPI and wins data from persisted sober-house records", () => {
+    const { store, attendanceRecords, meetingAttendanceLogs } = buildReportingStore();
+    const computation = computeResidentMonthlyKpis({
+      store,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+    });
+    const wins = computeResidentMonthlyWins(computation);
+
+    expect(computation?.choreCompletionRate.numerator).toBe(2);
+    expect(computation?.jobSearchCompletionRate.numerator).toBeGreaterThanOrEqual(1);
+    expect(computation?.acknowledgmentRequiredMessages).toBe(1);
+    expect(computation?.acknowledgmentCompletionRate.value).toBe(1);
+    expect(wins.some((win) => win.id === "prompt-acknowledgments")).toBe(true);
+    expect(wins.some((win) => win.id === "corrective-actions-on-time")).toBe(true);
+  });
+
+  it("generates stable resident and house monthly report snapshots", () => {
+    const { store, attendanceRecords, meetingAttendanceLogs, houseId } = buildReportingStore();
+    const residentResult = generateResidentMonthlyReport({
+      store,
+      actor: ACTOR,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:00:00-06:00",
+    });
+    const houseResult = generateHouseMonthlyReport({
+      store: residentResult.store,
+      actor: ACTOR,
+      houseId,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:05:00-06:00",
+    });
+
+    const residentSnapshot = residentResult.report?.summaryPayload;
+    const houseSnapshot = houseResult.report?.summaryPayload;
+
+    expect(residentSnapshot?.reportKind).toBe("resident_monthly");
+    expect(
+      residentSnapshot?.reportKind === "resident_monthly"
+        ? residentSnapshot.communicationSummary.acknowledgmentRequiredCount
+        : null,
+    ).toBe(1);
+    expect(
+      residentSnapshot?.reportKind === "resident_monthly"
+        ? residentSnapshot.correctiveActionSummary.completedCount
+        : null,
+    ).toBe(1);
+    expect(houseSnapshot?.reportKind).toBe("house_monthly");
+    expect(
+      houseSnapshot?.reportKind === "house_monthly" ? houseSnapshot.kpis.totalViolations : null,
+    ).toBe(1);
+    expect(
+      houseResult.store.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "monthlyReport" && entry.actionTaken === "monthly_report_generated",
+      ),
+    ).toBe(true);
+  });
+
+  it("enforces resident-vs-manager report history boundaries", () => {
+    const { store, attendanceRecords, meetingAttendanceLogs, houseId, residentId } =
+      buildReportingStore();
+    const residentReport = generateResidentMonthlyReport({
+      store,
+      actor: ACTOR,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:10:00-06:00",
+    });
+    const houseReport = generateHouseMonthlyReport({
+      store: residentReport.store,
+      actor: ACTOR,
+      houseId,
+      monthKey: "2026-03",
+      attendanceRecords,
+      meetingAttendanceLogs,
+      timestamp: "2026-03-31T22:15:00-06:00",
+    });
+
+    const residentVisible = listMonthlyReportsForViewer(houseReport.store, {
+      kind: "resident",
+      residentId,
+    });
+    const managerVisible = listMonthlyReportsForViewer(houseReport.store, {
+      kind: "manager",
+      houseId,
+    });
+
+    expect(residentVisible).toHaveLength(1);
+    expect(residentVisible[0]?.type).toBe("RESIDENT_MONTHLY");
+    expect(managerVisible).toHaveLength(2);
   });
 });

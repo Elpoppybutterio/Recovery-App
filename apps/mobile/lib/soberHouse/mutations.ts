@@ -12,6 +12,7 @@ import {
   createDefaultHouse,
   createDefaultHouseRuleSet,
   createDefaultJobApplicationRecord,
+  createDefaultMonthlyReport,
   createDefaultOrganization,
   createDefaultStaffAssignment,
   createDefaultViolation,
@@ -30,6 +31,7 @@ import type {
   House,
   HouseRuleSet,
   JobApplicationRecord,
+  MonthlyReport,
   Organization,
   ResidentConsentRecord,
   ResidentHousingProfile,
@@ -949,6 +951,54 @@ export function upsertChatMessageReceipt(
     fieldChanged: "messageId",
     oldValue: previous?.messageId ?? null,
     newValue: nextValue.messageId,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertMonthlyReport(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<MonthlyReport, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.monthlyReports.find((report) => report.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultMonthlyReport(timestamp, fields.houseId, fields.summaryPayload, fields.id);
+  const nextValue: MonthlyReport = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "monthlyReport",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      monthlyReports: replaceById(draftStore.monthlyReports, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "monthlyReport",
+    entityId: nextValue.id,
+    actionTaken: previous ? "monthly_report_updated" : "monthly_report_created",
+    fieldChanged: "status",
+    oldValue: previous?.status ?? null,
+    newValue: nextValue.status,
   });
 
   return {

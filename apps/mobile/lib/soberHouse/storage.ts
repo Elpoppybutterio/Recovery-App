@@ -23,6 +23,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     version !== 1 &&
     version !== 2 &&
     version !== 3 &&
+    version !== 4 &&
     version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
   ) {
     return createDefaultSoberHouseSettingsStore();
@@ -59,6 +60,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     chatMessageReceipts: Array.isArray(candidate.chatMessageReceipts)
       ? candidate.chatMessageReceipts
       : [],
+    monthlyReports: Array.isArray(candidate.monthlyReports) ? candidate.monthlyReports : [],
     auditLogEntries: Array.isArray(candidate.auditLogEntries) ? candidate.auditLogEntries : [],
   };
 }

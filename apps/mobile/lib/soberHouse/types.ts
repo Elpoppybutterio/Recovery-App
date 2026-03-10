@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 4 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 5 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -44,7 +44,8 @@ export type SoberHouseEntityType =
   | "chatThread"
   | "chatParticipant"
   | "chatMessage"
-  | "chatMessageReceipt";
+  | "chatMessageReceipt"
+  | "monthlyReport";
 export type ResidentOnboardingStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 export type ComplianceRuleType =
   | "curfew"
@@ -114,6 +115,9 @@ export type ChatMessageType =
   | "CORRECTIVE_ACTION_NOTICE"
   | "SYSTEM_NOTICE";
 export type ChatMetadataValue = string | number | boolean | null;
+export type MonthlyReportType = "RESIDENT_MONTHLY" | "HOUSE_MONTHLY";
+export type MonthlyReportStatus = "DRAFT" | "GENERATED" | "EXPORTED" | "SENT";
+export type MonthlyReportGeneratedBy = "SYSTEM" | "USER";
 
 export type Option<Value extends string> = {
   value: Value;
@@ -257,6 +261,20 @@ export const CHAT_MESSAGE_TYPE_OPTIONS: ReadonlyArray<Option<ChatMessageType>> =
 export type AuditActor = {
   id: string;
   name: string;
+};
+
+export type ReportMetricValue = {
+  value: number | null;
+  numerator: number | null;
+  denominator: number | null;
+  label: string;
+};
+
+export type ReportWinSummary = {
+  id: string;
+  label: string;
+  value: string;
+  detail: string;
 };
 
 export type Organization = {
@@ -632,6 +650,140 @@ export type ChatMessageReceipt = {
   acknowledgedAt: string | null;
 };
 
+export type ResidentMonthlyReportSnapshot = {
+  reportKind: "resident_monthly";
+  reportMonth: string;
+  resident: {
+    residentId: string;
+    residentName: string;
+    houseId: string | null;
+    houseName: string;
+    moveInDate: string | null;
+    programPhaseOnEntry: string | null;
+  };
+  complianceSummary: {
+    curfew: ReportMetricValue & { summary: string };
+    chores: ReportMetricValue & { summary: string };
+    work: ReportMetricValue & { summary: string };
+    jobSearch: ReportMetricValue & { summary: string };
+    meetings: ReportMetricValue & {
+      summary: string;
+      requiredCount: number | null;
+      completedCount: number | null;
+      remainingCount: number | null;
+    };
+    sponsorContact: {
+      applicable: boolean;
+      summary: string;
+      requiredContacts: number | null;
+    };
+  };
+  kpis: {
+    curfewComplianceRate: ReportMetricValue;
+    choreCompletionRate: ReportMetricValue;
+    meetingComplianceRate: ReportMetricValue;
+    employmentComplianceRate: ReportMetricValue;
+    jobSearchCompletionRate: ReportMetricValue;
+    totalViolations: number;
+    violationsByRuleType: Partial<Record<ViolationRuleType, number>>;
+    correctiveActionsOpen: number;
+    correctiveActionsCompleted: number;
+    correctiveActionsOverdue: number;
+    acknowledgmentRequiredMessages: number;
+    acknowledgmentCompletionRate: ReportMetricValue;
+  };
+  violationsSummary: {
+    totalViolations: number;
+    violationsByType: Partial<Record<ViolationRuleType, number>>;
+    openCount: number;
+    resolvedCount: number;
+    dismissedCount: number;
+    notableIncidents: Array<{
+      id: string;
+      ruleType: ViolationRuleType;
+      reasonSummary: string;
+      triggeredAt: string;
+      status: ViolationStatus;
+    }>;
+  };
+  correctiveActionSummary: {
+    totalAssigned: number;
+    openCount: number;
+    completedCount: number;
+    overdueCount: number;
+  };
+  communicationSummary: {
+    structuredMessageCount: number;
+    acknowledgmentRequiredCount: number;
+    acknowledgmentCompletedCount: number;
+    acknowledgmentCompletionSummary: string;
+  };
+  winsSummary: ReportWinSummary[];
+  notesSection: {
+    managerNote: string | null;
+  };
+};
+
+export type HouseMonthlyReportSnapshot = {
+  reportKind: "house_monthly";
+  reportMonth: string;
+  house: {
+    houseId: string;
+    houseName: string;
+    organizationId: string | null;
+    activeResidentCount: number;
+    staffSummary: string[];
+  };
+  kpis: {
+    curfewComplianceRate: ReportMetricValue;
+    choreCompletionRate: ReportMetricValue;
+    meetingComplianceRate: ReportMetricValue;
+    employmentComplianceRate: ReportMetricValue;
+    jobSearchCompletionRate: ReportMetricValue;
+    totalViolations: number;
+    violationsByRuleType: Partial<Record<ViolationRuleType, number>>;
+    correctiveActionsOpen: number;
+    correctiveActionsResolved: number;
+    acknowledgmentRequiredMessages: number;
+    acknowledgmentCompletionRate: ReportMetricValue;
+  };
+  operationsSummary: {
+    residentsInGoodStandingCount: number;
+    residentsWithUnresolvedIssuesCount: number;
+    residentsWithRepeatedViolationsCount: number;
+    acknowledgmentRequiredCommunicationCount: number;
+  };
+  winsSummary: ReportWinSummary[];
+  residentHighlights: Array<{
+    residentId: string;
+    residentName: string;
+    zeroViolations: boolean;
+    metMeetingGoals: boolean;
+    maintainedChoreCompliance: boolean;
+  }>;
+};
+
+export type MonthlyReportSnapshot = ResidentMonthlyReportSnapshot | HouseMonthlyReportSnapshot;
+
+export type MonthlyReport = {
+  id: string;
+  type: MonthlyReportType;
+  residentId: string | null;
+  houseId: string;
+  organizationId: string | null;
+  periodStart: string;
+  periodEnd: string;
+  generatedAt: string;
+  generatedBy: MonthlyReportGeneratedBy;
+  generatedByUserId: string | null;
+  status: MonthlyReportStatus;
+  summaryPayload: MonthlyReportSnapshot;
+  exportRef: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ResidentWizardDraft = {
   linkedUserId: string;
   currentStep: ResidentOnboardingStep;
@@ -699,6 +851,7 @@ export type SoberHouseSettingsStore = {
   chatParticipants: ChatParticipant[];
   chatMessages: ChatMessage[];
   chatMessageReceipts: ChatMessageReceipt[];
+  monthlyReports: MonthlyReport[];
   auditLogEntries: AuditLogEntry[];
 };
 

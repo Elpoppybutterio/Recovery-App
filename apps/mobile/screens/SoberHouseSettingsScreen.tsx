@@ -6,6 +6,7 @@ import { SoberHouseResidentManager } from "../components/SoberHouseResidentManag
 import { SoberHouseComplianceSection } from "../components/SoberHouseComplianceSection";
 import { SoberHouseInterventionSection } from "../components/SoberHouseInterventionSection";
 import { SoberHouseChatSection } from "../components/SoberHouseChatSection";
+import { SoberHouseReportsSection } from "../components/SoberHouseReportsSection";
 import { colors, radius, spacing, typography } from "../lib/theme/tokens";
 import {
   ALERT_DELIVERY_METHOD_OPTIONS,
@@ -921,6 +922,10 @@ export function SoberHouseSettingsScreen({
             <Text style={styles.summaryLabel}>Threads</Text>
           </View>
           <View style={styles.summaryPill}>
+            <Text style={styles.summaryValue}>{store.monthlyReports.length}</Text>
+            <Text style={styles.summaryLabel}>Reports</Text>
+          </View>
+          <View style={styles.summaryPill}>
             <Text style={styles.summaryValue}>{store.auditLogEntries.length}</Text>
             <Text style={styles.summaryLabel}>Audit</Text>
           </View>
@@ -959,6 +964,14 @@ export function SoberHouseSettingsScreen({
         isSaving={isSaving}
         chatIntent={chatIntent}
         onChatIntentHandled={() => setChatIntent(null)}
+        onPersist={persistStore}
+      />
+
+      <SoberHouseReportsSection
+        userId={userId}
+        store={store}
+        actor={actor}
+        isSaving={isSaving}
         onPersist={persistStore}
       />
 

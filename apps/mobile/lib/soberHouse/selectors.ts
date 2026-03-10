@@ -9,6 +9,7 @@ import type {
   EvidenceItem,
   House,
   HouseRuleSet,
+  MonthlyReport,
   SoberHouseSettingsStore,
   StaffAssignment,
   Violation,
@@ -112,6 +113,27 @@ export function getChatReceiptForMessageAndUser(
       (receipt) => receipt.messageId === messageId && receipt.userId === userId,
     ) ?? null
   );
+}
+
+export function getMonthlyReportById(
+  store: SoberHouseSettingsStore,
+  reportId: string,
+): MonthlyReport | null {
+  return store.monthlyReports.find((report) => report.id === reportId) ?? null;
+}
+
+export function getMonthlyReportsForHouse(
+  store: SoberHouseSettingsStore,
+  houseId: string,
+): MonthlyReport[] {
+  return store.monthlyReports.filter((report) => report.houseId === houseId);
+}
+
+export function getMonthlyReportsForResident(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+): MonthlyReport[] {
+  return store.monthlyReports.filter((report) => report.residentId === residentId);
 }
 
 export function getResidentDisplayName(store: SoberHouseSettingsStore): string {
