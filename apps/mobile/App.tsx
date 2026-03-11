@@ -2566,7 +2566,7 @@ export default function App() {
     });
   }, [meetingsForDay, meetingsFormatFilter, meetingsTimeFilter]);
   const dashboardMeetingsForPanel = useMemo<MeetingListItem[]>(
-    () => meetingsForMeetingsScreen,
+    () => meetingsForMeetingsScreen.slice(0, 5),
     [meetingsForMeetingsScreen],
   );
   const selectedMeetingsFormatLabel = useMemo(
@@ -10909,7 +10909,8 @@ export default function App() {
                         </View>
                       </View>
                       <Text style={styles.sectionMeta}>
-                        Upcoming meetings for {selectedDay.label} within {meetingRadiusMiles} miles.
+                        Next 5 meetings near you for {selectedDay.label} within {meetingRadiusMiles}{" "}
+                        miles.
                       </Text>
                       <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
                       {dashboardShowsOnlineFallback && selectedDayIsToday ? (
