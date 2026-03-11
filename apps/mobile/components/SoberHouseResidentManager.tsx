@@ -37,6 +37,7 @@ import {
   normalizeSignatureValueToRef,
   type SignatureRef,
 } from "../lib/signatures/signatureStore";
+import { getRuleSetForHouse } from "../lib/soberHouse/selectors";
 
 const INPUT_PLACEHOLDER_COLOR = "rgba(245,243,255,0.45)";
 const STEP_TITLES: Record<ResidentOnboardingStep, string> = {
@@ -207,6 +208,14 @@ export function SoberHouseResidentManager({
     () => store.houses.find((house) => house.id === draft.assignedHouseId) ?? null,
     [draft.assignedHouseId, store.houses],
   );
+  const assignedHouseRuleSet = useMemo(
+    () =>
+      draft.assignedHouseId
+        ? getRuleSetForHouse(store, draft.assignedHouseId, new Date().toISOString())
+        : null,
+    [draft.assignedHouseId, store],
+  );
+  const sponsorContactRequired = assignedHouseRuleSet?.sponsorContact.enabled ?? false;
 
   const startWizard = useCallback(() => {
     const nextDraft = createResidentWizardDraftFromProfiles(linkedUserId, store);
@@ -278,11 +287,16 @@ export function SoberHouseResidentManager({
       return;
     }
 
-    if (wizardStep === 5 && draft.sponsorPresent) {
+    if (wizardStep === 5) {
+      if (sponsorContactRequired && !draft.sponsorPresent) {
+        setResidentStatus("This house requires sponsor contact details in the recovery section.");
+        return;
+      }
       if (
-        !draft.sponsorName.trim() ||
-        !draft.sponsorPhone.trim() ||
-        !draft.sponsorContactFrequency.trim()
+        draft.sponsorPresent &&
+        (!draft.sponsorName.trim() ||
+          !draft.sponsorPhone.trim() ||
+          !draft.sponsorContactFrequency.trim())
       ) {
         setResidentStatus("Sponsor name, phone, and contact cadence are required.");
         return;
@@ -305,7 +319,7 @@ export function SoberHouseResidentManager({
       return;
     }
     await persistDraftAtStep(draft, (wizardStep + 1) as ResidentOnboardingStep);
-  }, [draft, persistDraftAtStep, wizardStep]);
+  }, [draft, persistDraftAtStep, sponsorContactRequired, wizardStep]);
 
   const previousStep = useCallback(async () => {
     setResidentStatus(null);
@@ -832,6 +846,12 @@ export function SoberHouseResidentManager({
 
           {wizardStep === 5 ? (
             <>
+              {sponsorContactRequired ? (
+                <Text style={styles.meta}>
+                  Sponsor contact is enabled for this house. Complete this recovery section before
+                  continuing.
+                </Text>
+              ) : null}
               <ToggleRow
                 label="Sponsor present"
                 value={draft.sponsorPresent}
@@ -883,7 +903,11 @@ export function SoberHouseResidentManager({
                   />
                 </>
               ) : (
-                <Text style={styles.meta}>Sponsor details are skipped.</Text>
+                <Text style={styles.meta}>
+                  {sponsorContactRequired
+                    ? "Sponsor details are required for this house."
+                    : "Sponsor details are skipped."}
+                </Text>
               )}
             </>
           ) : null}

@@ -24,6 +24,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     version !== 2 &&
     version !== 3 &&
     version !== 4 &&
+    version !== 5 &&
     version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
   ) {
     return createDefaultSoberHouseSettingsStore();
@@ -57,14 +58,41 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     organization: candidate.organization ?? null,
     houses: Array.isArray(candidate.houses) ? candidate.houses : [],
     staffAssignments: Array.isArray(candidate.staffAssignments) ? candidate.staffAssignments : [],
-    houseRuleSets: Array.isArray(candidate.houseRuleSets) ? candidate.houseRuleSets : [],
+    houseRuleSets: Array.isArray(candidate.houseRuleSets)
+      ? candidate.houseRuleSets.map((ruleSet) => ({
+          ...ruleSet,
+          chores: {
+            ...ruleSet.chores,
+            proofRequirement: Array.isArray(ruleSet.chores?.proofRequirement)
+              ? ruleSet.chores.proofRequirement
+              : ruleSet.chores?.proofRequirement
+                ? [ruleSet.chores.proofRequirement]
+                : ["NONE"],
+          },
+          meetings: {
+            ...ruleSet.meetings,
+            proofMethod:
+              ((ruleSet.meetings as { proofMethod?: string } | undefined)?.proofMethod ?? null) ===
+              "PHOTO"
+                ? "GEOFENCE_SIGNATURE"
+                : (ruleSet.meetings?.proofMethod ?? "GEOFENCE_SIGNATURE"),
+          },
+        }))
+      : [],
     alertPreferences: Array.isArray(candidate.alertPreferences) ? candidate.alertPreferences : [],
     residentHousingProfile: candidate.residentHousingProfile ?? null,
     residentRequirementProfile: candidate.residentRequirementProfile ?? null,
     residentConsentRecord: candidate.residentConsentRecord ?? null,
     residentWizardDraft: candidate.residentWizardDraft ?? null,
     choreCompletionRecords: Array.isArray(candidate.choreCompletionRecords)
-      ? candidate.choreCompletionRecords
+      ? candidate.choreCompletionRecords.map((record) => ({
+          ...record,
+          proofRequirement: Array.isArray(record.proofRequirement)
+            ? record.proofRequirement
+            : record.proofRequirement
+              ? [record.proofRequirement]
+              : ["NONE"],
+        }))
       : [],
     jobApplicationRecords: Array.isArray(candidate.jobApplicationRecords)
       ? candidate.jobApplicationRecords

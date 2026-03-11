@@ -176,9 +176,8 @@ function groupViolationsByRuleType(
 }
 
 function validChoreCompletion(record: ChoreCompletionRecord): boolean {
-  return (
-    record.proofRequirement === "NONE" || record.proofProvided || Boolean(record.proofReference)
-  );
+  const proofRequired = record.proofRequirement.some((requirement) => requirement !== "NONE");
+  return !proofRequired || record.proofProvided || Boolean(record.proofReference);
 }
 
 function enumerateChorePeriods(

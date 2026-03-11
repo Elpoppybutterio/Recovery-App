@@ -148,7 +148,7 @@ export function createDefaultHouseRuleSet(
       enabled: false,
       frequency: "WEEKLY",
       dueTime: "18:00",
-      proofRequirement: "CHECKLIST",
+      proofRequirement: ["CHECKLIST"],
       gracePeriodMinutes: 15,
       managerInstantNotificationEnabled: false,
     },
@@ -167,7 +167,7 @@ export function createDefaultHouseRuleSet(
       meetingsRequired: false,
       meetingsPerWeek: 0,
       allowedMeetingTypes: ["AA"],
-      proofMethod: "GEOFENCE",
+      proofMethod: "GEOFENCE_SIGNATURE",
     },
     sponsorContact: {
       enabled: false,
@@ -219,7 +219,7 @@ export function createDefaultChoreCompletionRecord(
     organizationId,
     houseId,
     completedAt: now,
-    proofRequirement: "NONE",
+    proofRequirement: ["NONE"],
     proofProvided: false,
     proofReference: null,
     notes: "",
@@ -497,7 +497,10 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
     houseRuleSets: store.houseRuleSets.map((ruleSet) => ({
       ...ruleSet,
       curfew: { ...ruleSet.curfew },
-      chores: { ...ruleSet.chores },
+      chores: {
+        ...ruleSet.chores,
+        proofRequirement: [...ruleSet.chores.proofRequirement],
+      },
       employment: { ...ruleSet.employment },
       jobSearch: { ...ruleSet.jobSearch },
       meetings: {
@@ -529,7 +532,10 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
             : null,
         }
       : null,
-    choreCompletionRecords: store.choreCompletionRecords.map((record) => ({ ...record })),
+    choreCompletionRecords: store.choreCompletionRecords.map((record) => ({
+      ...record,
+      proofRequirement: [...record.proofRequirement],
+    })),
     jobApplicationRecords: store.jobApplicationRecords.map((record) => ({ ...record })),
     workVerificationRecords: store.workVerificationRecords.map((record) => ({ ...record })),
     violations: store.violations.map((violation) => ({

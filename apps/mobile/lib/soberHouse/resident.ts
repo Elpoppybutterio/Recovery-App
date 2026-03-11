@@ -146,6 +146,7 @@ export function applyHouseDefaultsToResidentDraft(
     jobApplicationsRequiredPerWeek: ruleSet.jobSearch.applicationsRequiredPerWeek,
     meetingsRequiredWeekly: ruleSet.meetings.meetingsRequired,
     meetingsRequiredCount: ruleSet.meetings.meetingsPerWeek,
+    sponsorPresent: ruleSet.sponsorContact.enabled ? true : draft.sponsorPresent,
     sponsorContactFrequency:
       ruleSet.sponsorContact.contactsRequiredPerWeek > 0
         ? `${ruleSet.sponsorContact.contactsRequiredPerWeek} per week`

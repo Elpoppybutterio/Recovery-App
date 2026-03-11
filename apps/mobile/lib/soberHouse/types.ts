@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 5 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 6 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -22,7 +22,11 @@ export type MeetingType =
   | "DHARMA_RECOVERY"
   | "CELEBRATE_RECOVERY"
   | "OTHER";
-export type MeetingProofMethod = "GEOFENCE" | "SIGNATURE" | "PHOTO" | "MANAGER_CONFIRMATION";
+export type MeetingProofMethod =
+  | "GEOFENCE_SIGNATURE"
+  | "GEOFENCE"
+  | "SIGNATURE"
+  | "MANAGER_CONFIRMATION";
 export type SponsorProofType = "CALL_LOG" | "TEXT_CONFIRMATION" | "MANAGER_CONFIRMATION";
 export type AlertDeliveryMethod = "EMAIL" | "SMS" | "BOTH";
 export type AlertScope = "ORGANIZATION" | "HOUSE";
@@ -180,9 +184,9 @@ export const MEETING_TYPE_OPTIONS: ReadonlyArray<Option<MeetingType>> = [
 ];
 
 export const MEETING_PROOF_METHOD_OPTIONS: ReadonlyArray<Option<MeetingProofMethod>> = [
+  { value: "GEOFENCE_SIGNATURE", label: "Geofence + signature" },
   { value: "GEOFENCE", label: "Geofence" },
   { value: "SIGNATURE", label: "Signature" },
-  { value: "PHOTO", label: "Photo" },
   { value: "MANAGER_CONFIRMATION", label: "Manager confirmation" },
 ];
 
@@ -350,7 +354,7 @@ export type ChoresRuleConfig = {
   enabled: boolean;
   frequency: ChoreFrequency;
   dueTime: string;
-  proofRequirement: ProofRequirement;
+  proofRequirement: ProofRequirement[];
   gracePeriodMinutes: number;
   managerInstantNotificationEnabled: boolean;
 };
@@ -509,7 +513,7 @@ export type ChoreCompletionRecord = {
   organizationId: string | null;
   houseId: string | null;
   completedAt: string;
-  proofRequirement: ProofRequirement;
+  proofRequirement: ProofRequirement[];
   proofProvided: boolean;
   proofReference: string | null;
   notes: string;

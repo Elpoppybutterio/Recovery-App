@@ -272,18 +272,18 @@ function createHouseRuleSetDraft(
     name: base?.name ?? "Default house rules",
     isActive: base?.status !== "INACTIVE",
     curfewEnabled: base?.curfew.enabled ?? false,
-    weekdayCurfew: base?.curfew.weekdayCurfew ?? "22:00",
-    fridayCurfew: base?.curfew.fridayCurfew ?? "23:00",
-    saturdayCurfew: base?.curfew.saturdayCurfew ?? "23:00",
-    sundayCurfew: base?.curfew.sundayCurfew ?? "22:00",
+    weekdayCurfew: formatTwelveHourTime(base?.curfew.weekdayCurfew ?? "22:00"),
+    fridayCurfew: formatTwelveHourTime(base?.curfew.fridayCurfew ?? "23:00"),
+    saturdayCurfew: formatTwelveHourTime(base?.curfew.saturdayCurfew ?? "23:00"),
+    sundayCurfew: formatTwelveHourTime(base?.curfew.sundayCurfew ?? "22:00"),
     curfewGracePeriodMinutes: String(base?.curfew.gracePeriodMinutes ?? 15),
     preViolationAlertEnabled: base?.curfew.preViolationAlertEnabled ?? false,
     preViolationLeadTimeMinutes: String(base?.curfew.preViolationLeadTimeMinutes ?? 15),
     curfewAlertBasis: base?.curfew.alertBasis ?? "CLOCK_ONLY",
     choresEnabled: base?.chores.enabled ?? false,
     choresFrequency: base?.chores.frequency ?? "WEEKLY",
-    choresDueTime: base?.chores.dueTime ?? "18:00",
-    choresProofRequirement: base?.chores.proofRequirement ?? "CHECKLIST",
+    choresDueTime: formatTwelveHourTime(base?.chores.dueTime ?? "18:00"),
+    choresProofRequirement: [...(base?.chores.proofRequirement ?? ["CHECKLIST"])],
     choresGracePeriodMinutes: String(base?.chores.gracePeriodMinutes ?? 15),
     choresManagerInstantNotificationEnabled:
       base?.chores.managerInstantNotificationEnabled ?? false,
@@ -297,7 +297,7 @@ function createHouseRuleSetDraft(
     meetingsRequired: base?.meetings.meetingsRequired ?? false,
     meetingsPerWeek: String(base?.meetings.meetingsPerWeek ?? 0),
     allowedMeetingTypes: [...(base?.meetings.allowedMeetingTypes ?? ["AA"])],
-    meetingsProofMethod: base?.meetings.proofMethod ?? "GEOFENCE",
+    meetingsProofMethod: base?.meetings.proofMethod ?? "GEOFENCE_SIGNATURE",
     sponsorContactEnabled: base?.sponsorContact.enabled ?? false,
     sponsorContactsRequiredPerWeek: String(base?.sponsorContact.contactsRequiredPerWeek ?? 0),
     sponsorProofType: base?.sponsorContact.proofType ?? "CALL_LOG",
@@ -357,6 +357,48 @@ function isValidHhmm(value: string): boolean {
   const hours = Number(hoursText);
   const minutes = Number(minutesText);
   return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59;
+}
+
+function formatTwelveHourTime(value: string): string {
+  if (!isValidHhmm(value)) {
+    return value;
+  }
+  const [hoursText, minutesText] = value.split(":");
+  const hours = Number(hoursText);
+  const meridiem = hours >= 12 ? "PM" : "AM";
+  const normalizedHours = hours % 12 === 0 ? 12 : hours % 12;
+  return `${String(normalizedHours).padStart(2, "0")}:${minutesText} ${meridiem}`;
+}
+
+function parseTwelveHourTime(value: string): string | null {
+  const trimmed = value.trim().toUpperCase();
+  const match = /^(\d{1,2}):(\d{2})\s*([AP]M)$/.exec(trimmed);
+  if (!match) {
+    return null;
+  }
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const meridiem = match[3];
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || hours < 1 || hours > 12) {
+    return null;
+  }
+  if (minutes < 0 || minutes > 59) {
+    return null;
+  }
+  const normalizedHours =
+    meridiem === "AM" ? (hours === 12 ? 0 : hours) : hours === 12 ? 12 : hours + 12;
+  return `${String(normalizedHours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function formatProofRequirementList(values: HouseRuleSet["chores"]["proofRequirement"]): string {
+  return (
+    values
+      .map(
+        (value) =>
+          PROOF_REQUIREMENT_OPTIONS.find((option) => option.value === value)?.label ?? value,
+      )
+      .join(", ") || "None"
+  );
 }
 
 function parseNonNegativeInt(value: string, fallback = 0): number {
@@ -724,20 +766,22 @@ export function SoberHouseSettingsScreen({
       setStatusMessage("Create a house before saving rules.");
       return;
     }
-    if (!isValidHhmm(ruleDraft.weekdayCurfew)) {
-      setStatusMessage("Weekday curfew must be HH:MM.");
+    const weekdayCurfew = parseTwelveHourTime(ruleDraft.weekdayCurfew);
+    const fridayCurfew = parseTwelveHourTime(ruleDraft.fridayCurfew);
+    const saturdayCurfew = parseTwelveHourTime(ruleDraft.saturdayCurfew);
+    const sundayCurfew = parseTwelveHourTime(ruleDraft.sundayCurfew);
+    const choresDueTime = parseTwelveHourTime(ruleDraft.choresDueTime);
+
+    if (!weekdayCurfew) {
+      setStatusMessage("Weekday curfew must use 12-hour time like 10:00 PM.");
       return;
     }
-    if (
-      !isValidHhmm(ruleDraft.fridayCurfew) ||
-      !isValidHhmm(ruleDraft.saturdayCurfew) ||
-      !isValidHhmm(ruleDraft.sundayCurfew)
-    ) {
-      setStatusMessage("All curfew times must be HH:MM.");
+    if (!fridayCurfew || !saturdayCurfew || !sundayCurfew) {
+      setStatusMessage("All curfew times must use 12-hour format with AM or PM.");
       return;
     }
-    if (!isValidHhmm(ruleDraft.choresDueTime)) {
-      setStatusMessage("Chore due time must be HH:MM.");
+    if (!choresDueTime) {
+      setStatusMessage("Chore due time must use 12-hour format with AM or PM.");
       return;
     }
 
@@ -752,10 +796,10 @@ export function SoberHouseSettingsScreen({
         status: ruleDraft.isActive ? "ACTIVE" : "INACTIVE",
         curfew: {
           enabled: ruleDraft.curfewEnabled,
-          weekdayCurfew: ruleDraft.weekdayCurfew,
-          fridayCurfew: ruleDraft.fridayCurfew,
-          saturdayCurfew: ruleDraft.saturdayCurfew,
-          sundayCurfew: ruleDraft.sundayCurfew,
+          weekdayCurfew,
+          fridayCurfew,
+          saturdayCurfew,
+          sundayCurfew,
           gracePeriodMinutes: parseNonNegativeInt(ruleDraft.curfewGracePeriodMinutes, 15),
           preViolationAlertEnabled: ruleDraft.preViolationAlertEnabled,
           preViolationLeadTimeMinutes: parseNonNegativeInt(
@@ -767,8 +811,11 @@ export function SoberHouseSettingsScreen({
         chores: {
           enabled: ruleDraft.choresEnabled,
           frequency: ruleDraft.choresFrequency,
-          dueTime: ruleDraft.choresDueTime,
-          proofRequirement: ruleDraft.choresProofRequirement,
+          dueTime: choresDueTime,
+          proofRequirement:
+            ruleDraft.choresProofRequirement.length > 0
+              ? ruleDraft.choresProofRequirement
+              : ["NONE"],
           gracePeriodMinutes: parseNonNegativeInt(ruleDraft.choresGracePeriodMinutes, 15),
           managerInstantNotificationEnabled: ruleDraft.choresManagerInstantNotificationEnabled,
         },
@@ -879,8 +926,13 @@ export function SoberHouseSettingsScreen({
       result.store,
       `Alert preference saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
     );
-    setAlertDraft(createAlertPreferenceDraft(null));
-    setEditingAlertPreferenceId(null);
+    const savedId = editingAlertPreferenceId ?? alertDraft.id ?? null;
+    const savedPreference =
+      savedId !== null
+        ? (result.store.alertPreferences.find((preference) => preference.id === savedId) ?? null)
+        : null;
+    setAlertDraft(createAlertPreferenceDraft(savedPreference));
+    setEditingAlertPreferenceId(savedPreference?.id ?? null);
   }, [actor, alertDraft, editingAlertPreferenceId, persistStore, store]);
 
   if (loading || !store) {
@@ -1513,7 +1565,9 @@ export function SoberHouseSettingsScreen({
                   onChangeText={(value) =>
                     setRuleDraft((current) => ({ ...current, weekdayCurfew: value }))
                   }
-                  placeholder="22:00"
+                  placeholder="10:00 PM"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
                   placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
                 />
               </View>
@@ -1525,7 +1579,9 @@ export function SoberHouseSettingsScreen({
                   onChangeText={(value) =>
                     setRuleDraft((current) => ({ ...current, fridayCurfew: value }))
                   }
-                  placeholder="23:00"
+                  placeholder="11:00 PM"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
                   placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
                 />
               </View>
@@ -1539,7 +1595,9 @@ export function SoberHouseSettingsScreen({
                   onChangeText={(value) =>
                     setRuleDraft((current) => ({ ...current, saturdayCurfew: value }))
                   }
-                  placeholder="23:00"
+                  placeholder="11:00 PM"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
                   placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
                 />
               </View>
@@ -1551,7 +1609,9 @@ export function SoberHouseSettingsScreen({
                   onChangeText={(value) =>
                     setRuleDraft((current) => ({ ...current, sundayCurfew: value }))
                   }
-                  placeholder="22:00"
+                  placeholder="10:00 PM"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
                   placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
                 />
               </View>
@@ -1641,7 +1701,9 @@ export function SoberHouseSettingsScreen({
                   onChangeText={(value) =>
                     setRuleDraft((current) => ({ ...current, choresDueTime: value }))
                   }
-                  placeholder="18:00"
+                  placeholder="06:00 PM"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
                   placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
                 />
               </View>
@@ -1668,16 +1730,22 @@ export function SoberHouseSettingsScreen({
                 <OptionChip
                   key={option.value}
                   label={option.label}
-                  selected={ruleDraft.choresProofRequirement === option.value}
+                  selected={ruleDraft.choresProofRequirement.includes(option.value)}
                   onPress={() =>
                     setRuleDraft((current) => ({
                       ...current,
-                      choresProofRequirement: option.value,
+                      choresProofRequirement: toggleStringValue(
+                        current.choresProofRequirement,
+                        option.value,
+                      ),
                     }))
                   }
                 />
               ))}
             </View>
+            <Text style={styles.entityMeta}>
+              Selected: {formatProofRequirementList(ruleDraft.choresProofRequirement)}
+            </Text>
             <ToggleRow
               label="Manager instant notification enabled"
               value={ruleDraft.choresManagerInstantNotificationEnabled}
@@ -1908,7 +1976,13 @@ export function SoberHouseSettingsScreen({
             <Text style={styles.sectionMeta}>No alert preferences configured yet.</Text>
           ) : (
             store.alertPreferences.map((preference) => (
-              <View key={preference.id} style={styles.entityCard}>
+              <View
+                key={preference.id}
+                style={[
+                  styles.entityCard,
+                  editingAlertPreferenceId === preference.id ? styles.entityCardSelected : null,
+                ]}
+              >
                 <Text style={styles.entityTitle}>{preference.label}</Text>
                 <Text style={styles.entityMeta}>
                   Scope:{" "}
@@ -2108,9 +2182,24 @@ export function SoberHouseSettingsScreen({
         <View style={styles.buttonRow}>
           <AppButton
             title={editingAlertPreferenceId ? "Update alert" : "Create alert"}
+            variant={editingAlertPreferenceId ? "secondary" : undefined}
             onPress={() => void saveAlertPreference()}
             disabled={isSaving}
           />
+          {editingAlertPreferenceId ? (
+            <>
+              <View style={styles.buttonSpacer} />
+              <AppButton
+                title="New alert"
+                variant="secondary"
+                onPress={() => {
+                  setEditingAlertPreferenceId(null);
+                  setAlertDraft(createAlertPreferenceDraft(null));
+                }}
+                disabled={isSaving}
+              />
+            </>
+          ) : null}
         </View>
       </GlassCard>
 
@@ -2263,6 +2352,10 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.05)",
     padding: spacing.sm,
     gap: 4,
+  },
+  entityCardSelected: {
+    borderColor: "rgba(96,165,250,0.8)",
+    backgroundColor: "rgba(59,130,246,0.16)",
   },
   entityTitle: {
     color: colors.textPrimary,

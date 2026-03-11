@@ -61,6 +61,13 @@ function formatIso(value: string | null): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
+function formatProofRequirementList(values: string[]): string {
+  return values
+    .map((value) => value.replaceAll("_", " "))
+    .join(", ")
+    .toLowerCase();
+}
+
 function statusColors(status: ComplianceEvaluation["status"]) {
   const tone = statusToneForComplianceStatus(status);
   if (tone === "green") {
@@ -310,7 +317,7 @@ export function SoberHouseComplianceSection({ userId, store, actor, isSaving, on
           <Text style={styles.sectionTitle}>Resident Actions</Text>
           <Text style={styles.subsectionTitle}>Log chore completion</Text>
           <Text style={styles.sectionMeta}>
-            Proof requirement: {ruleSet.chores.proofRequirement.replaceAll("_", " ")}
+            Proof requirement: {formatProofRequirementList(ruleSet.chores.proofRequirement)}
           </Text>
           <View style={styles.toggleRow}>
             <Text style={styles.label}>Proof provided</Text>
