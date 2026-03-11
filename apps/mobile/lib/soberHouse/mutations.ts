@@ -10,10 +10,12 @@ import {
   createDefaultCorrectiveAction,
   createDefaultEvidenceItem,
   createDefaultHouse,
+  createDefaultHouseGroup,
   createDefaultHouseRuleSet,
   createDefaultJobApplicationRecord,
   createDefaultMonthlyReport,
   createDefaultOrganization,
+  createDefaultSoberHouseUserAccessProfile,
   createDefaultStaffAssignment,
   createDefaultViolation,
   createDefaultWorkVerificationRecord,
@@ -29,6 +31,7 @@ import type {
   CorrectiveAction,
   EvidenceItem,
   House,
+  HouseGroup,
   HouseRuleSet,
   JobApplicationRecord,
   MonthlyReport,
@@ -39,6 +42,7 @@ import type {
   ResidentWizardDraft,
   SoberHouseEntityType,
   SoberHouseSettingsStore,
+  SoberHouseUserAccessProfile,
   StaffAssignment,
   Violation,
   ViolationStatus,
@@ -52,11 +56,25 @@ type MutationResult = {
 
 type HouseMutationFields = Omit<
   House,
-  "id" | "createdAt" | "updatedAt" | "organizationId" | "geofenceCenterLat" | "geofenceCenterLng"
+  | "id"
+  | "createdAt"
+  | "updatedAt"
+  | "organizationId"
+  | "houseGroupId"
+  | "geofenceCenterLat"
+  | "geofenceCenterLng"
 > & {
   id?: string;
+  houseGroupId?: string | null;
   geofenceCenterLat?: number | null;
   geofenceCenterLng?: number | null;
+};
+
+type HouseGroupMutationFields = Omit<
+  HouseGroup,
+  "id" | "createdAt" | "updatedAt" | "organizationId"
+> & {
+  id?: string;
 };
 
 function applyAuditedEntityChange<T extends { id: string }>(
@@ -109,6 +127,10 @@ export function upsertOrganization(
     (draftStore) => ({
       ...draftStore,
       organization: nextValue,
+      houseGroups: draftStore.houseGroups.map((group) => ({
+        ...group,
+        organizationId: nextValue.id,
+      })),
       houses: draftStore.houses.map((house) => ({ ...house, organizationId: nextValue.id })),
       staffAssignments: draftStore.staffAssignments.map((assignment) => ({
         ...assignment,
@@ -127,6 +149,37 @@ export function upsertOrganization(
   );
 }
 
+export function upsertUserAccessProfile(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<SoberHouseUserAccessProfile, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.userAccessProfile;
+  const base =
+    previous ?? createDefaultSoberHouseUserAccessProfile(timestamp, fields.linkedUserId, fields.id);
+  const nextValue: SoberHouseUserAccessProfile = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "userAccessProfile",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      userAccessProfile: nextValue,
+    }),
+    timestamp,
+  );
+}
+
 function replaceById<T extends { id: string }>(items: T[], nextValue: T): T[] {
   const existingIndex = items.findIndex((item) => item.id === nextValue.id);
   if (existingIndex === -1) {
@@ -134,6 +187,88 @@ function replaceById<T extends { id: string }>(items: T[], nextValue: T): T[] {
   }
 
   return items.map((item) => (item.id === nextValue.id ? nextValue : item));
+}
+
+function syncHouseGroupMembership(
+  houseGroups: HouseGroup[],
+  houseId: string,
+  nextHouseGroupId: string | null,
+): HouseGroup[] {
+  return houseGroups.map((group) => {
+    const withoutHouse = group.houseIds.filter((groupHouseId) => groupHouseId !== houseId);
+    if (group.id !== nextHouseGroupId) {
+      return withoutHouse.length === group.houseIds.length
+        ? group
+        : { ...group, houseIds: withoutHouse };
+    }
+    return withoutHouse.includes(houseId)
+      ? { ...group, houseIds: withoutHouse }
+      : { ...group, houseIds: [...withoutHouse, houseId] };
+  });
+}
+
+function matchesRuleScope(ruleSet: HouseRuleSet, candidate: HouseRuleSet): boolean {
+  return (
+    ruleSet.scopeType === candidate.scopeType &&
+    ruleSet.houseId === candidate.houseId &&
+    ruleSet.houseGroupId === candidate.houseGroupId
+  );
+}
+
+export function upsertHouseGroup(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: HouseGroupMutationFields,
+  timestamp: string,
+): MutationResult {
+  const previous = store.houseGroups.find((group) => group.id === fields.id) ?? null;
+  const base =
+    previous ?? createDefaultHouseGroup(timestamp, store.organization?.id ?? null, fields.id);
+  const nextValue: HouseGroup = {
+    ...base,
+    ...fields,
+    id: base.id,
+    organizationId: store.organization?.id ?? null,
+    houseIds: Array.from(new Set(fields.houseIds ?? base.houseIds)),
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "houseGroup",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      houseGroups: replaceById(draftStore.houseGroups, nextValue),
+      houses: draftStore.houses.map((house) => ({
+        ...house,
+        houseGroupId: nextValue.houseIds.includes(house.id)
+          ? nextValue.id
+          : house.houseGroupId === nextValue.id
+            ? null
+            : house.houseGroupId,
+      })),
+    }),
+    timestamp,
+  );
+}
+
+export function setHouseGroupStatus(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  houseGroupId: string,
+  status: HouseGroup["status"],
+  timestamp: string,
+): MutationResult {
+  const previous = store.houseGroups.find((group) => group.id === houseGroupId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  return upsertHouseGroup(store, actor, { ...previous, status }, timestamp);
 }
 
 export function upsertHouse(
@@ -161,6 +296,11 @@ export function upsertHouse(
     nextValue,
     (draftStore) => ({
       ...draftStore,
+      houseGroups: syncHouseGroupMembership(
+        draftStore.houseGroups,
+        nextValue.id,
+        nextValue.houseGroupId,
+      ),
       houses: replaceById(draftStore.houses, nextValue),
     }),
     timestamp,
@@ -234,21 +374,45 @@ export function setStaffAssignmentStatus(
 export function upsertHouseRuleSet(
   store: SoberHouseSettingsStore,
   actor: AuditActor,
-  fields: Omit<HouseRuleSet, "id" | "createdAt" | "updatedAt" | "organizationId"> & {
+  fields: Omit<
+    HouseRuleSet,
+    "id" | "createdAt" | "updatedAt" | "organizationId" | "scopeType" | "houseId" | "houseGroupId"
+  > & {
     id?: string;
+    scopeType?: HouseRuleSet["scopeType"];
+    houseId?: string | null;
+    houseGroupId?: string | null;
   },
   timestamp: string,
 ): MutationResult {
+  const scopeType =
+    fields.scopeType ??
+    (fields.houseId ? "HOUSE" : fields.houseGroupId ? "HOUSE_GROUP" : "ORGANIZATION");
   const previous =
-    store.houseRuleSets.find((ruleSet) => ruleSet.houseId === fields.houseId) ?? null;
+    (fields.id ? store.houseRuleSets.find((ruleSet) => ruleSet.id === fields.id) : null) ??
+    store.houseRuleSets.find(
+      (ruleSet) =>
+        ruleSet.scopeType === scopeType &&
+        ruleSet.houseId === (fields.houseId ?? null) &&
+        ruleSet.houseGroupId === (fields.houseGroupId ?? null),
+    ) ??
+    null;
   const base =
     previous ??
-    createDefaultHouseRuleSet(timestamp, fields.houseId, store.organization?.id ?? null, fields.id);
+    createDefaultHouseRuleSet(
+      timestamp,
+      fields.houseId ?? "",
+      store.organization?.id ?? null,
+      fields.id,
+    );
   const nextValue: HouseRuleSet = {
     ...base,
     ...fields,
     id: base.id,
     organizationId: store.organization?.id ?? null,
+    scopeType,
+    houseId: scopeType === "HOUSE" ? (fields.houseId ?? null) : null,
+    houseGroupId: scopeType === "HOUSE_GROUP" ? (fields.houseGroupId ?? null) : null,
     createdAt: base.createdAt,
     updatedAt: timestamp,
   };
@@ -262,7 +426,7 @@ export function upsertHouseRuleSet(
     (draftStore) => ({
       ...draftStore,
       houseRuleSets: replaceById(
-        draftStore.houseRuleSets.filter((ruleSet) => ruleSet.houseId !== nextValue.houseId),
+        draftStore.houseRuleSets.filter((ruleSet) => !matchesRuleScope(ruleSet, nextValue)),
         nextValue,
       ),
     }),
@@ -273,11 +437,11 @@ export function upsertHouseRuleSet(
 export function setHouseRuleSetStatus(
   store: SoberHouseSettingsStore,
   actor: AuditActor,
-  houseId: string,
+  ruleSetId: string,
   status: HouseRuleSet["status"],
   timestamp: string,
 ): MutationResult {
-  const previous = store.houseRuleSets.find((ruleSet) => ruleSet.houseId === houseId);
+  const previous = store.houseRuleSets.find((ruleSet) => ruleSet.id === ruleSetId);
   if (!previous) {
     return { store, auditCount: 0 };
   }

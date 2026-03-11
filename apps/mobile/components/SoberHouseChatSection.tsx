@@ -88,6 +88,18 @@ function TypeChip({
   );
 }
 
+function initialsForLabel(label: string): string {
+  const parts = label
+    .split(" ")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+  if (parts.length === 0) {
+    return "?";
+  }
+  return parts.map((part) => part.charAt(0).toUpperCase()).join("");
+}
+
 export function SoberHouseChatSection({
   store,
   actor,
@@ -335,7 +347,7 @@ export function SoberHouseChatSection({
         <View style={styles.headerCopy}>
           <Text style={styles.sectionTitle}>Internal Chat</Text>
           <Text style={styles.sectionMeta}>
-            Structured sober-house direct messaging with unread and acknowledgment state.
+            Operational sober-house messaging with acknowledgment tracking and manager follow-up.
           </Text>
         </View>
         {managerContexts.length > 0 ? (
@@ -395,25 +407,34 @@ export function SoberHouseChatSection({
                 ]}
                 onPress={() => setSelectedThreadId(summary.thread.id)}
               >
-                <Text style={styles.threadTitle}>{summary.otherParticipantName}</Text>
-                <Text style={styles.threadMeta}>{summary.otherParticipantRole}</Text>
+                <View style={styles.threadHeaderRow}>
+                  <View style={styles.threadAvatar}>
+                    <Text style={styles.threadAvatarText}>
+                      {initialsForLabel(summary.otherParticipantName)}
+                    </Text>
+                  </View>
+                  <View style={styles.threadHeaderCopy}>
+                    <Text style={styles.threadTitle}>{summary.otherParticipantName}</Text>
+                    <Text style={styles.threadMeta}>{summary.otherParticipantRole}</Text>
+                  </View>
+                  {summary.unreadCount > 0 ? (
+                    <View style={styles.unreadBadge}>
+                      <Text style={styles.unreadBadgeText}>{summary.unreadCount}</Text>
+                    </View>
+                  ) : null}
+                </View>
                 {summary.thread.linkedViolationId ? (
-                  <Text style={styles.threadMeta}>
+                  <Text style={styles.threadContextPill}>
                     {threadContextLabel(store, summary.thread.linkedViolationId)}
                   </Text>
                 ) : null}
-                <Text style={styles.threadPreview}>
+                <Text numberOfLines={2} style={styles.threadPreview}>
                   {summary.lastMessage?.bodyText ?? "No messages yet."}
                 </Text>
                 <View style={styles.threadFooter}>
                   <Text style={styles.threadMeta}>
                     {formatIso(summary.lastMessage?.createdAt ?? summary.thread.createdAt)}
                   </Text>
-                  {summary.unreadCount > 0 ? (
-                    <View style={styles.unreadBadge}>
-                      <Text style={styles.unreadBadgeText}>{summary.unreadCount}</Text>
-                    </View>
-                  ) : null}
                   {summary.acknowledgmentPending ? (
                     <View style={styles.pendingBadge}>
                       <Text style={styles.pendingBadgeText}>Ack pending</Text>
@@ -426,7 +447,7 @@ export function SoberHouseChatSection({
         </View>
 
         <View style={styles.threadDetail}>
-          <Text style={styles.subsectionTitle}>Thread detail</Text>
+          <Text style={styles.subsectionTitle}>Conversation</Text>
           {!selectedThread || !activeViewer ? (
             <Text style={styles.sectionMeta}>Select a thread to view the conversation.</Text>
           ) : (
@@ -441,7 +462,7 @@ export function SoberHouseChatSection({
                   {activeViewer.kind === "manager" ? "Manager" : "Resident"}
                 </Text>
                 {selectedThread.linkedViolationId ? (
-                  <Text style={styles.bannerMeta}>
+                  <Text style={styles.bannerContext}>
                     {threadContextLabel(store, selectedThread.linkedViolationId)}
                   </Text>
                 ) : null}
@@ -452,7 +473,12 @@ export function SoberHouseChatSection({
                 contentContainerStyle={styles.messageListContent}
               >
                 {selectedThreadMessages.length === 0 ? (
-                  <Text style={styles.sectionMeta}>No messages yet.</Text>
+                  <View style={styles.emptyConversationState}>
+                    <Text style={styles.emptyConversationTitle}>No messages yet</Text>
+                    <Text style={styles.sectionMeta}>
+                      Start the thread with a clear operational message or reply below.
+                    </Text>
+                  </View>
                 ) : (
                   selectedThreadMessages.map((message) => {
                     const isMine = message.senderUserId === activeViewer.userId;
@@ -476,102 +502,132 @@ export function SoberHouseChatSection({
                       <View
                         key={message.id}
                         style={[
-                          styles.messageCard,
-                          isMine ? styles.messageCardMine : styles.messageCardTheirs,
+                          styles.messageRow,
+                          isMine ? styles.messageRowMine : styles.messageRowTheirs,
                         ]}
                       >
-                        <Text style={styles.messageType}>
-                          {labelForChatMessageType(message.messageType)}
-                        </Text>
-                        <Text style={styles.messageBody}>{message.bodyText}</Text>
-                        {linkedAction ? (
-                          <Text style={styles.messageMeta}>
-                            Linked corrective action due {formatIso(linkedAction.dueAt)}
+                        <View style={styles.messageSenderBadge}>
+                          <Text style={styles.messageSenderBadgeText}>
+                            {isMine
+                              ? "You"
+                              : selectedThreadParticipants.find(
+                                    (participant) => participant.userId === message.senderUserId,
+                                  )?.roleInThread === "RESIDENT"
+                                ? "Resident"
+                                : "Manager"}
                           </Text>
-                        ) : null}
-                        <Text style={styles.messageMeta}>{formatIso(message.createdAt)}</Text>
-                        {isMine ? (
-                          <Text style={styles.messageMeta}>
-                            {message.messageType === "ACKNOWLEDGMENT_REQUIRED"
-                              ? recipientReceipt?.acknowledgedAt
-                                ? "Acknowledged"
-                                : "Awaiting acknowledgment"
-                              : recipientReceipt?.readAt
-                                ? "Read"
-                                : "Delivered"}
-                          </Text>
-                        ) : message.messageType === "ACKNOWLEDGMENT_REQUIRED" &&
-                          activeViewer.kind === "resident" &&
-                          !viewerReceipt?.acknowledgedAt ? (
-                          <AppButton
-                            title="Acknowledge"
-                            variant="secondary"
-                            onPress={() => void acknowledgeMessage(message.id)}
-                            disabled={isSaving}
-                          />
-                        ) : null}
+                        </View>
+                        <View
+                          style={[
+                            styles.messageCard,
+                            isMine ? styles.messageCardMine : styles.messageCardTheirs,
+                          ]}
+                        >
+                          <View style={styles.messageHeaderRow}>
+                            <Text style={styles.messageType}>
+                              {labelForChatMessageType(message.messageType)}
+                            </Text>
+                            <Text style={styles.messageMeta}>{formatIso(message.createdAt)}</Text>
+                          </View>
+                          <Text style={styles.messageBody}>{message.bodyText}</Text>
+                          {linkedAction ? (
+                            <Text style={styles.messageMeta}>
+                              Linked corrective action due {formatIso(linkedAction.dueAt)}
+                            </Text>
+                          ) : null}
+                          {isMine ? (
+                            <Text style={styles.messageReceipt}>
+                              {message.messageType === "ACKNOWLEDGMENT_REQUIRED"
+                                ? recipientReceipt?.acknowledgedAt
+                                  ? "Acknowledged"
+                                  : "Awaiting acknowledgment"
+                                : recipientReceipt?.readAt
+                                  ? "Read"
+                                  : "Delivered"}
+                            </Text>
+                          ) : message.messageType === "ACKNOWLEDGMENT_REQUIRED" &&
+                            activeViewer.kind === "resident" &&
+                            !viewerReceipt?.acknowledgedAt ? (
+                            <View style={styles.messageActionRow}>
+                              <AppButton
+                                title="Acknowledge"
+                                variant="secondary"
+                                onPress={() => void acknowledgeMessage(message.id)}
+                                disabled={isSaving}
+                              />
+                            </View>
+                          ) : null}
+                        </View>
                       </View>
                     );
                   })
                 )}
               </ScrollView>
 
-              {activeViewer.kind === "manager" ? (
-                <>
-                  <Text style={styles.fieldLabel}>Message type</Text>
-                  <View style={styles.selectorRow}>
-                    {CHAT_MESSAGE_TYPE_OPTIONS.map((option) => (
-                      <TypeChip
-                        key={option.value}
-                        label={option.label}
-                        selected={messageType === option.value}
-                        onPress={() => setMessageType(option.value)}
-                      />
-                    ))}
-                  </View>
-                  {selectedThreadActions.length > 0 ? (
-                    <>
-                      <Text style={styles.fieldLabel}>Linked corrective action</Text>
-                      <View style={styles.selectorRow}>
+              <View style={styles.composerShell}>
+                {activeViewer.kind === "manager" ? (
+                  <View style={styles.composerTools}>
+                    <Text style={styles.fieldLabel}>Message style</Text>
+                    <View style={styles.selectorRow}>
+                      {CHAT_MESSAGE_TYPE_OPTIONS.map((option) => (
                         <TypeChip
-                          label="None"
-                          selected={linkedCorrectiveActionId === null}
-                          onPress={() => setLinkedCorrectiveActionId(null)}
+                          key={option.value}
+                          label={option.label}
+                          selected={messageType === option.value}
+                          onPress={() => setMessageType(option.value)}
                         />
-                        {selectedThreadActions.map((action) => (
+                      ))}
+                    </View>
+                    {selectedThreadActions.length > 0 ? (
+                      <>
+                        <Text style={styles.fieldLabel}>Linked corrective action</Text>
+                        <View style={styles.selectorRow}>
                           <TypeChip
-                            key={action.id}
-                            label={formatIso(action.dueAt)}
-                            selected={linkedCorrectiveActionId === action.id}
-                            onPress={() => setLinkedCorrectiveActionId(action.id)}
+                            label="None"
+                            selected={linkedCorrectiveActionId === null}
+                            onPress={() => setLinkedCorrectiveActionId(null)}
                           />
-                        ))}
-                      </View>
-                    </>
-                  ) : null}
-                </>
-              ) : null}
+                          {selectedThreadActions.map((action) => (
+                            <TypeChip
+                              key={action.id}
+                              label={formatIso(action.dueAt)}
+                              selected={linkedCorrectiveActionId === action.id}
+                              onPress={() => setLinkedCorrectiveActionId(action.id)}
+                            />
+                          ))}
+                        </View>
+                      </>
+                    ) : null}
+                  </View>
+                ) : null}
 
-              <Text style={styles.fieldLabel}>
-                {activeViewer.kind === "manager" ? "Compose message" : "Reply"}
-              </Text>
-              <TextInput
-                style={[styles.input, styles.multilineInput]}
-                value={messageDraft}
-                onChangeText={setMessageDraft}
-                placeholder={
-                  activeViewer.kind === "manager"
-                    ? "Send an operational message to the resident"
-                    : "Reply to your manager"
-                }
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                multiline
-              />
-              <AppButton
-                title={activeViewer.kind === "manager" ? "Send message" : "Send reply"}
-                onPress={() => void sendMessage()}
-                disabled={isSaving}
-              />
+                <View style={styles.composerDock}>
+                  <TextInput
+                    style={[styles.input, styles.multilineInput, styles.composerInput]}
+                    value={messageDraft}
+                    onChangeText={setMessageDraft}
+                    placeholder={
+                      activeViewer.kind === "manager"
+                        ? "Message the resident like an AI assistant prompt..."
+                        : "Reply to your house manager..."
+                    }
+                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    multiline
+                  />
+                  <View style={styles.composerFooter}>
+                    <Text style={styles.composerHint}>
+                      {activeViewer.kind === "manager"
+                        ? "Keep it direct, specific, and action-oriented."
+                        : "Your reply is saved in the resident-manager thread."}
+                    </Text>
+                    <AppButton
+                      title={activeViewer.kind === "manager" ? "Send" : "Reply"}
+                      onPress={() => void sendMessage()}
+                      disabled={isSaving}
+                    />
+                  </View>
+                </View>
+              </View>
             </>
           )}
         </View>
@@ -651,6 +707,30 @@ const styles = StyleSheet.create({
   threadDetail: {
     gap: spacing.sm,
   },
+  threadHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  threadHeaderCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  threadAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(59,130,246,0.22)",
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.4)",
+  },
+  threadAvatarText: {
+    color: colors.textPrimary,
+    fontSize: typography.small,
+    fontWeight: "800",
+  },
   threadRow: {
     borderRadius: radius.lg,
     borderWidth: 1,
@@ -676,6 +756,16 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     fontSize: typography.body,
     lineHeight: 20,
+  },
+  threadContextPill: {
+    alignSelf: "flex-start",
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    backgroundColor: "rgba(245,158,11,0.18)",
+    color: "#fde68a",
+    fontSize: typography.small,
+    fontWeight: "700",
   },
   threadFooter: {
     flexDirection: "row",
@@ -724,12 +814,57 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: typography.small,
   },
+  bannerContext: {
+    alignSelf: "flex-start",
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    backgroundColor: "rgba(245,158,11,0.18)",
+    color: "#fde68a",
+    fontSize: typography.small,
+    fontWeight: "800",
+  },
   messageList: {
     maxHeight: 360,
   },
   messageListContent: {
     gap: spacing.sm,
     paddingVertical: spacing.xs,
+  },
+  emptyConversationState: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.18)",
+    backgroundColor: "rgba(15,23,42,0.24)",
+    padding: spacing.lg,
+    gap: spacing.xs,
+  },
+  emptyConversationTitle: {
+    color: colors.textPrimary,
+    fontSize: typography.h3,
+    fontWeight: "700",
+  },
+  messageRow: {
+    gap: spacing.xs,
+    maxWidth: "92%",
+  },
+  messageRowMine: {
+    alignSelf: "flex-end",
+  },
+  messageRowTheirs: {
+    alignSelf: "flex-start",
+  },
+  messageSenderBadge: {
+    alignSelf: "flex-start",
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    backgroundColor: "rgba(148,163,184,0.18)",
+  },
+  messageSenderBadgeText: {
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    fontWeight: "800",
   },
   messageCard: {
     borderRadius: radius.lg,
@@ -750,6 +885,12 @@ const styles = StyleSheet.create({
     fontSize: typography.small,
     fontWeight: "800",
   },
+  messageHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
   messageBody: {
     color: colors.textPrimary,
     fontSize: typography.body,
@@ -758,6 +899,15 @@ const styles = StyleSheet.create({
   messageMeta: {
     color: colors.textSecondary,
     fontSize: typography.small,
+  },
+  messageReceipt: {
+    color: "#bfdbfe",
+    fontSize: typography.small,
+    fontWeight: "700",
+  },
+  messageActionRow: {
+    alignItems: "flex-start",
+    paddingTop: spacing.xs,
   },
   fieldLabel: {
     color: colors.textPrimary,
@@ -777,6 +927,42 @@ const styles = StyleSheet.create({
   multilineInput: {
     minHeight: 104,
     textAlignVertical: "top",
+  },
+  composerShell: {
+    gap: spacing.md,
+  },
+  composerTools: {
+    gap: spacing.sm,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.18)",
+    backgroundColor: "rgba(15,23,42,0.18)",
+    padding: spacing.md,
+  },
+  composerDock: {
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: "rgba(96,165,250,0.24)",
+    backgroundColor: "rgba(2,6,23,0.74)",
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  composerInput: {
+    minHeight: 120,
+    borderColor: "rgba(96,165,250,0.24)",
+    backgroundColor: "rgba(15,23,42,0.42)",
+  },
+  composerFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: spacing.md,
+  },
+  composerHint: {
+    flex: 1,
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    lineHeight: 18,
   },
   localStatus: {
     color: "#fde68a",

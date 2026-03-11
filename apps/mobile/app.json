@@ -10,6 +10,7 @@
       "icon": "./assets/icon.png",
       "bundleIdentifier": "com.rabbithole.soberai.dev",
       "infoPlist": {
+        "NSFaceIDUsageDescription": "Use Face ID or your device passcode to unlock sober-house records.",
         "NSLocationWhenInUseUsageDescription": "We use your location to show distance to meetings.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "We use your location to show distance to meetings and enable geofence features if you turn them on.",
         "NSLocationAlwaysUsageDescription": "We use your location to show distance to meetings and enable geofence features if you turn them on.",

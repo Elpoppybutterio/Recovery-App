@@ -8,8 +8,11 @@ import type {
   CorrectiveAction,
   EvidenceItem,
   House,
+  HouseGroup,
   HouseRuleSet,
+  HouseRuleScopeType,
   MonthlyReport,
+  SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
   StaffAssignment,
   Violation,
@@ -19,8 +22,33 @@ export function getActiveHouses(store: SoberHouseSettingsStore): House[] {
   return store.houses.filter((house) => house.status === "ACTIVE");
 }
 
+export function getUserAccessProfile(
+  store: SoberHouseSettingsStore,
+): SoberHouseUserAccessProfile | null {
+  return store.userAccessProfile;
+}
+
+export function isOwnerOperatorAccess(store: SoberHouseSettingsStore): boolean {
+  return store.userAccessProfile?.role === "OWNER_OPERATOR";
+}
+
+export function isResidentAccess(store: SoberHouseSettingsStore): boolean {
+  return store.userAccessProfile?.role === "HOUSE_RESIDENT";
+}
+
 export function getHouseById(store: SoberHouseSettingsStore, houseId: string): House | null {
   return store.houses.find((house) => house.id === houseId) ?? null;
+}
+
+export function getActiveHouseGroups(store: SoberHouseSettingsStore): HouseGroup[] {
+  return store.houseGroups.filter((group) => group.status === "ACTIVE");
+}
+
+export function getHouseGroupById(
+  store: SoberHouseSettingsStore,
+  houseGroupId: string,
+): HouseGroup | null {
+  return store.houseGroups.find((group) => group.id === houseGroupId) ?? null;
 }
 
 export function getStaffAssignmentById(
@@ -35,9 +63,51 @@ export function getRuleSetForHouse(
   houseId: string,
   now: string,
 ): HouseRuleSet {
+  const house = getHouseById(store, houseId);
+  const houseScope =
+    store.houseRuleSets.find(
+      (ruleSet) => ruleSet.scopeType === "HOUSE" && ruleSet.houseId === houseId,
+    ) ?? null;
+  if (houseScope) {
+    return houseScope;
+  }
+
+  if (house?.houseGroupId) {
+    const groupScope =
+      store.houseRuleSets.find(
+        (ruleSet) =>
+          ruleSet.scopeType === "HOUSE_GROUP" && ruleSet.houseGroupId === house.houseGroupId,
+      ) ?? null;
+    if (groupScope) {
+      return groupScope;
+    }
+  }
+
+  const organizationScope =
+    store.houseRuleSets.find((ruleSet) => ruleSet.scopeType === "ORGANIZATION") ?? null;
   return (
-    store.houseRuleSets.find((ruleSet) => ruleSet.houseId === houseId) ??
-    createDefaultHouseRuleSet(now, houseId, store.organization?.id ?? null)
+    organizationScope ?? createDefaultHouseRuleSet(now, houseId, store.organization?.id ?? null)
+  );
+}
+
+export function getRuleSetForScope(
+  store: SoberHouseSettingsStore,
+  scopeType: HouseRuleScopeType,
+  scopeId: string | null,
+): HouseRuleSet | null {
+  return (
+    store.houseRuleSets.find((ruleSet) => {
+      if (ruleSet.scopeType !== scopeType) {
+        return false;
+      }
+      if (scopeType === "ORGANIZATION") {
+        return true;
+      }
+      if (scopeType === "HOUSE_GROUP") {
+        return ruleSet.houseGroupId === scopeId;
+      }
+      return ruleSet.houseId === scopeId;
+    }) ?? null
   );
 }
 

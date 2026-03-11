@@ -6,6 +6,7 @@ import {
   upsertAlertPreference,
   upsertChoreCompletionRecord,
   upsertHouse,
+  upsertHouseGroup,
   upsertHouseRuleSet,
   upsertJobApplicationRecord,
   upsertOrganization,
@@ -13,6 +14,7 @@ import {
   upsertResidentHousingProfile,
   upsertResidentRequirementProfile,
   upsertStaffAssignment,
+  upsertUserAccessProfile,
   upsertWorkVerificationRecord,
 } from "../lib/soberHouse/mutations";
 import {
@@ -52,6 +54,7 @@ import {
   transitionMonthlyReportStatus,
   updateMonthlyReportFinalNotes,
 } from "../lib/soberHouse/reportWorkflow";
+import { requiresSoberHouseDeviceUnlock } from "../lib/soberHouse/deviceAuth";
 import { getChatReceiptForMessageAndUser, getRuleSetForHouse } from "../lib/soberHouse/selectors";
 import { computeResidentMonthlyWins } from "../lib/soberHouse/wins";
 
@@ -426,6 +429,14 @@ function buildReportingStore() {
 }
 
 describe("sober house settings mutations", () => {
+  it("requires device unlock for sober-house owner operators and residents only", () => {
+    expect(requiresSoberHouseDeviceUnlock("OWNER_OPERATOR")).toBe(true);
+    expect(requiresSoberHouseDeviceUnlock("HOUSE_RESIDENT")).toBe(true);
+    expect(requiresSoberHouseDeviceUnlock("UNASSIGNED")).toBe(false);
+    expect(requiresSoberHouseDeviceUnlock("DRUG_COURT_PARTICIPANT")).toBe(false);
+    expect(requiresSoberHouseDeviceUnlock("PROBATION_PAROLE_PARTICIPANT")).toBe(false);
+  });
+
   it("supports multi-house records and audits staff assignment changes", () => {
     let store = createDefaultSoberHouseSettingsStore();
     store = upsertOrganization(
@@ -672,6 +683,228 @@ describe("sober house settings mutations", () => {
     expect(store.houseRuleSets).toHaveLength(2);
   });
 
+  it("resolves organization, house-group, and house rule scopes in order", () => {
+    let store = createDefaultSoberHouseSettingsStore();
+    store = upsertOrganization(
+      store,
+      ACTOR,
+      {
+        name: "Bright Path Recovery",
+        primaryContactName: "",
+        primaryPhone: "",
+        primaryEmail: "",
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-08T11:20:00.000Z",
+    ).store;
+
+    store = upsertHouseGroup(
+      store,
+      ACTOR,
+      {
+        name: "Downtown cluster",
+        houseIds: [],
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-08T11:21:00.000Z",
+    ).store;
+
+    const houseGroupId = store.houseGroups[0]!.id;
+    store = upsertHouse(
+      store,
+      ACTOR,
+      {
+        houseGroupId,
+        name: "Maple House",
+        address: "123 Main St",
+        phone: "",
+        geofenceRadiusFeetDefault: 200,
+        houseTypes: ["MEN"],
+        bedCount: 12,
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-08T11:22:00.000Z",
+    ).store;
+
+    const houseId = store.houses[0]!.id;
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        scopeType: "ORGANIZATION",
+        houseId: null,
+        houseGroupId: null,
+        name: "Org defaults",
+        status: "ACTIVE",
+        curfew: {
+          enabled: true,
+          weekdayCurfew: "22:00",
+          fridayCurfew: "22:00",
+          saturdayCurfew: "22:00",
+          sundayCurfew: "22:00",
+          gracePeriodMinutes: 10,
+          preViolationAlertEnabled: false,
+          preViolationLeadTimeMinutes: 15,
+          alertBasis: "CLOCK_ONLY",
+        },
+        chores: {
+          enabled: false,
+          frequency: "WEEKLY",
+          dueTime: "18:00",
+          proofRequirement: ["CHECKLIST"],
+          gracePeriodMinutes: 15,
+          managerInstantNotificationEnabled: false,
+        },
+        employment: {
+          employmentRequired: false,
+          workplaceVerificationEnabled: false,
+          workplaceGeofenceRadiusDefault: 200,
+          managerVerificationRequired: false,
+        },
+        jobSearch: {
+          applicationsRequiredPerWeek: 0,
+          proofRequired: false,
+          managerApprovalRequired: false,
+        },
+        meetings: {
+          meetingsRequired: true,
+          meetingsPerWeek: 3,
+          allowedMeetingTypes: ["AA"],
+          proofMethod: "GEOFENCE_SIGNATURE",
+        },
+        sponsorContact: {
+          enabled: false,
+          contactsRequiredPerWeek: 0,
+          proofType: "CALL_LOG",
+        },
+      },
+      "2026-03-08T11:23:00.000Z",
+    ).store;
+
+    expect(
+      getRuleSetForHouse(store, houseId, "2026-03-08T11:24:00.000Z").meetings.meetingsPerWeek,
+    ).toBe(3);
+
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        scopeType: "HOUSE_GROUP",
+        houseId: null,
+        houseGroupId,
+        name: "Group defaults",
+        status: "ACTIVE",
+        curfew: {
+          enabled: true,
+          weekdayCurfew: "21:30",
+          fridayCurfew: "22:30",
+          saturdayCurfew: "22:30",
+          sundayCurfew: "21:30",
+          gracePeriodMinutes: 10,
+          preViolationAlertEnabled: false,
+          preViolationLeadTimeMinutes: 15,
+          alertBasis: "CLOCK_ONLY",
+        },
+        chores: {
+          enabled: false,
+          frequency: "WEEKLY",
+          dueTime: "18:00",
+          proofRequirement: ["CHECKLIST"],
+          gracePeriodMinutes: 15,
+          managerInstantNotificationEnabled: false,
+        },
+        employment: {
+          employmentRequired: false,
+          workplaceVerificationEnabled: false,
+          workplaceGeofenceRadiusDefault: 200,
+          managerVerificationRequired: false,
+        },
+        jobSearch: {
+          applicationsRequiredPerWeek: 0,
+          proofRequired: false,
+          managerApprovalRequired: false,
+        },
+        meetings: {
+          meetingsRequired: true,
+          meetingsPerWeek: 5,
+          allowedMeetingTypes: ["AA"],
+          proofMethod: "GEOFENCE_SIGNATURE",
+        },
+        sponsorContact: {
+          enabled: false,
+          contactsRequiredPerWeek: 0,
+          proofType: "CALL_LOG",
+        },
+      },
+      "2026-03-08T11:25:00.000Z",
+    ).store;
+
+    expect(
+      getRuleSetForHouse(store, houseId, "2026-03-08T11:26:00.000Z").meetings.meetingsPerWeek,
+    ).toBe(5);
+
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        scopeType: "HOUSE",
+        houseId,
+        houseGroupId: null,
+        name: "House defaults",
+        status: "ACTIVE",
+        curfew: {
+          enabled: true,
+          weekdayCurfew: "21:00",
+          fridayCurfew: "22:00",
+          saturdayCurfew: "22:00",
+          sundayCurfew: "21:00",
+          gracePeriodMinutes: 10,
+          preViolationAlertEnabled: false,
+          preViolationLeadTimeMinutes: 15,
+          alertBasis: "CLOCK_ONLY",
+        },
+        chores: {
+          enabled: false,
+          frequency: "WEEKLY",
+          dueTime: "18:00",
+          proofRequirement: ["CHECKLIST"],
+          gracePeriodMinutes: 15,
+          managerInstantNotificationEnabled: false,
+        },
+        employment: {
+          employmentRequired: false,
+          workplaceVerificationEnabled: false,
+          workplaceGeofenceRadiusDefault: 200,
+          managerVerificationRequired: false,
+        },
+        jobSearch: {
+          applicationsRequiredPerWeek: 0,
+          proofRequired: false,
+          managerApprovalRequired: false,
+        },
+        meetings: {
+          meetingsRequired: true,
+          meetingsPerWeek: 7,
+          allowedMeetingTypes: ["AA"],
+          proofMethod: "GEOFENCE_SIGNATURE",
+        },
+        sponsorContact: {
+          enabled: false,
+          contactsRequiredPerWeek: 0,
+          proofType: "CALL_LOG",
+        },
+      },
+      "2026-03-08T11:27:00.000Z",
+    ).store;
+
+    expect(
+      getRuleSetForHouse(store, houseId, "2026-03-08T11:28:00.000Z").meetings.meetingsPerWeek,
+    ).toBe(7);
+  });
+
   it("audits deactivation and alert preference persistence", () => {
     let store = createDefaultSoberHouseSettingsStore();
     store = upsertOrganization(
@@ -738,6 +971,58 @@ describe("sober house settings mutations", () => {
         (entry) => entry.entityType === "house" && entry.fieldChanged === "status",
       )?.newValue,
     ).toBe("INACTIVE");
+  });
+
+  it("persists the current user access profile for owner or resident routing", () => {
+    let store = createDefaultSoberHouseSettingsStore();
+    store = upsertOrganization(
+      store,
+      ACTOR,
+      {
+        name: "Bright Path Recovery",
+        primaryContactName: "",
+        primaryPhone: "",
+        primaryEmail: "",
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-08T12:10:00.000Z",
+    ).store;
+
+    store = upsertHouse(
+      store,
+      ACTOR,
+      {
+        name: "Maple House",
+        address: "123 Main St",
+        phone: "",
+        geofenceRadiusFeetDefault: 200,
+        houseTypes: ["MEN"],
+        bedCount: 12,
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-08T12:11:00.000Z",
+    ).store;
+
+    const houseId = store.houses[0]!.id;
+    store = upsertUserAccessProfile(
+      store,
+      ACTOR,
+      {
+        linkedUserId: "enduser-a1",
+        role: "HOUSE_RESIDENT",
+        organizationId: store.organization?.id ?? null,
+        houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-08T12:12:00.000Z",
+    ).store;
+
+    expect(store.userAccessProfile?.linkedUserId).toBe("enduser-a1");
+    expect(store.userAccessProfile?.role).toBe("HOUSE_RESIDENT");
+    expect(store.userAccessProfile?.houseId).toBe(houseId);
   });
 
   it("initializes resident requirement defaults from house rules and persists profiles", () => {

@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 6 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 8 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -30,8 +30,11 @@ export type MeetingProofMethod =
 export type SponsorProofType = "CALL_LOG" | "TEXT_CONFIRMATION" | "MANAGER_CONFIRMATION";
 export type AlertDeliveryMethod = "EMAIL" | "SMS" | "BOTH";
 export type AlertScope = "ORGANIZATION" | "HOUSE";
+export type HouseRuleScopeType = "ORGANIZATION" | "HOUSE_GROUP" | "HOUSE";
 export type SoberHouseEntityType =
   | "organization"
+  | "userAccessProfile"
+  | "houseGroup"
   | "house"
   | "staffAssignment"
   | "houseRuleSet"
@@ -130,6 +133,12 @@ export type MonthlyReportStatus =
 export type MonthlyReportGeneratedBy = "SYSTEM" | "USER";
 export type ReportDistributionRecipientType = "RESIDENT" | "MANAGER" | "OWNER" | "COURT" | "OTHER";
 export type ReportDistributionMethod = "EMAIL" | "SMS" | "PORTAL" | "PRINT" | "OTHER";
+export type SoberHouseAccessRole =
+  | "UNASSIGNED"
+  | "OWNER_OPERATOR"
+  | "HOUSE_RESIDENT"
+  | "DRUG_COURT_PARTICIPANT"
+  | "PROBATION_PAROLE_PARTICIPANT";
 
 export type Option<Value extends string> = {
   value: Value;
@@ -301,9 +310,22 @@ export type Organization = {
   updatedAt: string;
 };
 
+export type SoberHouseUserAccessProfile = {
+  id: string;
+  linkedUserId: string;
+  role: SoberHouseAccessRole;
+  organizationId: string | null;
+  houseId: string | null;
+  houseGroupId: string | null;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type House = {
   id: string;
   organizationId: string | null;
+  houseGroupId: string | null;
   name: string;
   address: string;
   phone: string;
@@ -312,6 +334,17 @@ export type House = {
   geofenceRadiusFeetDefault: number;
   houseTypes: HouseType[];
   bedCount: number;
+  notes: string;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HouseGroup = {
+  id: string;
+  organizationId: string | null;
+  name: string;
+  houseIds: string[];
   notes: string;
   status: EntityStatus;
   createdAt: string;
@@ -388,7 +421,9 @@ export type SponsorContactRuleConfig = {
 export type HouseRuleSet = {
   id: string;
   organizationId: string | null;
-  houseId: string;
+  scopeType: HouseRuleScopeType;
+  houseId: string | null;
+  houseGroupId: string | null;
   name: string;
   status: EntityStatus;
   curfew: CurfewRuleConfig;
@@ -877,7 +912,9 @@ export type ResidentWizardDraft = {
 
 export type SoberHouseSettingsStore = {
   version: typeof SOBER_HOUSE_SETTINGS_STORE_VERSION;
+  userAccessProfile: SoberHouseUserAccessProfile | null;
   organization: Organization | null;
+  houseGroups: HouseGroup[];
   houses: House[];
   staffAssignments: StaffAssignment[];
   houseRuleSets: HouseRuleSet[];

@@ -25,6 +25,8 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     version !== 3 &&
     version !== 4 &&
     version !== 5 &&
+    version !== 6 &&
+    version !== 7 &&
     version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
   ) {
     return createDefaultSoberHouseSettingsStore();
@@ -55,12 +57,29 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
 
   return {
     version: SOBER_HOUSE_SETTINGS_STORE_VERSION,
+    userAccessProfile: candidate.userAccessProfile ?? null,
     organization: candidate.organization ?? null,
-    houses: Array.isArray(candidate.houses) ? candidate.houses : [],
+    houseGroups: Array.isArray(candidate.houseGroups)
+      ? candidate.houseGroups.map((group) => ({
+          ...group,
+          houseIds: Array.isArray(group.houseIds) ? group.houseIds : [],
+        }))
+      : [],
+    houses: Array.isArray(candidate.houses)
+      ? candidate.houses.map((house) => ({
+          ...house,
+          houseGroupId: house.houseGroupId ?? null,
+        }))
+      : [],
     staffAssignments: Array.isArray(candidate.staffAssignments) ? candidate.staffAssignments : [],
     houseRuleSets: Array.isArray(candidate.houseRuleSets)
       ? candidate.houseRuleSets.map((ruleSet) => ({
           ...ruleSet,
+          scopeType:
+            ruleSet.scopeType ??
+            (ruleSet.houseId ? "HOUSE" : ruleSet.houseGroupId ? "HOUSE_GROUP" : "ORGANIZATION"),
+          houseId: ruleSet.houseId ?? null,
+          houseGroupId: ruleSet.houseGroupId ?? null,
           chores: {
             ...ruleSet.chores,
             proofRequirement: Array.isArray(ruleSet.chores?.proofRequirement)

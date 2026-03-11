@@ -31,6 +31,7 @@ type Props = {
   store: SoberHouseSettingsStore;
   actor: AuditActor;
   isSaving: boolean;
+  readOnly?: boolean;
   onPersist: (
     nextStore: SoberHouseSettingsStore,
     successMessage: string,
@@ -122,7 +123,14 @@ function labelForRule(ruleType: ComplianceEvaluation["ruleType"]): string {
   }
 }
 
-export function SoberHouseComplianceSection({ userId, store, actor, isSaving, onPersist }: Props) {
+export function SoberHouseComplianceSection({
+  userId,
+  store,
+  actor,
+  isSaving,
+  readOnly = false,
+  onPersist,
+}: Props) {
   const [attendanceRecords, setAttendanceRecords] = useState<
     Awaited<ReturnType<typeof loadAttendanceRecords>>
   >([]);
@@ -312,7 +320,7 @@ export function SoberHouseComplianceSection({ userId, store, actor, isSaving, on
         </Text>
       </GlassCard>
 
-      {ruleSet?.chores.enabled ? (
+      {!readOnly && ruleSet?.chores.enabled ? (
         <GlassCard style={styles.card}>
           <Text style={styles.sectionTitle}>Resident Actions</Text>
           <Text style={styles.subsectionTitle}>Log chore completion</Text>
@@ -339,7 +347,8 @@ export function SoberHouseComplianceSection({ userId, store, actor, isSaving, on
         </GlassCard>
       ) : null}
 
-      {store.residentRequirementProfile?.workRequired &&
+      {!readOnly &&
+      store.residentRequirementProfile?.workRequired &&
       !store.residentRequirementProfile.currentlyEmployed ? (
         <GlassCard style={styles.card}>
           <Text style={styles.subsectionTitle}>Log job application</Text>
@@ -370,7 +379,8 @@ export function SoberHouseComplianceSection({ userId, store, actor, isSaving, on
         </GlassCard>
       ) : null}
 
-      {store.residentRequirementProfile?.workRequired &&
+      {!readOnly &&
+      store.residentRequirementProfile?.workRequired &&
       store.residentRequirementProfile.currentlyEmployed &&
       ruleSet?.employment.workplaceVerificationEnabled ? (
         <GlassCard style={styles.card}>
@@ -391,28 +401,30 @@ export function SoberHouseComplianceSection({ userId, store, actor, isSaving, on
         </GlassCard>
       ) : null}
 
-      <GlassCard style={styles.card}>
-        <Text style={styles.sectionTitle}>Manager Attention View</Text>
-        <Text style={styles.sectionMeta}>
-          Highlights current sober-house items that need action or setup.
-        </Text>
-        {attentionItems.length === 0 ? (
+      {!readOnly ? (
+        <GlassCard style={styles.card}>
+          <Text style={styles.sectionTitle}>Manager Attention View</Text>
           <Text style={styles.sectionMeta}>
-            No active at-risk, violation, or setup issues right now.
+            Highlights current sober-house items that need action or setup.
           </Text>
-        ) : (
-          attentionItems.map((evaluation) => (
-            <View key={`attention-${evaluation.ruleType}`} style={styles.attentionRow}>
-              <Text style={styles.attentionTitle}>
-                {residentName} • {labelForRule(evaluation.ruleType)}
-              </Text>
-              <Text style={styles.complianceReason}>{evaluation.statusReason}</Text>
-            </View>
-          ))
-        )}
-      </GlassCard>
+          {attentionItems.length === 0 ? (
+            <Text style={styles.sectionMeta}>
+              No active at-risk, violation, or setup issues right now.
+            </Text>
+          ) : (
+            attentionItems.map((evaluation) => (
+              <View key={`attention-${evaluation.ruleType}`} style={styles.attentionRow}>
+                <Text style={styles.attentionTitle}>
+                  {residentName} • {labelForRule(evaluation.ruleType)}
+                </Text>
+                <Text style={styles.complianceReason}>{evaluation.statusReason}</Text>
+              </View>
+            ))
+          )}
+        </GlassCard>
+      ) : null}
 
-      {statusMessage ? <Text style={styles.inlineStatus}>{statusMessage}</Text> : null}
+      {!readOnly && statusMessage ? <Text style={styles.inlineStatus}>{statusMessage}</Text> : null}
     </>
   );
 }

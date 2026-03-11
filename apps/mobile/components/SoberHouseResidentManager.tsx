@@ -220,7 +220,7 @@ export function SoberHouseResidentManager({
   const startWizard = useCallback(() => {
     const nextDraft = createResidentWizardDraftFromProfiles(linkedUserId, store);
     setDraft(nextDraft);
-    setWizardStep(1);
+    setWizardStep(nextDraft.currentStep);
     setResidentStatus(null);
     setSignaturePoints([]);
     setIsEditing(true);
@@ -468,6 +468,18 @@ export function SoberHouseResidentManager({
     store.residentHousingProfile !== null &&
     store.residentRequirementProfile !== null &&
     store.residentConsentRecord !== null;
+
+  useEffect(() => {
+    if (store.userAccessProfile?.role !== "HOUSE_RESIDENT" || residentComplete || isEditing) {
+      return;
+    }
+    const nextDraft = createResidentWizardDraftFromProfiles(linkedUserId, store);
+    setDraft(nextDraft);
+    setWizardStep(nextDraft.currentStep);
+    setResidentStatus(null);
+    setSignaturePoints([]);
+    setIsEditing(true);
+  }, [isEditing, linkedUserId, residentComplete, store]);
 
   return (
     <GlassCard style={styles.card} strong>

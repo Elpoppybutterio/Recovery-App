@@ -8,10 +8,12 @@ import type {
   CorrectiveAction,
   EvidenceItem,
   House,
+  HouseGroup,
   JobApplicationRecord,
   HouseRuleSet,
   MonthlyReport,
   Organization,
+  SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
   StaffAssignment,
   Violation,
@@ -34,7 +36,9 @@ export function createEntityId(prefix: string): string {
 export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore {
   return {
     version: SOBER_HOUSE_SETTINGS_STORE_VERSION,
+    userAccessProfile: null,
     organization: null,
+    houseGroups: [],
     houses: [],
     staffAssignments: [],
     houseRuleSets: [],
@@ -72,6 +76,24 @@ export function createDefaultOrganization(now: string, id = createEntityId("org"
   };
 }
 
+export function createDefaultSoberHouseUserAccessProfile(
+  now: string,
+  linkedUserId: string,
+  id = createEntityId("user-access"),
+): SoberHouseUserAccessProfile {
+  return {
+    id,
+    linkedUserId,
+    role: "UNASSIGNED",
+    organizationId: null,
+    houseId: null,
+    houseGroupId: null,
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export function createDefaultHouse(
   now: string,
   organizationId: string | null,
@@ -80,6 +102,7 @@ export function createDefaultHouse(
   return {
     id,
     organizationId,
+    houseGroupId: null,
     name: "",
     address: "",
     phone: "",
@@ -88,6 +111,23 @@ export function createDefaultHouse(
     geofenceRadiusFeetDefault: DEFAULT_HOUSE_GEOFENCE_RADIUS_FEET,
     houseTypes: ["OTHER"],
     bedCount: 0,
+    notes: "",
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultHouseGroup(
+  now: string,
+  organizationId: string | null,
+  id = createEntityId("house-group"),
+): HouseGroup {
+  return {
+    id,
+    organizationId,
+    name: "",
+    houseIds: [],
     notes: "",
     status: "ACTIVE",
     createdAt: now,
@@ -130,7 +170,9 @@ export function createDefaultHouseRuleSet(
   return {
     id,
     organizationId,
+    scopeType: "HOUSE",
     houseId,
+    houseGroupId: null,
     name: "Default house rules",
     status: "ACTIVE",
     curfew: {
@@ -488,7 +530,12 @@ export function createDefaultMonthlyReport(
 export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouseSettingsStore {
   return {
     version: store.version,
+    userAccessProfile: store.userAccessProfile ? { ...store.userAccessProfile } : null,
     organization: store.organization ? { ...store.organization } : null,
+    houseGroups: store.houseGroups.map((group) => ({
+      ...group,
+      houseIds: [...group.houseIds],
+    })),
     houses: store.houses.map((house) => ({ ...house, houseTypes: [...house.houseTypes] })),
     staffAssignments: store.staffAssignments.map((assignment) => ({
       ...assignment,

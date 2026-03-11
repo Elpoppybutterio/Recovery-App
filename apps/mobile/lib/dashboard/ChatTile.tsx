@@ -8,9 +8,29 @@ type ChatTileProps = {
   onPress: () => void;
   onHoverIn: () => void;
   onHoverOut: () => void;
+  title?: string;
+  subtitle?: string;
+  detail?: string;
+  badgeLabel?: string;
 };
 
-export function ChatTile({ enabled, hovered, onPress, onHoverIn, onHoverOut }: ChatTileProps) {
+export function ChatTile({
+  enabled,
+  hovered,
+  onPress,
+  onHoverIn,
+  onHoverOut,
+  title = "Intranet / Group Chat",
+  subtitle = "Sponsor + sponsee messaging in one place",
+  detail,
+  badgeLabel,
+}: ChatTileProps) {
+  const resolvedDetail =
+    detail ??
+    (enabled
+      ? "Feature flag enabled: placeholder route is active."
+      : "Dormant for now. Tap to preview planned experience.");
+  const resolvedBadgeLabel = badgeLabel ?? (enabled ? "Preview" : "Coming Soon");
   return (
     <Pressable
       onPress={onPress}
@@ -29,17 +49,13 @@ export function ChatTile({ enabled, hovered, onPress, onHoverIn, onHoverOut }: C
         ]}
       >
         <View style={styles.headerRow}>
-          <Text style={styles.title}>Intranet / Group Chat</Text>
+          <Text style={styles.title}>{title}</Text>
           <View style={styles.badge}>
-            <Text style={styles.badgeText}>Coming Soon</Text>
+            <Text style={styles.badgeText}>{resolvedBadgeLabel}</Text>
           </View>
         </View>
-        <Text style={styles.subtitle}>Sponsor + sponsee messaging in one place</Text>
-        <Text style={styles.detail}>
-          {enabled
-            ? "Feature flag enabled: placeholder route is active."
-            : "Dormant for now. Tap to preview planned experience."}
-        </Text>
+        <Text style={styles.subtitle}>{subtitle}</Text>
+        <Text style={styles.detail}>{resolvedDetail}</Text>
       </GlassCard>
     </Pressable>
   );
