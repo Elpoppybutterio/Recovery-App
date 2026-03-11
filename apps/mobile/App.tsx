@@ -2056,7 +2056,7 @@ export default function App() {
     useState<RoutineReaderBackScreen>("MORNING");
 
   const [meetingPlansByDate, setMeetingPlansByDate] = useState<MeetingPlansState>({});
-  const [debugTimeCompressionEnabled, setDebugTimeCompressionEnabled] = useState(false);
+  const [debugTimeCompressionEnabled] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
 
   const activeAttendanceRef = useRef<AttendanceRecord | null>(null);
@@ -2312,6 +2312,10 @@ export default function App() {
       return minutes >= 17 * 60;
     });
   }, [meetingsForDay, meetingsFormatFilter, meetingsTimeFilter]);
+  const dashboardMeetingsForPanel = useMemo<MeetingListItem[]>(
+    () => meetingsForMeetingsScreen.slice(0, 5),
+    [meetingsForMeetingsScreen],
+  );
   const selectedMeetingsFormatLabel = useMemo(
     () =>
       MEETINGS_FORMAT_OPTIONS.find((option) => option.value === meetingsFormatFilter)?.label ??
@@ -7704,63 +7708,6 @@ export default function App() {
     [resolveMeetingForLogging, openMeetingSignatureCapture],
   );
 
-  const scheduleDebugSponsorNotification = useCallback(async () => {
-    const hasPermission = await ensureNotificationPermission();
-    if (!hasPermission) {
-      setNotificationStatus("Notification permission denied.");
-      return;
-    }
-
-    const id = await scheduleAt(new Date(Date.now() + 10_000), {
-      title: "Sponsor call test",
-      body: `Call ${normalizedSponsorName || "Sponsor"} now (${sponsorPhoneE164 ?? "No number"})`,
-      categoryIdentifier: SPONSOR_NOTIFICATION_CATEGORY_ID,
-      data: {
-        type: "sponsor",
-        phoneE164: sponsorPhoneE164,
-        reason: "debug",
-      },
-    });
-
-    const buckets = await loadNotificationBuckets();
-    buckets.sponsor = [...buckets.sponsor, id];
-    await saveNotificationBuckets(buckets);
-
-    console.log("[notifications] debug sponsor scheduled", { id });
-    setNotificationStatus("Debug sponsor notification scheduled for ~10 seconds.");
-  }, [
-    ensureNotificationPermission,
-    scheduleAt,
-    normalizedSponsorName,
-    sponsorPhoneE164,
-    loadNotificationBuckets,
-    saveNotificationBuckets,
-  ]);
-
-  const scheduleDebugDriveNotification = useCallback(async () => {
-    const hasPermission = await ensureNotificationPermission();
-    if (!hasPermission) {
-      setNotificationStatus("Notification permission denied.");
-      return;
-    }
-
-    const id = await scheduleAt(new Date(Date.now() + 10_000), {
-      title: "Leave in 10 minutes",
-      body: "Leave in 10 minutes for your planned meeting.",
-      categoryIdentifier: DRIVE_NOTIFICATION_CATEGORY_ID,
-      data: {
-        type: "drive",
-      },
-    });
-
-    const buckets = await loadNotificationBuckets();
-    buckets.drive = [...buckets.drive, id];
-    await saveNotificationBuckets(buckets);
-
-    console.log("[notifications] debug drive scheduled", { id });
-    setNotificationStatus("Debug drive notification scheduled for ~10 seconds.");
-  }, [ensureNotificationPermission, loadNotificationBuckets, saveNotificationBuckets, scheduleAt]);
-
   useEffect(() => {
     if (!notificationsRuntimeEnabled) {
       return;
@@ -8722,7 +8669,10 @@ export default function App() {
   }, [homeScreen]);
 
   useEffect(() => {
-    if (!bootstrapped || homeScreen !== "MEETINGS") {
+    const shouldRefreshSelectedDayMeetings =
+      mode === "A" &&
+      (homeScreen === "MEETINGS" || homeScreen === "SETTINGS" || homeScreen === "DASHBOARD");
+    if (!bootstrapped || !shouldRefreshSelectedDayMeetings) {
       meetingsAutoRefreshKeyRef.current = null;
       return;
     }
@@ -8746,6 +8696,7 @@ export default function App() {
     })();
   }, [
     bootstrapped,
+    mode,
     homeScreen,
     selectedDay.dayOfWeek,
     meetingsFormatFilter,
@@ -9907,6 +9858,222 @@ export default function App() {
                   morningRoutine={morningRoutineStats}
                   nightlyInventory={nightlyInventoryStats}
                   routineInsights={routineInsights}
+                  upcomingMeetingsPanel={
+                    <GlassCard style={styles.card} strong>
+                      <View style={styles.inlineRow}>
+                        <Text style={styles.sectionTitle}>Current & Upcoming Meetings</Text>
+                        <View style={styles.inlineRowGap}>
+                          <Pressable
+                            style={styles.viewModeButton}
+                            onPress={() => {
+                              if (!mapsRuntimeAvailable) {
+                                setMeetingsStatus("Map view unavailable in this build.");
+                                return;
+                              }
+                              setMeetingsViewMode((current) =>
+                                current === "LIST" ? "MAP" : "LIST",
+                              );
+                              setSelectedLocationKey(null);
+                            }}
+                          >
+                            <Text style={styles.viewModeButtonText}>
+                              {meetingsViewMode === "LIST" ? "🗺 Map" : "☰ List"}
+                            </Text>
+                          </Pressable>
+                          <AppButton
+                            title="Open meetings"
+                            variant="secondary"
+                            onPress={openMeetingsHub}
+                          />
+                        </View>
+                      </View>
+                      <Text style={styles.sectionMeta}>
+                        Upcoming meetings for {selectedDay.label} within {meetingRadiusMiles} miles.
+                      </Text>
+                      <Text style={styles.sectionMeta}>{meetingsStatus}</Text>
+                      {dashboardShowsOnlineFallback && selectedDayIsToday ? (
+                        <Text style={styles.sectionMeta}>
+                          No in-person meetings remain today. Showing online fallback where
+                          available.
+                        </Text>
+                      ) : null}
+                      <Pressable
+                        style={styles.dashboardMeetingsAttendancePill}
+                        onPress={() => openAttendanceHub("dashboard")}
+                        accessibilityRole="button"
+                        accessibilityLabel="Open meetings attendance log page"
+                      >
+                        <Text style={styles.dashboardMeetingsAttendancePillText}>
+                          Meetings Attendance Log
+                        </Text>
+                      </Pressable>
+                      <View style={styles.chipRow}>
+                        {dayOptions.map((option) => (
+                          <Pressable
+                            key={option.offset}
+                            style={[
+                              styles.chip,
+                              selectedDayOffset === option.offset ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => onDayPress(option)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                selectedDayOffset === option.offset
+                                  ? styles.chipTextSelected
+                                  : null,
+                              ]}
+                            >
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                      {loadingMeetings ? (
+                        <Text style={styles.sectionMeta}>Loading meetings...</Text>
+                      ) : null}
+
+                      {meetingsViewMode === "MAP" ? (
+                        <>
+                          {!mapsRuntimeAvailable ? (
+                            <Text style={styles.sectionMeta}>
+                              Map module unavailable in this build. Reinstall the latest app build.
+                            </Text>
+                          ) : (
+                            <View style={styles.mapContainer}>
+                              <MapViewCompat
+                                ref={mapRef}
+                                style={styles.map}
+                                initialRegion={mapRenderRegion}
+                                region={mapRenderRegion}
+                                onRegionChangeComplete={onMapRegionChangeComplete}
+                                showsUserLocation={locationPermission === "granted"}
+                              >
+                                {meetingLocationGroups.map((group) => (
+                                  <MarkerCompat
+                                    key={group.key}
+                                    coordinate={{ latitude: group.lat, longitude: group.lng }}
+                                    onPress={() => setSelectedLocationKey(group.key)}
+                                    pinColor={group.meetings.length > 1 ? "#9c4221" : "#155eef"}
+                                  />
+                                ))}
+                              </MapViewCompat>
+
+                              {mapDraggedOutsideBoundary ? (
+                                <View style={styles.mapBoundaryControls}>
+                                  <AppButton
+                                    title="Return to boundary"
+                                    onPress={returnToBoundary}
+                                    variant="secondary"
+                                  />
+                                  <View style={styles.buttonSpacer} />
+                                  <AppButton
+                                    title="Search this area"
+                                    onPress={() => void searchThisArea()}
+                                    variant="secondary"
+                                  />
+                                </View>
+                              ) : null}
+                            </View>
+                          )}
+
+                          {selectedLocationGroup ? (
+                            <View style={styles.mapMeetingCard}>
+                              <Text style={styles.meetingName}>
+                                {selectedLocationGroup.meetings.length === 1
+                                  ? selectedLocationGroup.meetings[0]?.name
+                                  : "Meetings at this location"}
+                              </Text>
+                              <Text style={styles.sectionMeta}>
+                                {selectedLocationGroup.address}
+                              </Text>
+                              {selectedLocationGroup.meetings.map((meeting) => (
+                                <Pressable
+                                  key={meeting.id}
+                                  style={styles.mapMeetingRow}
+                                  onPress={() => {
+                                    openMeetingsHub();
+                                    setSelectedMeeting(meeting);
+                                    setScreen("DETAIL");
+                                  }}
+                                >
+                                  <Text style={styles.detailButtonText}>
+                                    {formatHhmmForDisplay(meeting.startsAtLocal)} • {meeting.name}
+                                  </Text>
+                                </Pressable>
+                              ))}
+                            </View>
+                          ) : null}
+
+                          {!loadingMeetings && meetingLocationGroups.length === 0 ? (
+                            <Text style={styles.sectionMeta}>
+                              No in-person meetings with coordinates for this day.
+                            </Text>
+                          ) : null}
+                        </>
+                      ) : (
+                        <>
+                          {dashboardMeetingsForPanel.map((meeting) => (
+                            <View key={meeting.id} style={styles.meetingCard}>
+                              <Text style={styles.meetingName}>{meeting.name}</Text>
+                              <Text style={styles.sectionMeta}>
+                                {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
+                                {meeting.openness || "Unknown"} • {meeting.format || "Unknown"}
+                              </Text>
+                              <Text style={styles.sectionMeta}>
+                                {meeting.format === "ONLINE"
+                                  ? "Online"
+                                  : meeting.address || "Unknown address"}{" "}
+                                •{" "}
+                                {meetingDistanceLabel(
+                                  meeting,
+                                  meeting.distanceMeters,
+                                  locationPermission,
+                                  locationIssue,
+                                )}
+                              </Text>
+                              <View style={styles.buttonRow}>
+                                <AppButton
+                                  title="Details"
+                                  onPress={() => {
+                                    openMeetingsHub();
+                                    setSelectedMeeting(meeting);
+                                    setScreen("DETAIL");
+                                  }}
+                                  variant="primary"
+                                />
+                                <View style={styles.buttonSpacer} />
+                                <AppButton
+                                  title={
+                                    dashboardMeetingPrimaryActionLabels[meeting.id] ?? "Attend"
+                                  }
+                                  onPress={() =>
+                                    void handleDashboardMeetingPrimaryAction(meeting.id)
+                                  }
+                                  variant="secondary"
+                                />
+                              </View>
+                            </View>
+                          ))}
+                          {!loadingMeetings && meetingsForMeetingsScreen.length > 5 ? (
+                            <Text style={styles.sectionMeta}>
+                              Showing the first 5 meetings. Open Meetings for the full list.
+                            </Text>
+                          ) : null}
+                          {!loadingMeetings && meetingsForMeetingsScreen.length === 0 ? (
+                            <Text style={styles.sectionMeta}>
+                              {selectedDayIsPast
+                                ? "No upcoming meetings for a past day."
+                                : selectedDayIsToday
+                                  ? "No in-progress or upcoming meetings remaining today."
+                                  : "No upcoming meetings for this day."}
+                            </Text>
+                          ) : null}
+                        </>
+                      )}
+                    </GlassCard>
+                  }
                   onMeetingPress={(meetingId) => {
                     const meeting =
                       meetingsForDay.find((entry) => entry.id === meetingId) ??
@@ -10041,11 +10208,28 @@ export default function App() {
                   <GlassCard style={styles.card} strong>
                     <View style={styles.inlineRow}>
                       <Text style={styles.sectionTitle}>Meetings</Text>
-                      <GlassCard style={styles.meetingsBackPill} darken blurIntensity={14}>
-                        <Pressable onPress={openDashboard} style={styles.meetingsBackPillButton}>
-                          <Text style={styles.meetingsBackPillText}>Back to Dashboard</Text>
+                      <View style={styles.inlineRowGap}>
+                        <Pressable
+                          style={styles.viewModeButton}
+                          onPress={() => {
+                            if (!mapsRuntimeAvailable) {
+                              setMeetingsStatus("Map view unavailable in this build.");
+                              return;
+                            }
+                            setMeetingsViewMode((current) => (current === "LIST" ? "MAP" : "LIST"));
+                            setSelectedLocationKey(null);
+                          }}
+                        >
+                          <Text style={styles.viewModeButtonText}>
+                            {meetingsViewMode === "LIST" ? "🗺 Map" : "☰ List"}
+                          </Text>
                         </Pressable>
-                      </GlassCard>
+                        <GlassCard style={styles.meetingsBackPill} darken blurIntensity={14}>
+                          <Pressable onPress={openDashboard} style={styles.meetingsBackPillButton}>
+                            <Text style={styles.meetingsBackPillText}>Back to Dashboard</Text>
+                          </Pressable>
+                        </GlassCard>
+                      </View>
                     </View>
 
                     <Text style={styles.sectionMeta}>
@@ -11396,6 +11580,10 @@ export default function App() {
                           </View>
                         ) : null}
                         <Text style={styles.sectionMeta}>{sponsorStatusLine}</Text>
+                        <Text style={styles.sectionMeta}>
+                          Notification status: {notificationStatus}
+                        </Text>
+                        <Text style={styles.sectionMeta}>Calendar status: {calendarStatus}</Text>
                         <AppButton
                           title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
                           onPress={() => void saveSponsorConfig()}
@@ -11404,40 +11592,6 @@ export default function App() {
                       </>
                     )}
                   </GlassCard>
-
-                  {__DEV__ ? (
-                    <GlassCard style={styles.card} strong>
-                      <Text style={styles.sectionTitle}>Debug Notification Tools</Text>
-                      <View style={styles.inlineRow}>
-                        <Text style={styles.label}>Time compression</Text>
-                        <Switch
-                          value={debugTimeCompressionEnabled}
-                          onValueChange={setDebugTimeCompressionEnabled}
-                        />
-                      </View>
-                      <Text style={styles.sectionMeta}>
-                        When enabled, scheduled notification delays are compressed for quick
-                        simulator tests.
-                      </Text>
-                      <Text style={styles.sectionMeta}>
-                        Notification debug: {notificationStatus}
-                      </Text>
-                      <Text style={styles.sectionMeta}>Calendar debug: {calendarStatus}</Text>
-                      <View style={styles.buttonRow}>
-                        <AppButton
-                          title="Test sponsor alert in 10s"
-                          onPress={() => void scheduleDebugSponsorNotification()}
-                          variant="secondary"
-                        />
-                        <View style={styles.buttonSpacer} />
-                        <AppButton
-                          title="Test leave alert in 10s"
-                          onPress={() => void scheduleDebugDriveNotification()}
-                          variant="secondary"
-                        />
-                      </View>
-                    </GlassCard>
-                  ) : null}
 
                   <GlassCard style={styles.card} strong>
                     <View style={styles.inlineRow}>
@@ -12541,6 +12695,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
     flexShrink: 1,
+  },
+  dashboardMeetingsAttendancePill: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(196,181,253,0.42)",
+    backgroundColor: "rgba(24,14,52,0.64)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  dashboardMeetingsAttendancePillText: {
+    color: colors.textPrimary,
+    fontSize: 13,
+    fontWeight: "600",
   },
   filterDropdownTrigger: {
     borderWidth: 2,

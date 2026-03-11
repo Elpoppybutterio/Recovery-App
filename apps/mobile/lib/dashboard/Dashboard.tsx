@@ -1,5 +1,5 @@
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { GlassCard } from "../ui/GlassCard";
 import { Design } from "../ui/design";
 import type { RecoveryInsight } from "../recoveryInsights";
@@ -64,6 +64,7 @@ type DashboardProps = {
   onOpenRecoverySettings: () => void;
   onOpenPrivacyStatement: () => void;
   onOpenMeetings: () => void;
+  upcomingMeetingsPanel?: ReactNode;
   onOpenAttendance: () => void;
   onOpenAttendanceToday: () => void;
   onOpenTools: () => void;
@@ -213,6 +214,7 @@ export function Dashboard({
   onOpenRecoverySettings,
   onOpenPrivacyStatement,
   onOpenMeetings,
+  upcomingMeetingsPanel,
   onOpenAttendance,
   onOpenAttendanceToday,
   onOpenTools,
@@ -752,105 +754,107 @@ export function Dashboard({
           </Pressable>
         </View>
 
-        <Pressable
-          onHoverIn={() => setTileHover("upcoming", true)}
-          onHoverOut={() => setTileHover("upcoming", false)}
-          accessible={false}
-        >
-          <GlassCard
-            strong
-            blurIntensity={12}
-            style={[
-              styles.upcomingCard,
-              styles.liquidGlassTile,
-              hoveredTileId === "upcoming" ? styles.liquidGlassTileHover : null,
-            ]}
+        {upcomingMeetingsPanel ?? (
+          <Pressable
+            onHoverIn={() => setTileHover("upcoming", true)}
+            onHoverOut={() => setTileHover("upcoming", false)}
+            accessible={false}
           >
-            <View style={styles.upcomingHeader}>
-              <Text style={styles.upcomingTitle}>Current & Upcoming Meetings</Text>
-              <Pressable
-                style={styles.upcomingMoreButton}
-                onPress={onOpenMeetings}
-                accessibilityRole="button"
-                accessibilityLabel="Open meetings page"
-              >
-                <View style={styles.dotRow}>
-                  <View style={styles.dot} />
-                  <View style={styles.dot} />
-                  <View style={styles.dot} />
-                </View>
-              </Pressable>
-            </View>
-            {showingOnlineMeetingsFallback ? (
-              <Text style={styles.upcomingNotice}>
-                No in-person meetings available for the rest of today. Showing online meetings.
-              </Text>
-            ) : null}
-            <Pressable
-              style={styles.meetingsAttendanceLogPill}
-              onPress={onOpenAttendance}
-              accessibilityRole="button"
-              accessibilityLabel="Open meetings attendance log page"
+            <GlassCard
+              strong
+              blurIntensity={12}
+              style={[
+                styles.upcomingCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "upcoming" ? styles.liquidGlassTileHover : null,
+              ]}
             >
-              <Text style={styles.meetingsAttendanceLogPillText}>Meetings Attendance Log</Text>
-            </Pressable>
-
-            {upcoming.map((meeting, index) => (
-              <View key={meeting.id} style={styles.meetingItem}>
+              <View style={styles.upcomingHeader}>
+                <Text style={styles.upcomingTitle}>Current & Upcoming Meetings</Text>
                 <Pressable
-                  style={styles.meetingDetailsButton}
-                  onPress={() => onMeetingPress(meeting.id)}
+                  style={styles.upcomingMoreButton}
+                  onPress={onOpenMeetings}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open meetings page"
                 >
-                  <View style={[styles.meetingIcon, index === 2 ? styles.meetingIconPink : null]}>
-                    <Text style={styles.meetingIconText}>
-                      {index === 1 ? "🔒" : index === 2 ? "✦" : "↪"}
-                    </Text>
-                  </View>
-                  <View style={styles.meetingTextCol}>
-                    <Text numberOfLines={2} style={styles.meetingName}>
-                      {meeting.name}
-                    </Text>
-                    <View style={styles.meetingMetaRow}>
-                      <Text style={styles.meetingDistance}>
-                        {distanceLabel(meeting.distanceMeters)}
-                      </Text>
-                      <Text style={styles.meetingMeta}>• {meetingFormatLabel(meeting)}</Text>
-                      <Text style={styles.meetingMeta}>
-                        • {toTwelveHour(meeting.startsAtLocal)}
-                      </Text>
-                    </View>
+                  <View style={styles.dotRow}>
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
                   </View>
                 </Pressable>
-                <View style={styles.meetingActionsRow}>
-                  <Pressable
-                    style={styles.meetingLogButton}
-                    onPress={() => onLogMeeting(meeting.id)}
-                  >
-                    <Text style={styles.meetingLogButtonText}>
-                      {meetingPrimaryActionLabels[meeting.id] ?? "Attend"}
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    style={styles.meetingLogButton}
-                    onPress={() => onCaptureSignature(meeting.id)}
-                  >
-                    <Text style={styles.meetingLogButtonText}>Signature</Text>
-                  </Pressable>
-                </View>
               </View>
-            ))}
-
-            {upcoming.length === 0 ? (
-              <Pressable style={styles.emptyMeetingCta} onPress={onSearchArea}>
-                <Text style={styles.emptyMeetingText}>
-                  {locationEnabled
-                    ? "No upcoming meetings in your area. Tap to search this area."
-                    : "Location is off. Tap to refresh and try again."}
+              {showingOnlineMeetingsFallback ? (
+                <Text style={styles.upcomingNotice}>
+                  No in-person meetings available for the rest of today. Showing online meetings.
                 </Text>
+              ) : null}
+              <Pressable
+                style={styles.meetingsAttendanceLogPill}
+                onPress={onOpenAttendance}
+                accessibilityRole="button"
+                accessibilityLabel="Open meetings attendance log page"
+              >
+                <Text style={styles.meetingsAttendanceLogPillText}>Meetings Attendance Log</Text>
               </Pressable>
-            ) : null}
-          </GlassCard>
-        </Pressable>
+
+              {upcoming.map((meeting, index) => (
+                <View key={meeting.id} style={styles.meetingItem}>
+                  <Pressable
+                    style={styles.meetingDetailsButton}
+                    onPress={() => onMeetingPress(meeting.id)}
+                  >
+                    <View style={[styles.meetingIcon, index === 2 ? styles.meetingIconPink : null]}>
+                      <Text style={styles.meetingIconText}>
+                        {index === 1 ? "🔒" : index === 2 ? "✦" : "↪"}
+                      </Text>
+                    </View>
+                    <View style={styles.meetingTextCol}>
+                      <Text numberOfLines={2} style={styles.meetingName}>
+                        {meeting.name}
+                      </Text>
+                      <View style={styles.meetingMetaRow}>
+                        <Text style={styles.meetingDistance}>
+                          {distanceLabel(meeting.distanceMeters)}
+                        </Text>
+                        <Text style={styles.meetingMeta}>• {meetingFormatLabel(meeting)}</Text>
+                        <Text style={styles.meetingMeta}>
+                          • {toTwelveHour(meeting.startsAtLocal)}
+                        </Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                  <View style={styles.meetingActionsRow}>
+                    <Pressable
+                      style={styles.meetingLogButton}
+                      onPress={() => onLogMeeting(meeting.id)}
+                    >
+                      <Text style={styles.meetingLogButtonText}>
+                        {meetingPrimaryActionLabels[meeting.id] ?? "Attend"}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.meetingLogButton}
+                      onPress={() => onCaptureSignature(meeting.id)}
+                    >
+                      <Text style={styles.meetingLogButtonText}>Signature</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+
+              {upcoming.length === 0 ? (
+                <Pressable style={styles.emptyMeetingCta} onPress={onSearchArea}>
+                  <Text style={styles.emptyMeetingText}>
+                    {locationEnabled
+                      ? "No upcoming meetings in your area. Tap to search this area."
+                      : "Location is off. Tap to refresh and try again."}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </GlassCard>
+          </Pressable>
+        )}
 
         <ChatTile
           enabled={chatEnabled}
