@@ -1207,6 +1207,18 @@ function loadOptionalModule<T>(moduleName: string): T | null {
   }
 }
 
+type CalendarEventInputCompat = Omit<Partial<Calendar.Event>, "id">;
+type CalendarDialogResultCompat = {
+  action?: string;
+  id?: string;
+};
+
+const calendarCompat = Calendar as typeof Calendar & {
+  createEventInCalendarAsync?: (
+    eventDetails: CalendarEventInputCompat,
+  ) => Promise<CalendarDialogResultCompat>;
+};
+
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, "");
 }
@@ -2406,24 +2418,45 @@ export default function App() {
     return requested.granted || requested.status === Notifications.PermissionStatus.GRANTED;
   }, []);
 
-  const ensureCalendarPermission = useCallback(async (): Promise<boolean> => {
-    try {
-      const existing = await Calendar.getCalendarPermissionsAsync();
-      if (existing.granted) {
-        return true;
+  const openCalendarComposer = useCallback(
+    async (
+      eventDetails: CalendarEventInputCompat,
+    ): Promise<{
+      saved: boolean;
+      action: string | null;
+      eventId: string | null;
+      errorCode: "none" | "permission" | "unavailable";
+    }> => {
+      if (typeof calendarCompat.createEventInCalendarAsync !== "function") {
+        return {
+          saved: false,
+          action: null,
+          eventId: null,
+          errorCode: "unavailable",
+        };
       }
-      const requested = await Calendar.requestCalendarPermissionsAsync();
-      return requested.granted;
-    } catch {
-      return false;
-    }
-  }, []);
 
-  const findWritableCalendarId = useCallback(async (): Promise<string | null> => {
-    const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
-    const writable = calendars.find((item) => item.allowsModifications);
-    return writable?.id ?? null;
-  }, []);
+      try {
+        const result = await calendarCompat.createEventInCalendarAsync(eventDetails);
+        const action = typeof result?.action === "string" ? result.action : null;
+        return {
+          saved: action === "saved" || action === "done",
+          action,
+          eventId: typeof result?.id === "string" && result.id.length > 0 ? result.id : null,
+          errorCode: "none",
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        return {
+          saved: false,
+          action: null,
+          eventId: null,
+          errorCode: /calendar|permission/i.test(message) ? "permission" : "unavailable",
+        };
+      }
+    },
+    [],
+  );
 
   const applyScheduleTime = useCallback(
     (target: Date): Date | null => {
@@ -2543,6 +2576,12 @@ export default function App() {
   }, [readCurrentLocation]);
 
   const requestAlwaysLocationPermission = useCallback(async (): Promise<boolean> => {
+    if (Platform.OS === "ios") {
+      setLocationAlwaysPermission("unavailable");
+      setMeetingsStatus("This iOS build uses location only while the app is open.");
+      return false;
+    }
+
     const result = await requestAlwaysLocationPermissionFromService();
     setLocationPermission(result.permissionStatus);
     setLocationAlwaysPermission(result.alwaysPermissionStatus);
@@ -4176,18 +4215,6 @@ export default function App() {
         return;
       }
 
-      const hasPermission = await ensureCalendarPermission();
-      if (!hasPermission) {
-        setCalendarStatus("Calendar permission denied.");
-        return;
-      }
-
-      const calendarId = await findWritableCalendarId();
-      if (!calendarId) {
-        setCalendarStatus("No writable calendar found.");
-        return;
-      }
-
       const nextStart = computeNextCall(
         new Date(),
         sponsorCallTimeLocalHhmm,
@@ -4232,37 +4259,37 @@ export default function App() {
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       };
 
-      const storedEventId = await AsyncStorage.getItem(sponsorCalendarEventStorage);
-      let nextEventId: string;
-
-      if (storedEventId) {
-        try {
-          await Calendar.getEventAsync(storedEventId);
-          nextEventId = await Calendar.updateEventAsync(storedEventId, {
-            ...eventDetails,
-            calendarId,
-          });
-        } catch {
-          nextEventId = await Calendar.createEventAsync(calendarId, eventDetails);
+      const result = await openCalendarComposer(eventDetails);
+      if (!result.saved) {
+        if (result.action === "canceled") {
+          setCalendarStatus("Sponsor calendar add canceled.");
+        } else if (result.errorCode === "permission") {
+          setCalendarStatus(
+            "Calendar add requires the iOS system add flow or previously granted calendar access on this device.",
+          );
+        } else {
+          setCalendarStatus("Could not open the Calendar add sheet.");
         }
-      } else {
-        nextEventId = await Calendar.createEventAsync(calendarId, eventDetails);
+        return;
       }
 
-      await AsyncStorage.setItem(sponsorCalendarEventStorage, nextEventId);
+      if (result.eventId) {
+        await AsyncStorage.setItem(sponsorCalendarEventStorage, result.eventId);
+      } else {
+        await AsyncStorage.removeItem(sponsorCalendarEventStorage);
+      }
       console.log("[calendar] sponsor sync", {
         reason,
-        eventId: nextEventId,
+        eventId: result.eventId,
         startAt: nextStart.toISOString(),
         recurrenceSummary,
       });
-      setCalendarStatus(`Calendar synced (${nextStart.toLocaleString()}).`);
+      setCalendarStatus(`Sponsor call added to Calendar (${nextStart.toLocaleString()}).`);
     },
     [
       normalizedSponsorName,
       sponsorPhoneE164,
-      ensureCalendarPermission,
-      findWritableCalendarId,
+      openCalendarComposer,
       sponsorCallTimeLocalHhmm,
       sponsorRepeatUnit,
       sponsorRepeatInterval,
@@ -4279,96 +4306,64 @@ export default function App() {
           return;
         }
 
-        const hasPermission = await ensureCalendarPermission();
-        if (!hasPermission) {
-          setMilestoneCalendarStatus("Milestone calendar permission denied.");
-          return;
-        }
-
-        const calendarId = await findWritableCalendarId();
-        if (!calendarId) {
-          setMilestoneCalendarStatus("No writable calendar found for milestones.");
-          return;
-        }
-
-        const [storedIdsRaw, storedSyncDate] = await Promise.all([
-          AsyncStorage.getItem(sobrietyMilestoneEventIdsStorage),
-          AsyncStorage.getItem(sobrietyMilestoneSyncDateStorage),
-        ]);
-        let storedIds: string[] = [];
-        if (storedIdsRaw) {
-          try {
-            const parsed = JSON.parse(storedIdsRaw) as unknown;
-            if (Array.isArray(parsed)) {
-              storedIds = parsed.filter(
-                (entry): entry is string => typeof entry === "string" && entry.length > 0,
-              );
-            }
-          } catch {
-            storedIds = [];
-          }
-        }
-
-        if (storedSyncDate === sobrietyDateIso && storedIds.length > 0) {
-          setMilestoneCalendarStatus("Sobriety milestones unchanged.");
-          return;
-        }
-
-        if (storedIds.length > 0) {
-          await Promise.all(
-            storedIds.map(async (id) => {
-              try {
-                await Calendar.deleteEventAsync(id);
-              } catch {
-                // ignore stale/removed events
-              }
-            }),
-          );
-        }
-
         if (!sobrietyDateIso) {
           await Promise.all([
             AsyncStorage.removeItem(sobrietyMilestoneEventIdsStorage),
             AsyncStorage.removeItem(sobrietyMilestoneSyncDateStorage),
           ]);
-          setMilestoneCalendarStatus("Sobriety date cleared. Milestone events removed.");
+          setMilestoneCalendarStatus("Save a sobriety date before adding milestones.");
           return;
         }
 
         const milestones = buildSobrietyMilestones(sobrietyDateIso);
-        const createdIds: string[] = [];
-        const sobrietyDateLabel = formatIsoToDdMmYyyy(sobrietyDateIso);
+        const nextMilestone =
+          milestones.find((milestone) => milestone.at.getTime() >= Date.now()) ?? milestones[0] ?? null;
+        if (!nextMilestone) {
+          setMilestoneCalendarStatus("No sobriety milestones are available to add.");
+          return;
+        }
 
-        for (const milestone of milestones) {
-          const eventId = await Calendar.createEventAsync(calendarId, {
-            title: milestone.title,
-            notes: `Sobriety milestone from start date ${sobrietyDateLabel}.`,
-            startDate: milestone.at,
-            endDate: new Date(milestone.at.getTime() + 60 * 60 * 1000),
-            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-          });
-          createdIds.push(eventId);
+        const sobrietyDateLabel = formatIsoToDdMmYyyy(sobrietyDateIso);
+        const result = await openCalendarComposer({
+          title: nextMilestone.title,
+          notes: `Sobriety milestone from start date ${sobrietyDateLabel}.`,
+          startDate: nextMilestone.at,
+          endDate: new Date(nextMilestone.at.getTime() + 60 * 60 * 1000),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        });
+
+        if (!result.saved) {
+          if (result.action === "canceled") {
+            setMilestoneCalendarStatus("Sobriety milestone add canceled.");
+          } else if (result.errorCode === "permission") {
+            setMilestoneCalendarStatus(
+              "Calendar add requires the iOS system add flow or previously granted calendar access on this device.",
+            );
+          } else {
+            setMilestoneCalendarStatus("Could not open the Calendar add sheet.");
+          }
+          return;
         }
 
         await Promise.all([
-          AsyncStorage.setItem(sobrietyMilestoneEventIdsStorage, JSON.stringify(createdIds)),
+          AsyncStorage.removeItem(sobrietyMilestoneEventIdsStorage),
           AsyncStorage.setItem(sobrietyMilestoneSyncDateStorage, sobrietyDateIso),
         ]);
 
-        console.log("[calendar] sobriety milestones sync", {
+        console.log("[calendar] sobriety milestone add", {
           reason,
           sobrietyDateIso,
-          createdIds,
+          eventId: result.eventId,
+          title: nextMilestone.title,
         });
-        setMilestoneCalendarStatus(`Synced ${createdIds.length} sobriety milestone events.`);
+        setMilestoneCalendarStatus(`Next sobriety milestone added (${nextMilestone.title}).`);
       } catch {
-        setMilestoneCalendarStatus("Sobriety milestone calendar sync failed.");
+        setMilestoneCalendarStatus("Could not add the sobriety milestone to Calendar.");
       }
     },
     [
       sobrietyDateIso,
-      ensureCalendarPermission,
-      findWritableCalendarId,
+      openCalendarComposer,
       sobrietyMilestoneEventIdsStorage,
       sobrietyMilestoneSyncDateStorage,
     ],
@@ -4690,16 +4685,7 @@ export default function App() {
           );
         } else {
           const storedEventId = await AsyncStorage.getItem(sponsorCalendarEventStorage);
-          let eventExists = Boolean(storedEventId);
-          if (eventExists && Platform.OS === "ios" && storedEventId) {
-            try {
-              await Calendar.getEventAsync(storedEventId);
-            } catch {
-              eventExists = false;
-            }
-          }
-
-          if (eventExists) {
+          if (storedEventId) {
             setCalendarStatus("Calendar event unchanged.");
           } else {
             await syncSponsorCalendarEvent("save:event-recreate");
@@ -4939,40 +4925,8 @@ export default function App() {
         return false;
       }
 
-      const hasPermission = await ensureCalendarPermission();
-      if (!hasPermission) {
-        setAttendanceStatus("Calendar permission denied.");
-        Alert.alert("Calendar Permission Needed", "Enable Calendar access to add meeting events.", [
-          { text: "Not now", style: "cancel" },
-          {
-            text: "Open Settings",
-            onPress: () => {
-              void Linking.openSettings();
-            },
-          },
-        ]);
-        return false;
-      }
-
-      const calendarId = await findWritableCalendarId();
-      if (!calendarId) {
-        setAttendanceStatus("No writable calendar found.");
-        return false;
-      }
-
-      let existingEventId = sourceRecord.calendarEventId ?? null;
-      if (existingEventId) {
-        try {
-          await Calendar.getEventAsync(existingEventId);
-          setAttendanceStatus("Calendar event already linked to this attendance.");
-          return true;
-        } catch {
-          existingEventId = null;
-        }
-      }
-
       const window = getScheduledWindowForAttendance(sourceRecord);
-      const eventId = await Calendar.createEventAsync(calendarId, {
+      const result = await openCalendarComposer({
         title: `AA/NA Meeting - ${sourceRecord.meetingName}`,
         startDate: window.startDate,
         endDate:
@@ -4983,14 +4937,26 @@ export default function App() {
           sourceRecord.meetingAddress && sourceRecord.meetingAddress.trim().length > 0
             ? sourceRecord.meetingAddress
             : undefined,
-        notes: "Signature required",
+        notes: "Signature required. Added by Sober AI.",
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         alarms: [{ relativeOffset: -10 }],
       });
+      if (!result.saved) {
+        if (result.action === "canceled") {
+          setAttendanceStatus("Calendar add canceled.");
+        } else if (result.errorCode === "permission") {
+          setAttendanceStatus(
+            "Calendar add requires the iOS system add flow or previously granted calendar access on this device.",
+          );
+        } else {
+          setAttendanceStatus("Could not open the Calendar add sheet.");
+        }
+        return false;
+      }
 
       const next: AttendanceRecord = {
         ...sourceRecord,
-        calendarEventId: eventId,
+        calendarEventId: result.eventId ?? "dialog:created",
       };
       upsertAttendanceRecord(next);
       if (activeAttendanceRef.current?.id === next.id) {
@@ -5000,9 +4966,8 @@ export default function App() {
       return true;
     },
     [
-      ensureCalendarPermission,
-      findWritableCalendarId,
       getScheduledWindowForAttendance,
+      openCalendarComposer,
       upsertAttendanceRecord,
     ],
   );
@@ -6720,13 +6685,6 @@ export default function App() {
     }
     void AsyncStorage.setItem(ninetyDayGoalStorage, String(ninetyDayGoalTarget));
   }, [bootstrapped, ninetyDayGoalStorage, ninetyDayGoalTarget]);
-
-  useEffect(() => {
-    if (!bootstrapped) {
-      return;
-    }
-    void syncSobrietyMilestoneCalendarEvents("sobriety-date-change");
-  }, [bootstrapped, sobrietyDateIso, syncSobrietyMilestoneCalendarEvents]);
 
   useEffect(() => {
     if (!bootstrapped || !sponsorEnabledAtIso) {
@@ -9003,6 +8961,15 @@ export default function App() {
                       <View style={styles.buttonSpacer} />
                       <AppButton title="Reset goal" onPress={resetNinetyDayGoalFromSettings} />
                     </View>
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title="Add next milestone to calendar"
+                        onPress={() => {
+                          void syncSobrietyMilestoneCalendarEvents("manual-add");
+                        }}
+                        variant="secondary"
+                      />
+                    </View>
                   </GlassCard>
                   <GlassCard style={styles.card} strong>
                     <Text style={styles.sectionTitle}>Sponsor</Text>
@@ -9279,10 +9246,6 @@ export default function App() {
                     <Text style={styles.sectionMeta}>
                       Location: {locationPermission === "granted" ? "Enabled" : "Not enabled"}
                     </Text>
-                    <Text style={styles.sectionMeta}>
-                      Location Always:{" "}
-                      {locationAlwaysPermission === "granted" ? "Enabled" : "Not enabled"}
-                    </Text>
                     {locationPermission === "denied" ? (
                       <Text style={styles.errorText}>
                         Location disabled - enable to see meetings near you.
@@ -9293,7 +9256,7 @@ export default function App() {
                         Turn on Location Services to resolve meeting distance and geofence.
                       </Text>
                     ) : null}
-                    {locationAlwaysPermission === "denied" ? (
+                    {Platform.OS !== "ios" && locationAlwaysPermission === "denied" ? (
                       <Text style={styles.errorText}>
                         Always location denied - enable Always in device settings for auto-log.
                       </Text>
@@ -9323,16 +9286,21 @@ export default function App() {
                         }}
                         variant="secondary"
                       />
-                      <View style={styles.buttonSpacer} />
-                      <AppButton
-                        title="Always (recommended)"
-                        onPress={() => {
-                          void requestAlwaysLocationPermission();
-                        }}
-                        variant="secondary"
-                      />
+                      {Platform.OS !== "ios" ? (
+                        <>
+                          <View style={styles.buttonSpacer} />
+                          <AppButton
+                            title="Always (recommended)"
+                            onPress={() => {
+                              void requestAlwaysLocationPermission();
+                            }}
+                            variant="secondary"
+                          />
+                        </>
+                      ) : null}
                     </View>
-                    {locationPermission === "denied" || locationAlwaysPermission === "denied" ? (
+                    {locationPermission === "denied" ||
+                    (Platform.OS !== "ios" && locationAlwaysPermission === "denied") ? (
                       <View style={styles.buttonRow}>
                         <AppButton
                           title="Open settings"
