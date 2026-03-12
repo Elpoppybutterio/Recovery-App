@@ -191,6 +191,14 @@ function isAttentionStatus(status: ComplianceStatus): boolean {
   return status === "at_risk" || status === "violation" || status === "incomplete_setup";
 }
 
+function hasRequiredChoreProof(proofRequirements: string[]): boolean {
+  return proofRequirements.some((requirement) => requirement !== "NONE");
+}
+
+function formatProofRequirements(proofRequirements: string[]): string {
+  return proofRequirements.join(", ");
+}
+
 export function statusToneForComplianceStatus(
   status: ComplianceStatus,
 ): "green" | "yellow" | "red" | "gray" {
@@ -482,7 +490,7 @@ export function evaluateResidentCompliance({
       })
       .sort((a, b) => (toTimestamp(b.completedAt) ?? 0) - (toTimestamp(a.completedAt) ?? 0));
     const latest = completions[0] ?? null;
-    const proofRequired = rules.chores.proofRequirement !== "NONE";
+    const proofRequired = hasRequiredChoreProof(rules.chores.proofRequirement);
     const hasValidCompletion = latest ? !proofRequired || latest.proofProvided : false;
     const dueMs = dueAt?.getTime() ?? null;
     const violationMs = dueMs === null ? null : dueMs + rules.chores.gracePeriodMinutes * 60_000;
@@ -511,7 +519,7 @@ export function evaluateResidentCompliance({
           houseId,
           status: "compliant",
           statusReason: "Chore completed with the required proof.",
-          effectiveTargetValue: rules.chores.proofRequirement,
+          effectiveTargetValue: formatProofRequirements(rules.chores.proofRequirement),
           actualValue: latest?.completedAt ?? null,
           dueAt: dueAt.toISOString(),
           evaluatedAt: nowIso,
@@ -533,7 +541,7 @@ export function evaluateResidentCompliance({
             violationMs !== null && nowMs > violationMs
               ? "Chore was marked complete, but required proof is missing."
               : "Chore has been marked complete, but required proof is still missing.",
-          effectiveTargetValue: rules.chores.proofRequirement,
+          effectiveTargetValue: formatProofRequirements(rules.chores.proofRequirement),
           actualValue: latest.completedAt,
           dueAt: dueAt.toISOString(),
           evaluatedAt: nowIso,
@@ -558,7 +566,7 @@ export function evaluateResidentCompliance({
           evaluatedAt: nowIso,
           configSource: "house",
           metadata: {
-            proofRequirement: rules.chores.proofRequirement,
+            proofRequirement: formatProofRequirements(rules.chores.proofRequirement),
           },
         }),
       );
@@ -576,7 +584,7 @@ export function evaluateResidentCompliance({
           evaluatedAt: nowIso,
           configSource: "house",
           metadata: {
-            proofRequirement: rules.chores.proofRequirement,
+            proofRequirement: formatProofRequirements(rules.chores.proofRequirement),
           },
         }),
       );

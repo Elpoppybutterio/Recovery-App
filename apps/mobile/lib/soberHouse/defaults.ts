@@ -1,12 +1,19 @@
 import type {
   AlertPreference,
+  ChatMessage,
+  ChatMessageReceipt,
+  ChatParticipant,
+  ChatThread,
   ChoreCompletionRecord,
   CorrectiveAction,
   EvidenceItem,
   House,
+  HouseGroup,
   JobApplicationRecord,
   HouseRuleSet,
+  MonthlyReport,
   Organization,
+  SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
   StaffAssignment,
   Violation,
@@ -29,7 +36,9 @@ export function createEntityId(prefix: string): string {
 export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore {
   return {
     version: SOBER_HOUSE_SETTINGS_STORE_VERSION,
+    userAccessProfile: null,
     organization: null,
+    houseGroups: [],
     houses: [],
     staffAssignments: [],
     houseRuleSets: [],
@@ -44,6 +53,11 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     violations: [],
     correctiveActions: [],
     evidenceItems: [],
+    chatThreads: [],
+    chatParticipants: [],
+    chatMessages: [],
+    chatMessageReceipts: [],
+    monthlyReports: [],
     auditLogEntries: [],
   };
 }
@@ -62,6 +76,24 @@ export function createDefaultOrganization(now: string, id = createEntityId("org"
   };
 }
 
+export function createDefaultSoberHouseUserAccessProfile(
+  now: string,
+  linkedUserId: string,
+  id = createEntityId("user-access"),
+): SoberHouseUserAccessProfile {
+  return {
+    id,
+    linkedUserId,
+    role: "UNASSIGNED",
+    organizationId: null,
+    houseId: null,
+    houseGroupId: null,
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export function createDefaultHouse(
   now: string,
   organizationId: string | null,
@@ -70,6 +102,7 @@ export function createDefaultHouse(
   return {
     id,
     organizationId,
+    houseGroupId: null,
     name: "",
     address: "",
     phone: "",
@@ -78,6 +111,23 @@ export function createDefaultHouse(
     geofenceRadiusFeetDefault: DEFAULT_HOUSE_GEOFENCE_RADIUS_FEET,
     houseTypes: ["OTHER"],
     bedCount: 0,
+    notes: "",
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultHouseGroup(
+  now: string,
+  organizationId: string | null,
+  id = createEntityId("house-group"),
+): HouseGroup {
+  return {
+    id,
+    organizationId,
+    name: "",
+    houseIds: [],
     notes: "",
     status: "ACTIVE",
     createdAt: now,
@@ -120,7 +170,9 @@ export function createDefaultHouseRuleSet(
   return {
     id,
     organizationId,
+    scopeType: "HOUSE",
     houseId,
+    houseGroupId: null,
     name: "Default house rules",
     status: "ACTIVE",
     curfew: {
@@ -138,7 +190,7 @@ export function createDefaultHouseRuleSet(
       enabled: false,
       frequency: "WEEKLY",
       dueTime: "18:00",
-      proofRequirement: "CHECKLIST",
+      proofRequirement: ["CHECKLIST"],
       gracePeriodMinutes: 15,
       managerInstantNotificationEnabled: false,
     },
@@ -157,12 +209,21 @@ export function createDefaultHouseRuleSet(
       meetingsRequired: false,
       meetingsPerWeek: 0,
       allowedMeetingTypes: ["AA"],
-      proofMethod: "GEOFENCE",
+      proofMethod: "GEOFENCE_SIGNATURE",
     },
     sponsorContact: {
       enabled: false,
       contactsRequiredPerWeek: 0,
       proofType: "CALL_LOG",
+    },
+    oneOnOne: {
+      enabled: false,
+      defaultFrequency: "WEEKLY",
+      defaultWeekday: "TUE",
+      defaultTimeLocalHhmm: "15:00",
+      defaultLeadTimeMinutes: 30,
+      addToCalendarByDefault: true,
+      reminderEnabledByDefault: true,
     },
     createdAt: now,
     updatedAt: now,
@@ -209,7 +270,7 @@ export function createDefaultChoreCompletionRecord(
     organizationId,
     houseId,
     completedAt: now,
-    proofRequirement: "NONE",
+    proofRequirement: ["NONE"],
     proofProvided: false,
     proofReference: null,
     notes: "",
@@ -358,10 +419,132 @@ export function createDefaultEvidenceItem(
   };
 }
 
+export function createDefaultChatThread(
+  now: string,
+  createdBy: { id: string; name: string },
+  id = createEntityId("chat-thread"),
+): ChatThread {
+  return {
+    id,
+    threadType: "DIRECT",
+    moduleContext: "SOBER_HOUSE",
+    houseId: null,
+    residentId: null,
+    linkedViolationId: null,
+    createdBy,
+    createdAt: now,
+    lastMessageAt: null,
+    active: true,
+    metadata: {},
+  };
+}
+
+export function createDefaultChatParticipant(
+  now: string,
+  threadId: string,
+  userId: string,
+  id = createEntityId("chat-participant"),
+): ChatParticipant {
+  return {
+    id,
+    threadId,
+    userId,
+    roleInThread: "SYSTEM",
+    joinedAt: now,
+    active: true,
+    lastReadAt: null,
+    notificationPreferences: {},
+  };
+}
+
+export function createDefaultChatMessage(
+  now: string,
+  threadId: string,
+  senderUserId: string,
+  id = createEntityId("chat-message"),
+): ChatMessage {
+  return {
+    id,
+    threadId,
+    senderUserId,
+    senderRole: "SYSTEM",
+    messageType: "NORMAL",
+    bodyText: "",
+    createdAt: now,
+    editedAt: null,
+    active: true,
+    linkedViolationId: null,
+    linkedCorrectiveActionId: null,
+    metadata: {},
+  };
+}
+
+export function createDefaultChatMessageReceipt(
+  messageId: string,
+  userId: string,
+  id = createEntityId("chat-receipt"),
+): ChatMessageReceipt {
+  return {
+    id,
+    messageId,
+    userId,
+    deliveredAt: null,
+    readAt: null,
+    acknowledgedAt: null,
+  };
+}
+
+export function createDefaultMonthlyReport(
+  now: string,
+  houseId: string,
+  snapshot: MonthlyReport["summaryPayload"],
+  id = createEntityId("monthly-report"),
+): MonthlyReport {
+  return {
+    id,
+    type: snapshot.reportKind === "resident_monthly" ? "RESIDENT_MONTHLY" : "HOUSE_MONTHLY",
+    residentId: snapshot.reportKind === "resident_monthly" ? snapshot.resident.residentId : null,
+    houseId,
+    organizationId: null,
+    periodStart: now,
+    periodEnd: now,
+    generatedAt: now,
+    generatedBy: "USER",
+    generatedByUserId: null,
+    status: "GENERATED",
+    summaryPayload: snapshot,
+    reviewedAt: null,
+    reviewedBy: null,
+    approvedAt: null,
+    approvedBy: null,
+    lockedAt: null,
+    versionNumber: 1,
+    isCurrentVersion: true,
+    supersedesReportId: null,
+    exportRef: null,
+    exportHistory: [],
+    distributionMetadata: {
+      recipientType: null,
+      recipientTarget: null,
+      deliveryMethod: null,
+      sentStatus: null,
+      sentAt: null,
+    },
+    notes: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouseSettingsStore {
   return {
     version: store.version,
+    userAccessProfile: store.userAccessProfile ? { ...store.userAccessProfile } : null,
     organization: store.organization ? { ...store.organization } : null,
+    houseGroups: store.houseGroups.map((group) => ({
+      ...group,
+      houseIds: [...group.houseIds],
+    })),
     houses: store.houses.map((house) => ({ ...house, houseTypes: [...house.houseTypes] })),
     staffAssignments: store.staffAssignments.map((assignment) => ({
       ...assignment,
@@ -370,7 +553,10 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
     houseRuleSets: store.houseRuleSets.map((ruleSet) => ({
       ...ruleSet,
       curfew: { ...ruleSet.curfew },
-      chores: { ...ruleSet.chores },
+      chores: {
+        ...ruleSet.chores,
+        proofRequirement: [...ruleSet.chores.proofRequirement],
+      },
       employment: { ...ruleSet.employment },
       jobSearch: { ...ruleSet.jobSearch },
       meetings: {
@@ -378,13 +564,17 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
         allowedMeetingTypes: [...ruleSet.meetings.allowedMeetingTypes],
       },
       sponsorContact: { ...ruleSet.sponsorContact },
+      oneOnOne: { ...ruleSet.oneOnOne },
     })),
     alertPreferences: store.alertPreferences.map((preference) => ({ ...preference })),
     residentHousingProfile: store.residentHousingProfile
       ? { ...store.residentHousingProfile }
       : null,
     residentRequirementProfile: store.residentRequirementProfile
-      ? { ...store.residentRequirementProfile }
+      ? {
+          ...store.residentRequirementProfile,
+          oneOnOneNotificationIds: [...store.residentRequirementProfile.oneOnOneNotificationIds],
+        }
       : null,
     residentConsentRecord: store.residentConsentRecord
       ? {
@@ -402,7 +592,10 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
             : null,
         }
       : null,
-    choreCompletionRecords: store.choreCompletionRecords.map((record) => ({ ...record })),
+    choreCompletionRecords: store.choreCompletionRecords.map((record) => ({
+      ...record,
+      proofRequirement: [...record.proofRequirement],
+    })),
     jobApplicationRecords: store.jobApplicationRecords.map((record) => ({ ...record })),
     workVerificationRecords: store.workVerificationRecords.map((record) => ({ ...record })),
     violations: store.violations.map((violation) => ({
@@ -426,6 +619,33 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
       ...item,
       createdBy: { ...item.createdBy },
       metadata: { ...item.metadata },
+    })),
+    chatThreads: store.chatThreads.map((thread) => ({
+      ...thread,
+      createdBy: { ...thread.createdBy },
+      metadata: { ...thread.metadata },
+    })),
+    chatParticipants: store.chatParticipants.map((participant) => ({
+      ...participant,
+      notificationPreferences: { ...participant.notificationPreferences },
+    })),
+    chatMessages: store.chatMessages.map((message) => ({
+      ...message,
+      metadata: { ...message.metadata },
+    })),
+    chatMessageReceipts: store.chatMessageReceipts.map((receipt) => ({ ...receipt })),
+    monthlyReports: store.monthlyReports.map((report) => ({
+      ...report,
+      summaryPayload: JSON.parse(
+        JSON.stringify(report.summaryPayload),
+      ) as MonthlyReport["summaryPayload"],
+      reviewedBy: report.reviewedBy ? { ...report.reviewedBy } : null,
+      approvedBy: report.approvedBy ? { ...report.approvedBy } : null,
+      exportHistory: report.exportHistory.map((entry) => ({
+        ...entry,
+        exportedBy: { ...entry.exportedBy },
+      })),
+      distributionMetadata: { ...report.distributionMetadata },
     })),
     auditLogEntries: store.auditLogEntries.map((entry) => ({
       ...entry,

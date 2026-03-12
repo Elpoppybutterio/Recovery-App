@@ -5,6 +5,8 @@ import { AppButton } from "../lib/ui/AppButton";
 import { SoberHouseResidentManager } from "../components/SoberHouseResidentManager";
 import { SoberHouseComplianceSection } from "../components/SoberHouseComplianceSection";
 import { SoberHouseInterventionSection } from "../components/SoberHouseInterventionSection";
+import { SoberHouseChatSection } from "../components/SoberHouseChatSection";
+import { SoberHouseReportsSection } from "../components/SoberHouseReportsSection";
 import { colors, radius, spacing, typography } from "../lib/theme/tokens";
 import {
   ALERT_DELIVERY_METHOD_OPTIONS,
@@ -21,34 +23,44 @@ import {
   type AlertScope,
   type AuditActor,
   type House,
+  type HouseGroup,
   type HouseRuleSet,
+  type HouseRuleScopeType,
   type HouseType,
   type MeetingType,
   type Organization,
+  type SoberHouseAccessRole,
   type SoberHouseSettingsStore,
+  type SoberHouseUserAccessProfile,
   type StaffAssignment,
   type StaffRole,
 } from "../lib/soberHouse/types";
 import {
   createDefaultAlertPreference,
   createDefaultHouse,
+  createDefaultHouseGroup,
   createDefaultHouseRuleSet,
   createDefaultStaffAssignment,
 } from "../lib/soberHouse/defaults";
 import {
   setAlertPreferenceStatus,
+  setHouseGroupStatus,
   setHouseRuleSetStatus,
   setHouseStatus,
   setStaffAssignmentStatus,
   upsertAlertPreference,
   upsertHouse,
+  upsertHouseGroup,
   upsertHouseRuleSet,
   upsertOrganization,
   upsertStaffAssignment,
+  upsertUserAccessProfile,
 } from "../lib/soberHouse/mutations";
 import {
-  getActiveHouses,
-  getRuleSetForHouse,
+  getHouseGroupById,
+  getRuleSetForScope,
+  getUserAccessProfile,
+  isResidentAccess,
   getStaffAssignmentById,
 } from "../lib/soberHouse/selectors";
 import {
@@ -79,8 +91,15 @@ type OrganizationDraft = {
   isActive: boolean;
 };
 
+type AccessDraft = {
+  id?: string;
+  role: SoberHouseAccessRole;
+  houseId: string | null;
+};
+
 type HouseDraft = {
   id?: string;
+  houseGroupId: string | null;
   name: string;
   address: string;
   phone: string;
@@ -89,6 +108,14 @@ type HouseDraft = {
   geofenceRadiusFeetDefault: string;
   houseTypes: HouseType[];
   bedCount: string;
+  notes: string;
+  isActive: boolean;
+};
+
+type HouseGroupDraft = {
+  id?: string;
+  name: string;
+  houseIds: string[];
   notes: string;
   isActive: boolean;
 };
@@ -112,7 +139,9 @@ type StaffAssignmentDraft = {
 
 type HouseRuleSetDraft = {
   id?: string;
-  houseId: string;
+  scopeType: HouseRuleScopeType;
+  houseId: string | null;
+  houseGroupId: string | null;
   name: string;
   isActive: boolean;
   curfewEnabled: boolean;
@@ -144,6 +173,11 @@ type HouseRuleSetDraft = {
   sponsorContactEnabled: boolean;
   sponsorContactsRequiredPerWeek: string;
   sponsorProofType: HouseRuleSet["sponsorContact"]["proofType"];
+};
+
+type RuleScopeSelection = {
+  scopeType: HouseRuleScopeType;
+  scopeId: string | null;
 };
 
 type AlertPreferenceDraft = {
@@ -185,11 +219,20 @@ function createOrganizationDraft(value: Organization | null): OrganizationDraft 
   };
 }
 
+function createAccessDraft(value: SoberHouseUserAccessProfile | null): AccessDraft {
+  return {
+    id: value?.id,
+    role: value?.role ?? "UNASSIGNED",
+    houseId: value?.houseId ?? null,
+  };
+}
+
 function createHouseDraft(value: House | null): HouseDraft {
   if (!value) {
     const base = createDefaultHouse(new Date().toISOString(), null);
     return {
       id: base.id,
+      houseGroupId: null,
       name: "",
       address: "",
       phone: "",
@@ -205,6 +248,7 @@ function createHouseDraft(value: House | null): HouseDraft {
 
   return {
     id: value.id,
+    houseGroupId: value.houseGroupId,
     name: value.name,
     address: value.address,
     phone: value.phone,
@@ -213,6 +257,27 @@ function createHouseDraft(value: House | null): HouseDraft {
     geofenceRadiusFeetDefault: String(value.geofenceRadiusFeetDefault),
     houseTypes: [...value.houseTypes],
     bedCount: String(value.bedCount),
+    notes: value.notes,
+    isActive: value.status === "ACTIVE",
+  };
+}
+
+function createHouseGroupDraft(value: HouseGroup | null): HouseGroupDraft {
+  if (!value) {
+    const base = createDefaultHouseGroup(new Date().toISOString(), null);
+    return {
+      id: base.id,
+      name: "",
+      houseIds: [],
+      notes: "",
+      isActive: true,
+    };
+  }
+
+  return {
+    id: value.id,
+    name: value.name,
+    houseIds: [...value.houseIds],
     notes: value.notes,
     isActive: value.status === "ACTIVE",
   };
@@ -259,29 +324,33 @@ function createStaffAssignmentDraft(value: StaffAssignment | null): StaffAssignm
 
 function createHouseRuleSetDraft(
   value: HouseRuleSet | null,
-  houseId: string | null,
+  scopeType: HouseRuleScopeType,
+  scopeId: string | null,
 ): HouseRuleSetDraft {
+  const houseId = scopeType === "HOUSE" ? scopeId : null;
   const base =
     value ?? (houseId ? createDefaultHouseRuleSet(new Date().toISOString(), houseId, null) : null);
 
   return {
     id: base?.id,
-    houseId: base?.houseId ?? houseId ?? "",
+    scopeType,
+    houseId: scopeType === "HOUSE" ? (base?.houseId ?? houseId) : null,
+    houseGroupId: scopeType === "HOUSE_GROUP" ? (base?.houseGroupId ?? scopeId) : null,
     name: base?.name ?? "Default house rules",
     isActive: base?.status !== "INACTIVE",
     curfewEnabled: base?.curfew.enabled ?? false,
-    weekdayCurfew: base?.curfew.weekdayCurfew ?? "22:00",
-    fridayCurfew: base?.curfew.fridayCurfew ?? "23:00",
-    saturdayCurfew: base?.curfew.saturdayCurfew ?? "23:00",
-    sundayCurfew: base?.curfew.sundayCurfew ?? "22:00",
+    weekdayCurfew: formatTwelveHourTime(base?.curfew.weekdayCurfew ?? "22:00"),
+    fridayCurfew: formatTwelveHourTime(base?.curfew.fridayCurfew ?? "23:00"),
+    saturdayCurfew: formatTwelveHourTime(base?.curfew.saturdayCurfew ?? "23:00"),
+    sundayCurfew: formatTwelveHourTime(base?.curfew.sundayCurfew ?? "22:00"),
     curfewGracePeriodMinutes: String(base?.curfew.gracePeriodMinutes ?? 15),
     preViolationAlertEnabled: base?.curfew.preViolationAlertEnabled ?? false,
     preViolationLeadTimeMinutes: String(base?.curfew.preViolationLeadTimeMinutes ?? 15),
     curfewAlertBasis: base?.curfew.alertBasis ?? "CLOCK_ONLY",
     choresEnabled: base?.chores.enabled ?? false,
     choresFrequency: base?.chores.frequency ?? "WEEKLY",
-    choresDueTime: base?.chores.dueTime ?? "18:00",
-    choresProofRequirement: base?.chores.proofRequirement ?? "CHECKLIST",
+    choresDueTime: formatTwelveHourTime(base?.chores.dueTime ?? "18:00"),
+    choresProofRequirement: [...(base?.chores.proofRequirement ?? ["CHECKLIST"])],
     choresGracePeriodMinutes: String(base?.chores.gracePeriodMinutes ?? 15),
     choresManagerInstantNotificationEnabled:
       base?.chores.managerInstantNotificationEnabled ?? false,
@@ -295,7 +364,7 @@ function createHouseRuleSetDraft(
     meetingsRequired: base?.meetings.meetingsRequired ?? false,
     meetingsPerWeek: String(base?.meetings.meetingsPerWeek ?? 0),
     allowedMeetingTypes: [...(base?.meetings.allowedMeetingTypes ?? ["AA"])],
-    meetingsProofMethod: base?.meetings.proofMethod ?? "GEOFENCE",
+    meetingsProofMethod: base?.meetings.proofMethod ?? "GEOFENCE_SIGNATURE",
     sponsorContactEnabled: base?.sponsorContact.enabled ?? false,
     sponsorContactsRequiredPerWeek: String(base?.sponsorContact.contactsRequiredPerWeek ?? 0),
     sponsorProofType: base?.sponsorContact.proofType ?? "CALL_LOG",
@@ -357,6 +426,48 @@ function isValidHhmm(value: string): boolean {
   return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59;
 }
 
+function formatTwelveHourTime(value: string): string {
+  if (!isValidHhmm(value)) {
+    return value;
+  }
+  const [hoursText, minutesText] = value.split(":");
+  const hours = Number(hoursText);
+  const meridiem = hours >= 12 ? "PM" : "AM";
+  const normalizedHours = hours % 12 === 0 ? 12 : hours % 12;
+  return `${String(normalizedHours).padStart(2, "0")}:${minutesText} ${meridiem}`;
+}
+
+function parseTwelveHourTime(value: string): string | null {
+  const trimmed = value.trim().toUpperCase();
+  const match = /^(\d{1,2}):(\d{2})\s*([AP]M)$/.exec(trimmed);
+  if (!match) {
+    return null;
+  }
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const meridiem = match[3];
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || hours < 1 || hours > 12) {
+    return null;
+  }
+  if (minutes < 0 || minutes > 59) {
+    return null;
+  }
+  const normalizedHours =
+    meridiem === "AM" ? (hours === 12 ? 0 : hours) : hours === 12 ? 12 : hours + 12;
+  return `${String(normalizedHours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function formatProofRequirementList(values: HouseRuleSet["chores"]["proofRequirement"]): string {
+  return (
+    values
+      .map(
+        (value) =>
+          PROOF_REQUIREMENT_OPTIONS.find((option) => option.value === value)?.label ?? value,
+      )
+      .join(", ") || "None"
+  );
+}
+
 function parseNonNegativeInt(value: string, fallback = 0): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -393,6 +504,32 @@ function labelForHouseTypes(values: HouseType[]): string {
 
 function labelForRole(role: StaffRole): string {
   return STAFF_ROLE_OPTIONS.find((option) => option.value === role)?.label ?? role;
+}
+
+function labelForRuleScope(scopeType: HouseRuleScopeType): string {
+  if (scopeType === "ORGANIZATION") {
+    return "Organization defaults";
+  }
+  if (scopeType === "HOUSE_GROUP") {
+    return "House group";
+  }
+  return "House";
+}
+
+function labelForAccessRole(role: SoberHouseAccessRole): string {
+  if (role === "OWNER_OPERATOR") {
+    return "Owner / operator";
+  }
+  if (role === "HOUSE_RESIDENT") {
+    return "Resident";
+  }
+  if (role === "DRUG_COURT_PARTICIPANT") {
+    return "Drug court";
+  }
+  if (role === "PROBATION_PAROLE_PARTICIPANT") {
+    return "Probation / parole";
+  }
+  return "Not linked";
 }
 
 function formatAuditValue(value: string | null): string {
@@ -481,18 +618,33 @@ export function SoberHouseSettingsScreen({
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [chatIntent, setChatIntent] = useState<{
+    violationId: string;
+    correctiveActionId?: string | null;
+  } | null>(null);
   const [organizationDraft, setOrganizationDraft] = useState<OrganizationDraft>(
     createOrganizationDraft(null),
   );
+  const [accessDraft, setAccessDraft] = useState<AccessDraft>(createAccessDraft(null));
+  const [isHouseGroupEditorVisible, setIsHouseGroupEditorVisible] = useState(false);
+  const [editingHouseGroupId, setEditingHouseGroupId] = useState<string | null>(null);
+  const [houseGroupDraft, setHouseGroupDraft] = useState<HouseGroupDraft>(
+    createHouseGroupDraft(null),
+  );
+  const [selectedHouseIds, setSelectedHouseIds] = useState<string[]>([]);
+  const [isHouseEditorVisible, setIsHouseEditorVisible] = useState(false);
   const [editingHouseId, setEditingHouseId] = useState<string | null>(null);
   const [houseDraft, setHouseDraft] = useState<HouseDraft>(createHouseDraft(null));
   const [editingStaffAssignmentId, setEditingStaffAssignmentId] = useState<string | null>(null);
   const [staffDraft, setStaffDraft] = useState<StaffAssignmentDraft>(
     createStaffAssignmentDraft(null),
   );
-  const [selectedRuleHouseId, setSelectedRuleHouseId] = useState<string | null>(null);
+  const [selectedRuleScope, setSelectedRuleScope] = useState<RuleScopeSelection>({
+    scopeType: "ORGANIZATION",
+    scopeId: null,
+  });
   const [ruleDraft, setRuleDraft] = useState<HouseRuleSetDraft>(
-    createHouseRuleSetDraft(null, null),
+    createHouseRuleSetDraft(null, "ORGANIZATION", null),
   );
   const [editingAlertPreferenceId, setEditingAlertPreferenceId] = useState<string | null>(null);
   const [alertDraft, setAlertDraft] = useState<AlertPreferenceDraft>(
@@ -510,14 +662,20 @@ export function SoberHouseSettingsScreen({
       }
 
       setStore(nextStore);
+      setAccessDraft(createAccessDraft(nextStore.userAccessProfile));
       setOrganizationDraft(createOrganizationDraft(nextStore.organization));
+      setHouseGroupDraft(createHouseGroupDraft(null));
       setHouseDraft(createHouseDraft(null));
       setStaffDraft(createStaffAssignmentDraft(null));
       setAlertDraft(createAlertPreferenceDraft(null));
+      setIsHouseGroupEditorVisible(false);
+      setEditingHouseGroupId(null);
+      setIsHouseEditorVisible(false);
       setEditingHouseId(null);
       setEditingStaffAssignmentId(null);
       setEditingAlertPreferenceId(null);
-      setSelectedRuleHouseId(getActiveHouses(nextStore)[0]?.id ?? nextStore.houses[0]?.id ?? null);
+      setSelectedHouseIds([]);
+      setSelectedRuleScope({ scopeType: "ORGANIZATION", scopeId: null });
       setLoading(false);
     }
 
@@ -532,26 +690,41 @@ export function SoberHouseSettingsScreen({
       return;
     }
 
-    const availableHouseIds = new Set(store.houses.map((house) => house.id));
-    if (selectedRuleHouseId && availableHouseIds.has(selectedRuleHouseId)) {
-      return;
-    }
-    setSelectedRuleHouseId(getActiveHouses(store)[0]?.id ?? store.houses[0]?.id ?? null);
-  }, [selectedRuleHouseId, store]);
+    setSelectedHouseIds((current) =>
+      current.filter((houseId) => store.houses.some((house) => house.id === houseId)),
+    );
+  }, [store]);
 
   useEffect(() => {
-    if (!store || !selectedRuleHouseId) {
-      setRuleDraft(createHouseRuleSetDraft(null, selectedRuleHouseId));
+    if (!store) {
+      return;
+    }
+
+    if (
+      selectedRuleScope.scopeType === "HOUSE" &&
+      selectedRuleScope.scopeId &&
+      !store.houses.some((house) => house.id === selectedRuleScope.scopeId)
+    ) {
+      setSelectedRuleScope({ scopeType: "ORGANIZATION", scopeId: null });
+      return;
+    }
+    if (
+      selectedRuleScope.scopeType === "HOUSE_GROUP" &&
+      selectedRuleScope.scopeId &&
+      !store.houseGroups.some((group) => group.id === selectedRuleScope.scopeId)
+    ) {
+      setSelectedRuleScope({ scopeType: "ORGANIZATION", scopeId: null });
       return;
     }
 
     setRuleDraft(
       createHouseRuleSetDraft(
-        getRuleSetForHouse(store, selectedRuleHouseId, new Date().toISOString()),
-        selectedRuleHouseId,
+        getRuleSetForScope(store, selectedRuleScope.scopeType, selectedRuleScope.scopeId),
+        selectedRuleScope.scopeType,
+        selectedRuleScope.scopeId,
       ),
     );
-  }, [selectedRuleHouseId, store]);
+  }, [selectedRuleScope, store]);
 
   const persistStore = useCallback(
     async (
@@ -611,6 +784,71 @@ export function SoberHouseSettingsScreen({
     setOrganizationDraft(createOrganizationDraft(result.store.organization));
   }, [actor, organizationDraft, persistStore, store]);
 
+  const saveAccessProfile = useCallback(async () => {
+    if (!store) {
+      return;
+    }
+    if (accessDraft.role === "HOUSE_RESIDENT" && !accessDraft.houseId) {
+      setStatusMessage("Select the sober house you live in.");
+      return;
+    }
+    const timestamp = new Date().toISOString();
+    const result = upsertUserAccessProfile(
+      store,
+      actor,
+      {
+        id: accessDraft.id,
+        linkedUserId: userId,
+        role: accessDraft.role,
+        organizationId: store.organization?.id ?? null,
+        houseId: accessDraft.role === "HOUSE_RESIDENT" ? accessDraft.houseId : null,
+        houseGroupId:
+          accessDraft.role === "HOUSE_RESIDENT" && accessDraft.houseId
+            ? (store.houses.find((house) => house.id === accessDraft.houseId)?.houseGroupId ?? null)
+            : null,
+        status: "ACTIVE",
+      },
+      timestamp,
+    );
+    await persistStore(
+      result.store,
+      `Access profile saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+    );
+    setAccessDraft(createAccessDraft(result.store.userAccessProfile));
+  }, [accessDraft, actor, persistStore, store, userId]);
+
+  const saveHouseGroup = useCallback(async () => {
+    if (!store) {
+      return;
+    }
+    if (houseGroupDraft.name.trim().length === 0) {
+      setStatusMessage("House group name is required.");
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    const result = upsertHouseGroup(
+      store,
+      actor,
+      {
+        id: editingHouseGroupId ?? houseGroupDraft.id,
+        name: houseGroupDraft.name.trim(),
+        houseIds: [...houseGroupDraft.houseIds],
+        notes: houseGroupDraft.notes.trim(),
+        status: houseGroupDraft.isActive ? "ACTIVE" : "INACTIVE",
+      },
+      timestamp,
+    );
+
+    await persistStore(
+      result.store,
+      `House group saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+    );
+    setHouseGroupDraft(createHouseGroupDraft(null));
+    setEditingHouseGroupId(null);
+    setIsHouseGroupEditorVisible(false);
+  }, [actor, editingHouseGroupId, houseGroupDraft, persistStore, store]);
+
   const saveHouse = useCallback(async () => {
     if (!store) {
       return;
@@ -640,6 +878,7 @@ export function SoberHouseSettingsScreen({
       actor,
       {
         id: editingHouseId ?? houseDraft.id,
+        houseGroupId: houseDraft.houseGroupId,
         name: houseDraft.name.trim(),
         address: houseDraft.address.trim(),
         phone: houseDraft.phone.trim(),
@@ -660,10 +899,8 @@ export function SoberHouseSettingsScreen({
     );
     setHouseDraft(createHouseDraft(null));
     setEditingHouseId(null);
-    if (!selectedRuleHouseId) {
-      setSelectedRuleHouseId(result.store.houses[0]?.id ?? null);
-    }
-  }, [actor, editingHouseId, houseDraft, persistStore, selectedRuleHouseId, store]);
+    setIsHouseEditorVisible(false);
+  }, [actor, editingHouseId, houseDraft, persistStore, store]);
 
   const saveStaffAssignment = useCallback(async () => {
     if (!store) {
@@ -714,24 +951,31 @@ export function SoberHouseSettingsScreen({
   }, [actor, editingStaffAssignmentId, persistStore, staffDraft, store]);
 
   const saveRuleSet = useCallback(async () => {
-    if (!store || !selectedRuleHouseId) {
-      setStatusMessage("Create a house before saving rules.");
+    if (!store) {
       return;
     }
-    if (!isValidHhmm(ruleDraft.weekdayCurfew)) {
-      setStatusMessage("Weekday curfew must be HH:MM.");
+    if (selectedRuleScope.scopeType !== "ORGANIZATION" && !selectedRuleScope.scopeId) {
+      setStatusMessage(
+        `Select a ${labelForRuleScope(selectedRuleScope.scopeType).toLowerCase()} before saving rules.`,
+      );
       return;
     }
-    if (
-      !isValidHhmm(ruleDraft.fridayCurfew) ||
-      !isValidHhmm(ruleDraft.saturdayCurfew) ||
-      !isValidHhmm(ruleDraft.sundayCurfew)
-    ) {
-      setStatusMessage("All curfew times must be HH:MM.");
+    const weekdayCurfew = parseTwelveHourTime(ruleDraft.weekdayCurfew);
+    const fridayCurfew = parseTwelveHourTime(ruleDraft.fridayCurfew);
+    const saturdayCurfew = parseTwelveHourTime(ruleDraft.saturdayCurfew);
+    const sundayCurfew = parseTwelveHourTime(ruleDraft.sundayCurfew);
+    const choresDueTime = parseTwelveHourTime(ruleDraft.choresDueTime);
+
+    if (!weekdayCurfew) {
+      setStatusMessage("Weekday curfew must use 12-hour time like 10:00 PM.");
       return;
     }
-    if (!isValidHhmm(ruleDraft.choresDueTime)) {
-      setStatusMessage("Chore due time must be HH:MM.");
+    if (!fridayCurfew || !saturdayCurfew || !sundayCurfew) {
+      setStatusMessage("All curfew times must use 12-hour format with AM or PM.");
+      return;
+    }
+    if (!choresDueTime) {
+      setStatusMessage("Chore due time must use 12-hour format with AM or PM.");
       return;
     }
 
@@ -741,15 +985,18 @@ export function SoberHouseSettingsScreen({
       actor,
       {
         id: ruleDraft.id,
-        houseId: selectedRuleHouseId,
+        scopeType: selectedRuleScope.scopeType,
+        houseId: selectedRuleScope.scopeType === "HOUSE" ? selectedRuleScope.scopeId : null,
+        houseGroupId:
+          selectedRuleScope.scopeType === "HOUSE_GROUP" ? selectedRuleScope.scopeId : null,
         name: ruleDraft.name.trim() || "Default house rules",
         status: ruleDraft.isActive ? "ACTIVE" : "INACTIVE",
         curfew: {
           enabled: ruleDraft.curfewEnabled,
-          weekdayCurfew: ruleDraft.weekdayCurfew,
-          fridayCurfew: ruleDraft.fridayCurfew,
-          saturdayCurfew: ruleDraft.saturdayCurfew,
-          sundayCurfew: ruleDraft.sundayCurfew,
+          weekdayCurfew,
+          fridayCurfew,
+          saturdayCurfew,
+          sundayCurfew,
           gracePeriodMinutes: parseNonNegativeInt(ruleDraft.curfewGracePeriodMinutes, 15),
           preViolationAlertEnabled: ruleDraft.preViolationAlertEnabled,
           preViolationLeadTimeMinutes: parseNonNegativeInt(
@@ -761,8 +1008,11 @@ export function SoberHouseSettingsScreen({
         chores: {
           enabled: ruleDraft.choresEnabled,
           frequency: ruleDraft.choresFrequency,
-          dueTime: ruleDraft.choresDueTime,
-          proofRequirement: ruleDraft.choresProofRequirement,
+          dueTime: choresDueTime,
+          proofRequirement:
+            ruleDraft.choresProofRequirement.length > 0
+              ? ruleDraft.choresProofRequirement
+              : ["NONE"],
           gracePeriodMinutes: parseNonNegativeInt(ruleDraft.choresGracePeriodMinutes, 15),
           managerInstantNotificationEnabled: ruleDraft.choresManagerInstantNotificationEnabled,
         },
@@ -801,9 +1051,9 @@ export function SoberHouseSettingsScreen({
 
     await persistStore(
       result.store,
-      `House rules saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+      `Rules saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
     );
-  }, [actor, persistStore, ruleDraft, selectedRuleHouseId, store]);
+  }, [actor, persistStore, ruleDraft, selectedRuleScope, store]);
 
   const saveAlertPreference = useCallback(async () => {
     if (!store) {
@@ -873,9 +1123,30 @@ export function SoberHouseSettingsScreen({
       result.store,
       `Alert preference saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
     );
-    setAlertDraft(createAlertPreferenceDraft(null));
-    setEditingAlertPreferenceId(null);
+    const savedId = editingAlertPreferenceId ?? alertDraft.id ?? null;
+    const savedPreference =
+      savedId !== null
+        ? (result.store.alertPreferences.find((preference) => preference.id === savedId) ?? null)
+        : null;
+    setAlertDraft(createAlertPreferenceDraft(savedPreference));
+    setEditingAlertPreferenceId(savedPreference?.id ?? null);
   }, [actor, alertDraft, editingAlertPreferenceId, persistStore, store]);
+
+  const userAccessProfile = store ? getUserAccessProfile(store) : null;
+  const residentMode = store ? isResidentAccess(store) : false;
+  const residentAssignedHouse =
+    store && userAccessProfile?.houseId
+      ? (store.houses.find((house) => house.id === userAccessProfile.houseId) ?? null)
+      : null;
+  const residentAssignedRuleSet =
+    store && residentAssignedHouse
+      ? (getRuleSetForScope(store, "HOUSE", residentAssignedHouse.id) ??
+        (residentAssignedHouse.houseGroupId
+          ? getRuleSetForScope(store, "HOUSE_GROUP", residentAssignedHouse.houseGroupId)
+          : null) ??
+        getRuleSetForScope(store, "ORGANIZATION", null))
+      : null;
+  const showAdminControls = !residentMode;
 
   if (loading || !store) {
     return (
@@ -912,6 +1183,14 @@ export function SoberHouseSettingsScreen({
             <Text style={styles.summaryLabel}>Violations</Text>
           </View>
           <View style={styles.summaryPill}>
+            <Text style={styles.summaryValue}>{store.chatThreads.length}</Text>
+            <Text style={styles.summaryLabel}>Threads</Text>
+          </View>
+          <View style={styles.summaryPill}>
+            <Text style={styles.summaryValue}>{store.monthlyReports.length}</Text>
+            <Text style={styles.summaryLabel}>Reports</Text>
+          </View>
+          <View style={styles.summaryPill}>
             <Text style={styles.summaryValue}>{store.auditLogEntries.length}</Text>
             <Text style={styles.summaryLabel}>Audit</Text>
           </View>
@@ -919,1190 +1198,1745 @@ export function SoberHouseSettingsScreen({
         <SaveStatus message={statusMessage} />
       </GlassCard>
 
-      <SoberHouseResidentManager
-        store={store}
-        actor={actor}
-        linkedUserId={userId}
-        isSaving={isSaving}
-        onPersist={persistStore}
-      />
-
-      <SoberHouseComplianceSection
-        userId={userId}
-        store={store}
-        actor={actor}
-        isSaving={isSaving}
-        onPersist={persistStore}
-      />
-
-      <SoberHouseInterventionSection
-        userId={userId}
-        store={store}
-        actor={actor}
-        isSaving={isSaving}
-        onPersist={persistStore}
-      />
-
-      <GlassCard style={styles.card} strong>
-        <SectionHeader
-          title="Organization"
-          meta="Organization profile and primary contact settings."
-        />
-        <FieldLabel>Organization name</FieldLabel>
-        <TextInput
-          style={styles.input}
-          value={organizationDraft.name}
-          onChangeText={(value) => setOrganizationDraft((current) => ({ ...current, name: value }))}
-          placeholder="Bright Path Recovery Homes"
-          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-        />
-        <FieldLabel>Primary contact name</FieldLabel>
-        <TextInput
-          style={styles.input}
-          value={organizationDraft.primaryContactName}
-          onChangeText={(value) =>
-            setOrganizationDraft((current) => ({ ...current, primaryContactName: value }))
-          }
-          placeholder="Primary contact name"
-          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-        />
-        <View style={styles.twoColumnRow}>
-          <View style={styles.column}>
-            <FieldLabel>Primary phone</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={organizationDraft.primaryPhone}
-              onChangeText={(value) =>
-                setOrganizationDraft((current) => ({ ...current, primaryPhone: value }))
-              }
-              keyboardType="phone-pad"
-              placeholder="(555) 555-1212"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-          <View style={styles.column}>
-            <FieldLabel>Primary email</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={organizationDraft.primaryEmail}
-              onChangeText={(value) =>
-                setOrganizationDraft((current) => ({ ...current, primaryEmail: value }))
-              }
-              autoCapitalize="none"
-              placeholder="ops@example.org"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-        </View>
-        <FieldLabel>Notes</FieldLabel>
-        <TextInput
-          style={[styles.input, styles.multilineInput]}
-          value={organizationDraft.notes}
-          onChangeText={(value) =>
-            setOrganizationDraft((current) => ({ ...current, notes: value }))
-          }
-          placeholder="Internal notes for sober-house operations."
-          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-          multiline
-        />
-        <ToggleRow
-          label="Organization active"
-          value={organizationDraft.isActive}
-          onValueChange={(value) =>
-            setOrganizationDraft((current) => ({ ...current, isActive: value }))
-          }
-        />
-        <View style={styles.buttonRow}>
-          <AppButton
-            title={isSaving ? "Saving..." : "Save organization"}
-            onPress={() => void saveOrganization()}
-            disabled={isSaving}
+      {showAdminControls ? (
+        <GlassCard style={styles.card} strong>
+          <SectionHeader
+            title="Access & Scope"
+            meta="Choose whether this user is configuring sober-house defaults or living under inherited house policy."
           />
-        </View>
-      </GlassCard>
-
-      <GlassCard style={styles.card} strong>
-        <SectionHeader
-          title="Houses"
-          meta="Multi-house roster, locations, geofence defaults, and activation state."
-          action={
-            <AppButton
-              title="New house"
-              variant="secondary"
-              onPress={() => {
-                setEditingHouseId(null);
-                setHouseDraft(createHouseDraft(null));
-              }}
-            />
-          }
-        />
-        <View style={styles.listWrap}>
-          {store.houses.length === 0 ? (
-            <Text style={styles.sectionMeta}>No houses configured yet.</Text>
-          ) : (
-            store.houses.map((house) => (
-              <View key={house.id} style={styles.entityCard}>
-                <Text style={styles.entityTitle}>{house.name}</Text>
-                <Text style={styles.entityMeta}>{house.address}</Text>
-                <Text style={styles.entityMeta}>
-                  {labelForHouseTypes(house.houseTypes)} • Beds: {house.bedCount} • Radius:{" "}
-                  {house.geofenceRadiusFeetDefault} ft
-                </Text>
-                <Text style={styles.entityMeta}>
-                  Geofence center:{" "}
-                  {house.geofenceCenterLat !== null && house.geofenceCenterLng !== null
-                    ? `${house.geofenceCenterLat.toFixed(5)}, ${house.geofenceCenterLng.toFixed(5)}`
-                    : "Missing"}
-                </Text>
-                <Text style={styles.entityMeta}>
-                  {house.status === "ACTIVE" ? "Active" : "Inactive"}
-                </Text>
-                <View style={styles.buttonRow}>
-                  <AppButton
-                    title="Edit"
-                    variant="secondary"
-                    onPress={() => {
-                      setEditingHouseId(house.id);
-                      setHouseDraft(createHouseDraft(house));
-                    }}
-                  />
-                  <View style={styles.buttonSpacer} />
-                  <AppButton
-                    title={house.status === "ACTIVE" ? "Deactivate" : "Reactivate"}
-                    variant={house.status === "ACTIVE" ? "danger" : "secondary"}
-                    onPress={() => {
-                      const timestamp = new Date().toISOString();
-                      const result = setHouseStatus(
-                        store,
-                        actor,
-                        house.id,
-                        house.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
-                        timestamp,
-                      );
-                      void persistStore(
-                        result.store,
-                        `House status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
-                      );
-                    }}
-                  />
-                </View>
-              </View>
-            ))
-          )}
-        </View>
-        <FieldLabel>House name</FieldLabel>
-        <TextInput
-          style={styles.input}
-          value={houseDraft.name}
-          onChangeText={(value) => setHouseDraft((current) => ({ ...current, name: value }))}
-          placeholder="Maple House"
-          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-        />
-        <FieldLabel>House address</FieldLabel>
-        <TextInput
-          style={styles.input}
-          value={houseDraft.address}
-          onChangeText={(value) => setHouseDraft((current) => ({ ...current, address: value }))}
-          placeholder="123 Main St, Billings, MT"
-          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-        />
-        <View style={styles.twoColumnRow}>
-          <View style={styles.column}>
-            <FieldLabel>House phone</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={houseDraft.phone}
-              onChangeText={(value) => setHouseDraft((current) => ({ ...current, phone: value }))}
-              keyboardType="phone-pad"
-              placeholder="(555) 555-3434"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-          <View style={styles.column}>
-            <FieldLabel>Geofence radius (ft)</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={houseDraft.geofenceRadiusFeetDefault}
-              onChangeText={(value) =>
-                setHouseDraft((current) => ({
-                  ...current,
-                  geofenceRadiusFeetDefault: normalizeIntegerInput(value),
-                }))
-              }
-              keyboardType="number-pad"
-              placeholder="200"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-        </View>
-        <View style={styles.twoColumnRow}>
-          <View style={styles.column}>
-            <FieldLabel>Geofence latitude</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={houseDraft.geofenceCenterLat}
-              onChangeText={(value) =>
-                setHouseDraft((current) => ({ ...current, geofenceCenterLat: value }))
-              }
-              keyboardType="decimal-pad"
-              placeholder="45.7833"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-          <View style={styles.column}>
-            <FieldLabel>Geofence longitude</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={houseDraft.geofenceCenterLng}
-              onChangeText={(value) =>
-                setHouseDraft((current) => ({ ...current, geofenceCenterLng: value }))
-              }
-              keyboardType="decimal-pad"
-              placeholder="-108.5007"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-        </View>
-        <FieldLabel>House type</FieldLabel>
-        <View style={styles.chipRow}>
-          {HOUSE_TYPE_OPTIONS.map((option) => (
-            <OptionChip
-              key={option.value}
-              label={option.label}
-              selected={houseDraft.houseTypes.includes(option.value)}
-              onPress={() =>
-                setHouseDraft((current) => ({
-                  ...current,
-                  houseTypes: toggleStringValue(current.houseTypes, option.value),
-                }))
-              }
-            />
-          ))}
-        </View>
-        <View style={styles.twoColumnRow}>
-          <View style={styles.column}>
-            <FieldLabel>Bed count</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={houseDraft.bedCount}
-              onChangeText={(value) =>
-                setHouseDraft((current) => ({ ...current, bedCount: normalizeIntegerInput(value) }))
-              }
-              keyboardType="number-pad"
-              placeholder="12"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-          <View style={styles.column}>
-            <ToggleRow
-              label="House active"
-              value={houseDraft.isActive}
-              onValueChange={(value) =>
-                setHouseDraft((current) => ({ ...current, isActive: value }))
-              }
-            />
-          </View>
-        </View>
-        <FieldLabel>Notes</FieldLabel>
-        <TextInput
-          style={[styles.input, styles.multilineInput]}
-          value={houseDraft.notes}
-          onChangeText={(value) => setHouseDraft((current) => ({ ...current, notes: value }))}
-          placeholder="Notes about admission profile, transportation, or curfew handling."
-          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-          multiline
-        />
-        <View style={styles.buttonRow}>
-          <AppButton
-            title={editingHouseId ? "Update house" : "Create house"}
-            onPress={() => void saveHouse()}
-            disabled={isSaving}
-          />
-        </View>
-      </GlassCard>
-
-      <GlassCard style={styles.card} strong>
-        <SectionHeader
-          title="Staff / Managers"
-          meta="People, roles, house assignments, alert routing flags, and permissions."
-          action={
-            <AppButton
-              title="New staff"
-              variant="secondary"
-              onPress={() => {
-                setEditingStaffAssignmentId(null);
-                setStaffDraft(createStaffAssignmentDraft(null));
-              }}
-            />
-          }
-        />
-        <View style={styles.listWrap}>
-          {store.staffAssignments.length === 0 ? (
-            <Text style={styles.sectionMeta}>No staff assignments configured yet.</Text>
-          ) : (
-            store.staffAssignments.map((assignment) => (
-              <View key={assignment.id} style={styles.entityCard}>
-                <Text style={styles.entityTitle}>
-                  {assignment.firstName} {assignment.lastName}
-                </Text>
-                <Text style={styles.entityMeta}>{labelForRole(assignment.role)}</Text>
-                <Text style={styles.entityMeta}>
-                  Houses:{" "}
-                  {assignment.assignedHouseIds
-                    .map(
-                      (houseId) =>
-                        store.houses.find((house) => house.id === houseId)?.name ?? houseId,
-                    )
-                    .join(", ") || "None"}
-                </Text>
-                <Text style={styles.entityMeta}>
-                  Alerts: {assignment.receiveRealTimeViolationAlerts ? "Real-time " : ""}
-                  {assignment.receiveNearMissAlerts ? "Near-miss " : ""}
-                  {assignment.receiveMonthlyReports ? "Monthly reports" : ""}
-                </Text>
-                <Text style={styles.entityMeta}>
-                  {assignment.status === "ACTIVE" ? "Active" : "Inactive"}
-                </Text>
-                <View style={styles.buttonRow}>
-                  <AppButton
-                    title="Edit"
-                    variant="secondary"
-                    onPress={() => {
-                      setEditingStaffAssignmentId(assignment.id);
-                      setStaffDraft(createStaffAssignmentDraft(assignment));
-                    }}
-                  />
-                  <View style={styles.buttonSpacer} />
-                  <AppButton
-                    title={assignment.status === "ACTIVE" ? "Deactivate" : "Reactivate"}
-                    variant={assignment.status === "ACTIVE" ? "danger" : "secondary"}
-                    onPress={() => {
-                      const timestamp = new Date().toISOString();
-                      const result = setStaffAssignmentStatus(
-                        store,
-                        actor,
-                        assignment.id,
-                        assignment.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
-                        timestamp,
-                      );
-                      void persistStore(
-                        result.store,
-                        `Staff status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
-                      );
-                    }}
-                  />
-                </View>
-              </View>
-            ))
-          )}
-        </View>
-        <View style={styles.twoColumnRow}>
-          <View style={styles.column}>
-            <FieldLabel>First name</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={staffDraft.firstName}
-              onChangeText={(value) =>
-                setStaffDraft((current) => ({ ...current, firstName: value }))
-              }
-              placeholder="Jordan"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-          <View style={styles.column}>
-            <FieldLabel>Last name</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={staffDraft.lastName}
-              onChangeText={(value) =>
-                setStaffDraft((current) => ({ ...current, lastName: value }))
-              }
-              placeholder="Hayes"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-        </View>
-        <View style={styles.twoColumnRow}>
-          <View style={styles.column}>
-            <FieldLabel>Phone</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={staffDraft.phone}
-              onChangeText={(value) => setStaffDraft((current) => ({ ...current, phone: value }))}
-              keyboardType="phone-pad"
-              placeholder="(555) 555-9898"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-          <View style={styles.column}>
-            <FieldLabel>Email</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={staffDraft.email}
-              onChangeText={(value) => setStaffDraft((current) => ({ ...current, email: value }))}
-              autoCapitalize="none"
-              placeholder="manager@example.org"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-        </View>
-        <FieldLabel>Role</FieldLabel>
-        <View style={styles.chipRow}>
-          {STAFF_ROLE_OPTIONS.map((option) => (
-            <OptionChip
-              key={option.value}
-              label={option.label}
-              selected={staffDraft.role === option.value}
-              onPress={() => setStaffDraft((current) => ({ ...current, role: option.value }))}
-            />
-          ))}
-        </View>
-        <FieldLabel>Assigned house(s)</FieldLabel>
-        <View style={styles.chipRow}>
-          {store.houses.map((house) => (
-            <OptionChip
-              key={house.id}
-              label={house.name}
-              selected={staffDraft.assignedHouseIds.includes(house.id)}
-              onPress={() =>
-                setStaffDraft((current) => ({
-                  ...current,
-                  assignedHouseIds: toggleStringValue(current.assignedHouseIds, house.id),
-                }))
-              }
-            />
-          ))}
-        </View>
-        <ToggleRow
-          label="Receive real-time violation alerts"
-          value={staffDraft.receiveRealTimeViolationAlerts}
-          onValueChange={(value) =>
-            setStaffDraft((current) => ({ ...current, receiveRealTimeViolationAlerts: value }))
-          }
-        />
-        <ToggleRow
-          label="Receive near-miss alerts"
-          value={staffDraft.receiveNearMissAlerts}
-          onValueChange={(value) =>
-            setStaffDraft((current) => ({ ...current, receiveNearMissAlerts: value }))
-          }
-        />
-        <ToggleRow
-          label="Receive monthly reports"
-          value={staffDraft.receiveMonthlyReports}
-          onValueChange={(value) =>
-            setStaffDraft((current) => ({ ...current, receiveMonthlyReports: value }))
-          }
-        />
-        <ToggleRow
-          label="Can approve exceptions"
-          value={staffDraft.canApproveExceptions}
-          onValueChange={(value) =>
-            setStaffDraft((current) => ({ ...current, canApproveExceptions: value }))
-          }
-        />
-        <ToggleRow
-          label="Can issue corrective actions"
-          value={staffDraft.canIssueCorrectiveActions}
-          onValueChange={(value) =>
-            setStaffDraft((current) => ({ ...current, canIssueCorrectiveActions: value }))
-          }
-        />
-        <ToggleRow
-          label="Can view resident evidence"
-          value={staffDraft.canViewResidentEvidence}
-          onValueChange={(value) =>
-            setStaffDraft((current) => ({ ...current, canViewResidentEvidence: value }))
-          }
-        />
-        <ToggleRow
-          label="Staff assignment active"
-          value={staffDraft.isActive}
-          onValueChange={(value) => setStaffDraft((current) => ({ ...current, isActive: value }))}
-        />
-        <View style={styles.buttonRow}>
-          <AppButton
-            title={editingStaffAssignmentId ? "Update staff" : "Create staff"}
-            onPress={() => void saveStaffAssignment()}
-            disabled={isSaving}
-          />
-        </View>
-      </GlassCard>
-
-      <GlassCard style={styles.card} strong>
-        <SectionHeader
-          title="House Rules"
-          meta="Per-house configuration only. This does not enforce runtime compliance behavior."
-        />
-        {store.houses.length === 0 ? (
-          <Text style={styles.sectionMeta}>Create a house before configuring rule sets.</Text>
-        ) : (
-          <>
-            <FieldLabel>Select house</FieldLabel>
-            <View style={styles.chipRow}>
-              {store.houses.map((house) => (
-                <OptionChip
-                  key={house.id}
-                  label={house.name}
-                  selected={selectedRuleHouseId === house.id}
-                  onPress={() => setSelectedRuleHouseId(house.id)}
-                />
-              ))}
-            </View>
-            <FieldLabel>Rule set name</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={ruleDraft.name}
-              onChangeText={(value) => setRuleDraft((current) => ({ ...current, name: value }))}
-              placeholder="Default house rules"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-            <ToggleRow
-              label="Rule set active"
-              value={ruleDraft.isActive}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, isActive: value }))
-              }
-            />
-            <Text style={styles.groupTitle}>Curfew</Text>
-            <ToggleRow
-              label="Enabled"
-              value={ruleDraft.curfewEnabled}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, curfewEnabled: value }))
-              }
-            />
-            <View style={styles.twoColumnRow}>
-              <View style={styles.column}>
-                <FieldLabel>Weekday curfew</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.weekdayCurfew}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({ ...current, weekdayCurfew: value }))
-                  }
-                  placeholder="22:00"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-              <View style={styles.column}>
-                <FieldLabel>Friday curfew</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.fridayCurfew}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({ ...current, fridayCurfew: value }))
-                  }
-                  placeholder="23:00"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-            </View>
-            <View style={styles.twoColumnRow}>
-              <View style={styles.column}>
-                <FieldLabel>Saturday curfew</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.saturdayCurfew}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({ ...current, saturdayCurfew: value }))
-                  }
-                  placeholder="23:00"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-              <View style={styles.column}>
-                <FieldLabel>Sunday curfew</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.sundayCurfew}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({ ...current, sundayCurfew: value }))
-                  }
-                  placeholder="22:00"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-            </View>
-            <View style={styles.twoColumnRow}>
-              <View style={styles.column}>
-                <FieldLabel>Grace period (min)</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.curfewGracePeriodMinutes}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({
-                      ...current,
-                      curfewGracePeriodMinutes: normalizeIntegerInput(value),
-                    }))
-                  }
-                  keyboardType="number-pad"
-                  placeholder="15"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-              <View style={styles.column}>
-                <FieldLabel>Pre-alert lead (min)</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.preViolationLeadTimeMinutes}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({
-                      ...current,
-                      preViolationLeadTimeMinutes: normalizeIntegerInput(value),
-                    }))
-                  }
-                  keyboardType="number-pad"
-                  placeholder="15"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-            </View>
-            <ToggleRow
-              label="Pre-violation alert enabled"
-              value={ruleDraft.preViolationAlertEnabled}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, preViolationAlertEnabled: value }))
-              }
-            />
-            <FieldLabel>Alert basis</FieldLabel>
-            <View style={styles.chipRow}>
-              {CURFEW_ALERT_BASIS_OPTIONS.map((option) => (
-                <OptionChip
-                  key={option.value}
-                  label={option.label}
-                  selected={ruleDraft.curfewAlertBasis === option.value}
-                  onPress={() =>
-                    setRuleDraft((current) => ({ ...current, curfewAlertBasis: option.value }))
-                  }
-                />
-              ))}
-            </View>
-
-            <Text style={styles.groupTitle}>Chores</Text>
-            <ToggleRow
-              label="Enabled"
-              value={ruleDraft.choresEnabled}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, choresEnabled: value }))
-              }
-            />
-            <FieldLabel>Frequency</FieldLabel>
-            <View style={styles.chipRow}>
-              {CHORE_FREQUENCY_OPTIONS.map((option) => (
-                <OptionChip
-                  key={option.value}
-                  label={option.label}
-                  selected={ruleDraft.choresFrequency === option.value}
-                  onPress={() =>
-                    setRuleDraft((current) => ({ ...current, choresFrequency: option.value }))
-                  }
-                />
-              ))}
-            </View>
-            <View style={styles.twoColumnRow}>
-              <View style={styles.column}>
-                <FieldLabel>Due time</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.choresDueTime}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({ ...current, choresDueTime: value }))
-                  }
-                  placeholder="18:00"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-              <View style={styles.column}>
-                <FieldLabel>Grace period (min)</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.choresGracePeriodMinutes}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({
-                      ...current,
-                      choresGracePeriodMinutes: normalizeIntegerInput(value),
-                    }))
-                  }
-                  keyboardType="number-pad"
-                  placeholder="15"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-            </View>
-            <FieldLabel>Proof requirement</FieldLabel>
-            <View style={styles.chipRow}>
-              {PROOF_REQUIREMENT_OPTIONS.map((option) => (
-                <OptionChip
-                  key={option.value}
-                  label={option.label}
-                  selected={ruleDraft.choresProofRequirement === option.value}
-                  onPress={() =>
-                    setRuleDraft((current) => ({
-                      ...current,
-                      choresProofRequirement: option.value,
-                    }))
-                  }
-                />
-              ))}
-            </View>
-            <ToggleRow
-              label="Manager instant notification enabled"
-              value={ruleDraft.choresManagerInstantNotificationEnabled}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({
-                  ...current,
-                  choresManagerInstantNotificationEnabled: value,
-                }))
-              }
-            />
-
-            <Text style={styles.groupTitle}>Employment</Text>
-            <ToggleRow
-              label="Employment required"
-              value={ruleDraft.employmentRequired}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, employmentRequired: value }))
-              }
-            />
-            <ToggleRow
-              label="Workplace verification enabled"
-              value={ruleDraft.workplaceVerificationEnabled}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, workplaceVerificationEnabled: value }))
-              }
-            />
-            <ToggleRow
-              label="Manager verification required"
-              value={ruleDraft.managerVerificationRequired}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, managerVerificationRequired: value }))
-              }
-            />
-            <FieldLabel>Workplace geofence radius default (ft)</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={ruleDraft.workplaceGeofenceRadiusDefault}
-              onChangeText={(value) =>
-                setRuleDraft((current) => ({
-                  ...current,
-                  workplaceGeofenceRadiusDefault: normalizeIntegerInput(value),
-                }))
-              }
-              keyboardType="number-pad"
-              placeholder="200"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-
-            <Text style={styles.groupTitle}>Job search</Text>
-            <View style={styles.twoColumnRow}>
-              <View style={styles.column}>
-                <FieldLabel>Applications required per week</FieldLabel>
-                <TextInput
-                  style={styles.input}
-                  value={ruleDraft.jobSearchApplicationsRequiredPerWeek}
-                  onChangeText={(value) =>
-                    setRuleDraft((current) => ({
-                      ...current,
-                      jobSearchApplicationsRequiredPerWeek: normalizeIntegerInput(value),
-                    }))
-                  }
-                  keyboardType="number-pad"
-                  placeholder="5"
-                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                />
-              </View>
-            </View>
-            <ToggleRow
-              label="Proof required"
-              value={ruleDraft.jobSearchProofRequired}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, jobSearchProofRequired: value }))
-              }
-            />
-            <ToggleRow
-              label="Manager approval required"
-              value={ruleDraft.jobSearchManagerApprovalRequired}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({
-                  ...current,
-                  jobSearchManagerApprovalRequired: value,
-                }))
-              }
-            />
-
-            <Text style={styles.groupTitle}>Meetings</Text>
-            <ToggleRow
-              label="Meetings required"
-              value={ruleDraft.meetingsRequired}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, meetingsRequired: value }))
-              }
-            />
-            <FieldLabel>Meetings per week</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={ruleDraft.meetingsPerWeek}
-              onChangeText={(value) =>
-                setRuleDraft((current) => ({
-                  ...current,
-                  meetingsPerWeek: normalizeIntegerInput(value),
-                }))
-              }
-              keyboardType="number-pad"
-              placeholder="4"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-            <FieldLabel>Allowed meeting types</FieldLabel>
-            <View style={styles.chipRow}>
-              {MEETING_TYPE_OPTIONS.map((option) => (
-                <OptionChip
-                  key={option.value}
-                  label={option.label}
-                  selected={ruleDraft.allowedMeetingTypes.includes(option.value)}
-                  onPress={() =>
-                    setRuleDraft((current) => ({
-                      ...current,
-                      allowedMeetingTypes: toggleStringValue(
-                        current.allowedMeetingTypes,
-                        option.value,
-                      ),
-                    }))
-                  }
-                />
-              ))}
-            </View>
-            <FieldLabel>Proof method</FieldLabel>
-            <View style={styles.chipRow}>
-              {MEETING_PROOF_METHOD_OPTIONS.map((option) => (
-                <OptionChip
-                  key={option.value}
-                  label={option.label}
-                  selected={ruleDraft.meetingsProofMethod === option.value}
-                  onPress={() =>
-                    setRuleDraft((current) => ({ ...current, meetingsProofMethod: option.value }))
-                  }
-                />
-              ))}
-            </View>
-
-            <Text style={styles.groupTitle}>Sponsor contact</Text>
-            <ToggleRow
-              label="Enabled"
-              value={ruleDraft.sponsorContactEnabled}
-              onValueChange={(value) =>
-                setRuleDraft((current) => ({ ...current, sponsorContactEnabled: value }))
-              }
-            />
-            <FieldLabel>Contacts required per week</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={ruleDraft.sponsorContactsRequiredPerWeek}
-              onChangeText={(value) =>
-                setRuleDraft((current) => ({
-                  ...current,
-                  sponsorContactsRequiredPerWeek: normalizeIntegerInput(value),
-                }))
-              }
-              keyboardType="number-pad"
-              placeholder="3"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-            <FieldLabel>Proof type</FieldLabel>
-            <View style={styles.chipRow}>
-              {SPONSOR_PROOF_TYPE_OPTIONS.map((option) => (
-                <OptionChip
-                  key={option.value}
-                  label={option.label}
-                  selected={ruleDraft.sponsorProofType === option.value}
-                  onPress={() =>
-                    setRuleDraft((current) => ({ ...current, sponsorProofType: option.value }))
-                  }
-                />
-              ))}
-            </View>
-
-            <View style={styles.buttonRow}>
-              <AppButton
-                title="Save house rules"
-                onPress={() => void saveRuleSet()}
-                disabled={isSaving}
+          <FieldLabel>Current role</FieldLabel>
+          <View style={styles.chipRow}>
+            {(["UNASSIGNED", "OWNER_OPERATOR", "HOUSE_RESIDENT"] as const).map((role) => (
+              <OptionChip
+                key={role}
+                label={labelForAccessRole(role)}
+                selected={accessDraft.role === role}
+                onPress={() =>
+                  setAccessDraft((current) => ({
+                    ...current,
+                    role,
+                    houseId: role === "HOUSE_RESIDENT" ? current.houseId : null,
+                  }))
+                }
               />
-              {selectedRuleHouseId ? (
-                <>
+            ))}
+          </View>
+          <Text style={styles.entityMeta}>
+            Saved role: {labelForAccessRole(userAccessProfile?.role ?? "UNASSIGNED")}
+          </Text>
+          {accessDraft.role === "HOUSE_RESIDENT" ? (
+            <>
+              <FieldLabel>Assigned sober house</FieldLabel>
+              <View style={styles.chipRow}>
+                {store.houses.map((house) => (
+                  <OptionChip
+                    key={house.id}
+                    label={house.name}
+                    selected={accessDraft.houseId === house.id}
+                    onPress={() => setAccessDraft((current) => ({ ...current, houseId: house.id }))}
+                  />
+                ))}
+              </View>
+              <Text style={styles.sectionMeta}>
+                Residents inherit house defaults. Recovery settings that come from the house stay
+                read-only in the recovery app.
+              </Text>
+            </>
+          ) : accessDraft.role === "OWNER_OPERATOR" ? (
+            <Text style={styles.sectionMeta}>
+              Owner/operators can manage organization defaults, house groups, houses, staff, rules,
+              alerts, and activation state.
+            </Text>
+          ) : (
+            <Text style={styles.sectionMeta}>
+              Leave this unlinked if the user is only using the recovery app without sober-house
+              policy control.
+            </Text>
+          )}
+          <View style={styles.buttonRow}>
+            <AppButton
+              title="Save access role"
+              onPress={() => void saveAccessProfile()}
+              disabled={isSaving}
+            />
+          </View>
+        </GlassCard>
+      ) : null}
+
+      {residentMode ? (
+        <GlassCard style={styles.card} strong>
+          <SectionHeader
+            title="Assigned House Defaults"
+            meta="Residents can review inherited policy here, but house defaults are edited by owners/operators only."
+          />
+          <Text style={styles.entityTitle}>
+            {residentAssignedHouse?.name ?? "No house assigned"}
+          </Text>
+          <Text style={styles.entityMeta}>
+            Organization: {store.organization?.name ?? "No organization configured"}
+          </Text>
+          <Text style={styles.entityMeta}>
+            House group:{" "}
+            {residentAssignedHouse?.houseGroupId
+              ? (getHouseGroupById(store, residentAssignedHouse.houseGroupId)?.name ?? "Unassigned")
+              : "Unassigned"}
+          </Text>
+          <Text style={styles.entityMeta}>
+            Meetings required:{" "}
+            {residentAssignedRuleSet?.meetings.meetingsRequired
+              ? `${residentAssignedRuleSet.meetings.meetingsPerWeek} per week`
+              : "No weekly meeting requirement"}
+          </Text>
+          <Text style={styles.entityMeta}>
+            Work requirement:{" "}
+            {residentAssignedRuleSet?.employment.employmentRequired ? "Required" : "Not required"}
+          </Text>
+          <Text style={styles.entityMeta}>
+            Sponsor contact:{" "}
+            {residentAssignedRuleSet?.sponsorContact.enabled
+              ? `${residentAssignedRuleSet.sponsorContact.contactsRequiredPerWeek} per week`
+              : "Not required"}
+          </Text>
+          <Text style={styles.entityMeta}>
+            Curfew:{" "}
+            {residentAssignedRuleSet?.curfew.enabled
+              ? `${residentAssignedRuleSet.curfew.weekdayCurfew} weekdays`
+              : "Disabled"}
+          </Text>
+        </GlassCard>
+      ) : null}
+
+      {residentMode ? (
+        <SoberHouseResidentManager
+          store={store}
+          actor={actor}
+          linkedUserId={userId}
+          isSaving={isSaving}
+          onPersist={persistStore}
+        />
+      ) : null}
+
+      {residentMode ? (
+        <SoberHouseComplianceSection
+          userId={userId}
+          store={store}
+          actor={actor}
+          isSaving={isSaving}
+          readOnly
+          onPersist={persistStore}
+        />
+      ) : null}
+
+      {showAdminControls ? (
+        <SoberHouseInterventionSection
+          userId={userId}
+          store={store}
+          actor={actor}
+          isSaving={isSaving}
+          onOpenChat={(input) => setChatIntent(input)}
+          onPersist={persistStore}
+        />
+      ) : null}
+
+      {showAdminControls ? (
+        <SoberHouseChatSection
+          store={store}
+          actor={actor}
+          isSaving={isSaving}
+          chatIntent={chatIntent}
+          onChatIntentHandled={() => setChatIntent(null)}
+          onPersist={persistStore}
+        />
+      ) : null}
+
+      {showAdminControls ? (
+        <SoberHouseReportsSection
+          userId={userId}
+          store={store}
+          actor={actor}
+          isSaving={isSaving}
+          onPersist={persistStore}
+        />
+      ) : null}
+
+      {showAdminControls ? (
+        <GlassCard style={styles.card} strong>
+          <SectionHeader
+            title="Organization"
+            meta="Organization profile and primary contact settings."
+          />
+          <FieldLabel>Organization name</FieldLabel>
+          <TextInput
+            style={styles.input}
+            value={organizationDraft.name}
+            onChangeText={(value) =>
+              setOrganizationDraft((current) => ({ ...current, name: value }))
+            }
+            placeholder="Bright Path Recovery Homes"
+            placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+          />
+          <FieldLabel>Primary contact name</FieldLabel>
+          <TextInput
+            style={styles.input}
+            value={organizationDraft.primaryContactName}
+            onChangeText={(value) =>
+              setOrganizationDraft((current) => ({ ...current, primaryContactName: value }))
+            }
+            placeholder="Primary contact name"
+            placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+          />
+          <View style={styles.twoColumnRow}>
+            <View style={styles.column}>
+              <FieldLabel>Primary phone</FieldLabel>
+              <TextInput
+                style={styles.input}
+                value={organizationDraft.primaryPhone}
+                onChangeText={(value) =>
+                  setOrganizationDraft((current) => ({ ...current, primaryPhone: value }))
+                }
+                keyboardType="phone-pad"
+                placeholder="(555) 555-1212"
+                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+              />
+            </View>
+            <View style={styles.column}>
+              <FieldLabel>Primary email</FieldLabel>
+              <TextInput
+                style={styles.input}
+                value={organizationDraft.primaryEmail}
+                onChangeText={(value) =>
+                  setOrganizationDraft((current) => ({ ...current, primaryEmail: value }))
+                }
+                autoCapitalize="none"
+                placeholder="ops@example.org"
+                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+              />
+            </View>
+          </View>
+          <FieldLabel>Notes</FieldLabel>
+          <TextInput
+            style={[styles.input, styles.multilineInput]}
+            value={organizationDraft.notes}
+            onChangeText={(value) =>
+              setOrganizationDraft((current) => ({ ...current, notes: value }))
+            }
+            placeholder="Internal notes for sober-house operations."
+            placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+            multiline
+          />
+          <ToggleRow
+            label="Organization active"
+            value={organizationDraft.isActive}
+            onValueChange={(value) =>
+              setOrganizationDraft((current) => ({ ...current, isActive: value }))
+            }
+          />
+          <View style={styles.buttonRow}>
+            <AppButton
+              title={isSaving ? "Saving..." : "Save organization"}
+              onPress={() => void saveOrganization()}
+              disabled={isSaving}
+            />
+          </View>
+        </GlassCard>
+      ) : null}
+
+      {showAdminControls ? (
+        <>
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="Houses"
+              meta="Organization houses and house groups. Select a scope before editing any house-level configuration."
+              action={
+                <View style={styles.inlineButtonRow}>
+                  <AppButton
+                    title="New group"
+                    variant="secondary"
+                    onPress={() => {
+                      setEditingHouseGroupId(null);
+                      setHouseGroupDraft(createHouseGroupDraft(null));
+                      setIsHouseGroupEditorVisible(true);
+                    }}
+                  />
                   <View style={styles.buttonSpacer} />
                   <AppButton
-                    title={ruleDraft.isActive ? "Deactivate rule set" : "Reactivate rule set"}
-                    variant={ruleDraft.isActive ? "danger" : "secondary"}
+                    title="New house"
+                    variant="secondary"
                     onPress={() => {
+                      setEditingHouseId(null);
+                      setHouseDraft(createHouseDraft(null));
+                      setIsHouseEditorVisible(true);
+                    }}
+                  />
+                </View>
+              }
+            />
+            <Text style={styles.groupTitle}>House groups</Text>
+            <View style={styles.listWrap}>
+              {store.houseGroups.length === 0 ? (
+                <Text style={styles.sectionMeta}>No house groups configured yet.</Text>
+              ) : (
+                store.houseGroups.map((group) => (
+                  <View key={group.id} style={styles.entityCard}>
+                    <Text style={styles.entityTitle}>{group.name}</Text>
+                    <Text style={styles.entityMeta}>
+                      Houses:{" "}
+                      {group.houseIds
+                        .map(
+                          (houseId) =>
+                            store.houses.find((house) => house.id === houseId)?.name ?? houseId,
+                        )
+                        .join(", ") || "None"}
+                    </Text>
+                    <Text style={styles.entityMeta}>{group.notes || "No notes"}</Text>
+                    <Text style={styles.entityMeta}>
+                      {group.status === "ACTIVE" ? "Active" : "Inactive"}
+                    </Text>
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title="Edit"
+                        variant="secondary"
+                        onPress={() => {
+                          setEditingHouseGroupId(group.id);
+                          setHouseGroupDraft(createHouseGroupDraft(group));
+                          setIsHouseGroupEditorVisible(true);
+                        }}
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title={group.status === "ACTIVE" ? "Deactivate" : "Reactivate"}
+                        variant={group.status === "ACTIVE" ? "danger" : "secondary"}
+                        onPress={() => {
+                          const timestamp = new Date().toISOString();
+                          const result = setHouseGroupStatus(
+                            store,
+                            actor,
+                            group.id,
+                            group.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
+                            timestamp,
+                          );
+                          void persistStore(
+                            result.store,
+                            `House group status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+                          );
+                        }}
+                      />
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+            {isHouseGroupEditorVisible ? (
+              <>
+                <FieldLabel>House group name</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={houseGroupDraft.name}
+                  onChangeText={(value) =>
+                    setHouseGroupDraft((current) => ({ ...current, name: value }))
+                  }
+                  placeholder="Downtown houses"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <FieldLabel>Included houses</FieldLabel>
+                <View style={styles.chipRow}>
+                  {store.houses.map((house) => (
+                    <OptionChip
+                      key={house.id}
+                      label={house.name}
+                      selected={houseGroupDraft.houseIds.includes(house.id)}
+                      onPress={() =>
+                        setHouseGroupDraft((current) => ({
+                          ...current,
+                          houseIds: toggleStringValue(current.houseIds, house.id),
+                        }))
+                      }
+                    />
+                  ))}
+                </View>
+                <FieldLabel>Notes</FieldLabel>
+                <TextInput
+                  style={[styles.input, styles.multilineInput]}
+                  value={houseGroupDraft.notes}
+                  onChangeText={(value) =>
+                    setHouseGroupDraft((current) => ({ ...current, notes: value }))
+                  }
+                  placeholder="Shared defaults for a cluster of houses."
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  multiline
+                />
+                <ToggleRow
+                  label="House group active"
+                  value={houseGroupDraft.isActive}
+                  onValueChange={(value) =>
+                    setHouseGroupDraft((current) => ({ ...current, isActive: value }))
+                  }
+                />
+                <View style={styles.buttonRow}>
+                  <AppButton
+                    title={editingHouseGroupId ? "Update group" : "Create group"}
+                    onPress={() => void saveHouseGroup()}
+                    disabled={isSaving}
+                  />
+                  <View style={styles.buttonSpacer} />
+                  <AppButton
+                    title="Cancel"
+                    variant="secondary"
+                    onPress={() => {
+                      setIsHouseGroupEditorVisible(false);
+                      setEditingHouseGroupId(null);
+                      setHouseGroupDraft(createHouseGroupDraft(null));
+                    }}
+                  />
+                </View>
+              </>
+            ) : (
+              <Text style={styles.sectionMeta}>
+                Select New group or Edit to manage group membership and shared defaults.
+              </Text>
+            )}
+
+            <Text style={styles.groupTitle}>Organization houses</Text>
+            <View style={styles.listWrap}>
+              {store.houses.length === 0 ? (
+                <Text style={styles.sectionMeta}>No houses configured yet.</Text>
+              ) : (
+                store.houses.map((house) => (
+                  <View
+                    key={house.id}
+                    style={[
+                      styles.entityCard,
+                      selectedHouseIds.includes(house.id) ? styles.entityCardSelected : null,
+                    ]}
+                  >
+                    <Text style={styles.entityTitle}>{house.name}</Text>
+                    <Text style={styles.entityMeta}>{house.address}</Text>
+                    <Text style={styles.entityMeta}>
+                      Group:{" "}
+                      {getHouseGroupById(store, house.houseGroupId ?? "")?.name ?? "Unassigned"}
+                    </Text>
+                    <Text style={styles.entityMeta}>
+                      {labelForHouseTypes(house.houseTypes)} • Beds: {house.bedCount} • Radius:{" "}
+                      {house.geofenceRadiusFeetDefault} ft
+                    </Text>
+                    <Text style={styles.entityMeta}>
+                      Geofence center:{" "}
+                      {typeof house.geofenceCenterLat === "number" &&
+                      Number.isFinite(house.geofenceCenterLat) &&
+                      typeof house.geofenceCenterLng === "number" &&
+                      Number.isFinite(house.geofenceCenterLng)
+                        ? `${house.geofenceCenterLat.toFixed(5)}, ${house.geofenceCenterLng.toFixed(5)}`
+                        : "Missing"}
+                    </Text>
+                    <Text style={styles.entityMeta}>
+                      {house.status === "ACTIVE" ? "Active" : "Inactive"}
+                    </Text>
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title={selectedHouseIds.includes(house.id) ? "Unselect" : "Select"}
+                        variant="secondary"
+                        onPress={() =>
+                          setSelectedHouseIds((current) => toggleStringValue(current, house.id))
+                        }
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title="Edit"
+                        variant="secondary"
+                        onPress={() => {
+                          setEditingHouseId(house.id);
+                          setHouseDraft(createHouseDraft(house));
+                          setIsHouseEditorVisible(true);
+                        }}
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title={house.status === "ACTIVE" ? "Deactivate" : "Reactivate"}
+                        variant={house.status === "ACTIVE" ? "danger" : "secondary"}
+                        onPress={() => {
+                          const timestamp = new Date().toISOString();
+                          const result = setHouseStatus(
+                            store,
+                            actor,
+                            house.id,
+                            house.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
+                            timestamp,
+                          );
+                          void persistStore(
+                            result.store,
+                            `House status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+                          );
+                        }}
+                      />
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+            <View style={styles.buttonRow}>
+              {selectedHouseIds.length > 0 ? (
+                <>
+                  <AppButton
+                    title="Deactivate selected"
+                    variant="danger"
+                    onPress={() => {
+                      let nextStore = store;
+                      let auditCount = 0;
                       const timestamp = new Date().toISOString();
-                      const result = setHouseRuleSetStatus(
-                        store,
-                        actor,
-                        selectedRuleHouseId,
-                        ruleDraft.isActive ? "INACTIVE" : "ACTIVE",
-                        timestamp,
-                      );
+                      selectedHouseIds.forEach((houseId) => {
+                        const result = setHouseStatus(
+                          nextStore,
+                          actor,
+                          houseId,
+                          "INACTIVE",
+                          timestamp,
+                        );
+                        nextStore = result.store;
+                        auditCount += result.auditCount;
+                      });
                       void persistStore(
-                        result.store,
-                        `Rule set status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+                        nextStore,
+                        `Updated ${selectedHouseIds.length} selected house statuses with ${auditCount} audit entr${auditCount === 1 ? "y" : "ies"}.`,
                       );
+                      setSelectedHouseIds([]);
+                    }}
+                  />
+                  <View style={styles.buttonSpacer} />
+                  <AppButton
+                    title="Reactivate selected"
+                    variant="secondary"
+                    onPress={() => {
+                      let nextStore = store;
+                      let auditCount = 0;
+                      const timestamp = new Date().toISOString();
+                      selectedHouseIds.forEach((houseId) => {
+                        const result = setHouseStatus(
+                          nextStore,
+                          actor,
+                          houseId,
+                          "ACTIVE",
+                          timestamp,
+                        );
+                        nextStore = result.store;
+                        auditCount += result.auditCount;
+                      });
+                      void persistStore(
+                        nextStore,
+                        `Updated ${selectedHouseIds.length} selected house statuses with ${auditCount} audit entr${auditCount === 1 ? "y" : "ies"}.`,
+                      );
+                      setSelectedHouseIds([]);
                     }}
                   />
                 </>
               ) : null}
             </View>
-          </>
-        )}
-      </GlassCard>
-
-      <GlassCard style={styles.card} strong>
-        <SectionHeader
-          title="Alert Preferences"
-          meta="Alert recipient records and delivery methods for violations, near-misses, and monthly reporting."
-          action={
-            <AppButton
-              title="New alert"
-              variant="secondary"
-              onPress={() => {
-                setEditingAlertPreferenceId(null);
-                setAlertDraft(createAlertPreferenceDraft(null));
-              }}
-            />
-          }
-        />
-        <View style={styles.listWrap}>
-          {store.alertPreferences.length === 0 ? (
-            <Text style={styles.sectionMeta}>No alert preferences configured yet.</Text>
-          ) : (
-            store.alertPreferences.map((preference) => (
-              <View key={preference.id} style={styles.entityCard}>
-                <Text style={styles.entityTitle}>{preference.label}</Text>
-                <Text style={styles.entityMeta}>
-                  Scope:{" "}
-                  {preference.scope === "ORGANIZATION"
-                    ? "Organization-wide"
-                    : (store.houses.find((house) => house.id === preference.houseId)?.name ??
-                      "House")}
-                </Text>
-                <Text style={styles.entityMeta}>
-                  Recipient: {preference.recipientName || "Unassigned"} •{" "}
-                  {preference.deliveryMethod}
-                </Text>
-                <Text style={styles.entityMeta}>
-                  {preference.sendRealTimeViolationAlerts ? "Real-time " : ""}
-                  {preference.sendNearMissAlerts ? "Near-miss " : ""}
-                  {preference.sendMonthlyReports ? "Monthly reports" : ""}
-                </Text>
-                <Text style={styles.entityMeta}>
-                  {preference.status === "ACTIVE" ? "Active" : "Inactive"}
-                </Text>
+            <View style={styles.buttonRow}>
+              <AppButton
+                title="Deactivate all houses"
+                variant="danger"
+                onPress={() => {
+                  let nextStore = store;
+                  let auditCount = 0;
+                  const timestamp = new Date().toISOString();
+                  store.houses.forEach((house) => {
+                    const result = setHouseStatus(
+                      nextStore,
+                      actor,
+                      house.id,
+                      "INACTIVE",
+                      timestamp,
+                    );
+                    nextStore = result.store;
+                    auditCount += result.auditCount;
+                  });
+                  void persistStore(
+                    nextStore,
+                    `All house statuses updated with ${auditCount} audit entr${auditCount === 1 ? "y" : "ies"}.`,
+                  );
+                }}
+              />
+              <View style={styles.buttonSpacer} />
+              <AppButton
+                title="Reactivate all houses"
+                variant="secondary"
+                onPress={() => {
+                  let nextStore = store;
+                  let auditCount = 0;
+                  const timestamp = new Date().toISOString();
+                  store.houses.forEach((house) => {
+                    const result = setHouseStatus(nextStore, actor, house.id, "ACTIVE", timestamp);
+                    nextStore = result.store;
+                    auditCount += result.auditCount;
+                  });
+                  void persistStore(
+                    nextStore,
+                    `All house statuses updated with ${auditCount} audit entr${auditCount === 1 ? "y" : "ies"}.`,
+                  );
+                }}
+              />
+            </View>
+            {isHouseEditorVisible ? (
+              <>
+                <FieldLabel>House group</FieldLabel>
+                <View style={styles.chipRow}>
+                  <OptionChip
+                    label="No group"
+                    selected={houseDraft.houseGroupId === null}
+                    onPress={() => setHouseDraft((current) => ({ ...current, houseGroupId: null }))}
+                  />
+                  {store.houseGroups.map((group) => (
+                    <OptionChip
+                      key={group.id}
+                      label={group.name}
+                      selected={houseDraft.houseGroupId === group.id}
+                      onPress={() =>
+                        setHouseDraft((current) => ({ ...current, houseGroupId: group.id }))
+                      }
+                    />
+                  ))}
+                </View>
+                <FieldLabel>House name</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={houseDraft.name}
+                  onChangeText={(value) =>
+                    setHouseDraft((current) => ({ ...current, name: value }))
+                  }
+                  placeholder="Maple House"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <FieldLabel>House address</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={houseDraft.address}
+                  onChangeText={(value) =>
+                    setHouseDraft((current) => ({ ...current, address: value }))
+                  }
+                  placeholder="123 Main St, Billings, MT"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <View style={styles.twoColumnRow}>
+                  <View style={styles.column}>
+                    <FieldLabel>House phone</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={houseDraft.phone}
+                      onChangeText={(value) =>
+                        setHouseDraft((current) => ({ ...current, phone: value }))
+                      }
+                      keyboardType="phone-pad"
+                      placeholder="(555) 555-3434"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                  <View style={styles.column}>
+                    <FieldLabel>Geofence radius (ft)</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={houseDraft.geofenceRadiusFeetDefault}
+                      onChangeText={(value) =>
+                        setHouseDraft((current) => ({
+                          ...current,
+                          geofenceRadiusFeetDefault: normalizeIntegerInput(value),
+                        }))
+                      }
+                      keyboardType="number-pad"
+                      placeholder="200"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                </View>
+                <View style={styles.twoColumnRow}>
+                  <View style={styles.column}>
+                    <FieldLabel>Geofence latitude</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={houseDraft.geofenceCenterLat}
+                      onChangeText={(value) =>
+                        setHouseDraft((current) => ({ ...current, geofenceCenterLat: value }))
+                      }
+                      keyboardType="decimal-pad"
+                      placeholder="45.7833"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                  <View style={styles.column}>
+                    <FieldLabel>Geofence longitude</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={houseDraft.geofenceCenterLng}
+                      onChangeText={(value) =>
+                        setHouseDraft((current) => ({ ...current, geofenceCenterLng: value }))
+                      }
+                      keyboardType="decimal-pad"
+                      placeholder="-108.5007"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                </View>
+                <FieldLabel>House type</FieldLabel>
+                <View style={styles.chipRow}>
+                  {HOUSE_TYPE_OPTIONS.map((option) => (
+                    <OptionChip
+                      key={option.value}
+                      label={option.label}
+                      selected={houseDraft.houseTypes.includes(option.value)}
+                      onPress={() =>
+                        setHouseDraft((current) => ({
+                          ...current,
+                          houseTypes: toggleStringValue(current.houseTypes, option.value),
+                        }))
+                      }
+                    />
+                  ))}
+                </View>
+                <View style={styles.twoColumnRow}>
+                  <View style={styles.column}>
+                    <FieldLabel>Bed count</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={houseDraft.bedCount}
+                      onChangeText={(value) =>
+                        setHouseDraft((current) => ({
+                          ...current,
+                          bedCount: normalizeIntegerInput(value),
+                        }))
+                      }
+                      keyboardType="number-pad"
+                      placeholder="12"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                  <View style={styles.column}>
+                    <ToggleRow
+                      label="House active"
+                      value={houseDraft.isActive}
+                      onValueChange={(value) =>
+                        setHouseDraft((current) => ({ ...current, isActive: value }))
+                      }
+                    />
+                  </View>
+                </View>
+                <FieldLabel>Notes</FieldLabel>
+                <TextInput
+                  style={[styles.input, styles.multilineInput]}
+                  value={houseDraft.notes}
+                  onChangeText={(value) =>
+                    setHouseDraft((current) => ({ ...current, notes: value }))
+                  }
+                  placeholder="Notes about admission profile, transportation, or curfew handling."
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  multiline
+                />
                 <View style={styles.buttonRow}>
                   <AppButton
-                    title="Edit"
-                    variant="secondary"
-                    onPress={() => {
-                      setEditingAlertPreferenceId(preference.id);
-                      setAlertDraft(createAlertPreferenceDraft(preference));
-                    }}
+                    title={editingHouseId ? "Update house" : "Create house"}
+                    onPress={() => void saveHouse()}
+                    disabled={isSaving}
                   />
                   <View style={styles.buttonSpacer} />
                   <AppButton
-                    title={preference.status === "ACTIVE" ? "Deactivate" : "Reactivate"}
-                    variant={preference.status === "ACTIVE" ? "danger" : "secondary"}
+                    title="Cancel"
+                    variant="secondary"
                     onPress={() => {
-                      const timestamp = new Date().toISOString();
-                      const result = setAlertPreferenceStatus(
-                        store,
-                        actor,
-                        preference.id,
-                        preference.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
-                        timestamp,
-                      );
-                      void persistStore(
-                        result.store,
-                        `Alert preference status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
-                      );
+                      setIsHouseEditorVisible(false);
+                      setEditingHouseId(null);
+                      setHouseDraft(createHouseDraft(null));
                     }}
                   />
                 </View>
-              </View>
-            ))
-          )}
-        </View>
-        <FieldLabel>Label</FieldLabel>
-        <TextInput
-          style={styles.input}
-          value={alertDraft.label}
-          onChangeText={(value) => setAlertDraft((current) => ({ ...current, label: value }))}
-          placeholder="Default manager alerts"
-          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-        />
-        <FieldLabel>Scope</FieldLabel>
-        <View style={styles.chipRow}>
-          {ALERT_SCOPE_OPTIONS.map((option) => (
-            <OptionChip
-              key={option.value}
-              label={option.label}
-              selected={alertDraft.scope === option.value}
-              onPress={() =>
-                setAlertDraft((current) => ({
-                  ...current,
-                  scope: option.value,
-                  houseId: option.value === "HOUSE" ? current.houseId : null,
-                }))
+              </>
+            ) : (
+              <Text style={styles.sectionMeta}>
+                Select New house or Edit to configure an individual house. Houses stay visible here,
+                but their settings stay hidden until you choose one.
+              </Text>
+            )}
+          </GlassCard>
+
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="Staff / Managers"
+              meta="People, roles, house assignments, alert routing flags, and permissions."
+              action={
+                <AppButton
+                  title="New staff"
+                  variant="secondary"
+                  onPress={() => {
+                    setEditingStaffAssignmentId(null);
+                    setStaffDraft(createStaffAssignmentDraft(null));
+                  }}
+                />
               }
             />
-          ))}
-        </View>
-        {alertDraft.scope === "HOUSE" ? (
-          <>
-            <FieldLabel>Assigned house</FieldLabel>
+            <View style={styles.listWrap}>
+              {store.staffAssignments.length === 0 ? (
+                <Text style={styles.sectionMeta}>No staff assignments configured yet.</Text>
+              ) : (
+                store.staffAssignments.map((assignment) => (
+                  <View key={assignment.id} style={styles.entityCard}>
+                    <Text style={styles.entityTitle}>
+                      {assignment.firstName} {assignment.lastName}
+                    </Text>
+                    <Text style={styles.entityMeta}>{labelForRole(assignment.role)}</Text>
+                    <Text style={styles.entityMeta}>
+                      Houses:{" "}
+                      {assignment.assignedHouseIds
+                        .map(
+                          (houseId) =>
+                            store.houses.find((house) => house.id === houseId)?.name ?? houseId,
+                        )
+                        .join(", ") || "None"}
+                    </Text>
+                    <Text style={styles.entityMeta}>
+                      Alerts: {assignment.receiveRealTimeViolationAlerts ? "Real-time " : ""}
+                      {assignment.receiveNearMissAlerts ? "Near-miss " : ""}
+                      {assignment.receiveMonthlyReports ? "Monthly reports" : ""}
+                    </Text>
+                    <Text style={styles.entityMeta}>
+                      {assignment.status === "ACTIVE" ? "Active" : "Inactive"}
+                    </Text>
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title="Edit"
+                        variant="secondary"
+                        onPress={() => {
+                          setEditingStaffAssignmentId(assignment.id);
+                          setStaffDraft(createStaffAssignmentDraft(assignment));
+                        }}
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title={assignment.status === "ACTIVE" ? "Deactivate" : "Reactivate"}
+                        variant={assignment.status === "ACTIVE" ? "danger" : "secondary"}
+                        onPress={() => {
+                          const timestamp = new Date().toISOString();
+                          const result = setStaffAssignmentStatus(
+                            store,
+                            actor,
+                            assignment.id,
+                            assignment.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
+                            timestamp,
+                          );
+                          void persistStore(
+                            result.store,
+                            `Staff status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+                          );
+                        }}
+                      />
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+            <View style={styles.twoColumnRow}>
+              <View style={styles.column}>
+                <FieldLabel>First name</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={staffDraft.firstName}
+                  onChangeText={(value) =>
+                    setStaffDraft((current) => ({ ...current, firstName: value }))
+                  }
+                  placeholder="Jordan"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+              </View>
+              <View style={styles.column}>
+                <FieldLabel>Last name</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={staffDraft.lastName}
+                  onChangeText={(value) =>
+                    setStaffDraft((current) => ({ ...current, lastName: value }))
+                  }
+                  placeholder="Hayes"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+              </View>
+            </View>
+            <View style={styles.twoColumnRow}>
+              <View style={styles.column}>
+                <FieldLabel>Phone</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={staffDraft.phone}
+                  onChangeText={(value) =>
+                    setStaffDraft((current) => ({ ...current, phone: value }))
+                  }
+                  keyboardType="phone-pad"
+                  placeholder="(555) 555-9898"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+              </View>
+              <View style={styles.column}>
+                <FieldLabel>Email</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={staffDraft.email}
+                  onChangeText={(value) =>
+                    setStaffDraft((current) => ({ ...current, email: value }))
+                  }
+                  autoCapitalize="none"
+                  placeholder="manager@example.org"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+              </View>
+            </View>
+            <FieldLabel>Role</FieldLabel>
+            <View style={styles.chipRow}>
+              {STAFF_ROLE_OPTIONS.map((option) => (
+                <OptionChip
+                  key={option.value}
+                  label={option.label}
+                  selected={staffDraft.role === option.value}
+                  onPress={() => setStaffDraft((current) => ({ ...current, role: option.value }))}
+                />
+              ))}
+            </View>
+            <FieldLabel>Assigned house(s)</FieldLabel>
             <View style={styles.chipRow}>
               {store.houses.map((house) => (
                 <OptionChip
                   key={house.id}
                   label={house.name}
-                  selected={alertDraft.houseId === house.id}
-                  onPress={() => setAlertDraft((current) => ({ ...current, houseId: house.id }))}
+                  selected={staffDraft.assignedHouseIds.includes(house.id)}
+                  onPress={() =>
+                    setStaffDraft((current) => ({
+                      ...current,
+                      assignedHouseIds: toggleStringValue(current.assignedHouseIds, house.id),
+                    }))
+                  }
                 />
               ))}
             </View>
-          </>
-        ) : null}
-        <FieldLabel>Recipient staff</FieldLabel>
-        <View style={styles.chipRow}>
-          <OptionChip
-            label="Custom"
-            selected={alertDraft.recipientStaffAssignmentId === null}
-            onPress={() =>
-              setAlertDraft((current) => ({ ...current, recipientStaffAssignmentId: null }))
-            }
-          />
-          {store.staffAssignments.map((assignment) => (
-            <OptionChip
-              key={assignment.id}
-              label={`${assignment.firstName} ${assignment.lastName}`}
-              selected={alertDraft.recipientStaffAssignmentId === assignment.id}
-              onPress={() =>
-                setAlertDraft((current) => ({
-                  ...current,
-                  recipientStaffAssignmentId: assignment.id,
-                  recipientName: `${assignment.firstName} ${assignment.lastName}`.trim(),
-                  recipientPhone: assignment.phone,
-                  recipientEmail: assignment.email,
-                }))
+            <ToggleRow
+              label="Receive real-time violation alerts"
+              value={staffDraft.receiveRealTimeViolationAlerts}
+              onValueChange={(value) =>
+                setStaffDraft((current) => ({ ...current, receiveRealTimeViolationAlerts: value }))
               }
             />
-          ))}
-        </View>
-        <View style={styles.twoColumnRow}>
-          <View style={styles.column}>
-            <FieldLabel>Recipient name</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={alertDraft.recipientName}
-              onChangeText={(value) =>
-                setAlertDraft((current) => ({ ...current, recipientName: value }))
-              }
-              placeholder="Manager name"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-          <View style={styles.column}>
-            <FieldLabel>Recipient phone</FieldLabel>
-            <TextInput
-              style={styles.input}
-              value={alertDraft.recipientPhone}
-              onChangeText={(value) =>
-                setAlertDraft((current) => ({ ...current, recipientPhone: value }))
-              }
-              keyboardType="phone-pad"
-              placeholder="(555) 555-4545"
-              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-            />
-          </View>
-        </View>
-        <FieldLabel>Recipient email</FieldLabel>
-        <TextInput
-          style={styles.input}
-          value={alertDraft.recipientEmail}
-          onChangeText={(value) =>
-            setAlertDraft((current) => ({ ...current, recipientEmail: value }))
-          }
-          autoCapitalize="none"
-          placeholder="alerts@example.org"
-          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-        />
-        <FieldLabel>Delivery method</FieldLabel>
-        <View style={styles.chipRow}>
-          {ALERT_DELIVERY_METHOD_OPTIONS.map((option) => (
-            <OptionChip
-              key={option.value}
-              label={option.label}
-              selected={alertDraft.deliveryMethod === option.value}
-              onPress={() =>
-                setAlertDraft((current) => ({ ...current, deliveryMethod: option.value }))
+            <ToggleRow
+              label="Receive near-miss alerts"
+              value={staffDraft.receiveNearMissAlerts}
+              onValueChange={(value) =>
+                setStaffDraft((current) => ({ ...current, receiveNearMissAlerts: value }))
               }
             />
-          ))}
-        </View>
-        <ToggleRow
-          label="Receive real-time violation alerts"
-          value={alertDraft.sendRealTimeViolationAlerts}
-          onValueChange={(value) =>
-            setAlertDraft((current) => ({ ...current, sendRealTimeViolationAlerts: value }))
-          }
-        />
-        <ToggleRow
-          label="Receive near-miss alerts"
-          value={alertDraft.sendNearMissAlerts}
-          onValueChange={(value) =>
-            setAlertDraft((current) => ({ ...current, sendNearMissAlerts: value }))
-          }
-        />
-        <ToggleRow
-          label="Receive monthly reports"
-          value={alertDraft.sendMonthlyReports}
-          onValueChange={(value) =>
-            setAlertDraft((current) => ({ ...current, sendMonthlyReports: value }))
-          }
-        />
-        <ToggleRow
-          label="Alert preference active"
-          value={alertDraft.isActive}
-          onValueChange={(value) => setAlertDraft((current) => ({ ...current, isActive: value }))}
-        />
-        <View style={styles.buttonRow}>
-          <AppButton
-            title={editingAlertPreferenceId ? "Update alert" : "Create alert"}
-            onPress={() => void saveAlertPreference()}
-            disabled={isSaving}
-          />
-        </View>
-      </GlassCard>
-
-      <GlassCard style={styles.card} strong>
-        <SectionHeader
-          title="Audit Log"
-          meta="Read-only record of settings changes written on every saved edit."
-        />
-        {store.auditLogEntries.length === 0 ? (
-          <Text style={styles.sectionMeta}>No settings edits have been logged yet.</Text>
-        ) : (
-          store.auditLogEntries.slice(0, 30).map((entry) => (
-            <View key={entry.id} style={styles.auditRow}>
-              <Text style={styles.auditTitle}>
-                {entry.actor.name} • {entry.entityType} • {entry.actionTaken ?? entry.fieldChanged}
-              </Text>
-              <Text style={styles.entityMeta}>{new Date(entry.timestamp).toLocaleString()}</Text>
-              <Text style={styles.entityMeta}>
-                {formatAuditValue(entry.oldValue)} → {formatAuditValue(entry.newValue)}
-              </Text>
+            <ToggleRow
+              label="Receive monthly reports"
+              value={staffDraft.receiveMonthlyReports}
+              onValueChange={(value) =>
+                setStaffDraft((current) => ({ ...current, receiveMonthlyReports: value }))
+              }
+            />
+            <ToggleRow
+              label="Can approve exceptions"
+              value={staffDraft.canApproveExceptions}
+              onValueChange={(value) =>
+                setStaffDraft((current) => ({ ...current, canApproveExceptions: value }))
+              }
+            />
+            <ToggleRow
+              label="Can issue corrective actions"
+              value={staffDraft.canIssueCorrectiveActions}
+              onValueChange={(value) =>
+                setStaffDraft((current) => ({ ...current, canIssueCorrectiveActions: value }))
+              }
+            />
+            <ToggleRow
+              label="Can view resident evidence"
+              value={staffDraft.canViewResidentEvidence}
+              onValueChange={(value) =>
+                setStaffDraft((current) => ({ ...current, canViewResidentEvidence: value }))
+              }
+            />
+            <ToggleRow
+              label="Staff assignment active"
+              value={staffDraft.isActive}
+              onValueChange={(value) =>
+                setStaffDraft((current) => ({ ...current, isActive: value }))
+              }
+            />
+            <View style={styles.buttonRow}>
+              <AppButton
+                title={editingStaffAssignmentId ? "Update staff" : "Create staff"}
+                onPress={() => void saveStaffAssignment()}
+                disabled={isSaving}
+              />
             </View>
-          ))
-        )}
-      </GlassCard>
+          </GlassCard>
+
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="House Rules"
+              meta="Defaults cascade organization → house group → house → resident. Select a scope before editing."
+            />
+            <FieldLabel>Configuration scope</FieldLabel>
+            <View style={styles.chipRow}>
+              {(["ORGANIZATION", "HOUSE_GROUP", "HOUSE"] as const).map((scopeType) => (
+                <OptionChip
+                  key={scopeType}
+                  label={labelForRuleScope(scopeType)}
+                  selected={selectedRuleScope.scopeType === scopeType}
+                  onPress={() => setSelectedRuleScope({ scopeType, scopeId: null })}
+                />
+              ))}
+            </View>
+            {selectedRuleScope.scopeType === "HOUSE_GROUP" ? (
+              <>
+                <FieldLabel>Select house group</FieldLabel>
+                <View style={styles.chipRow}>
+                  {store.houseGroups.map((group) => (
+                    <OptionChip
+                      key={group.id}
+                      label={group.name}
+                      selected={selectedRuleScope.scopeId === group.id}
+                      onPress={() =>
+                        setSelectedRuleScope({ scopeType: "HOUSE_GROUP", scopeId: group.id })
+                      }
+                    />
+                  ))}
+                </View>
+              </>
+            ) : null}
+            {selectedRuleScope.scopeType === "HOUSE" ? (
+              <>
+                <FieldLabel>Select house</FieldLabel>
+                <View style={styles.chipRow}>
+                  {store.houses.map((house) => (
+                    <OptionChip
+                      key={house.id}
+                      label={house.name}
+                      selected={selectedRuleScope.scopeId === house.id}
+                      onPress={() =>
+                        setSelectedRuleScope({ scopeType: "HOUSE", scopeId: house.id })
+                      }
+                    />
+                  ))}
+                </View>
+              </>
+            ) : null}
+            {selectedRuleScope.scopeType !== "ORGANIZATION" && !selectedRuleScope.scopeId ? (
+              <Text style={styles.sectionMeta}>
+                Select a {selectedRuleScope.scopeType === "HOUSE_GROUP" ? "house group" : "house"}{" "}
+                to configure defaults for that scope.
+              </Text>
+            ) : (
+              <>
+                <Text style={styles.entityMeta}>
+                  Editing {labelForRuleScope(selectedRuleScope.scopeType)}
+                  {selectedRuleScope.scopeType === "HOUSE_GROUP" && selectedRuleScope.scopeId
+                    ? ` • ${getHouseGroupById(store, selectedRuleScope.scopeId)?.name ?? "Unknown group"}`
+                    : ""}
+                  {selectedRuleScope.scopeType === "HOUSE" && selectedRuleScope.scopeId
+                    ? ` • ${store.houses.find((house) => house.id === selectedRuleScope.scopeId)?.name ?? "Unknown house"}`
+                    : ""}
+                </Text>
+                <FieldLabel>Rule set name</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={ruleDraft.name}
+                  onChangeText={(value) => setRuleDraft((current) => ({ ...current, name: value }))}
+                  placeholder="Default house rules"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <ToggleRow
+                  label="Rule set active"
+                  value={ruleDraft.isActive}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, isActive: value }))
+                  }
+                />
+                <Text style={styles.groupTitle}>Curfew</Text>
+                <ToggleRow
+                  label="Enabled"
+                  value={ruleDraft.curfewEnabled}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, curfewEnabled: value }))
+                  }
+                />
+                <View style={styles.twoColumnRow}>
+                  <View style={styles.column}>
+                    <FieldLabel>Weekday curfew</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.weekdayCurfew}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({ ...current, weekdayCurfew: value }))
+                      }
+                      placeholder="10:00 PM"
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                  <View style={styles.column}>
+                    <FieldLabel>Friday curfew</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.fridayCurfew}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({ ...current, fridayCurfew: value }))
+                      }
+                      placeholder="11:00 PM"
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                </View>
+                <View style={styles.twoColumnRow}>
+                  <View style={styles.column}>
+                    <FieldLabel>Saturday curfew</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.saturdayCurfew}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({ ...current, saturdayCurfew: value }))
+                      }
+                      placeholder="11:00 PM"
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                  <View style={styles.column}>
+                    <FieldLabel>Sunday curfew</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.sundayCurfew}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({ ...current, sundayCurfew: value }))
+                      }
+                      placeholder="10:00 PM"
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                </View>
+                <View style={styles.twoColumnRow}>
+                  <View style={styles.column}>
+                    <FieldLabel>Grace period (min)</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.curfewGracePeriodMinutes}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({
+                          ...current,
+                          curfewGracePeriodMinutes: normalizeIntegerInput(value),
+                        }))
+                      }
+                      keyboardType="number-pad"
+                      placeholder="15"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                  <View style={styles.column}>
+                    <FieldLabel>Pre-alert lead (min)</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.preViolationLeadTimeMinutes}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({
+                          ...current,
+                          preViolationLeadTimeMinutes: normalizeIntegerInput(value),
+                        }))
+                      }
+                      keyboardType="number-pad"
+                      placeholder="15"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                </View>
+                <ToggleRow
+                  label="Pre-violation alert enabled"
+                  value={ruleDraft.preViolationAlertEnabled}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, preViolationAlertEnabled: value }))
+                  }
+                />
+                <FieldLabel>Alert basis</FieldLabel>
+                <View style={styles.chipRow}>
+                  {CURFEW_ALERT_BASIS_OPTIONS.map((option) => (
+                    <OptionChip
+                      key={option.value}
+                      label={option.label}
+                      selected={ruleDraft.curfewAlertBasis === option.value}
+                      onPress={() =>
+                        setRuleDraft((current) => ({ ...current, curfewAlertBasis: option.value }))
+                      }
+                    />
+                  ))}
+                </View>
+
+                <Text style={styles.groupTitle}>Chores</Text>
+                <ToggleRow
+                  label="Enabled"
+                  value={ruleDraft.choresEnabled}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, choresEnabled: value }))
+                  }
+                />
+                <FieldLabel>Frequency</FieldLabel>
+                <View style={styles.chipRow}>
+                  {CHORE_FREQUENCY_OPTIONS.map((option) => (
+                    <OptionChip
+                      key={option.value}
+                      label={option.label}
+                      selected={ruleDraft.choresFrequency === option.value}
+                      onPress={() =>
+                        setRuleDraft((current) => ({ ...current, choresFrequency: option.value }))
+                      }
+                    />
+                  ))}
+                </View>
+                <View style={styles.twoColumnRow}>
+                  <View style={styles.column}>
+                    <FieldLabel>Due time</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.choresDueTime}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({ ...current, choresDueTime: value }))
+                      }
+                      placeholder="06:00 PM"
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                  <View style={styles.column}>
+                    <FieldLabel>Grace period (min)</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.choresGracePeriodMinutes}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({
+                          ...current,
+                          choresGracePeriodMinutes: normalizeIntegerInput(value),
+                        }))
+                      }
+                      keyboardType="number-pad"
+                      placeholder="15"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                </View>
+                <FieldLabel>Proof requirement</FieldLabel>
+                <View style={styles.chipRow}>
+                  {PROOF_REQUIREMENT_OPTIONS.map((option) => (
+                    <OptionChip
+                      key={option.value}
+                      label={option.label}
+                      selected={ruleDraft.choresProofRequirement.includes(option.value)}
+                      onPress={() =>
+                        setRuleDraft((current) => ({
+                          ...current,
+                          choresProofRequirement: toggleStringValue(
+                            current.choresProofRequirement,
+                            option.value,
+                          ),
+                        }))
+                      }
+                    />
+                  ))}
+                </View>
+                <Text style={styles.entityMeta}>
+                  Selected: {formatProofRequirementList(ruleDraft.choresProofRequirement)}
+                </Text>
+                <ToggleRow
+                  label="Manager instant notification enabled"
+                  value={ruleDraft.choresManagerInstantNotificationEnabled}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({
+                      ...current,
+                      choresManagerInstantNotificationEnabled: value,
+                    }))
+                  }
+                />
+
+                <Text style={styles.groupTitle}>Employment</Text>
+                <ToggleRow
+                  label="Employment required"
+                  value={ruleDraft.employmentRequired}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, employmentRequired: value }))
+                  }
+                />
+                <ToggleRow
+                  label="Workplace verification enabled"
+                  value={ruleDraft.workplaceVerificationEnabled}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, workplaceVerificationEnabled: value }))
+                  }
+                />
+                <ToggleRow
+                  label="Manager verification required"
+                  value={ruleDraft.managerVerificationRequired}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, managerVerificationRequired: value }))
+                  }
+                />
+                <FieldLabel>Workplace geofence radius default (ft)</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={ruleDraft.workplaceGeofenceRadiusDefault}
+                  onChangeText={(value) =>
+                    setRuleDraft((current) => ({
+                      ...current,
+                      workplaceGeofenceRadiusDefault: normalizeIntegerInput(value),
+                    }))
+                  }
+                  keyboardType="number-pad"
+                  placeholder="200"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+
+                <Text style={styles.groupTitle}>Job search</Text>
+                <View style={styles.twoColumnRow}>
+                  <View style={styles.column}>
+                    <FieldLabel>Applications required per week</FieldLabel>
+                    <TextInput
+                      style={styles.input}
+                      value={ruleDraft.jobSearchApplicationsRequiredPerWeek}
+                      onChangeText={(value) =>
+                        setRuleDraft((current) => ({
+                          ...current,
+                          jobSearchApplicationsRequiredPerWeek: normalizeIntegerInput(value),
+                        }))
+                      }
+                      keyboardType="number-pad"
+                      placeholder="5"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </View>
+                </View>
+                <ToggleRow
+                  label="Proof required"
+                  value={ruleDraft.jobSearchProofRequired}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, jobSearchProofRequired: value }))
+                  }
+                />
+                <ToggleRow
+                  label="Manager approval required"
+                  value={ruleDraft.jobSearchManagerApprovalRequired}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({
+                      ...current,
+                      jobSearchManagerApprovalRequired: value,
+                    }))
+                  }
+                />
+
+                <Text style={styles.groupTitle}>Meetings</Text>
+                <ToggleRow
+                  label="Meetings required"
+                  value={ruleDraft.meetingsRequired}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, meetingsRequired: value }))
+                  }
+                />
+                <FieldLabel>Meetings per week</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={ruleDraft.meetingsPerWeek}
+                  onChangeText={(value) =>
+                    setRuleDraft((current) => ({
+                      ...current,
+                      meetingsPerWeek: normalizeIntegerInput(value),
+                    }))
+                  }
+                  keyboardType="number-pad"
+                  placeholder="4"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <FieldLabel>Allowed meeting types</FieldLabel>
+                <View style={styles.chipRow}>
+                  {MEETING_TYPE_OPTIONS.map((option) => (
+                    <OptionChip
+                      key={option.value}
+                      label={option.label}
+                      selected={ruleDraft.allowedMeetingTypes.includes(option.value)}
+                      onPress={() =>
+                        setRuleDraft((current) => ({
+                          ...current,
+                          allowedMeetingTypes: toggleStringValue(
+                            current.allowedMeetingTypes,
+                            option.value,
+                          ),
+                        }))
+                      }
+                    />
+                  ))}
+                </View>
+                <FieldLabel>Proof method</FieldLabel>
+                <View style={styles.chipRow}>
+                  {MEETING_PROOF_METHOD_OPTIONS.map((option) => (
+                    <OptionChip
+                      key={option.value}
+                      label={option.label}
+                      selected={ruleDraft.meetingsProofMethod === option.value}
+                      onPress={() =>
+                        setRuleDraft((current) => ({
+                          ...current,
+                          meetingsProofMethod: option.value,
+                        }))
+                      }
+                    />
+                  ))}
+                </View>
+
+                <Text style={styles.groupTitle}>Sponsor contact</Text>
+                <ToggleRow
+                  label="Enabled"
+                  value={ruleDraft.sponsorContactEnabled}
+                  onValueChange={(value) =>
+                    setRuleDraft((current) => ({ ...current, sponsorContactEnabled: value }))
+                  }
+                />
+                <FieldLabel>Contacts required per week</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={ruleDraft.sponsorContactsRequiredPerWeek}
+                  onChangeText={(value) =>
+                    setRuleDraft((current) => ({
+                      ...current,
+                      sponsorContactsRequiredPerWeek: normalizeIntegerInput(value),
+                    }))
+                  }
+                  keyboardType="number-pad"
+                  placeholder="3"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <FieldLabel>Proof type</FieldLabel>
+                <View style={styles.chipRow}>
+                  {SPONSOR_PROOF_TYPE_OPTIONS.map((option) => (
+                    <OptionChip
+                      key={option.value}
+                      label={option.label}
+                      selected={ruleDraft.sponsorProofType === option.value}
+                      onPress={() =>
+                        setRuleDraft((current) => ({ ...current, sponsorProofType: option.value }))
+                      }
+                    />
+                  ))}
+                </View>
+
+                <View style={styles.buttonRow}>
+                  <AppButton
+                    title="Save house rules"
+                    onPress={() => void saveRuleSet()}
+                    disabled={isSaving}
+                  />
+                  {ruleDraft.id ? (
+                    <>
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title={ruleDraft.isActive ? "Deactivate rule set" : "Reactivate rule set"}
+                        variant={ruleDraft.isActive ? "danger" : "secondary"}
+                        onPress={() => {
+                          const timestamp = new Date().toISOString();
+                          const result = setHouseRuleSetStatus(
+                            store,
+                            actor,
+                            ruleDraft.id ?? "",
+                            ruleDraft.isActive ? "INACTIVE" : "ACTIVE",
+                            timestamp,
+                          );
+                          void persistStore(
+                            result.store,
+                            `Rule set status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+                          );
+                        }}
+                      />
+                    </>
+                  ) : null}
+                </View>
+              </>
+            )}
+          </GlassCard>
+
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="Alert Preferences"
+              meta="Alert recipient records and delivery methods for violations, near-misses, and monthly reporting."
+              action={
+                <AppButton
+                  title="New alert"
+                  variant="secondary"
+                  onPress={() => {
+                    setEditingAlertPreferenceId(null);
+                    setAlertDraft(createAlertPreferenceDraft(null));
+                  }}
+                />
+              }
+            />
+            <View style={styles.listWrap}>
+              {store.alertPreferences.length === 0 ? (
+                <Text style={styles.sectionMeta}>No alert preferences configured yet.</Text>
+              ) : (
+                store.alertPreferences.map((preference) => (
+                  <View
+                    key={preference.id}
+                    style={[
+                      styles.entityCard,
+                      editingAlertPreferenceId === preference.id ? styles.entityCardSelected : null,
+                    ]}
+                  >
+                    <Text style={styles.entityTitle}>{preference.label}</Text>
+                    <Text style={styles.entityMeta}>
+                      Scope:{" "}
+                      {preference.scope === "ORGANIZATION"
+                        ? "Organization-wide"
+                        : (store.houses.find((house) => house.id === preference.houseId)?.name ??
+                          "House")}
+                    </Text>
+                    <Text style={styles.entityMeta}>
+                      Recipient: {preference.recipientName || "Unassigned"} •{" "}
+                      {preference.deliveryMethod}
+                    </Text>
+                    <Text style={styles.entityMeta}>
+                      {preference.sendRealTimeViolationAlerts ? "Real-time " : ""}
+                      {preference.sendNearMissAlerts ? "Near-miss " : ""}
+                      {preference.sendMonthlyReports ? "Monthly reports" : ""}
+                    </Text>
+                    <Text style={styles.entityMeta}>
+                      {preference.status === "ACTIVE" ? "Active" : "Inactive"}
+                    </Text>
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title="Edit"
+                        variant="secondary"
+                        onPress={() => {
+                          setEditingAlertPreferenceId(preference.id);
+                          setAlertDraft(createAlertPreferenceDraft(preference));
+                        }}
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title={preference.status === "ACTIVE" ? "Deactivate" : "Reactivate"}
+                        variant={preference.status === "ACTIVE" ? "danger" : "secondary"}
+                        onPress={() => {
+                          const timestamp = new Date().toISOString();
+                          const result = setAlertPreferenceStatus(
+                            store,
+                            actor,
+                            preference.id,
+                            preference.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
+                            timestamp,
+                          );
+                          void persistStore(
+                            result.store,
+                            `Alert preference status updated with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+                          );
+                        }}
+                      />
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+            <FieldLabel>Label</FieldLabel>
+            <TextInput
+              style={styles.input}
+              value={alertDraft.label}
+              onChangeText={(value) => setAlertDraft((current) => ({ ...current, label: value }))}
+              placeholder="Default manager alerts"
+              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+            />
+            <FieldLabel>Scope</FieldLabel>
+            <View style={styles.chipRow}>
+              {ALERT_SCOPE_OPTIONS.map((option) => (
+                <OptionChip
+                  key={option.value}
+                  label={option.label}
+                  selected={alertDraft.scope === option.value}
+                  onPress={() =>
+                    setAlertDraft((current) => ({
+                      ...current,
+                      scope: option.value,
+                      houseId: option.value === "HOUSE" ? current.houseId : null,
+                    }))
+                  }
+                />
+              ))}
+            </View>
+            {alertDraft.scope === "HOUSE" ? (
+              <>
+                <FieldLabel>Assigned house</FieldLabel>
+                <View style={styles.chipRow}>
+                  {store.houses.map((house) => (
+                    <OptionChip
+                      key={house.id}
+                      label={house.name}
+                      selected={alertDraft.houseId === house.id}
+                      onPress={() =>
+                        setAlertDraft((current) => ({ ...current, houseId: house.id }))
+                      }
+                    />
+                  ))}
+                </View>
+              </>
+            ) : null}
+            <FieldLabel>Recipient staff</FieldLabel>
+            <View style={styles.chipRow}>
+              <OptionChip
+                label="Custom"
+                selected={alertDraft.recipientStaffAssignmentId === null}
+                onPress={() =>
+                  setAlertDraft((current) => ({ ...current, recipientStaffAssignmentId: null }))
+                }
+              />
+              {store.staffAssignments.map((assignment) => (
+                <OptionChip
+                  key={assignment.id}
+                  label={`${assignment.firstName} ${assignment.lastName}`}
+                  selected={alertDraft.recipientStaffAssignmentId === assignment.id}
+                  onPress={() =>
+                    setAlertDraft((current) => ({
+                      ...current,
+                      recipientStaffAssignmentId: assignment.id,
+                      recipientName: `${assignment.firstName} ${assignment.lastName}`.trim(),
+                      recipientPhone: assignment.phone,
+                      recipientEmail: assignment.email,
+                    }))
+                  }
+                />
+              ))}
+            </View>
+            <View style={styles.twoColumnRow}>
+              <View style={styles.column}>
+                <FieldLabel>Recipient name</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={alertDraft.recipientName}
+                  onChangeText={(value) =>
+                    setAlertDraft((current) => ({ ...current, recipientName: value }))
+                  }
+                  placeholder="Manager name"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+              </View>
+              <View style={styles.column}>
+                <FieldLabel>Recipient phone</FieldLabel>
+                <TextInput
+                  style={styles.input}
+                  value={alertDraft.recipientPhone}
+                  onChangeText={(value) =>
+                    setAlertDraft((current) => ({ ...current, recipientPhone: value }))
+                  }
+                  keyboardType="phone-pad"
+                  placeholder="(555) 555-4545"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+              </View>
+            </View>
+            <FieldLabel>Recipient email</FieldLabel>
+            <TextInput
+              style={styles.input}
+              value={alertDraft.recipientEmail}
+              onChangeText={(value) =>
+                setAlertDraft((current) => ({ ...current, recipientEmail: value }))
+              }
+              autoCapitalize="none"
+              placeholder="alerts@example.org"
+              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+            />
+            <FieldLabel>Delivery method</FieldLabel>
+            <View style={styles.chipRow}>
+              {ALERT_DELIVERY_METHOD_OPTIONS.map((option) => (
+                <OptionChip
+                  key={option.value}
+                  label={option.label}
+                  selected={alertDraft.deliveryMethod === option.value}
+                  onPress={() =>
+                    setAlertDraft((current) => ({ ...current, deliveryMethod: option.value }))
+                  }
+                />
+              ))}
+            </View>
+            <ToggleRow
+              label="Receive real-time violation alerts"
+              value={alertDraft.sendRealTimeViolationAlerts}
+              onValueChange={(value) =>
+                setAlertDraft((current) => ({ ...current, sendRealTimeViolationAlerts: value }))
+              }
+            />
+            <ToggleRow
+              label="Receive near-miss alerts"
+              value={alertDraft.sendNearMissAlerts}
+              onValueChange={(value) =>
+                setAlertDraft((current) => ({ ...current, sendNearMissAlerts: value }))
+              }
+            />
+            <ToggleRow
+              label="Receive monthly reports"
+              value={alertDraft.sendMonthlyReports}
+              onValueChange={(value) =>
+                setAlertDraft((current) => ({ ...current, sendMonthlyReports: value }))
+              }
+            />
+            <ToggleRow
+              label="Alert preference active"
+              value={alertDraft.isActive}
+              onValueChange={(value) =>
+                setAlertDraft((current) => ({ ...current, isActive: value }))
+              }
+            />
+            <View style={styles.buttonRow}>
+              <AppButton
+                title={editingAlertPreferenceId ? "Update alert" : "Create alert"}
+                variant={editingAlertPreferenceId ? "secondary" : undefined}
+                onPress={() => void saveAlertPreference()}
+                disabled={isSaving}
+              />
+              {editingAlertPreferenceId ? (
+                <>
+                  <View style={styles.buttonSpacer} />
+                  <AppButton
+                    title="New alert"
+                    variant="secondary"
+                    onPress={() => {
+                      setEditingAlertPreferenceId(null);
+                      setAlertDraft(createAlertPreferenceDraft(null));
+                    }}
+                    disabled={isSaving}
+                  />
+                </>
+              ) : null}
+            </View>
+          </GlassCard>
+
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="Audit Log"
+              meta="Read-only record of settings changes written on every saved edit."
+            />
+            {store.auditLogEntries.length === 0 ? (
+              <Text style={styles.sectionMeta}>No settings edits have been logged yet.</Text>
+            ) : (
+              store.auditLogEntries.slice(0, 30).map((entry) => (
+                <View key={entry.id} style={styles.auditRow}>
+                  <Text style={styles.auditTitle}>
+                    {entry.actor.name} • {entry.entityType} •{" "}
+                    {entry.actionTaken ?? entry.fieldChanged}
+                  </Text>
+                  <Text style={styles.entityMeta}>
+                    {new Date(entry.timestamp).toLocaleString()}
+                  </Text>
+                  <Text style={styles.entityMeta}>
+                    {formatAuditValue(entry.oldValue)} → {formatAuditValue(entry.newValue)}
+                  </Text>
+                </View>
+              ))
+            )}
+          </GlassCard>
+        </>
+      ) : null}
     </View>
   );
 }
@@ -2232,6 +3066,10 @@ const styles = StyleSheet.create({
     padding: spacing.sm,
     gap: 4,
   },
+  entityCardSelected: {
+    borderColor: "rgba(96,165,250,0.8)",
+    backgroundColor: "rgba(59,130,246,0.16)",
+  },
   entityTitle: {
     color: colors.textPrimary,
     fontSize: typography.h3,
@@ -2245,6 +3083,11 @@ const styles = StyleSheet.create({
   buttonRow: {
     flexDirection: "row",
     alignItems: "center",
+  },
+  inlineButtonRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
   },
   buttonSpacer: {
     width: spacing.sm,

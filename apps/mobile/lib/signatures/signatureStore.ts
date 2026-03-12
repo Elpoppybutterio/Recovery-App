@@ -30,9 +30,11 @@ export type NormalizeSignatureResult = {
 
 export function loadSignatureFileSystemModule(): SignatureFileSystemModule | null {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require("expo-file-system/legacy") as SignatureFileSystemModule;
   } catch {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       return require("expo-file-system") as SignatureFileSystemModule;
     } catch {
       return null;

@@ -51,9 +51,14 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Sober house resident layer now adds onboarding/editable resident housing profiles, resident requirement branching, house assignment, inheritance-ready defaults, and consent acknowledgment capture with stored signature references.
 - Sober house compliance engine v1 now evaluates curfew, near-miss windows, chores, work/job-search status, and weekly meeting quotas using resident overrides, house rules, current location, persisted resident inputs, and the existing attendance source of truth.
 - Sober house intervention layer now persists deduped violations, corrective actions, evidence linkage, and manager resolution workflow on top of compliance outputs with audit-safe history.
+- Structured internal chat foundation now persists direct sober-house manager/resident threads, structured message types, violation-linked thread reuse, unread/read receipts, acknowledgment-required notices, and auditable message history.
+- Sober house monthly reporting now stores immutable resident and house report snapshots with monthly KPI summaries, wins/streak summaries, report history, and in-app detail views.
+- Sober house report output workflow now adds review states, locked final manager summaries, version-safe regeneration, resident/house PDF export from stored snapshots, export history, and distribution-ready metadata without delivery automation.
+- Sober house dashboard blending Part A now adds resident-only chore, weekly meeting, and next-obligation dashboard tiles backed by reusable summary selectors and house-config-aware visibility on the existing recovery dashboard.
+- Sober house dashboard blending Part B now adds conditional one-on-one setup in the resident flow, persisted one-on-one scheduling fields, calendar event mapping, centralized reminder scheduling, and next-up dashboard integration without introducing a separate scheduling engine.
 - Recovery UX v2: setup wizard flow, dashboard-first home experience, purple liquid-glass cards, and local recovery analytics (days sober, 90-day progress, sponsor adherence).
 - Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
-- Dashboard: add a dormant `Intranet / Group Chat` tile directly below Upcoming Meetings, feature-flagged with a Coming Soon placeholder flow.
+- Dashboard: evolve the existing direct-message foundation into broader recovery/service/probation chat flows after sober-house direct messaging proves out.
 - Dashboard: Wisdom tile uses server-driven daily rotation (`/api/wisdom/daily`) with one quote per day, pronoun normalization (`I/you -> we`), plus local cache and deterministic fallback.
 - Mobile dev correctness: API URL alignment (`localhost:3031`), no hardcoded SF map origin defaults, nearby-meetings request diagnostics, and map search-origin visibility.
 - Build readiness: Development Build workflow implemented (EAS `development` / `preview` / `production` profiles, environment-driven bundle identifiers, stable deep-link scheme, and dev-client runbook in `docs/DEV_BUILD.md`).
@@ -64,10 +69,10 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 
 ## Futures / Backlog
 
-- [ ] Sober house follow-on slices: alerts dispatch, reporting, exports, and dashboards on top of the settings foundation, resident profile layer, compliance engine v1, and intervention workflow.
+- [ ] Sober house follow-on slices: alert delivery automation, distribution workflows, and dashboards on top of the settings foundation, compliance/intervention layers, chat foundation, and monthly report exports.
 - [ ] Auto-request location permission on first launch; if denied, show Settings deep-link CTA.
 - [ ] Import AA/NA meetings feeds (Meeting Guide spec) and return meetings within 20-mile radius when location is available.
 - [ ] Meeting Guide distributed feed ingest + tenant-scoped `/v1/meetings/nearby` search (20-mile default) with map/list toggle UX.
 - [ ] Dashboard + Setup Wizard + upcoming-meetings logic hardening across timezones and tenant policy controls.
 - [ ] Tools: AM routine + Nightly inventory + insights (local-first storage, optional API sync later).
-- [ ] Enable provider-backed Intranet / Group Chat (contact invites, push notifications, deep links, moderation controls).
+- [ ] Expand the structured chat foundation to provider-backed invites, push notifications, deep links, group chat, and moderation controls.

@@ -46,13 +46,17 @@ function loadModule<T>(name: string): T | null {
   try {
     switch (name) {
       case "expo-print":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-print") as T;
       case "expo-sharing":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-sharing") as T;
       case "expo-file-system":
         try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
           return require("expo-file-system/legacy") as T;
         } catch {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
           return require("expo-file-system") as T;
         }
       default:

@@ -1,8 +1,9 @@
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { GlassCard } from "../ui/GlassCard";
 import { Design } from "../ui/design";
 import type { RecoveryInsight } from "../recoveryInsights";
+import type { SoberHouseDashboardTileSummary } from "../soberHouse/dashboard";
 import { ChatTile } from "./ChatTile";
 
 type DashboardMeeting = {
@@ -26,10 +27,31 @@ type DashboardProps = {
   sponsorEnabled: boolean;
   wisdomText?: string | null;
   dailyChecklist: {
-    rows: Array<{ id: string; label: string; complete: boolean; progress: number }>;
+    rows: Array<{
+      id: string;
+      label: string;
+      complete: boolean;
+      progress: number;
+      statusLabel?: string;
+      tone?: "green" | "yellow" | "red" | "gray";
+    }>;
     percent: number;
     summary: string;
+    title?: string;
   };
+  soberHouseResidentTiles?: SoberHouseDashboardTileSummary[];
+  soberHouseViolations?: {
+    activeCount: number;
+    openCount: number;
+    underReviewCount: number;
+    correctiveActionCount: number;
+    recentSummary: string;
+  } | null;
+  houseManagerContact?: {
+    name: string;
+    roleLabel: string;
+    phoneLabel: string;
+  } | null;
   homeGroupMeeting: DashboardMeeting | null;
   meetingsAttendedInNinetyDays: number;
   ninetyDayGoalTarget: number;
@@ -61,9 +83,13 @@ type DashboardProps = {
   onOpenMorningRoutine: () => void;
   onOpenNightlyInventory: () => void;
   onOpenChat: () => void;
+  onOpenSoberHouseKpi?: (kpiId: string) => void;
+  onCallHouseManager?: () => void;
   onOpenRecoverySettings: () => void;
   onOpenPrivacyStatement: () => void;
   onOpenMeetings: () => void;
+  supervisionPanel?: ReactNode;
+  upcomingMeetingsPanel?: ReactNode;
   onOpenAttendance: () => void;
   onOpenAttendanceToday: () => void;
   onOpenTools: () => void;
@@ -149,6 +175,31 @@ function dailyChecklistMessage(percent: number): string {
   return "You sure you belong here?";
 }
 
+function kpiToneStyle(tone: "green" | "yellow" | "red" | "gray") {
+  if (tone === "green") {
+    return {
+      borderColor: "rgba(136,255,179,0.48)",
+      backgroundColor: "rgba(34,197,94,0.16)",
+    };
+  }
+  if (tone === "yellow") {
+    return {
+      borderColor: "rgba(253,224,71,0.48)",
+      backgroundColor: "rgba(245,158,11,0.16)",
+    };
+  }
+  if (tone === "red") {
+    return {
+      borderColor: "rgba(252,165,165,0.48)",
+      backgroundColor: "rgba(239,68,68,0.16)",
+    };
+  }
+  return {
+    borderColor: "rgba(255,255,255,0.18)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+  };
+}
+
 function parseSobrietyStartMs(value: string | null): number | null {
   if (!value) {
     return null;
@@ -195,6 +246,9 @@ export function Dashboard({
   sponsorEnabled,
   wisdomText,
   dailyChecklist,
+  soberHouseViolations,
+  soberHouseResidentTiles = [],
+  houseManagerContact = null,
   meetingsAttendedInNinetyDays,
   ninetyDayGoalTarget,
   ninetyDayProgressPct,
@@ -210,9 +264,13 @@ export function Dashboard({
   onOpenMorningRoutine,
   onOpenNightlyInventory,
   onOpenChat,
+  onOpenSoberHouseKpi,
+  onCallHouseManager,
   onOpenRecoverySettings,
   onOpenPrivacyStatement,
   onOpenMeetings,
+  supervisionPanel,
+  upcomingMeetingsPanel,
   onOpenAttendance,
   onOpenAttendanceToday,
   onOpenTools,
@@ -239,6 +297,7 @@ export function Dashboard({
   const dailyChecklistRows = dailyChecklist.rows;
   const dailyChecklistPct = clampPercent(dailyChecklist.percent);
   const dailyChecklistSummary = dailyChecklist.summary;
+  const dailyChecklistTitle = dailyChecklist.title ?? "Sponsor Suggested Daily Checklist";
   const dailyChecklistInsight = dailyChecklistMessage(dailyChecklistPct);
   const upcoming = nextMeetings.slice(0, 5);
   const todayTotal = Math.max(1, morningRoutine.todayTotalCount);
@@ -568,7 +627,7 @@ export function Dashboard({
                 hoveredTileId === "daily-checklist" ? styles.liquidGlassTileHover : null,
               ]}
             >
-              <Text style={styles.metricHeading}>Sponsor Suggested Daily Checklist</Text>
+              <Text style={styles.metricHeading}>{dailyChecklistTitle}</Text>
               <Text style={styles.dailyChecklistInsight}>{dailyChecklistInsight}</Text>
               <View style={styles.separator} />
               <View style={styles.dailyChecklistProgressRow}>
@@ -583,20 +642,34 @@ export function Dashboard({
                     <View
                       style={[
                         styles.nightlyStatusDot,
-                        row.complete
+                        row.tone === "green" || row.complete
                           ? styles.nightlyStatusDotDone
-                          : row.progress > 0
+                          : row.tone === "yellow" || row.progress > 0
                             ? styles.nightlyStatusDotPartial
-                            : null,
+                            : row.tone === "red"
+                              ? styles.nightlyStatusDotRisk
+                              : null,
                       ]}
                     />
                     <Text style={styles.dailyChecklistLabel}>{row.label}</Text>
-                    <Text style={styles.dailyChecklistStatus}>
-                      {row.progress === 100
-                        ? "Done"
-                        : row.progress > 0
-                          ? `${row.progress}%`
-                          : "Pending"}
+                    <Text
+                      style={[
+                        styles.dailyChecklistStatus,
+                        row.tone === "green"
+                          ? styles.dailyChecklistStatusGreen
+                          : row.tone === "yellow"
+                            ? styles.dailyChecklistStatusYellow
+                            : row.tone === "red"
+                              ? styles.dailyChecklistStatusRed
+                              : null,
+                      ]}
+                    >
+                      {row.statusLabel ??
+                        (row.progress === 100
+                          ? "Done"
+                          : row.progress > 0
+                            ? `${row.progress}%`
+                            : "Pending")}
                     </Text>
                   </View>
                 ))}
@@ -605,6 +678,58 @@ export function Dashboard({
             </GlassCard>
           </Pressable>
         </View>
+
+        {soberHouseViolations ? (
+          <View style={styles.metricsRow}>
+            <Pressable
+              style={styles.metricTilePressable}
+              onPress={onOpenSoberHousingSettings}
+              onHoverIn={() => setTileHover("sober-house-violations", true)}
+              onHoverOut={() => setTileHover("sober-house-violations", false)}
+              accessibilityRole="button"
+              accessibilityLabel="Open sober-house violations"
+            >
+              <GlassCard
+                strong
+                blurIntensity={12}
+                darken
+                gradientDark
+                style={[
+                  styles.metricCard,
+                  styles.liquidGlassTile,
+                  hoveredTileId === "sober-house-violations" ? styles.liquidGlassTileHover : null,
+                ]}
+              >
+                <View style={styles.upcomingHeader}>
+                  <Text style={styles.metricHeading}>Violations</Text>
+                  <View style={styles.streakPill}>
+                    <Text style={styles.streakPillText}>{soberHouseViolations.activeCount}</Text>
+                  </View>
+                </View>
+                <View style={styles.separator} />
+                <View style={styles.violationStatsRow}>
+                  <View style={styles.violationStatBlock}>
+                    <Text style={styles.violationStatValue}>{soberHouseViolations.openCount}</Text>
+                    <Text style={styles.violationStatLabel}>Open</Text>
+                  </View>
+                  <View style={styles.violationStatBlock}>
+                    <Text style={styles.violationStatValue}>
+                      {soberHouseViolations.underReviewCount}
+                    </Text>
+                    <Text style={styles.violationStatLabel}>Review</Text>
+                  </View>
+                  <View style={styles.violationStatBlock}>
+                    <Text style={styles.violationStatValue}>
+                      {soberHouseViolations.correctiveActionCount}
+                    </Text>
+                    <Text style={styles.violationStatLabel}>Actions</Text>
+                  </View>
+                </View>
+                <Text style={styles.streakLabel}>{soberHouseViolations.recentSummary}</Text>
+              </GlassCard>
+            </Pressable>
+          </View>
+        ) : null}
 
         <View style={styles.metricsRow}>
           <Pressable
@@ -752,105 +877,109 @@ export function Dashboard({
           </Pressable>
         </View>
 
-        <Pressable
-          onHoverIn={() => setTileHover("upcoming", true)}
-          onHoverOut={() => setTileHover("upcoming", false)}
-          accessible={false}
-        >
-          <GlassCard
-            strong
-            blurIntensity={12}
-            style={[
-              styles.upcomingCard,
-              styles.liquidGlassTile,
-              hoveredTileId === "upcoming" ? styles.liquidGlassTileHover : null,
-            ]}
-          >
-            <View style={styles.upcomingHeader}>
-              <Text style={styles.upcomingTitle}>Current & Upcoming Meetings</Text>
-              <Pressable
-                style={styles.upcomingMoreButton}
-                onPress={onOpenMeetings}
-                accessibilityRole="button"
-                accessibilityLabel="Open meetings page"
-              >
-                <View style={styles.dotRow}>
-                  <View style={styles.dot} />
-                  <View style={styles.dot} />
-                  <View style={styles.dot} />
-                </View>
-              </Pressable>
-            </View>
-            {showingOnlineMeetingsFallback ? (
-              <Text style={styles.upcomingNotice}>
-                No in-person meetings available for the rest of today. Showing online meetings.
-              </Text>
-            ) : null}
-            <Pressable
-              style={styles.meetingsAttendanceLogPill}
-              onPress={onOpenAttendance}
-              accessibilityRole="button"
-              accessibilityLabel="Open meetings attendance log page"
-            >
-              <Text style={styles.meetingsAttendanceLogPillText}>Meetings Attendance Log</Text>
-            </Pressable>
+        {supervisionPanel}
 
-            {upcoming.map((meeting, index) => (
-              <View key={meeting.id} style={styles.meetingItem}>
+        {upcomingMeetingsPanel ?? (
+          <Pressable
+            onHoverIn={() => setTileHover("upcoming", true)}
+            onHoverOut={() => setTileHover("upcoming", false)}
+            accessible={false}
+          >
+            <GlassCard
+              strong
+              blurIntensity={12}
+              style={[
+                styles.upcomingCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "upcoming" ? styles.liquidGlassTileHover : null,
+              ]}
+            >
+              <View style={styles.upcomingHeader}>
+                <Text style={styles.upcomingTitle}>Current & Upcoming Meetings</Text>
                 <Pressable
-                  style={styles.meetingDetailsButton}
-                  onPress={() => onMeetingPress(meeting.id)}
+                  style={styles.upcomingMoreButton}
+                  onPress={onOpenMeetings}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open meetings page"
                 >
-                  <View style={[styles.meetingIcon, index === 2 ? styles.meetingIconPink : null]}>
-                    <Text style={styles.meetingIconText}>
-                      {index === 1 ? "🔒" : index === 2 ? "✦" : "↪"}
-                    </Text>
-                  </View>
-                  <View style={styles.meetingTextCol}>
-                    <Text numberOfLines={2} style={styles.meetingName}>
-                      {meeting.name}
-                    </Text>
-                    <View style={styles.meetingMetaRow}>
-                      <Text style={styles.meetingDistance}>
-                        {distanceLabel(meeting.distanceMeters)}
-                      </Text>
-                      <Text style={styles.meetingMeta}>• {meetingFormatLabel(meeting)}</Text>
-                      <Text style={styles.meetingMeta}>
-                        • {toTwelveHour(meeting.startsAtLocal)}
-                      </Text>
-                    </View>
+                  <View style={styles.dotRow}>
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
+                    <View style={styles.dot} />
                   </View>
                 </Pressable>
-                <View style={styles.meetingActionsRow}>
-                  <Pressable
-                    style={styles.meetingLogButton}
-                    onPress={() => onLogMeeting(meeting.id)}
-                  >
-                    <Text style={styles.meetingLogButtonText}>
-                      {meetingPrimaryActionLabels[meeting.id] ?? "Attend"}
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    style={styles.meetingLogButton}
-                    onPress={() => onCaptureSignature(meeting.id)}
-                  >
-                    <Text style={styles.meetingLogButtonText}>Signature</Text>
-                  </Pressable>
-                </View>
               </View>
-            ))}
-
-            {upcoming.length === 0 ? (
-              <Pressable style={styles.emptyMeetingCta} onPress={onSearchArea}>
-                <Text style={styles.emptyMeetingText}>
-                  {locationEnabled
-                    ? "No upcoming meetings in your area. Tap to search this area."
-                    : "Location is off. Tap to refresh and try again."}
+              {showingOnlineMeetingsFallback ? (
+                <Text style={styles.upcomingNotice}>
+                  No in-person meetings available for the rest of today. Showing online meetings.
                 </Text>
+              ) : null}
+              <Pressable
+                style={styles.meetingsAttendanceLogPill}
+                onPress={onOpenAttendance}
+                accessibilityRole="button"
+                accessibilityLabel="Open meetings attendance log page"
+              >
+                <Text style={styles.meetingsAttendanceLogPillText}>Meetings Attendance Log</Text>
               </Pressable>
-            ) : null}
-          </GlassCard>
-        </Pressable>
+
+              {upcoming.map((meeting, index) => (
+                <View key={meeting.id} style={styles.meetingItem}>
+                  <Pressable
+                    style={styles.meetingDetailsButton}
+                    onPress={() => onMeetingPress(meeting.id)}
+                  >
+                    <View style={[styles.meetingIcon, index === 2 ? styles.meetingIconPink : null]}>
+                      <Text style={styles.meetingIconText}>
+                        {index === 1 ? "🔒" : index === 2 ? "✦" : "↪"}
+                      </Text>
+                    </View>
+                    <View style={styles.meetingTextCol}>
+                      <Text numberOfLines={2} style={styles.meetingName}>
+                        {meeting.name}
+                      </Text>
+                      <View style={styles.meetingMetaRow}>
+                        <Text style={styles.meetingDistance}>
+                          {distanceLabel(meeting.distanceMeters)}
+                        </Text>
+                        <Text style={styles.meetingMeta}>• {meetingFormatLabel(meeting)}</Text>
+                        <Text style={styles.meetingMeta}>
+                          • {toTwelveHour(meeting.startsAtLocal)}
+                        </Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                  <View style={styles.meetingActionsRow}>
+                    <Pressable
+                      style={styles.meetingLogButton}
+                      onPress={() => onLogMeeting(meeting.id)}
+                    >
+                      <Text style={styles.meetingLogButtonText}>
+                        {meetingPrimaryActionLabels[meeting.id] ?? "Attend"}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.meetingLogButton}
+                      onPress={() => onCaptureSignature(meeting.id)}
+                    >
+                      <Text style={styles.meetingLogButtonText}>Signature</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+
+              {upcoming.length === 0 ? (
+                <Pressable style={styles.emptyMeetingCta} onPress={onSearchArea}>
+                  <Text style={styles.emptyMeetingText}>
+                    {locationEnabled
+                      ? "No upcoming meetings in your area. Tap to search this area."
+                      : "Location is off. Tap to refresh and try again."}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </GlassCard>
+          </Pressable>
+        )}
 
         <ChatTile
           enabled={chatEnabled}
@@ -858,7 +987,69 @@ export function Dashboard({
           onPress={onOpenChat}
           onHoverIn={() => setTileHover("chat", true)}
           onHoverOut={() => setTileHover("chat", false)}
+          title={houseManagerContact ? "House Manager Chat" : undefined}
+          subtitle={
+            houseManagerContact
+              ? `Direct operational messaging with ${houseManagerContact.name}`
+              : undefined
+          }
+          detail={
+            houseManagerContact
+              ? "Open unread messages, acknowledgment requests, and manager follow-up."
+              : undefined
+          }
+          badgeLabel={houseManagerContact ? "Live" : undefined}
         />
+
+        {houseManagerContact || soberHouseResidentTiles.length > 0 ? (
+          <GlassCard
+            strong
+            blurIntensity={12}
+            style={[styles.recoveryCard, styles.liquidGlassTile]}
+          >
+            <View style={styles.upcomingHeader}>
+              <Text style={styles.recoveryTitle}>Sober House Operations</Text>
+              {houseManagerContact && onCallHouseManager ? (
+                <Pressable style={styles.meetingsAttendanceLogPill} onPress={onCallHouseManager}>
+                  <Text style={styles.meetingsAttendanceLogPillText}>Call house manager</Text>
+                </Pressable>
+              ) : null}
+            </View>
+            {houseManagerContact ? (
+              <Text style={styles.recoveryText}>
+                {houseManagerContact.roleLabel}: {houseManagerContact.name} •{" "}
+                {houseManagerContact.phoneLabel}
+              </Text>
+            ) : null}
+            {soberHouseResidentTiles.length > 0 ? (
+              <View style={styles.kpiGrid}>
+                {soberHouseResidentTiles.map((tile) => (
+                  <Pressable
+                    key={tile.id}
+                    style={[styles.kpiTile, kpiToneStyle(tile.tone)]}
+                    onPress={() =>
+                      tile.routeTarget === "MEETINGS"
+                        ? onOpenMeetings()
+                        : onOpenSoberHouseKpi?.(tile.id)
+                    }
+                  >
+                    <View style={styles.soberHouseTileHeader}>
+                      <Text style={styles.kpiTitle}>{tile.title}</Text>
+                      {tile.badgeLabel ? (
+                        <View style={styles.soberHouseTileBadge}>
+                          <Text style={styles.soberHouseTileBadgeText}>{tile.badgeLabel}</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text style={styles.kpiValue}>{tile.value}</Text>
+                    <Text style={styles.kpiSubtitle}>{tile.subtitle}</Text>
+                    <Text style={styles.soberHouseTileDetail}>{tile.detail}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+          </GlassCard>
+        ) : null}
 
         <Pressable
           onHoverIn={() => setTileHover("physical-recovery", true)}
@@ -1244,11 +1435,45 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
   },
+  dailyChecklistStatusGreen: {
+    color: "rgba(136,255,179,0.95)",
+  },
+  dailyChecklistStatusYellow: {
+    color: "rgba(253,224,71,0.95)",
+  },
+  dailyChecklistStatusRed: {
+    color: "rgba(252,165,165,0.95)",
+  },
   dailyChecklistInsight: {
     color: Design.color.textSecondary,
     fontSize: 11,
     fontWeight: "700",
     lineHeight: 15,
+  },
+  violationStatsRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  violationStatBlock: {
+    flex: 1,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.16)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    gap: 4,
+  },
+  violationStatValue: {
+    color: Design.color.textPrimary,
+    fontSize: 22,
+    fontWeight: "900",
+  },
+  violationStatLabel: {
+    color: Design.color.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
   },
   metricMeta: {
     color: Design.color.textSecondary,
@@ -1373,6 +1598,9 @@ const styles = StyleSheet.create({
   },
   nightlyStatusDotPartial: {
     backgroundColor: "rgba(251,191,36,0.95)",
+  },
+  nightlyStatusDotRisk: {
+    backgroundColor: "rgba(252,165,165,0.95)",
   },
   trendBadge: {
     marginLeft: "auto",
@@ -1518,19 +1746,20 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   upcomingCard: {
-    padding: 12,
-    gap: 8,
+    padding: 16,
+    gap: 12,
   },
   upcomingHeader: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
-    gap: 8,
+    gap: 10,
   },
   upcomingTitle: {
     color: Design.color.textPrimary,
-    fontSize: 17,
+    fontSize: 19,
     fontWeight: "800",
+    flex: 1,
   },
   dotRow: {
     flexDirection: "row",
@@ -1543,7 +1772,7 @@ const styles = StyleSheet.create({
   },
   upcomingNotice: {
     color: Design.color.textSecondary,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "600",
     marginBottom: 2,
   },
@@ -1552,14 +1781,14 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.36)",
-    backgroundColor: "rgba(255,255,255,0.15)",
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    marginBottom: 2,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    marginBottom: 4,
   },
   meetingsAttendanceLogPillText: {
     color: Design.color.textPrimary,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "700",
   },
   dot: {
@@ -1569,42 +1798,54 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.55)",
   },
   meetingItem: {
-    gap: 8,
-    padding: 9,
-    borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.92)",
+    gap: 12,
+    padding: 16,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(71,52,152,0.16)",
+    backgroundColor: "rgba(255,255,255,0.96)",
+    shadowColor: "rgba(35,18,93,0.28)",
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
   },
   meetingDetailsButton: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
+    alignItems: "center",
+    gap: 14,
   },
   meetingIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#6D4FD8",
+    shadowColor: "rgba(109,79,216,0.4)",
+    shadowOpacity: 0.24,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
   meetingIconPink: {
     backgroundColor: "#DE56AE",
   },
   meetingIconText: {
     color: "#fff",
-    fontSize: 14,
+    fontSize: 18,
     fontWeight: "700",
   },
   meetingTextCol: {
     flex: 1,
     minWidth: 0,
-    gap: 2,
+    gap: 4,
   },
   meetingName: {
     color: "#2B1F72",
-    fontSize: 15,
-    fontWeight: "700",
-    lineHeight: 19,
+    fontSize: 17,
+    fontWeight: "800",
+    lineHeight: 22,
   },
   meetingMetaRow: {
     flexDirection: "row",
@@ -1614,31 +1855,32 @@ const styles = StyleSheet.create({
   },
   meetingDistance: {
     color: "#1F1457",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "800",
   },
   meetingMeta: {
     color: "#3F2E88",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "700",
   },
   meetingActionsRow: {
     flexDirection: "row",
-    gap: 8,
+    gap: 12,
   },
   meetingLogButton: {
     flex: 1,
-    borderRadius: 10,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(47,35,128,0.25)",
-    backgroundColor: "rgba(90,44,206,0.12)",
-    paddingHorizontal: 10,
-    paddingVertical: 9,
+    borderColor: "rgba(95,73,179,0.22)",
+    backgroundColor: "#E9E1F8",
+    paddingHorizontal: 12,
+    paddingVertical: 13,
     alignItems: "center",
+    justifyContent: "center",
   },
   meetingLogButtonText: {
     color: "#2F2380",
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "800",
   },
   emptyMeetingCta: {
@@ -1667,6 +1909,62 @@ const styles = StyleSheet.create({
     color: Design.color.textPrimary,
     fontSize: 15,
     lineHeight: 22,
+    fontWeight: "600",
+  },
+  kpiGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  kpiTile: {
+    width: "48%",
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    gap: 6,
+  },
+  soberHouseTileHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  soberHouseTileBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: "rgba(255,255,255,0.14)",
+  },
+  soberHouseTileBadgeText: {
+    color: Design.color.textPrimary,
+    fontSize: 10,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  kpiTitle: {
+    color: Design.color.textSecondary,
+    fontSize: 11,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  kpiValue: {
+    color: Design.color.textPrimary,
+    fontSize: 22,
+    fontWeight: "900",
+  },
+  kpiSubtitle: {
+    color: Design.color.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "600",
+  },
+  soberHouseTileDetail: {
+    color: Design.color.textPrimary,
+    fontSize: 12,
+    lineHeight: 17,
     fontWeight: "600",
   },
 });

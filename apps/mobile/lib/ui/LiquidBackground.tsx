@@ -12,6 +12,7 @@ export function LiquidBackground({ children }: Props) {
   return (
     <View style={styles.root}>
       <ImageBackground
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         source={require("../../assets/dashboard-bg.png")}
         resizeMode="cover"
         style={StyleSheet.absoluteFill}

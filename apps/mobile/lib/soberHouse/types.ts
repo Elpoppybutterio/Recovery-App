@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 3 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 9 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -22,12 +22,21 @@ export type MeetingType =
   | "DHARMA_RECOVERY"
   | "CELEBRATE_RECOVERY"
   | "OTHER";
-export type MeetingProofMethod = "GEOFENCE" | "SIGNATURE" | "PHOTO" | "MANAGER_CONFIRMATION";
+export type MeetingProofMethod =
+  | "GEOFENCE_SIGNATURE"
+  | "GEOFENCE"
+  | "SIGNATURE"
+  | "MANAGER_CONFIRMATION";
 export type SponsorProofType = "CALL_LOG" | "TEXT_CONFIRMATION" | "MANAGER_CONFIRMATION";
+export type ScheduledFrequency = "ONCE" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+export type ScheduledWeekdayCode = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
 export type AlertDeliveryMethod = "EMAIL" | "SMS" | "BOTH";
 export type AlertScope = "ORGANIZATION" | "HOUSE";
+export type HouseRuleScopeType = "ORGANIZATION" | "HOUSE_GROUP" | "HOUSE";
 export type SoberHouseEntityType =
   | "organization"
+  | "userAccessProfile"
+  | "houseGroup"
   | "house"
   | "staffAssignment"
   | "houseRuleSet"
@@ -40,7 +49,12 @@ export type SoberHouseEntityType =
   | "workVerificationRecord"
   | "violation"
   | "correctiveAction"
-  | "evidenceItem";
+  | "evidenceItem"
+  | "chatThread"
+  | "chatParticipant"
+  | "chatMessage"
+  | "chatMessageReceipt"
+  | "monthlyReport";
 export type ResidentOnboardingStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 export type ComplianceRuleType =
   | "curfew"
@@ -92,6 +106,41 @@ export type EvidenceType =
   | "DOCUMENT"
   | "NOTE"
   | "OTHER";
+export type ChatThreadType = "DIRECT" | "VIOLATION_LINKED_DIRECT" | "SYSTEM_LINKED_DIRECT";
+export type ChatModuleContext = "SOBER_HOUSE" | "RECOVERY" | "DRUG_COURT" | "PROBATION";
+export type ChatParticipantRole =
+  | "RESIDENT"
+  | "MANAGER"
+  | "OWNER"
+  | "ASSISTANT_MANAGER"
+  | "SPONSOR"
+  | "PROBATION_OFFICER"
+  | "SYSTEM";
+export type ChatMessageType =
+  | "NORMAL"
+  | "REMINDER"
+  | "WARNING"
+  | "ACKNOWLEDGMENT_REQUIRED"
+  | "CORRECTIVE_ACTION_NOTICE"
+  | "SYSTEM_NOTICE";
+export type ChatMetadataValue = string | number | boolean | null;
+export type MonthlyReportType = "RESIDENT_MONTHLY" | "HOUSE_MONTHLY";
+export type MonthlyReportStatus =
+  | "DRAFT"
+  | "GENERATED"
+  | "IN_REVIEW"
+  | "APPROVED"
+  | "EXPORTED"
+  | "SENT";
+export type MonthlyReportGeneratedBy = "SYSTEM" | "USER";
+export type ReportDistributionRecipientType = "RESIDENT" | "MANAGER" | "OWNER" | "COURT" | "OTHER";
+export type ReportDistributionMethod = "EMAIL" | "SMS" | "PORTAL" | "PRINT" | "OTHER";
+export type SoberHouseAccessRole =
+  | "UNASSIGNED"
+  | "OWNER_OPERATOR"
+  | "HOUSE_RESIDENT"
+  | "DRUG_COURT_PARTICIPANT"
+  | "PROBATION_PAROLE_PARTICIPANT";
 
 export type Option<Value extends string> = {
   value: Value;
@@ -146,9 +195,9 @@ export const MEETING_TYPE_OPTIONS: ReadonlyArray<Option<MeetingType>> = [
 ];
 
 export const MEETING_PROOF_METHOD_OPTIONS: ReadonlyArray<Option<MeetingProofMethod>> = [
+  { value: "GEOFENCE_SIGNATURE", label: "Geofence + signature" },
   { value: "GEOFENCE", label: "Geofence" },
   { value: "SIGNATURE", label: "Signature" },
-  { value: "PHOTO", label: "Photo" },
   { value: "MANAGER_CONFIRMATION", label: "Manager confirmation" },
 ];
 
@@ -223,9 +272,32 @@ export const EVIDENCE_TYPE_OPTIONS: ReadonlyArray<Option<EvidenceType>> = [
   { value: "OTHER", label: "Other" },
 ];
 
+export const CHAT_MESSAGE_TYPE_OPTIONS: ReadonlyArray<Option<ChatMessageType>> = [
+  { value: "NORMAL", label: "Normal" },
+  { value: "REMINDER", label: "Reminder" },
+  { value: "WARNING", label: "Warning" },
+  { value: "ACKNOWLEDGMENT_REQUIRED", label: "Acknowledgment required" },
+  { value: "CORRECTIVE_ACTION_NOTICE", label: "Corrective action notice" },
+  { value: "SYSTEM_NOTICE", label: "System notice" },
+];
+
 export type AuditActor = {
   id: string;
   name: string;
+};
+
+export type ReportMetricValue = {
+  value: number | null;
+  numerator: number | null;
+  denominator: number | null;
+  label: string;
+};
+
+export type ReportWinSummary = {
+  id: string;
+  label: string;
+  value: string;
+  detail: string;
 };
 
 export type Organization = {
@@ -240,9 +312,22 @@ export type Organization = {
   updatedAt: string;
 };
 
+export type SoberHouseUserAccessProfile = {
+  id: string;
+  linkedUserId: string;
+  role: SoberHouseAccessRole;
+  organizationId: string | null;
+  houseId: string | null;
+  houseGroupId: string | null;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type House = {
   id: string;
   organizationId: string | null;
+  houseGroupId: string | null;
   name: string;
   address: string;
   phone: string;
@@ -251,6 +336,17 @@ export type House = {
   geofenceRadiusFeetDefault: number;
   houseTypes: HouseType[];
   bedCount: number;
+  notes: string;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HouseGroup = {
+  id: string;
+  organizationId: string | null;
+  name: string;
+  houseIds: string[];
   notes: string;
   status: EntityStatus;
   createdAt: string;
@@ -293,7 +389,7 @@ export type ChoresRuleConfig = {
   enabled: boolean;
   frequency: ChoreFrequency;
   dueTime: string;
-  proofRequirement: ProofRequirement;
+  proofRequirement: ProofRequirement[];
   gracePeriodMinutes: number;
   managerInstantNotificationEnabled: boolean;
 };
@@ -324,10 +420,22 @@ export type SponsorContactRuleConfig = {
   proofType: SponsorProofType;
 };
 
+export type OneOnOneRuleConfig = {
+  enabled: boolean;
+  defaultFrequency: ScheduledFrequency;
+  defaultWeekday: ScheduledWeekdayCode | null;
+  defaultTimeLocalHhmm: string;
+  defaultLeadTimeMinutes: number;
+  addToCalendarByDefault: boolean;
+  reminderEnabledByDefault: boolean;
+};
+
 export type HouseRuleSet = {
   id: string;
   organizationId: string | null;
-  houseId: string;
+  scopeType: HouseRuleScopeType;
+  houseId: string | null;
+  houseGroupId: string | null;
   name: string;
   status: EntityStatus;
   curfew: CurfewRuleConfig;
@@ -336,6 +444,7 @@ export type HouseRuleSet = {
   jobSearch: JobSearchRuleConfig;
   meetings: MeetingsRuleConfig;
   sponsorContact: SponsorContactRuleConfig;
+  oneOnOne: OneOnOneRuleConfig;
   createdAt: string;
   updatedAt: string;
 };
@@ -424,6 +533,18 @@ export type ResidentRequirementProfile = {
   wantsRealTimeViolationAlerts: boolean;
   wantsNearMissAlerts: boolean;
   wantsMonthlySummaryReports: boolean;
+  oneOnOneRequired: boolean;
+  oneOnOneAssignedStaffAssignmentId: string | null;
+  oneOnOneFrequency: ScheduledFrequency;
+  oneOnOneWeekday: ScheduledWeekdayCode | null;
+  oneOnOneScheduledDate: string | null;
+  oneOnOneTimeLocalHhmm: string;
+  oneOnOneLeadTimeMinutes: number;
+  oneOnOneAddToCalendar: boolean;
+  oneOnOneReminderEnabled: boolean;
+  oneOnOneCalendarEventId: string | null;
+  oneOnOneScheduleFingerprint: string | null;
+  oneOnOneNotificationIds: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -452,7 +573,7 @@ export type ChoreCompletionRecord = {
   organizationId: string | null;
   houseId: string | null;
   completedAt: string;
-  proofRequirement: ProofRequirement;
+  proofRequirement: ProofRequirement[];
   proofProvided: boolean;
   proofReference: string | null;
   notes: string;
@@ -552,6 +673,222 @@ export type EvidenceItem = {
   description: string;
 };
 
+export type ChatThread = {
+  id: string;
+  threadType: ChatThreadType;
+  moduleContext: ChatModuleContext;
+  houseId: string | null;
+  residentId: string | null;
+  linkedViolationId: string | null;
+  createdBy: AuditActor;
+  createdAt: string;
+  lastMessageAt: string | null;
+  active: boolean;
+  metadata: Record<string, ChatMetadataValue>;
+};
+
+export type ChatParticipant = {
+  id: string;
+  threadId: string;
+  userId: string;
+  roleInThread: ChatParticipantRole;
+  joinedAt: string;
+  active: boolean;
+  lastReadAt: string | null;
+  notificationPreferences: Record<string, ChatMetadataValue>;
+};
+
+export type ChatMessage = {
+  id: string;
+  threadId: string;
+  senderUserId: string;
+  senderRole: ChatParticipantRole;
+  messageType: ChatMessageType;
+  bodyText: string;
+  createdAt: string;
+  editedAt: string | null;
+  active: boolean;
+  linkedViolationId: string | null;
+  linkedCorrectiveActionId: string | null;
+  metadata: Record<string, ChatMetadataValue>;
+};
+
+export type ChatMessageReceipt = {
+  id: string;
+  messageId: string;
+  userId: string;
+  deliveredAt: string | null;
+  readAt: string | null;
+  acknowledgedAt: string | null;
+};
+
+export type ResidentMonthlyReportSnapshot = {
+  reportKind: "resident_monthly";
+  reportMonth: string;
+  resident: {
+    residentId: string;
+    residentName: string;
+    houseId: string | null;
+    houseName: string;
+    moveInDate: string | null;
+    programPhaseOnEntry: string | null;
+  };
+  complianceSummary: {
+    curfew: ReportMetricValue & { summary: string };
+    chores: ReportMetricValue & { summary: string };
+    work: ReportMetricValue & { summary: string };
+    jobSearch: ReportMetricValue & { summary: string };
+    meetings: ReportMetricValue & {
+      summary: string;
+      requiredCount: number | null;
+      completedCount: number | null;
+      remainingCount: number | null;
+    };
+    sponsorContact: {
+      applicable: boolean;
+      summary: string;
+      requiredContacts: number | null;
+    };
+  };
+  kpis: {
+    curfewComplianceRate: ReportMetricValue;
+    choreCompletionRate: ReportMetricValue;
+    meetingComplianceRate: ReportMetricValue;
+    employmentComplianceRate: ReportMetricValue;
+    jobSearchCompletionRate: ReportMetricValue;
+    totalViolations: number;
+    violationsByRuleType: Partial<Record<ViolationRuleType, number>>;
+    correctiveActionsOpen: number;
+    correctiveActionsCompleted: number;
+    correctiveActionsOverdue: number;
+    acknowledgmentRequiredMessages: number;
+    acknowledgmentCompletionRate: ReportMetricValue;
+  };
+  violationsSummary: {
+    totalViolations: number;
+    violationsByType: Partial<Record<ViolationRuleType, number>>;
+    openCount: number;
+    resolvedCount: number;
+    dismissedCount: number;
+    notableIncidents: Array<{
+      id: string;
+      ruleType: ViolationRuleType;
+      reasonSummary: string;
+      triggeredAt: string;
+      status: ViolationStatus;
+    }>;
+  };
+  correctiveActionSummary: {
+    totalAssigned: number;
+    openCount: number;
+    completedCount: number;
+    overdueCount: number;
+  };
+  communicationSummary: {
+    structuredMessageCount: number;
+    acknowledgmentRequiredCount: number;
+    acknowledgmentCompletedCount: number;
+    acknowledgmentCompletionSummary: string;
+  };
+  winsSummary: ReportWinSummary[];
+  notesSection: {
+    monthlySummary: string | null;
+    progressSummary: string | null;
+    concernsPriorities: string | null;
+    encouragementStrengths: string | null;
+  };
+};
+
+export type HouseMonthlyReportSnapshot = {
+  reportKind: "house_monthly";
+  reportMonth: string;
+  house: {
+    houseId: string;
+    houseName: string;
+    organizationId: string | null;
+    activeResidentCount: number;
+    staffSummary: string[];
+  };
+  kpis: {
+    curfewComplianceRate: ReportMetricValue;
+    choreCompletionRate: ReportMetricValue;
+    meetingComplianceRate: ReportMetricValue;
+    employmentComplianceRate: ReportMetricValue;
+    jobSearchCompletionRate: ReportMetricValue;
+    totalViolations: number;
+    violationsByRuleType: Partial<Record<ViolationRuleType, number>>;
+    correctiveActionsOpen: number;
+    correctiveActionsResolved: number;
+    acknowledgmentRequiredMessages: number;
+    acknowledgmentCompletionRate: ReportMetricValue;
+  };
+  operationsSummary: {
+    residentsInGoodStandingCount: number;
+    residentsWithUnresolvedIssuesCount: number;
+    residentsWithRepeatedViolationsCount: number;
+    acknowledgmentRequiredCommunicationCount: number;
+  };
+  winsSummary: ReportWinSummary[];
+  notesSection: {
+    monthlySummary: string | null;
+    operationalConcerns: string | null;
+    followUpPriorities: string | null;
+  };
+  residentHighlights: Array<{
+    residentId: string;
+    residentName: string;
+    zeroViolations: boolean;
+    metMeetingGoals: boolean;
+    maintainedChoreCompliance: boolean;
+  }>;
+};
+
+export type MonthlyReportSnapshot = ResidentMonthlyReportSnapshot | HouseMonthlyReportSnapshot;
+
+export type MonthlyReportExportRecord = {
+  id: string;
+  exportedAt: string;
+  exportedBy: AuditActor;
+  exportRef: string;
+};
+
+export type MonthlyReportDistributionMetadata = {
+  recipientType: ReportDistributionRecipientType | null;
+  recipientTarget: string | null;
+  deliveryMethod: ReportDistributionMethod | null;
+  sentStatus: "READY" | "SENT" | null;
+  sentAt: string | null;
+};
+
+export type MonthlyReport = {
+  id: string;
+  type: MonthlyReportType;
+  residentId: string | null;
+  houseId: string;
+  organizationId: string | null;
+  periodStart: string;
+  periodEnd: string;
+  generatedAt: string;
+  generatedBy: MonthlyReportGeneratedBy;
+  generatedByUserId: string | null;
+  status: MonthlyReportStatus;
+  summaryPayload: MonthlyReportSnapshot;
+  reviewedAt: string | null;
+  reviewedBy: AuditActor | null;
+  approvedAt: string | null;
+  approvedBy: AuditActor | null;
+  lockedAt: string | null;
+  versionNumber: number;
+  isCurrentVersion: boolean;
+  supersedesReportId: string | null;
+  exportRef: string | null;
+  exportHistory: MonthlyReportExportRecord[];
+  distributionMetadata: MonthlyReportDistributionMetadata;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ResidentWizardDraft = {
   linkedUserId: string;
   currentStep: ResidentOnboardingStep;
@@ -569,6 +906,15 @@ export type ResidentWizardDraft = {
   wantsRealTimeViolationAlerts: boolean;
   wantsNearMissAlerts: boolean;
   wantsMonthlySummaryReports: boolean;
+  oneOnOneRequired: boolean;
+  oneOnOneAssignedStaffAssignmentId: string | null;
+  oneOnOneFrequency: ScheduledFrequency;
+  oneOnOneWeekday: ScheduledWeekdayCode | null;
+  oneOnOneScheduledDate: string | null;
+  oneOnOneTimeLocalHhmm: string;
+  oneOnOneLeadTimeMinutes: number;
+  oneOnOneAddToCalendar: boolean;
+  oneOnOneReminderEnabled: boolean;
   workRequired: boolean;
   currentlyEmployed: boolean;
   employerName: string;
@@ -600,7 +946,9 @@ export type ResidentWizardDraft = {
 
 export type SoberHouseSettingsStore = {
   version: typeof SOBER_HOUSE_SETTINGS_STORE_VERSION;
+  userAccessProfile: SoberHouseUserAccessProfile | null;
   organization: Organization | null;
+  houseGroups: HouseGroup[];
   houses: House[];
   staffAssignments: StaffAssignment[];
   houseRuleSets: HouseRuleSet[];
@@ -615,6 +963,11 @@ export type SoberHouseSettingsStore = {
   violations: Violation[];
   correctiveActions: CorrectiveAction[];
   evidenceItems: EvidenceItem[];
+  chatThreads: ChatThread[];
+  chatParticipants: ChatParticipant[];
+  chatMessages: ChatMessage[];
+  chatMessageReceipts: ChatMessageReceipt[];
+  monthlyReports: MonthlyReport[];
   auditLogEntries: AuditLogEntry[];
 };
 
