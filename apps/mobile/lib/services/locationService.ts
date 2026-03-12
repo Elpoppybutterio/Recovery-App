@@ -1,4 +1,5 @@
 import * as Location from "expo-location";
+import { Platform } from "react-native";
 
 export type LocationPermissionState = "unknown" | "granted" | "denied" | "unavailable";
 export type LocationReadFailureReason =
@@ -59,6 +60,9 @@ function toPermissionState(permission: ExpoPermission | null): LocationPermissio
 }
 
 async function getAlwaysPermission(): Promise<ExpoPermission | null> {
+  if (Platform.OS === "ios") {
+    return null;
+  }
   if (typeof locationCompat.getBackgroundPermissionsAsync !== "function") {
     return null;
   }
@@ -245,6 +249,20 @@ export async function requestAlwaysLocationPermission(): Promise<{
   permissionStatus: LocationPermissionState;
   alwaysPermissionStatus: LocationPermissionState;
 }> {
+  if (Platform.OS === "ios") {
+    try {
+      const foregroundCurrent = await Location.getForegroundPermissionsAsync();
+      return {
+        permissionStatus: toPermissionState(foregroundCurrent),
+        alwaysPermissionStatus: "unavailable",
+      };
+    } catch {
+      return {
+        permissionStatus: "unavailable",
+        alwaysPermissionStatus: "unavailable",
+      };
+    }
+  }
   try {
     const foregroundCurrent = await Location.getForegroundPermissionsAsync();
     const foreground = foregroundCurrent.granted

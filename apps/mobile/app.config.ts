@@ -132,12 +132,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       infoPlist: {
         ...config.ios?.infoPlist,
         ITSAppUsesNonExemptEncryption: false,
-        NSLocationWhenInUseUsageDescription: "We use your location to show distance to meetings.",
-        NSLocationAlwaysAndWhenInUseUsageDescription:
-          "We use your location to show distance to meetings and enable geofence features if you turn them on.",
-        NSLocationAlwaysUsageDescription:
-          "We use your location to show distance to meetings and enable geofence features if you turn them on.",
-        UIBackgroundModes: ["location", "fetch", "remote-notification"],
+        NSLocationWhenInUseUsageDescription:
+          "Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.",
+        NSCalendarsUsageDescription:
+          "Sober AI adds recovery events to your calendar, such as meetings, sober house obligations, and one-on-one sessions, so you receive reminders and stay on schedule. For example, when you tap 'Add to Calendar' on a meeting, Sober AI saves that meeting to your calendar.",
+        NSCalendarsWriteOnlyAccessUsageDescription:
+          "Sober AI adds recovery events to your calendar, such as meetings, sober house obligations, and one-on-one sessions, so you receive reminders and stay on schedule. For example, when you tap 'Add to Calendar' on a meeting, Sober AI saves that meeting to your calendar.",
+        UIBackgroundModes: ["fetch", "remote-notification"],
       },
     },
     android: {
