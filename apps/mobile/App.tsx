@@ -1544,20 +1544,27 @@ function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     switch (moduleName) {
       case "react-native-maps":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("react-native-maps") as T;
       case "expo-calendar":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-calendar") as T;
       case "expo-notifications":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-notifications") as T;
       case "expo-file-system":
         try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
           return require("expo-file-system/legacy") as T;
         } catch {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
           return require("expo-file-system") as T;
         }
       case "expo-speech":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-speech") as T;
       case "expo-av":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-av") as T;
       default:
         return null;
@@ -2319,6 +2326,7 @@ export default function App() {
       }
 
       try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         const module = require("expo-local-authentication") as LocalAuthenticationModule;
         localAuthenticationModuleRef.current = module;
         return module;
