@@ -5,6 +5,7 @@ import { AppButton } from "../lib/ui/AppButton";
 import { SoberHouseResidentManager } from "../components/SoberHouseResidentManager";
 import { SoberHouseComplianceSection } from "../components/SoberHouseComplianceSection";
 import { SoberHouseInterventionSection } from "../components/SoberHouseInterventionSection";
+import { SoberHouseChatSection } from "../components/SoberHouseChatSection";
 import { colors, radius, spacing, typography } from "../lib/theme/tokens";
 import {
   ALERT_DELIVERY_METHOD_OPTIONS,
@@ -481,6 +482,10 @@ export function SoberHouseSettingsScreen({
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [chatIntent, setChatIntent] = useState<{
+    violationId: string;
+    correctiveActionId?: string | null;
+  } | null>(null);
   const [organizationDraft, setOrganizationDraft] = useState<OrganizationDraft>(
     createOrganizationDraft(null),
   );
@@ -912,6 +917,10 @@ export function SoberHouseSettingsScreen({
             <Text style={styles.summaryLabel}>Violations</Text>
           </View>
           <View style={styles.summaryPill}>
+            <Text style={styles.summaryValue}>{store.chatThreads.length}</Text>
+            <Text style={styles.summaryLabel}>Threads</Text>
+          </View>
+          <View style={styles.summaryPill}>
             <Text style={styles.summaryValue}>{store.auditLogEntries.length}</Text>
             <Text style={styles.summaryLabel}>Audit</Text>
           </View>
@@ -940,6 +949,16 @@ export function SoberHouseSettingsScreen({
         store={store}
         actor={actor}
         isSaving={isSaving}
+        onOpenChat={(input) => setChatIntent(input)}
+        onPersist={persistStore}
+      />
+
+      <SoberHouseChatSection
+        store={store}
+        actor={actor}
+        isSaving={isSaving}
+        chatIntent={chatIntent}
+        onChatIntentHandled={() => setChatIntent(null)}
         onPersist={persistStore}
       />
 

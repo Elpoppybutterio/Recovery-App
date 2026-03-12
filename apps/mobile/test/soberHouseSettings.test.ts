@@ -30,7 +30,15 @@ import {
   syncViolationFromEvaluation,
   transitionViolationForManager,
 } from "../lib/soberHouse/interventions";
-import { getRuleSetForHouse } from "../lib/soberHouse/selectors";
+import {
+  acknowledgeChatMessage,
+  buildChatThreadSummaries,
+  ensureDirectThreadForResident,
+  getManagerViewerContexts,
+  markThreadRead,
+  sendChatMessage,
+} from "../lib/soberHouse/chat";
+import { getChatReceiptForMessageAndUser, getRuleSetForHouse } from "../lib/soberHouse/selectors";
 
 const ACTOR = {
   id: "admin-a",
@@ -175,6 +183,35 @@ function buildResidentComplianceStore() {
     houseId,
     residentId: housing.residentId,
     linkedUserId: housing.linkedUserId,
+  };
+}
+
+function buildChatStore() {
+  const base = buildResidentComplianceStore();
+  const store = upsertStaffAssignment(
+    base.store,
+    ACTOR,
+    {
+      firstName: "Casey",
+      lastName: "Morris",
+      phone: "(555) 555-4444",
+      email: "casey@brightpath.org",
+      role: "HOUSE_MANAGER",
+      assignedHouseIds: base.houseId ? [base.houseId] : [],
+      receiveRealTimeViolationAlerts: true,
+      receiveNearMissAlerts: true,
+      receiveMonthlyReports: true,
+      canApproveExceptions: false,
+      canIssueCorrectiveActions: true,
+      canViewResidentEvidence: true,
+      status: "ACTIVE",
+    },
+    "2026-03-08T10:15:00.000Z",
+  ).store;
+  return {
+    ...base,
+    store,
+    managerContext: getManagerViewerContexts(store)[0] ?? null,
   };
 }
 
@@ -1064,6 +1101,155 @@ describe("sober house interventions", () => {
     expect(
       evidence.store.auditLogEntries.some(
         (entry) => entry.entityType === "evidenceItem" && entry.actionTaken === "evidence_linked",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("structured sober house chat", () => {
+  it("creates one reusable violation-linked direct thread per violation and manager pair", () => {
+    const { store, managerContext } = buildChatStore();
+    if (!managerContext) {
+      throw new Error("manager context should exist");
+    }
+
+    const violation = createManualViolation(
+      store,
+      ACTOR,
+      {
+        ruleType: "chores",
+        severity: "WARNING",
+        reasonSummary: "Missed assigned kitchen task.",
+      },
+      "2026-03-12T10:00:00-06:00",
+    );
+    const first = ensureDirectThreadForResident(
+      violation.store,
+      ACTOR,
+      {
+        managerStaffAssignmentId: managerContext.staffAssignmentId,
+        linkedViolationId: violation.violation!.id,
+      },
+      "2026-03-12T10:05:00-06:00",
+    );
+    const second = ensureDirectThreadForResident(
+      first.store,
+      ACTOR,
+      {
+        managerStaffAssignmentId: managerContext.staffAssignmentId,
+        linkedViolationId: violation.violation!.id,
+      },
+      "2026-03-12T10:06:00-06:00",
+    );
+
+    expect(first.thread?.linkedViolationId).toBe(violation.violation?.id ?? null);
+    expect(first.store.chatThreads).toHaveLength(1);
+    expect(second.store.chatThreads).toHaveLength(1);
+    expect(second.thread?.id).toBe(first.thread?.id);
+    expect(
+      first.store.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "chatThread" &&
+          entry.entityId === first.thread?.id &&
+          entry.actionTaken === "chat_thread_linked_to_violation",
+      ),
+    ).toBe(true);
+  });
+
+  it("limits thread visibility to the participating resident or assigned manager", () => {
+    const { store, managerContext } = buildChatStore();
+    if (!managerContext) {
+      throw new Error("manager context should exist");
+    }
+
+    const threadResult = ensureDirectThreadForResident(
+      store,
+      ACTOR,
+      { managerStaffAssignmentId: managerContext.staffAssignmentId },
+      "2026-03-12T11:00:00-06:00",
+    );
+    const residentViewer = {
+      kind: "resident" as const,
+      userId: store.residentHousingProfile!.linkedUserId,
+      residentId: store.residentHousingProfile!.residentId,
+      houseId: store.residentHousingProfile!.houseId,
+      role: "RESIDENT" as const,
+      label: "Taylor Brooks",
+    };
+    const residentThreads = buildChatThreadSummaries(threadResult.store, residentViewer);
+    const outsiderViewer = {
+      kind: "manager" as const,
+      userId: "staff-assignment:outsider",
+      staffAssignmentId: "staff-outsider",
+      houseIds: [],
+      role: "MANAGER" as const,
+      label: "Outside Manager",
+    };
+    const outsiderThreads = buildChatThreadSummaries(threadResult.store, outsiderViewer);
+
+    expect(residentThreads).toHaveLength(1);
+    expect(residentThreads[0]?.thread.id).toBe(threadResult.thread?.id);
+    expect(outsiderThreads).toHaveLength(0);
+  });
+
+  it("persists read and acknowledgment state transitions for structured messages", () => {
+    const { store, managerContext } = buildChatStore();
+    if (!managerContext) {
+      throw new Error("manager context should exist");
+    }
+
+    const threadResult = ensureDirectThreadForResident(
+      store,
+      ACTOR,
+      { managerStaffAssignmentId: managerContext.staffAssignmentId },
+      "2026-03-12T12:00:00-06:00",
+    );
+    const managerSend = sendChatMessage(
+      threadResult.store,
+      ACTOR,
+      managerContext,
+      {
+        threadId: threadResult.thread!.id,
+        messageType: "ACKNOWLEDGMENT_REQUIRED",
+        bodyText: "You need to complete one make-up chore tonight.",
+      },
+      "2026-03-12T12:01:00-06:00",
+    );
+    const residentViewer = {
+      kind: "resident" as const,
+      userId: managerSend.store.residentHousingProfile!.linkedUserId,
+      residentId: managerSend.store.residentHousingProfile!.residentId,
+      houseId: managerSend.store.residentHousingProfile!.houseId,
+      role: "RESIDENT" as const,
+      label: "Taylor Brooks",
+    };
+    const markedRead = markThreadRead(
+      managerSend.store,
+      ACTOR,
+      residentViewer,
+      threadResult.thread!.id,
+      "2026-03-12T12:02:00-06:00",
+    );
+    const acknowledged = acknowledgeChatMessage(
+      markedRead.store,
+      ACTOR,
+      residentViewer,
+      managerSend.message!.id,
+      "2026-03-12T12:03:00-06:00",
+    );
+    const receipt = getChatReceiptForMessageAndUser(
+      acknowledged.store,
+      managerSend.message!.id,
+      residentViewer.userId,
+    );
+
+    expect(receipt?.readAt).toBe("2026-03-12T12:02:00-06:00");
+    expect(receipt?.acknowledgedAt).toBe("2026-03-12T12:03:00-06:00");
+    expect(
+      acknowledged.store.auditLogEntries.some(
+        (entry) =>
+          entry.entityType === "chatMessageReceipt" &&
+          entry.actionTaken === "chat_message_acknowledged",
       ),
     ).toBe(true);
   });

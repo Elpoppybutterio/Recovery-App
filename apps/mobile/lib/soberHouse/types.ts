@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 3 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 4 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -40,7 +40,11 @@ export type SoberHouseEntityType =
   | "workVerificationRecord"
   | "violation"
   | "correctiveAction"
-  | "evidenceItem";
+  | "evidenceItem"
+  | "chatThread"
+  | "chatParticipant"
+  | "chatMessage"
+  | "chatMessageReceipt";
 export type ResidentOnboardingStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 export type ComplianceRuleType =
   | "curfew"
@@ -92,6 +96,24 @@ export type EvidenceType =
   | "DOCUMENT"
   | "NOTE"
   | "OTHER";
+export type ChatThreadType = "DIRECT" | "VIOLATION_LINKED_DIRECT" | "SYSTEM_LINKED_DIRECT";
+export type ChatModuleContext = "SOBER_HOUSE" | "RECOVERY" | "DRUG_COURT" | "PROBATION";
+export type ChatParticipantRole =
+  | "RESIDENT"
+  | "MANAGER"
+  | "OWNER"
+  | "ASSISTANT_MANAGER"
+  | "SPONSOR"
+  | "PROBATION_OFFICER"
+  | "SYSTEM";
+export type ChatMessageType =
+  | "NORMAL"
+  | "REMINDER"
+  | "WARNING"
+  | "ACKNOWLEDGMENT_REQUIRED"
+  | "CORRECTIVE_ACTION_NOTICE"
+  | "SYSTEM_NOTICE";
+export type ChatMetadataValue = string | number | boolean | null;
 
 export type Option<Value extends string> = {
   value: Value;
@@ -221,6 +243,15 @@ export const EVIDENCE_TYPE_OPTIONS: ReadonlyArray<Option<EvidenceType>> = [
   { value: "DOCUMENT", label: "Document" },
   { value: "NOTE", label: "Note" },
   { value: "OTHER", label: "Other" },
+];
+
+export const CHAT_MESSAGE_TYPE_OPTIONS: ReadonlyArray<Option<ChatMessageType>> = [
+  { value: "NORMAL", label: "Normal" },
+  { value: "REMINDER", label: "Reminder" },
+  { value: "WARNING", label: "Warning" },
+  { value: "ACKNOWLEDGMENT_REQUIRED", label: "Acknowledgment required" },
+  { value: "CORRECTIVE_ACTION_NOTICE", label: "Corrective action notice" },
+  { value: "SYSTEM_NOTICE", label: "System notice" },
 ];
 
 export type AuditActor = {
@@ -552,6 +583,55 @@ export type EvidenceItem = {
   description: string;
 };
 
+export type ChatThread = {
+  id: string;
+  threadType: ChatThreadType;
+  moduleContext: ChatModuleContext;
+  houseId: string | null;
+  residentId: string | null;
+  linkedViolationId: string | null;
+  createdBy: AuditActor;
+  createdAt: string;
+  lastMessageAt: string | null;
+  active: boolean;
+  metadata: Record<string, ChatMetadataValue>;
+};
+
+export type ChatParticipant = {
+  id: string;
+  threadId: string;
+  userId: string;
+  roleInThread: ChatParticipantRole;
+  joinedAt: string;
+  active: boolean;
+  lastReadAt: string | null;
+  notificationPreferences: Record<string, ChatMetadataValue>;
+};
+
+export type ChatMessage = {
+  id: string;
+  threadId: string;
+  senderUserId: string;
+  senderRole: ChatParticipantRole;
+  messageType: ChatMessageType;
+  bodyText: string;
+  createdAt: string;
+  editedAt: string | null;
+  active: boolean;
+  linkedViolationId: string | null;
+  linkedCorrectiveActionId: string | null;
+  metadata: Record<string, ChatMetadataValue>;
+};
+
+export type ChatMessageReceipt = {
+  id: string;
+  messageId: string;
+  userId: string;
+  deliveredAt: string | null;
+  readAt: string | null;
+  acknowledgedAt: string | null;
+};
+
 export type ResidentWizardDraft = {
   linkedUserId: string;
   currentStep: ResidentOnboardingStep;
@@ -615,6 +695,10 @@ export type SoberHouseSettingsStore = {
   violations: Violation[];
   correctiveActions: CorrectiveAction[];
   evidenceItems: EvidenceItem[];
+  chatThreads: ChatThread[];
+  chatParticipants: ChatParticipant[];
+  chatMessages: ChatMessage[];
+  chatMessageReceipts: ChatMessageReceipt[];
   auditLogEntries: AuditLogEntry[];
 };
 
