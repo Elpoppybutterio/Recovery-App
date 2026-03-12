@@ -54,6 +54,8 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Structured internal chat foundation now persists direct sober-house manager/resident threads, structured message types, violation-linked thread reuse, unread/read receipts, acknowledgment-required notices, and auditable message history.
 - Sober house monthly reporting now stores immutable resident and house report snapshots with monthly KPI summaries, wins/streak summaries, report history, and in-app detail views.
 - Sober house report output workflow now adds review states, locked final manager summaries, version-safe regeneration, resident/house PDF export from stored snapshots, export history, and distribution-ready metadata without delivery automation.
+- Sober house dashboard blending Part A now adds resident-only chore, weekly meeting, and next-obligation dashboard tiles backed by reusable summary selectors and house-config-aware visibility on the existing recovery dashboard.
+- Sober house dashboard blending Part B now adds conditional one-on-one setup in the resident flow, persisted one-on-one scheduling fields, calendar event mapping, centralized reminder scheduling, and next-up dashboard integration without introducing a separate scheduling engine.
 - Recovery UX v2: setup wizard flow, dashboard-first home experience, purple liquid-glass cards, and local recovery analytics (days sober, 90-day progress, sponsor adherence).
 - Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
 - Dashboard: evolve the existing direct-message foundation into broader recovery/service/probation chat flows after sober-house direct messaging proves out.

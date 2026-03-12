@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as LocalAuthentication from "expo-local-authentication";
+import Constants from "expo-constants";
 import { geocodeAsync } from "expo-location";
 import type * as CalendarTypes from "expo-calendar";
 import type * as NotificationsTypes from "expo-notifications";
@@ -107,21 +107,26 @@ import {
   evaluateResidentCompliance,
   statusToneForComplianceStatus,
 } from "./lib/soberHouse/compliance";
+import { buildSoberHouseResidentDashboardSummary } from "./lib/soberHouse/dashboard";
 import {
   applyHouseDefaultsToResidentDraft,
   createDefaultResidentWizardDraft,
 } from "./lib/soberHouse/resident";
-import { saveResidentWizardDraft, upsertUserAccessProfile } from "./lib/soberHouse/mutations";
+import {
+  saveResidentWizardDraft,
+  upsertResidentRequirementProfile,
+  upsertUserAccessProfile,
+} from "./lib/soberHouse/mutations";
 import { buildResidentViolationSummary } from "./lib/soberHouse/interventions";
 import { getRuleSetForHouse } from "./lib/soberHouse/selectors";
+import {
+  buildOneOnOneCalendarEventPlan,
+  buildOneOnOneReminderPlans,
+} from "./lib/soberHouse/scheduling";
 import { loadSoberHouseSettingsStore, saveSoberHouseSettingsStore } from "./lib/soberHouse/storage";
 import type { SoberHouseSettingsStore } from "./lib/soberHouse/types";
 import { requiresSoberHouseDeviceUnlock } from "./lib/soberHouse/deviceAuth";
-import {
-  buildChatThreadSummaries,
-  getChatViewerContexts,
-  getManagerViewerContexts,
-} from "./lib/soberHouse/chat";
+import { getManagerViewerContexts } from "./lib/soberHouse/chat";
 import {
   DiagnosticsScreen,
   type DiagnosticsExportAttempt,
@@ -143,6 +148,7 @@ const BIG_BOOK_86_88_ITEM_ID = "bb-86-88";
 const BIG_BOOK_60_63_ITEM_ID = "bb-60-63";
 const SEVENTH_STEP_PRAYER_ITEM_ID = "prayer-seventh-step";
 const ELEVENTH_STEP_PRAYER_ITEM_ID = "prayer-eleventh-step";
+const SIMULATOR_SOBER_HOUSE_UNLOCK_CODE = "11912477";
 const SEVENTH_STEP_PRAYER_READ_TEXT = [
   "My Creator, I am now willing that You should have all of me, good and bad.",
   "I pray that You now remove from me every single defect of character which stand in the way of my usefulness to You and my fellows.",
@@ -1811,6 +1817,14 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
 }
 
 export default function App() {
+  type LocalAuthenticationModule = {
+    authenticateAsync: (options: {
+      promptMessage?: string;
+      cancelLabel?: string;
+      fallbackLabel?: string;
+      disableDeviceFallback?: boolean;
+    }) => Promise<{ success: boolean; error?: string }>;
+  };
   const iosLaunchSafeMode =
     Platform.OS === "ios" && process.env.EXPO_PUBLIC_IOS_SAFE_BOOT?.trim() === "1";
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
@@ -2102,6 +2116,8 @@ export default function App() {
   const [soberHouseUnlocked, setSoberHouseUnlocked] = useState(false);
   const [soberHouseUnlocking, setSoberHouseUnlocking] = useState(false);
   const [soberHouseUnlockStatus, setSoberHouseUnlockStatus] = useState<string | null>(null);
+  const [showSoberHouseSimulatorKeypad, setShowSoberHouseSimulatorKeypad] = useState(false);
+  const [soberHouseSimulatorPasscode, setSoberHouseSimulatorPasscode] = useState("");
   const [debugTimeCompressionEnabled] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
 
@@ -2132,6 +2148,10 @@ export default function App() {
   const sponsorScheduleEffectKeyRef = useRef<string | null>(null);
   const bootstrapStartedRef = useRef(false);
   const soberHouseUnlockPromptedRef = useRef(false);
+  const soberHouseScheduleSyncKeyRef = useRef<string | null>(null);
+  const localAuthenticationModuleRef = useRef<LocalAuthenticationModule | null | undefined>(
+    undefined,
+  );
   const setupStep4RefreshLocationKeyRef = useRef<string | null>(null);
   const departurePromptedAttendanceRef = useRef<string | null>(null);
   const saveSponsorConfigRef = useRef<(overrides?: SaveSponsorConfigOverrides) => Promise<boolean>>(
@@ -2241,18 +2261,6 @@ export default function App() {
     () => getManagerViewerContexts(soberHouseStore),
     [soberHouseStore],
   );
-  const soberHouseResidentChatViewer = useMemo(
-    () =>
-      getChatViewerContexts(soberHouseStore).find((context) => context.kind === "resident") ?? null,
-    [soberHouseStore],
-  );
-  const soberHouseResidentChatSummaries = useMemo(
-    () =>
-      soberHouseResidentChatViewer
-        ? buildChatThreadSummaries(soberHouseStore, soberHouseResidentChatViewer)
-        : [],
-    [soberHouseResidentChatViewer, soberHouseStore],
-  );
   const soberHouseManagerContact = useMemo(() => {
     const primaryManagerContext =
       soberHouseManagerContexts.find((context) => context.role === "MANAGER") ??
@@ -2301,15 +2309,56 @@ export default function App() {
     homeScreen === "SETTINGS" &&
     soberHouseRequiresDeviceUnlock &&
     !soberHouseUnlocked;
+  const isIosSimulator = Platform.OS === "ios" && Constants.isDevice === false;
+  const hasNativeLocalAuthentication =
+    NativeModules != null &&
+    typeof NativeModules === "object" &&
+    "ExpoLocalAuthentication" in NativeModules &&
+    NativeModules.ExpoLocalAuthentication != null;
+  const canUseSimulatorSoberHouseUnlock = isIosSimulator && !hasNativeLocalAuthentication;
+  const loadLocalAuthenticationModule =
+    useCallback(async (): Promise<LocalAuthenticationModule | null> => {
+      if (localAuthenticationModuleRef.current !== undefined) {
+        return localAuthenticationModuleRef.current;
+      }
+
+      if (!hasNativeLocalAuthentication) {
+        localAuthenticationModuleRef.current = null;
+        return null;
+      }
+
+      try {
+        const module = require("expo-local-authentication") as LocalAuthenticationModule;
+        localAuthenticationModuleRef.current = module;
+        return module;
+      } catch {
+        localAuthenticationModuleRef.current = null;
+        return null;
+      }
+    }, [hasNativeLocalAuthentication]);
   const unlockSoberHouseAccess = useCallback(async () => {
     if (!soberHouseRequiresDeviceUnlock || soberHouseUnlocking) {
+      return;
+    }
+
+    if (canUseSimulatorSoberHouseUnlock) {
+      setShowSoberHouseSimulatorKeypad(true);
+      setSoberHouseUnlockStatus("Simulator mode: enter the sober-house test passcode to continue.");
       return;
     }
 
     setSoberHouseUnlocking(true);
     setSoberHouseUnlockStatus(null);
     try {
-      const result = await LocalAuthentication.authenticateAsync({
+      const localAuthentication = await loadLocalAuthenticationModule();
+      if (!localAuthentication) {
+        setSoberHouseUnlockStatus(
+          "This build does not include device authentication. Rebuild the app with Face ID / passcode support to open sober-house records.",
+        );
+        return;
+      }
+
+      const result = await localAuthentication.authenticateAsync({
         promptMessage: "Unlock Sober House",
         cancelLabel: "Cancel",
         fallbackLabel: "Use Passcode",
@@ -2348,7 +2397,27 @@ export default function App() {
     } finally {
       setSoberHouseUnlocking(false);
     }
-  }, [soberHouseRequiresDeviceUnlock, soberHouseUnlocking]);
+  }, [
+    canUseSimulatorSoberHouseUnlock,
+    loadLocalAuthenticationModule,
+    soberHouseRequiresDeviceUnlock,
+    soberHouseUnlocking,
+  ]);
+  const submitSoberHouseSimulatorPasscode = useCallback(() => {
+    if (!canUseSimulatorSoberHouseUnlock) {
+      return;
+    }
+
+    if (soberHouseSimulatorPasscode === SIMULATOR_SOBER_HOUSE_UNLOCK_CODE) {
+      setSoberHouseUnlocked(true);
+      setSoberHouseUnlockStatus(null);
+      setShowSoberHouseSimulatorKeypad(false);
+      setSoberHouseSimulatorPasscode("");
+      return;
+    }
+
+    setSoberHouseUnlockStatus("Incorrect simulator passcode. Try again.");
+  }, [canUseSimulatorSoberHouseUnlock, soberHouseSimulatorPasscode]);
 
   useEffect(() => {
     if (soberHouseControlledSponsorRequirement && !sponsorEnabled) {
@@ -2367,6 +2436,14 @@ export default function App() {
       soberHouseUnlockPromptedRef.current = false;
       setSoberHouseUnlocked(false);
       setSoberHouseUnlockStatus(null);
+      setShowSoberHouseSimulatorKeypad(false);
+      setSoberHouseSimulatorPasscode("");
+      return;
+    }
+
+    if (canUseSimulatorSoberHouseUnlock) {
+      soberHouseUnlockPromptedRef.current = false;
+      setSoberHouseUnlockStatus("Simulator mode: tap unlock and enter the test passcode.");
       return;
     }
 
@@ -2379,6 +2456,7 @@ export default function App() {
   }, [
     homeScreen,
     mode,
+    canUseSimulatorSoberHouseUnlock,
     soberHouseRequiresDeviceUnlock,
     soberHouseUnlocked,
     unlockSoberHouseAccess,
@@ -2389,6 +2467,8 @@ export default function App() {
       if (nextState === "inactive" || nextState === "background") {
         setSoberHouseUnlocked(false);
         soberHouseUnlockPromptedRef.current = false;
+        setShowSoberHouseSimulatorKeypad(false);
+        setSoberHouseSimulatorPasscode("");
       }
     });
 
@@ -3217,136 +3297,25 @@ export default function App() {
         : "No recorded sober-house violations.",
     };
   }, [soberHouseAccessProfile?.role, soberHouseResidentViolations]);
-  const soberHouseDashboardKpis = useMemo(() => {
-    if (soberHouseAccessProfile?.role !== "HOUSE_RESIDENT" || !soberHouseComplianceSummary) {
-      return [];
-    }
-
-    const evaluationMap = new Map(
-      soberHouseComplianceSummary.evaluations.map((evaluation) => [
-        evaluation.ruleType,
-        evaluation,
-      ]),
-    );
-    const workEvaluation =
-      evaluationMap.get("work")?.status !== "not_applicable"
-        ? (evaluationMap.get("work") ?? null)
-        : (evaluationMap.get("jobSearch") ?? null);
-    const reportsCount = soberHouseStore.monthlyReports.filter(
-      (report) =>
-        report.type === "RESIDENT_MONTHLY" &&
-        report.residentId === soberHouseStore.residentHousingProfile?.residentId,
-    ).length;
-
-    const formatTone = (
-      status: "compliant" | "at_risk" | "violation" | "not_applicable" | "incomplete_setup",
-    ) => {
-      const tone = statusToneForComplianceStatus(status);
-      return tone === "green"
-        ? "green"
-        : tone === "yellow"
-          ? "yellow"
-          : tone === "red"
-            ? "red"
-            : "gray";
-    };
-
-    const formatValue = (ruleType: string, fallback = "N/A") => {
-      const evaluation = evaluationMap.get(ruleType as any);
-      if (!evaluation) {
-        return fallback;
-      }
-      if (ruleType === "meetings") {
-        return `${evaluation.actualValue ?? 0}/${evaluation.effectiveTargetValue ?? 0}`;
-      }
-      if (ruleType === "chores") {
-        return evaluation.status === "compliant"
-          ? "Done"
-          : evaluation.status === "at_risk"
-            ? "Pending"
-            : evaluation.status === "violation"
-              ? "Overdue"
-              : "Setup";
-      }
-      if (ruleType === "curfew") {
-        return evaluation.status === "compliant"
-          ? "On time"
-          : evaluation.status === "at_risk"
-            ? "At risk"
-            : evaluation.status === "violation"
-              ? "Late"
-              : "N/A";
-      }
-      return (
-        String(evaluation.actualValue ?? evaluation.effectiveTargetValue ?? fallback)
-          .replaceAll("_", " ")
-          .trim() || fallback
-      );
-    };
-
-    return [
-      {
-        id: "curfew",
-        title: "Curfew",
-        value: formatValue("curfew"),
-        subtitle: evaluationMap.get("curfew")?.statusReason ?? "No curfew rule",
-        tone: formatTone(evaluationMap.get("curfew")?.status ?? "not_applicable"),
-      },
-      {
-        id: "chores",
-        title: "Chores",
-        value: formatValue("chores"),
-        subtitle: evaluationMap.get("chores")?.statusReason ?? "No chore rule",
-        tone: formatTone(evaluationMap.get("chores")?.status ?? "not_applicable"),
-      },
-      {
-        id: "meetings",
-        title: "Meetings",
-        value: formatValue("meetings"),
-        subtitle: evaluationMap.get("meetings")?.statusReason ?? "No meeting rule",
-        tone: formatTone(evaluationMap.get("meetings")?.status ?? "not_applicable"),
-      },
-      {
-        id: "work",
-        title: workEvaluation?.ruleType === "jobSearch" ? "Job Search" : "Work",
-        value:
-          workEvaluation?.ruleType === "jobSearch"
-            ? `${workEvaluation.actualValue ?? 0}/${workEvaluation.effectiveTargetValue ?? 0}`
-            : String(workEvaluation?.actualValue ?? workEvaluation?.effectiveTargetValue ?? "N/A"),
-        subtitle: workEvaluation?.statusReason ?? "No work requirement",
-        tone: formatTone(workEvaluation?.status ?? "not_applicable"),
-      },
-      {
-        id: "violations",
-        title: "Violations",
-        value: String(soberHouseViolationTile?.activeCount ?? 0),
-        subtitle:
-          soberHouseViolationTile?.activeCount && soberHouseViolationTile.recentSummary
-            ? soberHouseViolationTile.recentSummary
-            : "No active violations",
-        tone: (soberHouseViolationTile?.activeCount ?? 0) > 0 ? "red" : "green",
-      },
-      {
-        id: "reports",
-        title: "Reports",
-        value: String(reportsCount),
-        subtitle: reportsCount > 0 ? "Monthly summaries available" : "No monthly reports yet",
-        tone: reportsCount > 0 ? "green" : "gray",
-      },
-    ] satisfies Array<{
-      id: string;
-      title: string;
-      value: string;
-      subtitle: string;
-      tone: "green" | "yellow" | "red" | "gray";
-    }>;
-  }, [
-    soberHouseAccessProfile?.role,
-    soberHouseComplianceSummary,
-    soberHouseStore.monthlyReports,
-    soberHouseStore.residentHousingProfile?.residentId,
-    soberHouseViolationTile,
-  ]);
+  const soberHouseResidentDashboardSummary = useMemo(
+    () =>
+      buildSoberHouseResidentDashboardSummary({
+        store: soberHouseStore,
+        nowIso: new Date(clockTickMs).toISOString(),
+        attendanceRecords,
+        meetingAttendanceLogs,
+        complianceSummary: soberHouseComplianceSummary,
+        upcomingMeetings: dashboardNextFiveMeetings,
+      }),
+    [
+      soberHouseStore,
+      clockTickMs,
+      attendanceRecords,
+      meetingAttendanceLogs,
+      soberHouseComplianceSummary,
+      dashboardNextFiveMeetings,
+    ],
+  );
   const dailyChecklistStatus = useMemo(() => {
     const morningEnabledRows = routinesStore.morningTemplate.items
       .filter((item) => item.enabled)
@@ -3688,6 +3657,24 @@ export default function App() {
       } catch {
         // ignore lookup failures
       }
+    },
+    [notificationsRuntimeEnabled],
+  );
+
+  const cancelScheduledNotificationIds = useCallback(
+    async (ids: string[]) => {
+      if (!notificationsRuntimeEnabled || ids.length === 0) {
+        return;
+      }
+      await Promise.all(
+        ids.map(async (id) => {
+          try {
+            await Notifications.cancelScheduledNotificationAsync(id);
+          } catch {
+            // Ignore stale identifiers.
+          }
+        }),
+      );
     },
     [notificationsRuntimeEnabled],
   );
@@ -5323,15 +5310,18 @@ export default function App() {
   const persistSoberHouseInteraction = useCallback(
     async (
       nextStore: SoberHouseSettingsStore,
-      _message: string,
-      _options?: { showStatus?: boolean },
+      message: string,
+      options?: { showStatus?: boolean },
     ) => {
+      void message;
+      void options;
       await persistSoberHouseStore(nextStore);
     },
     [persistSoberHouseStore],
   );
   const openSoberHouseDashboardDetail = useCallback(
-    (_kpiId: string) => {
+    (kpiId: string) => {
+      void kpiId;
       openSoberHousingSettings();
     },
     [openSoberHousingSettings],
@@ -6430,6 +6420,197 @@ export default function App() {
   useEffect(() => {
     saveSponsorConfigRef.current = saveSponsorConfig;
   }, [saveSponsorConfig]);
+
+  const syncSoberHouseResidentScheduling = useCallback(
+    async (reason: string) => {
+      const requirement = soberHouseStore.residentRequirementProfile;
+      const housing = soberHouseStore.residentHousingProfile;
+      if (
+        soberHouseStore.userAccessProfile?.role !== "HOUSE_RESIDENT" ||
+        !requirement ||
+        !housing
+      ) {
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const oneOnOneEventPlan = buildOneOnOneCalendarEventPlan(
+        soberHouseStore,
+        requirement,
+        nowIso,
+      );
+      const oneOnOneReminderPlans = buildOneOnOneReminderPlans(
+        soberHouseStore,
+        requirement,
+        nowIso,
+      );
+
+      let nextCalendarEventId = requirement.oneOnOneCalendarEventId;
+      let nextScheduleFingerprint = requirement.oneOnOneScheduleFingerprint;
+      let nextNotificationIds = requirement.oneOnOneNotificationIds;
+
+      if (Platform.OS === "ios" && calendarRuntimeEnabled) {
+        if (!oneOnOneEventPlan && requirement.oneOnOneCalendarEventId) {
+          try {
+            await Calendar.deleteEventAsync(requirement.oneOnOneCalendarEventId);
+          } catch {
+            // Ignore stale calendar entries.
+          }
+          nextCalendarEventId = null;
+          nextScheduleFingerprint = null;
+        } else if (
+          oneOnOneEventPlan &&
+          requirement.oneOnOneAddToCalendar &&
+          requirement.oneOnOneScheduleFingerprint !== oneOnOneEventPlan.fingerprint
+        ) {
+          const hasPermission = await ensureCalendarPermission();
+          if (hasPermission) {
+            const calendarId = await findWritableCalendarId();
+            if (calendarId) {
+              let eventId = requirement.oneOnOneCalendarEventId;
+              if (eventId) {
+                try {
+                  await Calendar.getEventAsync(eventId);
+                  await Calendar.updateEventAsync(eventId, {
+                    calendarId,
+                    title: oneOnOneEventPlan.title,
+                    notes: oneOnOneEventPlan.notes,
+                    startDate: oneOnOneEventPlan.startDate,
+                    endDate: oneOnOneEventPlan.endDate,
+                    alarms: oneOnOneEventPlan.alarms,
+                  });
+                } catch {
+                  eventId = await Calendar.createEventAsync(calendarId, {
+                    title: oneOnOneEventPlan.title,
+                    notes: oneOnOneEventPlan.notes,
+                    startDate: oneOnOneEventPlan.startDate,
+                    endDate: oneOnOneEventPlan.endDate,
+                    alarms: oneOnOneEventPlan.alarms,
+                  });
+                }
+              } else {
+                eventId = await Calendar.createEventAsync(calendarId, {
+                  title: oneOnOneEventPlan.title,
+                  notes: oneOnOneEventPlan.notes,
+                  startDate: oneOnOneEventPlan.startDate,
+                  endDate: oneOnOneEventPlan.endDate,
+                  alarms: oneOnOneEventPlan.alarms,
+                });
+              }
+              nextCalendarEventId = eventId;
+              nextScheduleFingerprint = oneOnOneEventPlan.fingerprint;
+              console.log("[sober-house] one-on-one calendar sync", {
+                reason,
+                eventId,
+                fingerprint: oneOnOneEventPlan.fingerprint,
+              });
+            }
+          }
+        }
+      }
+
+      if (requirement.oneOnOneNotificationIds.length > 0) {
+        await cancelScheduledNotificationIds(requirement.oneOnOneNotificationIds);
+      }
+      nextNotificationIds = [];
+      if (oneOnOneReminderPlans.length > 0 && requirement.oneOnOneReminderEnabled) {
+        const hasPermission = await ensureNotificationPermission();
+        if (hasPermission) {
+          const scheduledIds: string[] = [];
+          for (const reminderPlan of oneOnOneReminderPlans) {
+            const fireAt = applyScheduleTime(reminderPlan.fireAt);
+            if (!fireAt) {
+              continue;
+            }
+            const notificationId = await scheduleAt(fireAt, {
+              title: reminderPlan.title,
+              body: reminderPlan.body,
+              data: {
+                type: "sober-house",
+                obligationType: reminderPlan.obligationType,
+                reason: "one-on-one",
+              },
+            });
+            scheduledIds.push(notificationId);
+          }
+          nextNotificationIds = scheduledIds;
+          console.log("[sober-house] one-on-one reminders", {
+            reason,
+            count: scheduledIds.length,
+          });
+        }
+      }
+
+      if (
+        nextCalendarEventId === requirement.oneOnOneCalendarEventId &&
+        nextScheduleFingerprint === requirement.oneOnOneScheduleFingerprint &&
+        JSON.stringify(nextNotificationIds) === JSON.stringify(requirement.oneOnOneNotificationIds)
+      ) {
+        return;
+      }
+
+      const nextRequirement = {
+        ...requirement,
+        oneOnOneCalendarEventId: nextCalendarEventId,
+        oneOnOneScheduleFingerprint: nextScheduleFingerprint,
+        oneOnOneNotificationIds: nextNotificationIds,
+      };
+      const mutation = upsertResidentRequirementProfile(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        nextRequirement,
+        nowIso,
+      );
+      await persistSoberHouseStore(mutation.store);
+    },
+    [
+      Calendar,
+      applyScheduleTime,
+      calendarRuntimeEnabled,
+      cancelScheduledNotificationIds,
+      devAuthUserId,
+      devUserDisplayName,
+      ensureCalendarPermission,
+      ensureNotificationPermission,
+      findWritableCalendarId,
+      persistSoberHouseStore,
+      scheduleAt,
+      soberHouseStore,
+    ],
+  );
+
+  useEffect(() => {
+    const requirement = soberHouseStore.residentRequirementProfile;
+    const role = soberHouseStore.userAccessProfile?.role ?? "UNASSIGNED";
+    if (role !== "HOUSE_RESIDENT" || !requirement) {
+      soberHouseScheduleSyncKeyRef.current = null;
+      return;
+    }
+
+    const nextKey = [
+      role,
+      requirement.houseId ?? "none",
+      requirement.oneOnOneRequired ? "required" : "not-required",
+      requirement.oneOnOneAssignedStaffAssignmentId ?? "none",
+      requirement.oneOnOneFrequency,
+      requirement.oneOnOneWeekday ?? "none",
+      requirement.oneOnOneScheduledDate ?? "none",
+      requirement.oneOnOneTimeLocalHhmm,
+      String(requirement.oneOnOneLeadTimeMinutes),
+      requirement.oneOnOneAddToCalendar ? "calendar" : "no-calendar",
+      requirement.oneOnOneReminderEnabled ? "reminder" : "no-reminder",
+    ].join("|");
+
+    if (soberHouseScheduleSyncKeyRef.current === nextKey) {
+      return;
+    }
+    soberHouseScheduleSyncKeyRef.current = nextKey;
+    void syncSoberHouseResidentScheduling("resident-requirement-changed");
+  }, [
+    soberHouseStore.residentRequirementProfile,
+    soberHouseStore.userAccessProfile?.role,
+    syncSoberHouseResidentScheduling,
+  ]);
 
   const finishSetup = useCallback(async () => {
     setSetupError(null);
@@ -10845,7 +11026,7 @@ export default function App() {
                   sponsorEnabled={sponsorEnabled}
                   wisdomText={dailyWisdomText}
                   dailyChecklist={dailyChecklistStatus}
-                  soberHouseKpis={soberHouseDashboardKpis}
+                  soberHouseResidentTiles={soberHouseResidentDashboardSummary.tiles}
                   soberHouseViolations={soberHouseViolationTile}
                   houseManagerContact={
                     soberHouseManagerContact
@@ -13517,18 +13698,50 @@ export default function App() {
                 <GlassCard style={styles.card} strong>
                   <Text style={styles.sectionTitle}>Unlock Sober House</Text>
                   <Text style={styles.sectionMeta}>
-                    Owner/operator and resident sober-house records require Face ID, Touch ID, or
-                    your iPhone passcode before they can be opened.
+                    {canUseSimulatorSoberHouseUnlock
+                      ? "Simulator mode requires the sober-house test passcode before records can be opened."
+                      : "Owner/operator and resident sober-house records require Face ID, Touch ID, or your iPhone passcode before they can be opened."}
                   </Text>
                   {soberHouseUnlockStatus ? (
                     <Text style={styles.sectionMeta}>{soberHouseUnlockStatus}</Text>
                   ) : null}
+                  {canUseSimulatorSoberHouseUnlock && showSoberHouseSimulatorKeypad ? (
+                    <>
+                      <Text style={styles.label}>Simulator passcode</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={soberHouseSimulatorPasscode}
+                        onChangeText={(value) =>
+                          setSoberHouseSimulatorPasscode(value.replace(/[^0-9]/g, "").slice(0, 8))
+                        }
+                        keyboardType="number-pad"
+                        secureTextEntry
+                        placeholder="Enter 8-digit code"
+                        placeholderTextColor="rgba(255,255,255,0.45)"
+                        maxLength={8}
+                        autoFocus
+                        onSubmitEditing={submitSoberHouseSimulatorPasscode}
+                      />
+                    </>
+                  ) : null}
                   <View style={styles.buttonRow}>
                     <AppButton
                       title={
-                        soberHouseUnlocking ? "Unlocking..." : "Unlock with Face ID / Passcode"
+                        canUseSimulatorSoberHouseUnlock
+                          ? showSoberHouseSimulatorKeypad
+                            ? "Submit Simulator Passcode"
+                            : "Unlock with Simulator Passcode"
+                          : soberHouseUnlocking
+                            ? "Unlocking..."
+                            : "Unlock with Face ID / Passcode"
                       }
-                      onPress={() => void unlockSoberHouseAccess()}
+                      onPress={() =>
+                        canUseSimulatorSoberHouseUnlock
+                          ? showSoberHouseSimulatorKeypad
+                            ? submitSoberHouseSimulatorPasscode()
+                            : void unlockSoberHouseAccess()
+                          : void unlockSoberHouseAccess()
+                      }
                       disabled={soberHouseUnlocking}
                     />
                     <View style={styles.buttonSpacer} />

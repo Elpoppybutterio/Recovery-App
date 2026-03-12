@@ -55,7 +55,13 @@ import {
   updateMonthlyReportFinalNotes,
 } from "../lib/soberHouse/reportWorkflow";
 import { requiresSoberHouseDeviceUnlock } from "../lib/soberHouse/deviceAuth";
+import { buildSoberHouseResidentDashboardSummary } from "../lib/soberHouse/dashboard";
 import { getChatReceiptForMessageAndUser, getRuleSetForHouse } from "../lib/soberHouse/selectors";
+import {
+  buildOneOnOneCalendarEventPlan,
+  buildOneOnOneReminderPlans,
+  isOneOnOneApplicable,
+} from "../lib/soberHouse/scheduling";
 import { computeResidentMonthlyWins } from "../lib/soberHouse/wins";
 
 const ACTOR = {
@@ -2101,5 +2107,475 @@ describe("sober house monthly reports", () => {
     expect(houseHtml).toContain("House report export note.");
     expect(houseHtml).toContain("Operations Summary");
     expect(houseHtml).toContain("Workflow Metadata");
+  });
+
+  it("hides sober-house resident dashboard tiles for recovery-only users", () => {
+    const { store } = buildResidentComplianceStore();
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store,
+      nowIso: "2026-03-10T10:00:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      complianceSummary: null,
+      upcomingMeetings: [],
+    });
+
+    expect(summary.visibility.eligible).toBe(false);
+    expect(summary.tiles).toHaveLength(0);
+  });
+
+  it("shows resident dashboard tile visibility from role and house config", () => {
+    const base = buildResidentComplianceStore();
+    const store = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-10T09:00:00-06:00",
+    ).store;
+
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store,
+      nowIso: "2026-03-10T10:00:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      complianceSummary: null,
+      upcomingMeetings: [
+        {
+          id: "meeting-a",
+          name: "Noon AA",
+          address: "123 Main St",
+          startsAtLocal: "12:00",
+          distanceMeters: 800,
+          format: "IN_PERSON",
+        },
+      ],
+    });
+
+    expect(summary.visibility).toEqual({
+      eligible: true,
+      showChoreTile: true,
+      showWeeklyMeetingTile: true,
+      showHouseScheduleTile: true,
+    });
+  });
+
+  it("hides chore and weekly meeting tiles when house config disables them", () => {
+    const base = buildResidentComplianceStore();
+    const residentStore = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-10T09:10:00-06:00",
+    ).store;
+    const ruleSet = getRuleSetForHouse(residentStore, base.houseId, "2026-03-10T09:10:00-06:00");
+    const updatedStore = upsertHouseRuleSet(
+      residentStore,
+      ACTOR,
+      {
+        ...ruleSet,
+        chores: { ...ruleSet.chores, enabled: false },
+        meetings: { ...ruleSet.meetings, meetingsRequired: false, meetingsPerWeek: 0 },
+      },
+      "2026-03-10T09:11:00-06:00",
+    ).store;
+    const residentRequirements = updatedStore.residentRequirementProfile!;
+    const noMeetingRequirementStore = upsertResidentRequirementProfile(
+      updatedStore,
+      ACTOR,
+      {
+        ...residentRequirements,
+        meetingsRequiredWeekly: false,
+        meetingsRequiredCount: 0,
+      },
+      "2026-03-10T09:12:00-06:00",
+    ).store;
+
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store: noMeetingRequirementStore,
+      nowIso: "2026-03-10T10:00:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      complianceSummary: null,
+      upcomingMeetings: [],
+    });
+
+    expect(summary.visibility.showChoreTile).toBe(false);
+    expect(summary.visibility.showWeeklyMeetingTile).toBe(false);
+  });
+
+  it("computes the chore dashboard tile from persisted completion data", () => {
+    const base = buildResidentComplianceStore();
+    let store = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-10T08:00:00-06:00",
+    ).store;
+
+    store = upsertChoreCompletionRecord(
+      store,
+      ACTOR,
+      {
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        completedAt: "2026-03-10T17:20:00-06:00",
+        proofRequirement: ["PHOTO"],
+        proofProvided: true,
+        proofReference: "file:///tmp/chore-proof.jpg",
+        notes: "Kitchen chore done.",
+      },
+      "2026-03-10T17:21:00-06:00",
+    ).store;
+
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store,
+      nowIso: "2026-03-10T17:30:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      complianceSummary: null,
+      upcomingMeetings: [],
+    });
+
+    expect(summary.choreTile.visible).toBe(true);
+    expect(summary.choreTile.value).toBe("1/1");
+    expect(summary.choreTile.tone).toBe("green");
+    expect(summary.choreTile.badgeLabel).toBe("All complete");
+  });
+
+  it("computes the weekly meeting dashboard tile from persisted attendance", () => {
+    const base = buildResidentComplianceStore();
+    const store = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-12T08:00:00-06:00",
+    ).store;
+
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store,
+      nowIso: "2026-03-12T10:00:00-06:00",
+      attendanceRecords: [
+        { id: "att-1", meetingId: "m1", startAt: "2026-03-10T08:00:00-06:00" },
+        { id: "att-2", meetingId: "m2", startAt: "2026-03-11T08:00:00-06:00" },
+        { id: "att-3", meetingId: "m3", startAt: "2026-03-12T08:00:00-06:00" },
+      ],
+      meetingAttendanceLogs: [],
+      complianceSummary: null,
+      upcomingMeetings: [
+        {
+          id: "meeting-next",
+          name: "Thursday Night AA",
+          address: "123 Main St",
+          startsAtLocal: "19:00",
+          distanceMeters: 900,
+          format: "IN_PERSON",
+        },
+      ],
+    });
+
+    expect(summary.weeklyMeetingTile.visible).toBe(true);
+    expect(summary.weeklyMeetingTile.value).toBe("3/5");
+    expect(summary.weeklyMeetingTile.subtitle).toContain("2 meetings remaining");
+    expect(summary.weeklyMeetingTile.detail).toContain("Thursday Night AA");
+  });
+
+  it("uses pending acknowledgments as the next house schedule obligation", () => {
+    const base = buildChatStore();
+    if (!base.managerContext) {
+      throw new Error("manager context should exist");
+    }
+
+    let store = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-12T07:00:00-06:00",
+    ).store;
+
+    const ensured = ensureDirectThreadForResident(
+      store,
+      ACTOR,
+      {
+        managerStaffAssignmentId: base.managerContext.staffAssignmentId,
+      },
+      "2026-03-12T07:05:00-06:00",
+    );
+    store = ensured.store;
+
+    const sent = sendChatMessage(
+      store,
+      ACTOR,
+      base.managerContext,
+      {
+        threadId: ensured.thread!.id,
+        messageType: "ACKNOWLEDGMENT_REQUIRED",
+        bodyText: "Please acknowledge tonight's house meeting update.",
+      },
+      "2026-03-12T07:10:00-06:00",
+    );
+
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store: sent.store,
+      nowIso: "2026-03-12T08:00:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      complianceSummary: null,
+      upcomingMeetings: [],
+    });
+
+    expect(summary.houseScheduleTile.visible).toBe(true);
+    expect(summary.houseScheduleTile.subtitle).toBe("Acknowledge manager notice");
+    expect(summary.houseScheduleTile.badgeLabel).toBe("Ack needed");
+  });
+
+  it("shows one-on-one wizard scheduling only when house config or resident requirement makes it applicable", () => {
+    const base = buildResidentComplianceStore();
+    const draft = createDefaultResidentWizardDraft(base.linkedUserId);
+
+    expect(isOneOnOneApplicable(base.store, draft)).toBe(false);
+
+    const houseRules = getRuleSetForHouse(base.store, base.houseId, "2026-03-14T09:00:00-06:00");
+    const configuredStore = upsertHouseRuleSet(
+      base.store,
+      ACTOR,
+      {
+        ...houseRules,
+        oneOnOne: {
+          ...houseRules.oneOnOne,
+          enabled: true,
+          defaultFrequency: "WEEKLY",
+          defaultWeekday: "THU",
+          defaultTimeLocalHhmm: "14:00",
+        },
+      },
+      "2026-03-14T09:00:00-06:00",
+    ).store;
+
+    expect(
+      isOneOnOneApplicable(configuredStore, {
+        ...draft,
+        assignedHouseId: base.houseId,
+      }),
+    ).toBe(true);
+  });
+
+  it("persists one-on-one scheduling fields from the resident draft", () => {
+    const base = buildResidentComplianceStore();
+    const draft = {
+      ...createDefaultResidentWizardDraft(base.linkedUserId),
+      assignedHouseId: base.houseId,
+      firstName: "Taylor",
+      lastName: "Brooks",
+      moveInDate: "2026-03-01",
+      roomOrBed: "2B",
+      emergencyContactName: "Jamie Brooks",
+      emergencyContactPhone: "(555) 555-1212",
+      programPhaseOnEntry: "Phase 1",
+      oneOnOneRequired: true,
+      oneOnOneAssignedStaffAssignmentId: null,
+      oneOnOneFrequency: "WEEKLY" as const,
+      oneOnOneWeekday: "THU" as const,
+      oneOnOneTimeLocalHhmm: "14:30",
+      oneOnOneLeadTimeMinutes: 45,
+      oneOnOneAddToCalendar: true,
+      oneOnOneReminderEnabled: true,
+    };
+
+    const requirement = createResidentRequirementProfileFromDraft(
+      base.store,
+      base.linkedUserId,
+      draft,
+      "2026-03-14T09:15:00-06:00",
+    );
+
+    expect(requirement.oneOnOneRequired).toBe(true);
+    expect(requirement.oneOnOneFrequency).toBe("WEEKLY");
+    expect(requirement.oneOnOneWeekday).toBe("THU");
+    expect(requirement.oneOnOneTimeLocalHhmm).toBe("14:30");
+    expect(requirement.oneOnOneLeadTimeMinutes).toBe(45);
+    expect(requirement.oneOnOneAddToCalendar).toBe(true);
+    expect(requirement.oneOnOneReminderEnabled).toBe(true);
+  });
+
+  it("maps one-on-one scheduling into calendar events and reminders without recovery-only side effects", () => {
+    const base = buildChatStore();
+    const houseRules = getRuleSetForHouse(base.store, base.houseId, "2026-03-14T09:00:00-06:00");
+    let store = upsertHouseRuleSet(
+      base.store,
+      ACTOR,
+      {
+        ...houseRules,
+        oneOnOne: {
+          ...houseRules.oneOnOne,
+          enabled: true,
+          defaultFrequency: "WEEKLY",
+          defaultWeekday: "FRI",
+          defaultTimeLocalHhmm: "13:00",
+          defaultLeadTimeMinutes: 20,
+        },
+      },
+      "2026-03-14T09:00:00-06:00",
+    ).store;
+
+    store = upsertUserAccessProfile(
+      store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-14T09:01:00-06:00",
+    ).store;
+
+    const nextRequirement = upsertResidentRequirementProfile(
+      store,
+      ACTOR,
+      {
+        ...store.residentRequirementProfile!,
+        oneOnOneRequired: true,
+        oneOnOneAssignedStaffAssignmentId: base.managerContext?.staffAssignmentId ?? null,
+        oneOnOneFrequency: "WEEKLY",
+        oneOnOneWeekday: "FRI",
+        oneOnOneScheduledDate: null,
+        oneOnOneTimeLocalHhmm: "13:00",
+        oneOnOneLeadTimeMinutes: 20,
+        oneOnOneAddToCalendar: true,
+        oneOnOneReminderEnabled: true,
+      },
+      "2026-03-14T09:02:00-06:00",
+    ).store.residentRequirementProfile!;
+
+    const eventPlan = buildOneOnOneCalendarEventPlan(
+      store,
+      nextRequirement,
+      "2026-03-14T09:10:00-06:00",
+    );
+    const reminderPlans = buildOneOnOneReminderPlans(
+      store,
+      nextRequirement,
+      "2026-03-14T09:10:00-06:00",
+    );
+
+    expect(eventPlan?.title).toContain("One-on-one");
+    expect(eventPlan?.alarms[0]?.relativeOffset).toBe(-20);
+    expect(reminderPlans).toHaveLength(1);
+    expect(reminderPlans[0]?.obligationType).toBe("ONE_ON_ONE");
+  });
+
+  it("shows the next one-on-one session in the blended house schedule tile", () => {
+    const base = buildChatStore();
+    let store = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-14T09:30:00-06:00",
+    ).store;
+
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        houseId: base.houseId,
+        curfew: {
+          enabled: false,
+          weekdayCurfew: "22:00",
+          fridayCurfew: "23:00",
+          saturdayCurfew: "23:00",
+          sundayCurfew: "22:00",
+          gracePeriodMinutes: 15,
+          preViolationAlertEnabled: true,
+          preViolationLeadTimeMinutes: 30,
+          alertBasis: "CLOCK_ONLY",
+        },
+        chores: {
+          enabled: false,
+          frequency: "DAILY",
+          dueTime: "18:00",
+          proofRequirement: ["PHOTO"],
+          gracePeriodMinutes: 15,
+          managerInstantNotificationEnabled: true,
+        },
+      },
+      "2026-03-14T09:30:30-06:00",
+    ).store;
+
+    store = upsertResidentRequirementProfile(
+      store,
+      ACTOR,
+      {
+        ...store.residentRequirementProfile!,
+        oneOnOneRequired: true,
+        oneOnOneAssignedStaffAssignmentId: base.managerContext?.staffAssignmentId ?? null,
+        oneOnOneFrequency: "WEEKLY",
+        oneOnOneWeekday: "FRI",
+        oneOnOneScheduledDate: null,
+        oneOnOneTimeLocalHhmm: "11:00",
+        oneOnOneLeadTimeMinutes: 15,
+        oneOnOneAddToCalendar: true,
+        oneOnOneReminderEnabled: true,
+      },
+      "2026-03-14T09:31:00-06:00",
+    ).store;
+
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store,
+      nowIso: "2026-03-14T09:40:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      complianceSummary: null,
+      upcomingMeetings: [],
+    });
+
+    expect(summary.houseScheduleTile.visible).toBe(true);
+    expect(summary.houseScheduleTile.subtitle).toBe("Next one-on-one session");
+    expect(summary.houseScheduleTile.badgeLabel).toBe("1:1");
   });
 });

@@ -374,9 +374,11 @@ export function setStaffAssignmentStatus(
 export function upsertHouseRuleSet(
   store: SoberHouseSettingsStore,
   actor: AuditActor,
-  fields: Omit<
-    HouseRuleSet,
-    "id" | "createdAt" | "updatedAt" | "organizationId" | "scopeType" | "houseId" | "houseGroupId"
+  fields: Partial<
+    Omit<
+      HouseRuleSet,
+      "id" | "createdAt" | "updatedAt" | "organizationId" | "scopeType" | "houseId" | "houseGroupId"
+    >
   > & {
     id?: string;
     scopeType?: HouseRuleSet["scopeType"];
@@ -408,6 +410,13 @@ export function upsertHouseRuleSet(
   const nextValue: HouseRuleSet = {
     ...base,
     ...fields,
+    curfew: { ...base.curfew, ...(fields.curfew ?? {}) },
+    chores: { ...base.chores, ...(fields.chores ?? {}) },
+    employment: { ...base.employment, ...(fields.employment ?? {}) },
+    jobSearch: { ...base.jobSearch, ...(fields.jobSearch ?? {}) },
+    meetings: { ...base.meetings, ...(fields.meetings ?? {}) },
+    sponsorContact: { ...base.sponsorContact, ...(fields.sponsorContact ?? {}) },
+    oneOnOne: { ...base.oneOnOne, ...(fields.oneOnOne ?? {}) },
     id: base.id,
     organizationId: store.organization?.id ?? null,
     scopeType,

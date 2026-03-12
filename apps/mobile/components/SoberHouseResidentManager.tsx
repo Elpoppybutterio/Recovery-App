@@ -17,6 +17,7 @@ import {
   createResidentWizardDraftFromProfiles,
   persistResidentConsentArtifact,
 } from "../lib/soberHouse/resident";
+import { isOneOnOneApplicable, SCHEDULED_WEEKDAY_OPTIONS } from "../lib/soberHouse/scheduling";
 import {
   saveResidentWizardDraft,
   upsertResidentConsentRecord,
@@ -47,9 +48,16 @@ const STEP_TITLES: Record<ResidentOnboardingStep, string> = {
   4: "Meetings",
   5: "Sponsor",
   6: "Curfew and exceptions",
-  7: "Chores",
+  7: "Chores and schedule",
   8: "Consent",
 };
+
+const ONE_ON_ONE_FREQUENCY_OPTIONS = [
+  { value: "ONCE", label: "One time" },
+  { value: "WEEKLY", label: "Weekly" },
+  { value: "BIWEEKLY", label: "Bi-weekly" },
+  { value: "MONTHLY", label: "Monthly" },
+] as const;
 
 type PersistOptions = {
   showStatus?: boolean;
@@ -216,6 +224,7 @@ export function SoberHouseResidentManager({
     [draft.assignedHouseId, store],
   );
   const sponsorContactRequired = assignedHouseRuleSet?.sponsorContact.enabled ?? false;
+  const oneOnOneSectionVisible = useMemo(() => isOneOnOneApplicable(store, draft), [draft, store]);
 
   const startWizard = useCallback(() => {
     const nextDraft = createResidentWizardDraftFromProfiles(linkedUserId, store);
@@ -311,6 +320,21 @@ export function SoberHouseResidentManager({
         !isValidTimeInput(draft.residentCurfewSunday)
       ) {
         setResidentStatus("All curfew override times must be HH:MM.");
+        return;
+      }
+    }
+
+    if (wizardStep === 7 && draft.oneOnOneRequired) {
+      if (!draft.oneOnOneTimeLocalHhmm.match(/^\d{2}:\d{2}$/)) {
+        setResidentStatus("One-on-one time must use HH:MM.");
+        return;
+      }
+      if (draft.oneOnOneFrequency === "ONCE" && !draft.oneOnOneScheduledDate) {
+        setResidentStatus("Select a one-on-one date.");
+        return;
+      }
+      if (draft.oneOnOneFrequency !== "ONCE" && !draft.oneOnOneWeekday) {
+        setResidentStatus("Select the one-on-one day of week.");
         return;
       }
     }
@@ -549,6 +573,12 @@ export function SoberHouseResidentManager({
             </Text>
             <Text style={styles.entityMeta}>
               Chores: {store.residentRequirementProfile?.assignedChoreNotes || "None"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              One-on-one:{" "}
+              {store.residentRequirementProfile?.oneOnOneRequired
+                ? `${store.residentRequirementProfile.oneOnOneFrequency.toLowerCase()} at ${store.residentRequirementProfile.oneOnOneTimeLocalHhmm}`
+                : "Not required"}
             </Text>
             <Text style={styles.entityMeta}>
               Consent: signed {formatSignedAt(store.residentConsentRecord?.signedAt ?? null)}
@@ -1036,6 +1066,166 @@ export function SoberHouseResidentManager({
                 placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
                 multiline
               />
+              {oneOnOneSectionVisible ? (
+                <>
+                  <Text style={styles.sectionHeader}>One-on-one session</Text>
+                  <ToggleRow
+                    label="One-on-one required"
+                    value={draft.oneOnOneRequired}
+                    onValueChange={(value) =>
+                      updateDraft((current) => ({
+                        ...current,
+                        oneOnOneRequired: value,
+                        oneOnOneAssignedStaffAssignmentId: value
+                          ? current.oneOnOneAssignedStaffAssignmentId
+                          : null,
+                        oneOnOneScheduledDate:
+                          value && current.oneOnOneFrequency === "ONCE"
+                            ? current.oneOnOneScheduledDate
+                            : null,
+                      }))
+                    }
+                  />
+                  {draft.oneOnOneRequired ? (
+                    <>
+                      <Text style={styles.label}>Assigned manager</Text>
+                      <View style={styles.chipRow}>
+                        {store.staffAssignments
+                          .filter(
+                            (assignment) =>
+                              assignment.status === "ACTIVE" &&
+                              (assignment.role === "OWNER" ||
+                                assignment.role === "HOUSE_MANAGER" ||
+                                assignment.role === "ASSISTANT_MANAGER"),
+                          )
+                          .map((assignment) => (
+                            <Chip
+                              key={assignment.id}
+                              label={`${assignment.firstName} ${assignment.lastName}`.trim()}
+                              selected={draft.oneOnOneAssignedStaffAssignmentId === assignment.id}
+                              onPress={() =>
+                                updateDraft((current) => ({
+                                  ...current,
+                                  oneOnOneAssignedStaffAssignmentId: assignment.id,
+                                }))
+                              }
+                            />
+                          ))}
+                      </View>
+                      <Text style={styles.label}>Frequency</Text>
+                      <View style={styles.chipRow}>
+                        {ONE_ON_ONE_FREQUENCY_OPTIONS.map((option) => (
+                          <Chip
+                            key={option.value}
+                            label={option.label}
+                            selected={draft.oneOnOneFrequency === option.value}
+                            onPress={() =>
+                              updateDraft((current) => ({
+                                ...current,
+                                oneOnOneFrequency: option.value,
+                                oneOnOneWeekday:
+                                  option.value === "ONCE"
+                                    ? null
+                                    : (current.oneOnOneWeekday ?? "TUE"),
+                                oneOnOneScheduledDate:
+                                  option.value === "ONCE" ? current.oneOnOneScheduledDate : null,
+                              }))
+                            }
+                          />
+                        ))}
+                      </View>
+                      {draft.oneOnOneFrequency === "ONCE" ? (
+                        <>
+                          <Text style={styles.label}>Scheduled date</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={draft.oneOnOneScheduledDate ?? ""}
+                            onChangeText={(value) =>
+                              updateDraft((current) => ({
+                                ...current,
+                                oneOnOneScheduledDate: value,
+                              }))
+                            }
+                            placeholder="YYYY-MM-DD"
+                            placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                          />
+                        </>
+                      ) : (
+                        <>
+                          <Text style={styles.label}>Recurring day</Text>
+                          <View style={styles.chipRow}>
+                            {SCHEDULED_WEEKDAY_OPTIONS.map((option) => (
+                              <Chip
+                                key={option.value}
+                                label={option.label}
+                                selected={draft.oneOnOneWeekday === option.value}
+                                onPress={() =>
+                                  updateDraft((current) => ({
+                                    ...current,
+                                    oneOnOneWeekday: option.value,
+                                  }))
+                                }
+                              />
+                            ))}
+                          </View>
+                        </>
+                      )}
+                      <Text style={styles.label}>Scheduled time</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={draft.oneOnOneTimeLocalHhmm}
+                        onChangeText={(value) =>
+                          updateDraft((current) => ({
+                            ...current,
+                            oneOnOneTimeLocalHhmm: value,
+                          }))
+                        }
+                        placeholder="15:00"
+                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                      />
+                      <Text style={styles.label}>Lead-time reminder minutes</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={String(draft.oneOnOneLeadTimeMinutes)}
+                        onChangeText={(value) =>
+                          updateDraft((current) => ({
+                            ...current,
+                            oneOnOneLeadTimeMinutes: parseNonNegativeInt(
+                              normalizeIntegerInput(value),
+                              0,
+                            ),
+                          }))
+                        }
+                        keyboardType="number-pad"
+                        placeholder="30"
+                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                      />
+                      <ToggleRow
+                        label="Add to calendar"
+                        value={draft.oneOnOneAddToCalendar}
+                        onValueChange={(value) =>
+                          updateDraft((current) => ({
+                            ...current,
+                            oneOnOneAddToCalendar: value,
+                          }))
+                        }
+                      />
+                      <ToggleRow
+                        label="In-app reminder"
+                        value={draft.oneOnOneReminderEnabled}
+                        onValueChange={(value) =>
+                          updateDraft((current) => ({
+                            ...current,
+                            oneOnOneReminderEnabled: value,
+                          }))
+                        }
+                      />
+                    </>
+                  ) : (
+                    <Text style={styles.meta}>One-on-one details are skipped.</Text>
+                  )}
+                </>
+              ) : null}
             </>
           ) : null}
 
@@ -1176,6 +1366,12 @@ const styles = StyleSheet.create({
     color: colors.neonLavender,
     fontSize: typography.small,
     fontWeight: "700",
+  },
+  sectionHeader: {
+    color: colors.textPrimary,
+    fontSize: typography.body,
+    fontWeight: "700",
+    marginTop: spacing.sm,
   },
   label: {
     color: colors.textPrimary,

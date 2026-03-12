@@ -27,6 +27,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     version !== 5 &&
     version !== 6 &&
     version !== 7 &&
+    version !== 8 &&
     version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
   ) {
     return createDefaultSoberHouseSettingsStore();
@@ -96,13 +97,62 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
                 ? "GEOFENCE_SIGNATURE"
                 : (ruleSet.meetings?.proofMethod ?? "GEOFENCE_SIGNATURE"),
           },
+          oneOnOne: {
+            enabled: ruleSet.oneOnOne?.enabled ?? false,
+            defaultFrequency: ruleSet.oneOnOne?.defaultFrequency ?? "WEEKLY",
+            defaultWeekday: ruleSet.oneOnOne?.defaultWeekday ?? "TUE",
+            defaultTimeLocalHhmm: ruleSet.oneOnOne?.defaultTimeLocalHhmm ?? "15:00",
+            defaultLeadTimeMinutes: ruleSet.oneOnOne?.defaultLeadTimeMinutes ?? 30,
+            addToCalendarByDefault: ruleSet.oneOnOne?.addToCalendarByDefault ?? true,
+            reminderEnabledByDefault: ruleSet.oneOnOne?.reminderEnabledByDefault ?? true,
+          },
         }))
       : [],
     alertPreferences: Array.isArray(candidate.alertPreferences) ? candidate.alertPreferences : [],
     residentHousingProfile: candidate.residentHousingProfile ?? null,
-    residentRequirementProfile: candidate.residentRequirementProfile ?? null,
+    residentRequirementProfile: candidate.residentRequirementProfile
+      ? {
+          ...candidate.residentRequirementProfile,
+          oneOnOneRequired: candidate.residentRequirementProfile.oneOnOneRequired ?? false,
+          oneOnOneAssignedStaffAssignmentId:
+            candidate.residentRequirementProfile.oneOnOneAssignedStaffAssignmentId ?? null,
+          oneOnOneFrequency: candidate.residentRequirementProfile.oneOnOneFrequency ?? "WEEKLY",
+          oneOnOneWeekday: candidate.residentRequirementProfile.oneOnOneWeekday ?? "TUE",
+          oneOnOneScheduledDate: candidate.residentRequirementProfile.oneOnOneScheduledDate ?? null,
+          oneOnOneTimeLocalHhmm: candidate.residentRequirementProfile.oneOnOneTimeLocalHhmm ?? "",
+          oneOnOneLeadTimeMinutes:
+            candidate.residentRequirementProfile.oneOnOneLeadTimeMinutes ?? 0,
+          oneOnOneAddToCalendar:
+            candidate.residentRequirementProfile.oneOnOneAddToCalendar ?? false,
+          oneOnOneReminderEnabled:
+            candidate.residentRequirementProfile.oneOnOneReminderEnabled ?? false,
+          oneOnOneCalendarEventId:
+            candidate.residentRequirementProfile.oneOnOneCalendarEventId ?? null,
+          oneOnOneScheduleFingerprint:
+            candidate.residentRequirementProfile.oneOnOneScheduleFingerprint ?? null,
+          oneOnOneNotificationIds: Array.isArray(
+            candidate.residentRequirementProfile.oneOnOneNotificationIds,
+          )
+            ? candidate.residentRequirementProfile.oneOnOneNotificationIds
+            : [],
+        }
+      : null,
     residentConsentRecord: candidate.residentConsentRecord ?? null,
-    residentWizardDraft: candidate.residentWizardDraft ?? null,
+    residentWizardDraft: candidate.residentWizardDraft
+      ? {
+          ...candidate.residentWizardDraft,
+          oneOnOneRequired: candidate.residentWizardDraft.oneOnOneRequired ?? false,
+          oneOnOneAssignedStaffAssignmentId:
+            candidate.residentWizardDraft.oneOnOneAssignedStaffAssignmentId ?? null,
+          oneOnOneFrequency: candidate.residentWizardDraft.oneOnOneFrequency ?? "WEEKLY",
+          oneOnOneWeekday: candidate.residentWizardDraft.oneOnOneWeekday ?? "TUE",
+          oneOnOneScheduledDate: candidate.residentWizardDraft.oneOnOneScheduledDate ?? null,
+          oneOnOneTimeLocalHhmm: candidate.residentWizardDraft.oneOnOneTimeLocalHhmm ?? "",
+          oneOnOneLeadTimeMinutes: candidate.residentWizardDraft.oneOnOneLeadTimeMinutes ?? 0,
+          oneOnOneAddToCalendar: candidate.residentWizardDraft.oneOnOneAddToCalendar ?? false,
+          oneOnOneReminderEnabled: candidate.residentWizardDraft.oneOnOneReminderEnabled ?? false,
+        }
+      : null,
     choreCompletionRecords: Array.isArray(candidate.choreCompletionRecords)
       ? candidate.choreCompletionRecords.map((record) => ({
           ...record,

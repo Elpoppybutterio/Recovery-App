@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 8 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 9 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -28,6 +28,8 @@ export type MeetingProofMethod =
   | "SIGNATURE"
   | "MANAGER_CONFIRMATION";
 export type SponsorProofType = "CALL_LOG" | "TEXT_CONFIRMATION" | "MANAGER_CONFIRMATION";
+export type ScheduledFrequency = "ONCE" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+export type ScheduledWeekdayCode = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
 export type AlertDeliveryMethod = "EMAIL" | "SMS" | "BOTH";
 export type AlertScope = "ORGANIZATION" | "HOUSE";
 export type HouseRuleScopeType = "ORGANIZATION" | "HOUSE_GROUP" | "HOUSE";
@@ -418,6 +420,16 @@ export type SponsorContactRuleConfig = {
   proofType: SponsorProofType;
 };
 
+export type OneOnOneRuleConfig = {
+  enabled: boolean;
+  defaultFrequency: ScheduledFrequency;
+  defaultWeekday: ScheduledWeekdayCode | null;
+  defaultTimeLocalHhmm: string;
+  defaultLeadTimeMinutes: number;
+  addToCalendarByDefault: boolean;
+  reminderEnabledByDefault: boolean;
+};
+
 export type HouseRuleSet = {
   id: string;
   organizationId: string | null;
@@ -432,6 +444,7 @@ export type HouseRuleSet = {
   jobSearch: JobSearchRuleConfig;
   meetings: MeetingsRuleConfig;
   sponsorContact: SponsorContactRuleConfig;
+  oneOnOne: OneOnOneRuleConfig;
   createdAt: string;
   updatedAt: string;
 };
@@ -520,6 +533,18 @@ export type ResidentRequirementProfile = {
   wantsRealTimeViolationAlerts: boolean;
   wantsNearMissAlerts: boolean;
   wantsMonthlySummaryReports: boolean;
+  oneOnOneRequired: boolean;
+  oneOnOneAssignedStaffAssignmentId: string | null;
+  oneOnOneFrequency: ScheduledFrequency;
+  oneOnOneWeekday: ScheduledWeekdayCode | null;
+  oneOnOneScheduledDate: string | null;
+  oneOnOneTimeLocalHhmm: string;
+  oneOnOneLeadTimeMinutes: number;
+  oneOnOneAddToCalendar: boolean;
+  oneOnOneReminderEnabled: boolean;
+  oneOnOneCalendarEventId: string | null;
+  oneOnOneScheduleFingerprint: string | null;
+  oneOnOneNotificationIds: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -881,6 +906,15 @@ export type ResidentWizardDraft = {
   wantsRealTimeViolationAlerts: boolean;
   wantsNearMissAlerts: boolean;
   wantsMonthlySummaryReports: boolean;
+  oneOnOneRequired: boolean;
+  oneOnOneAssignedStaffAssignmentId: string | null;
+  oneOnOneFrequency: ScheduledFrequency;
+  oneOnOneWeekday: ScheduledWeekdayCode | null;
+  oneOnOneScheduledDate: string | null;
+  oneOnOneTimeLocalHhmm: string;
+  oneOnOneLeadTimeMinutes: number;
+  oneOnOneAddToCalendar: boolean;
+  oneOnOneReminderEnabled: boolean;
   workRequired: boolean;
   currentlyEmployed: boolean;
   employerName: string;

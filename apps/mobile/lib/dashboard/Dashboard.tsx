@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { GlassCard } from "../ui/GlassCard";
 import { Design } from "../ui/design";
 import type { RecoveryInsight } from "../recoveryInsights";
+import type { SoberHouseDashboardTileSummary } from "../soberHouse/dashboard";
 import { ChatTile } from "./ChatTile";
 
 type DashboardMeeting = {
@@ -38,13 +39,7 @@ type DashboardProps = {
     summary: string;
     title?: string;
   };
-  soberHouseKpis?: Array<{
-    id: string;
-    title: string;
-    value: string;
-    subtitle: string;
-    tone: "green" | "yellow" | "red" | "gray";
-  }>;
+  soberHouseResidentTiles?: SoberHouseDashboardTileSummary[];
   soberHouseViolations?: {
     activeCount: number;
     openCount: number;
@@ -252,7 +247,7 @@ export function Dashboard({
   wisdomText,
   dailyChecklist,
   soberHouseViolations,
-  soberHouseKpis = [],
+  soberHouseResidentTiles = [],
   houseManagerContact = null,
   meetingsAttendedInNinetyDays,
   ninetyDayGoalTarget,
@@ -1006,7 +1001,7 @@ export function Dashboard({
           badgeLabel={houseManagerContact ? "Live" : undefined}
         />
 
-        {houseManagerContact || soberHouseKpis.length > 0 ? (
+        {houseManagerContact || soberHouseResidentTiles.length > 0 ? (
           <GlassCard
             strong
             blurIntensity={12}
@@ -1026,17 +1021,29 @@ export function Dashboard({
                 {houseManagerContact.phoneLabel}
               </Text>
             ) : null}
-            {soberHouseKpis.length > 0 ? (
+            {soberHouseResidentTiles.length > 0 ? (
               <View style={styles.kpiGrid}>
-                {soberHouseKpis.map((kpi) => (
+                {soberHouseResidentTiles.map((tile) => (
                   <Pressable
-                    key={kpi.id}
-                    style={[styles.kpiTile, kpiToneStyle(kpi.tone)]}
-                    onPress={() => onOpenSoberHouseKpi?.(kpi.id)}
+                    key={tile.id}
+                    style={[styles.kpiTile, kpiToneStyle(tile.tone)]}
+                    onPress={() =>
+                      tile.routeTarget === "MEETINGS"
+                        ? onOpenMeetings()
+                        : onOpenSoberHouseKpi?.(tile.id)
+                    }
                   >
-                    <Text style={styles.kpiTitle}>{kpi.title}</Text>
-                    <Text style={styles.kpiValue}>{kpi.value}</Text>
-                    <Text style={styles.kpiSubtitle}>{kpi.subtitle}</Text>
+                    <View style={styles.soberHouseTileHeader}>
+                      <Text style={styles.kpiTitle}>{tile.title}</Text>
+                      {tile.badgeLabel ? (
+                        <View style={styles.soberHouseTileBadge}>
+                          <Text style={styles.soberHouseTileBadgeText}>{tile.badgeLabel}</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text style={styles.kpiValue}>{tile.value}</Text>
+                    <Text style={styles.kpiSubtitle}>{tile.subtitle}</Text>
+                    <Text style={styles.soberHouseTileDetail}>{tile.detail}</Text>
                   </Pressable>
                 ))}
               </View>
@@ -1739,19 +1746,20 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   upcomingCard: {
-    padding: 12,
-    gap: 8,
+    padding: 16,
+    gap: 12,
   },
   upcomingHeader: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
-    gap: 8,
+    gap: 10,
   },
   upcomingTitle: {
     color: Design.color.textPrimary,
-    fontSize: 17,
+    fontSize: 19,
     fontWeight: "800",
+    flex: 1,
   },
   dotRow: {
     flexDirection: "row",
@@ -1764,7 +1772,7 @@ const styles = StyleSheet.create({
   },
   upcomingNotice: {
     color: Design.color.textSecondary,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "600",
     marginBottom: 2,
   },
@@ -1773,14 +1781,14 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.36)",
-    backgroundColor: "rgba(255,255,255,0.15)",
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    marginBottom: 2,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    marginBottom: 4,
   },
   meetingsAttendanceLogPillText: {
     color: Design.color.textPrimary,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "700",
   },
   dot: {
@@ -1790,42 +1798,54 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.55)",
   },
   meetingItem: {
-    gap: 8,
-    padding: 9,
-    borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.92)",
+    gap: 12,
+    padding: 16,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(71,52,152,0.16)",
+    backgroundColor: "rgba(255,255,255,0.96)",
+    shadowColor: "rgba(35,18,93,0.28)",
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
   },
   meetingDetailsButton: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
+    alignItems: "center",
+    gap: 14,
   },
   meetingIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#6D4FD8",
+    shadowColor: "rgba(109,79,216,0.4)",
+    shadowOpacity: 0.24,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
   meetingIconPink: {
     backgroundColor: "#DE56AE",
   },
   meetingIconText: {
     color: "#fff",
-    fontSize: 14,
+    fontSize: 18,
     fontWeight: "700",
   },
   meetingTextCol: {
     flex: 1,
     minWidth: 0,
-    gap: 2,
+    gap: 4,
   },
   meetingName: {
     color: "#2B1F72",
-    fontSize: 15,
-    fontWeight: "700",
-    lineHeight: 19,
+    fontSize: 17,
+    fontWeight: "800",
+    lineHeight: 22,
   },
   meetingMetaRow: {
     flexDirection: "row",
@@ -1835,31 +1855,32 @@ const styles = StyleSheet.create({
   },
   meetingDistance: {
     color: "#1F1457",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "800",
   },
   meetingMeta: {
     color: "#3F2E88",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "700",
   },
   meetingActionsRow: {
     flexDirection: "row",
-    gap: 8,
+    gap: 12,
   },
   meetingLogButton: {
     flex: 1,
-    borderRadius: 10,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(47,35,128,0.25)",
-    backgroundColor: "rgba(90,44,206,0.12)",
-    paddingHorizontal: 10,
-    paddingVertical: 9,
+    borderColor: "rgba(95,73,179,0.22)",
+    backgroundColor: "#E9E1F8",
+    paddingHorizontal: 12,
+    paddingVertical: 13,
     alignItems: "center",
+    justifyContent: "center",
   },
   meetingLogButtonText: {
     color: "#2F2380",
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "800",
   },
   emptyMeetingCta: {
@@ -1903,6 +1924,25 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     gap: 6,
   },
+  soberHouseTileHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  soberHouseTileBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: "rgba(255,255,255,0.14)",
+  },
+  soberHouseTileBadgeText: {
+    color: Design.color.textPrimary,
+    fontSize: 10,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
   kpiTitle: {
     color: Design.color.textSecondary,
     fontSize: 11,
@@ -1917,6 +1957,12 @@ const styles = StyleSheet.create({
   },
   kpiSubtitle: {
     color: Design.color.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "600",
+  },
+  soberHouseTileDetail: {
+    color: Design.color.textPrimary,
     fontSize: 12,
     lineHeight: 17,
     fontWeight: "600",

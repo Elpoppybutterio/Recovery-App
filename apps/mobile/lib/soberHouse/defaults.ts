@@ -216,6 +216,15 @@ export function createDefaultHouseRuleSet(
       contactsRequiredPerWeek: 0,
       proofType: "CALL_LOG",
     },
+    oneOnOne: {
+      enabled: false,
+      defaultFrequency: "WEEKLY",
+      defaultWeekday: "TUE",
+      defaultTimeLocalHhmm: "15:00",
+      defaultLeadTimeMinutes: 30,
+      addToCalendarByDefault: true,
+      reminderEnabledByDefault: true,
+    },
     createdAt: now,
     updatedAt: now,
   };
@@ -555,13 +564,17 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
         allowedMeetingTypes: [...ruleSet.meetings.allowedMeetingTypes],
       },
       sponsorContact: { ...ruleSet.sponsorContact },
+      oneOnOne: { ...ruleSet.oneOnOne },
     })),
     alertPreferences: store.alertPreferences.map((preference) => ({ ...preference })),
     residentHousingProfile: store.residentHousingProfile
       ? { ...store.residentHousingProfile }
       : null,
     residentRequirementProfile: store.residentRequirementProfile
-      ? { ...store.residentRequirementProfile }
+      ? {
+          ...store.residentRequirementProfile,
+          oneOnOneNotificationIds: [...store.residentRequirementProfile.oneOnOneNotificationIds],
+        }
       : null,
     residentConsentRecord: store.residentConsentRecord
       ? {
