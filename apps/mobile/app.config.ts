@@ -106,7 +106,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         NSLocationWhenInUseUsageDescription:
           "Sober AI uses your location while the app is open to show nearby meetings and help confirm meeting arrival timing.",
         NSCalendarsWriteOnlyAccessUsageDescription:
-          "Sober AI adds recovery events to your calendar, such as meetings, sober house obligations, and one-on-one sessions, so you receive reminders and stay on schedule. For example, when you tap “Add to Calendar” on a meeting, Sober AI saves that meeting to your calendar.",
+          "Sober AI adds recovery events to your calendar, such as meetings, sober house obligations, and one-on-one sessions, so you receive reminders and stay on schedule. For example, when you tap 'Add to Calendar' on a meeting, Sober AI saves that meeting to your calendar.",
         UIBackgroundModes: ["fetch", "remote-notification"],
       },
     },
