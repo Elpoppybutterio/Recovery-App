@@ -106,7 +106,50 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
             addToCalendarByDefault: ruleSet.oneOnOne?.addToCalendarByDefault ?? true,
             reminderEnabledByDefault: ruleSet.oneOnOne?.reminderEnabledByDefault ?? true,
           },
+          operations: {
+            choresEnabled: ruleSet.operations?.choresEnabled ?? ruleSet.chores?.enabled ?? false,
+            houseMeetingsEnabled: ruleSet.operations?.houseMeetingsEnabled ?? false,
+            houseMeetingsRequired: ruleSet.operations?.houseMeetingsRequired ?? false,
+            oneOnOneSessionsEnabled:
+              ruleSet.operations?.oneOnOneSessionsEnabled ?? ruleSet.oneOnOne?.enabled ?? false,
+            oneOnOneSessionsRequired: ruleSet.operations?.oneOnOneSessionsRequired ?? false,
+            houseAlertsEnabled: ruleSet.operations?.houseAlertsEnabled ?? false,
+            announcementsEnabled: ruleSet.operations?.announcementsEnabled ?? false,
+            complianceSnapshotEnabled: ruleSet.operations?.complianceSnapshotEnabled ?? true,
+          },
+          support: {
+            defaultReminderLeadMinutes: ruleSet.support?.defaultReminderLeadMinutes ?? 30,
+            defaultAddToCalendar: ruleSet.support?.defaultAddToCalendar ?? false,
+            defaultInAppReminders: ruleSet.support?.defaultInAppReminders ?? false,
+            requireHouseMeetingAcknowledgment:
+              ruleSet.support?.requireHouseMeetingAcknowledgment ?? false,
+            requireAnnouncementAcknowledgment:
+              ruleSet.support?.requireAnnouncementAcknowledgment ?? false,
+            requireOneOnOneManagerConfirmation:
+              ruleSet.support?.requireOneOnOneManagerConfirmation ?? false,
+          },
         }))
+      : [],
+    residentHouseMemberships: Array.isArray(candidate.residentHouseMemberships)
+      ? candidate.residentHouseMemberships
+      : [],
+    recurringObligations: Array.isArray(candidate.recurringObligations)
+      ? candidate.recurringObligations
+      : [],
+    houseMeetings: Array.isArray(candidate.houseMeetings) ? candidate.houseMeetings : [],
+    oneOnOneSessions: Array.isArray(candidate.oneOnOneSessions) ? candidate.oneOnOneSessions : [],
+    houseChores: Array.isArray(candidate.houseChores)
+      ? candidate.houseChores.map((chore) => ({
+          ...chore,
+          proofRequirement: Array.isArray(chore.proofRequirement)
+            ? chore.proofRequirement
+            : chore.proofRequirement
+              ? [chore.proofRequirement]
+              : ["NONE"],
+        }))
+      : [],
+    houseAlertAnnouncements: Array.isArray(candidate.houseAlertAnnouncements)
+      ? candidate.houseAlertAnnouncements
       : [],
     alertPreferences: Array.isArray(candidate.alertPreferences) ? candidate.alertPreferences : [],
     residentHousingProfile: candidate.residentHousingProfile ?? null,

@@ -566,9 +566,9 @@ export function SoberHouseReportsSection({ userId, store, actor, isSaving, onPer
     <GlassCard style={styles.card}>
       <View style={styles.headerRow}>
         <View style={styles.headerCopy}>
-          <Text style={styles.sectionTitle}>Monthly Reports</Text>
+          <Text style={styles.sectionTitle}>Reports & Snapshots</Text>
           <Text style={styles.sectionMeta}>
-            Generate, review, approve, and export stable monthly report snapshots.
+            Compile stable current-period report snapshots, then review, approve, and export them.
           </Text>
         </View>
       </View>
@@ -603,13 +603,13 @@ export function SoberHouseReportsSection({ userId, store, actor, isSaving, onPer
       {canManageReports ? (
         <View style={styles.buttonRow}>
           <AppButton
-            title="Generate resident report"
+            title="Compile resident report now"
             onPress={() => void generateResidentReport()}
-            disabled={isSaving}
+            disabled={isSaving || !store.residentHousingProfile}
           />
           <View style={styles.buttonSpacer} />
           <AppButton
-            title="Generate house report"
+            title="Compile house report now"
             variant="secondary"
             onPress={() => void generateHouseReport()}
             disabled={isSaving || !selectedHouseId}

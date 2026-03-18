@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Sober AI</string>
+	<string>Sober²</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,7 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<string>Sober²</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -45,21 +45,23 @@
 		<true/>
 	</dict>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your calendars</string>
+	<string>Allow Sober² to access your calendars</string>
 	<key>NSCalendarsUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your calendars</string>
+	<string>Allow Sober² to access your calendars</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>Sober² adds recovery events to your calendar when you choose Add to Calendar.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your location</string>
+	<string>Allow Sober² to access your location</string>
 	<key>NSLocationAlwaysUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your location</string>
+	<string>Allow Sober² to access your location</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Location is used to show nearby meetings and arrival prompts.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your microphone</string>
+	<string>Allow Sober² to access your microphone</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your reminders</string>
+	<string>Allow Sober² to access your reminders</string>
 	<key>NSRemindersUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your reminders</string>
+	<string>Allow Sober² to access your reminders</string>
 	<key>RCTNewArchEnabled</key>
 	<false/>
 	<key>UIBackgroundModes</key>

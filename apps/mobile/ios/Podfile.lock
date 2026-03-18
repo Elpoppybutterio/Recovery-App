@@ -274,6 +274,8 @@ PODS:
     - ExpoModulesCore
   - ExpoLinearGradient (15.0.8):
     - ExpoModulesCore
+  - ExpoLocalAuthentication (17.0.8):
+    - ExpoModulesCore
   - ExpoLocation (19.0.8):
     - ExpoModulesCore
   - ExpoModulesCore (3.0.29):
@@ -2652,6 +2654,7 @@ DEPENDENCIES:
   - "ExpoImageManipulator (from `../../../node_modules/.pnpm/expo-image-manipulator@14.0.8_expo@54.0.33/node_modules/expo-image-manipulator/ios`)"
   - "ExpoKeepAwake (from `../../../node_modules/.pnpm/expo-keep-awake@15.0.8_expo@54.0.33_react@19.1.0/node_modules/expo-keep-awake/ios`)"
   - "ExpoLinearGradient (from `../../../node_modules/.pnpm/expo-linear-gradient@15.0.8_expo@54.0.33_react-native@0.81.5_@babel+core@7.29.0_@types+_e0e6272bb5c4d1f8b2bfc94cf1013630/node_modules/expo-linear-gradient/ios`)"
+  - "ExpoLocalAuthentication (from `../../../node_modules/.pnpm/expo-local-authentication@17.0.8_expo@54.0.33/node_modules/expo-local-authentication/ios`)"
   - "ExpoLocation (from `../../../node_modules/.pnpm/expo-location@19.0.8_expo@54.0.33/node_modules/expo-location/ios`)"
   - "ExpoModulesCore (from `../../../node_modules/.pnpm/expo-modules-core@3.0.29_react-native@0.81.5_@babel+core@7.29.0_@types+react@19.1.10_react@19.1.0__react@19.1.0/node_modules/expo-modules-core`)"
   - "ExpoPrint (from `../../../node_modules/.pnpm/expo-print@15.0.8_expo@54.0.33_react-native@0.81.5_@babel+core@7.29.0_@types+react@19.1.10_react@19.1.0_/node_modules/expo-print/ios`)"
@@ -2791,6 +2794,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/.pnpm/expo-keep-awake@15.0.8_expo@54.0.33_react@19.1.0/node_modules/expo-keep-awake/ios"
   ExpoLinearGradient:
     :path: "../../../node_modules/.pnpm/expo-linear-gradient@15.0.8_expo@54.0.33_react-native@0.81.5_@babel+core@7.29.0_@types+_e0e6272bb5c4d1f8b2bfc94cf1013630/node_modules/expo-linear-gradient/ios"
+  ExpoLocalAuthentication:
+    :path: "../../../node_modules/.pnpm/expo-local-authentication@17.0.8_expo@54.0.33/node_modules/expo-local-authentication/ios"
   ExpoLocation:
     :path: "../../../node_modules/.pnpm/expo-location@19.0.8_expo@54.0.33/node_modules/expo-location/ios"
   ExpoModulesCore:
@@ -2979,6 +2984,7 @@ SPEC CHECKSUMS:
   ExpoImageManipulator: 607a5c8c88085381639458a46cc55fb9d3869148
   ExpoKeepAwake: 55f75eca6499bb9e4231ebad6f3e9cb8f99c0296
   ExpoLinearGradient: 809102bdb979f590083af49f7fa4805cd931bd58
+  ExpoLocalAuthentication: 8a31808565da7af926dd9b595e98594d8b1553b6
   ExpoLocation: d5b61cb4970fa982e39ca94246a206a0c3b812ca
   ExpoModulesCore: 39c0aca5ee449ec315f1ded494cbdcc7ebe66aae
   ExpoPrint: 813bfa965eda2ecc4b1cdc61612c820e239c382a

@@ -8,11 +8,17 @@ import type {
   CorrectiveAction,
   EvidenceItem,
   House,
+  HouseAlertAnnouncement,
+  HouseChore,
   HouseGroup,
+  HouseMeeting,
   JobApplicationRecord,
   HouseRuleSet,
   MonthlyReport,
   Organization,
+  OneOnOneSession,
+  RecurringObligation,
+  ResidentHouseMembership,
   SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
   StaffAssignment,
@@ -42,6 +48,12 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     houses: [],
     staffAssignments: [],
     houseRuleSets: [],
+    residentHouseMemberships: [],
+    recurringObligations: [],
+    houseMeetings: [],
+    oneOnOneSessions: [],
+    houseChores: [],
+    houseAlertAnnouncements: [],
     alertPreferences: [],
     residentHousingProfile: null,
     residentRequirementProfile: null,
@@ -225,6 +237,24 @@ export function createDefaultHouseRuleSet(
       addToCalendarByDefault: true,
       reminderEnabledByDefault: true,
     },
+    operations: {
+      choresEnabled: false,
+      houseMeetingsEnabled: false,
+      houseMeetingsRequired: false,
+      oneOnOneSessionsEnabled: false,
+      oneOnOneSessionsRequired: false,
+      houseAlertsEnabled: false,
+      announcementsEnabled: false,
+      complianceSnapshotEnabled: true,
+    },
+    support: {
+      defaultReminderLeadMinutes: 30,
+      defaultAddToCalendar: false,
+      defaultInAppReminders: false,
+      requireHouseMeetingAcknowledgment: false,
+      requireAnnouncementAcknowledgment: false,
+      requireOneOnOneManagerConfirmation: false,
+    },
     createdAt: now,
     updatedAt: now,
   };
@@ -255,6 +285,181 @@ export function createDefaultAlertPreference(
   };
 }
 
+export function createDefaultResidentHouseMembership(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("resident-house-membership"),
+): ResidentHouseMembership {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    organizationId,
+    houseId,
+    roomOrBed: "",
+    moveInDate: now.slice(0, 10),
+    moveOutDate: null,
+    isPrimary: true,
+    status: "ACTIVE",
+    notes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultRecurringObligation(
+  now: string,
+  organizationId: string | null,
+  houseId: string | null,
+  residentId: string | null,
+  linkedUserId: string | null,
+  id = createEntityId("recurring-obligation"),
+): RecurringObligation {
+  return {
+    id,
+    organizationId,
+    houseId,
+    residentId,
+    linkedUserId,
+    obligationType: "HOUSE_MEETING",
+    title: "",
+    detail: "",
+    frequency: "WEEKLY",
+    weekday: "MON",
+    scheduledDate: null,
+    timeLocalHhmm: "18:00",
+    required: false,
+    reminderLeadMinutes: 30,
+    inAppReminderEnabled: false,
+    addToCalendar: false,
+    accountabilityMethod: "NONE",
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultHouseMeeting(
+  now: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("house-meeting"),
+): HouseMeeting {
+  return {
+    id,
+    organizationId,
+    houseId,
+    recurringObligationId: null,
+    title: "",
+    description: "",
+    meetingKind: "HOUSE_MEETING",
+    locationLabel: "",
+    startsAt: now,
+    endsAt: null,
+    required: false,
+    reminderLeadMinutes: 30,
+    inAppReminderEnabled: false,
+    addToCalendar: false,
+    acknowledgmentRequired: false,
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultOneOnOneSession(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("one-on-one-session"),
+): OneOnOneSession {
+  return {
+    id,
+    organizationId,
+    houseId,
+    residentId,
+    linkedUserId,
+    staffAssignmentId: null,
+    recurringObligationId: null,
+    title: "One-on-one",
+    notes: "",
+    scheduledAt: now,
+    endsAt: null,
+    required: false,
+    reminderLeadMinutes: 30,
+    inAppReminderEnabled: false,
+    addToCalendar: false,
+    managerConfirmationRequired: false,
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultHouseChore(
+  now: string,
+  organizationId: string | null,
+  houseId: string | null,
+  residentId: string | null,
+  linkedUserId: string | null,
+  id = createEntityId("house-chore"),
+): HouseChore {
+  return {
+    id,
+    organizationId,
+    houseId,
+    residentId,
+    linkedUserId,
+    recurringObligationId: null,
+    title: "",
+    summary: "",
+    frequency: "WEEKLY",
+    dueTimeLocalHhmm: "18:00",
+    weekday: null,
+    scheduledDate: null,
+    required: false,
+    proofRequirement: ["NONE"],
+    reminderLeadMinutes: 30,
+    inAppReminderEnabled: false,
+    addToCalendar: false,
+    accountabilityRequired: false,
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultHouseAlertAnnouncement(
+  now: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("house-alert"),
+): HouseAlertAnnouncement {
+  return {
+    id,
+    organizationId,
+    houseId,
+    recurringObligationId: null,
+    title: "",
+    body: "",
+    severity: "INFO",
+    startsAt: now,
+    endsAt: null,
+    reminderLeadMinutes: 0,
+    inAppReminderEnabled: false,
+    addToCalendar: false,
+    acknowledgmentRequired: false,
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export function createDefaultChoreCompletionRecord(
   now: string,
   residentId: string,
@@ -269,6 +474,7 @@ export function createDefaultChoreCompletionRecord(
     linkedUserId,
     organizationId,
     houseId,
+    houseChoreId: null,
     completedAt: now,
     proofRequirement: ["NONE"],
     proofProvided: false,
@@ -565,6 +771,23 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
       },
       sponsorContact: { ...ruleSet.sponsorContact },
       oneOnOne: { ...ruleSet.oneOnOne },
+      operations: { ...ruleSet.operations },
+      support: { ...ruleSet.support },
+    })),
+    residentHouseMemberships: store.residentHouseMemberships.map((membership) => ({
+      ...membership,
+    })),
+    recurringObligations: store.recurringObligations.map((obligation) => ({
+      ...obligation,
+    })),
+    houseMeetings: store.houseMeetings.map((meeting) => ({ ...meeting })),
+    oneOnOneSessions: store.oneOnOneSessions.map((session) => ({ ...session })),
+    houseChores: store.houseChores.map((chore) => ({
+      ...chore,
+      proofRequirement: [...chore.proofRequirement],
+    })),
+    houseAlertAnnouncements: store.houseAlertAnnouncements.map((announcement) => ({
+      ...announcement,
     })),
     alertPreferences: store.alertPreferences.map((preference) => ({ ...preference })),
     residentHousingProfile: store.residentHousingProfile

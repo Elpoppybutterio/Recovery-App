@@ -57,6 +57,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Sober house dashboard blending Part A now adds resident-only chore, weekly meeting, and next-obligation dashboard tiles backed by reusable summary selectors and house-config-aware visibility on the existing recovery dashboard.
 - Sober house dashboard blending Part B now adds conditional one-on-one setup in the resident flow, persisted one-on-one scheduling fields, calendar event mapping, centralized reminder scheduling, and next-up dashboard integration without introducing a separate scheduling engine.
 - Recovery UX v2: setup wizard flow, dashboard-first home experience, purple liquid-glass cards, and local recovery analytics (days sober, 90-day progress, sponsor adherence).
+- Recovery milestone UX: after the initial 90-day meeting window, the dashboard now switches to the next sobriety benchmark coin with days-remaining tracking, plus a once-per-milestone celebration splash on exact sobriety birthdays.
 - Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
 - Dashboard: evolve the existing direct-message foundation into broader recovery/service/probation chat flows after sober-house direct messaging proves out.
 - Dashboard: Wisdom tile uses server-driven daily rotation (`/api/wisdom/daily`) with one quote per day, pronoun normalization (`I/you -> we`), plus local cache and deterministic fallback.

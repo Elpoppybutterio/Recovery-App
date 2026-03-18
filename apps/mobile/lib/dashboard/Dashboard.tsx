@@ -1,10 +1,12 @@
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useEffect, useState, type ReactNode } from "react";
+import type { CommunicationNotificationSummary } from "../communication/summary";
+import type { RecoveryMilestoneTileSummary } from "../recoveryMilestones";
 import { GlassCard } from "../ui/GlassCard";
+import { MilestoneCoin } from "../ui/MilestoneCoin";
 import { Design } from "../ui/design";
 import type { RecoveryInsight } from "../recoveryInsights";
 import type { SoberHouseDashboardTileSummary } from "../soberHouse/dashboard";
-import { ChatTile } from "./ChatTile";
 
 type DashboardMeeting = {
   id: string;
@@ -23,9 +25,9 @@ type DashboardProps = {
   locationEnabled: boolean;
   nextMeetings: DashboardMeeting[];
   showingOnlineMeetingsFallback: boolean;
-  chatEnabled: boolean;
-  sponsorEnabled: boolean;
+  sponsorCallAvailable: boolean;
   wisdomText?: string | null;
+  notificationSummary?: CommunicationNotificationSummary | null;
   dailyChecklist: {
     rows: Array<{
       id: string;
@@ -39,7 +41,28 @@ type DashboardProps = {
     summary: string;
     title?: string;
   };
+  soberHouseChatPreview?: {
+    visible: boolean;
+    threadCount: number;
+    unreadCount: number;
+    acknowledgmentPending: boolean;
+    threads: Array<{
+      id: string;
+      participantName: string;
+      participantRole: string;
+      preview: string;
+      timestamp: string;
+      unreadCount: number;
+      acknowledgmentPending: boolean;
+    }>;
+  } | null;
   soberHouseResidentTiles?: SoberHouseDashboardTileSummary[];
+  soberHouseSetupPrompt?: {
+    visible: boolean;
+    title: string;
+    detail: string;
+    actionLabel: string;
+  } | null;
   soberHouseViolations?: {
     activeCount: number;
     openCount: number;
@@ -56,6 +79,7 @@ type DashboardProps = {
   meetingsAttendedInNinetyDays: number;
   ninetyDayGoalTarget: number;
   ninetyDayProgressPct: number;
+  recoveryMilestoneSummary?: RecoveryMilestoneTileSummary | null;
   meetingsAttendedToday: {
     count: number;
     goal: number;
@@ -82,12 +106,13 @@ type DashboardProps = {
   onCallSponsor: () => void;
   onOpenMorningRoutine: () => void;
   onOpenNightlyInventory: () => void;
-  onOpenChat: () => void;
+  onOpenNotifications: () => void;
   onOpenSoberHouseKpi?: (kpiId: string) => void;
   onCallHouseManager?: () => void;
   onOpenRecoverySettings: () => void;
   onOpenPrivacyStatement: () => void;
   onOpenMeetings: () => void;
+  onOpenRecoveryRoadmap: () => void;
   supervisionPanel?: ReactNode;
   upcomingMeetingsPanel?: ReactNode;
   onOpenAttendance: () => void;
@@ -242,16 +267,19 @@ export function Dashboard({
   locationEnabled,
   nextMeetings,
   showingOnlineMeetingsFallback,
-  chatEnabled,
-  sponsorEnabled,
+  sponsorCallAvailable,
   wisdomText,
+  notificationSummary = null,
   dailyChecklist,
+  soberHouseChatPreview = null,
   soberHouseViolations,
   soberHouseResidentTiles = [],
+  soberHouseSetupPrompt = null,
   houseManagerContact = null,
   meetingsAttendedInNinetyDays,
   ninetyDayGoalTarget,
   ninetyDayProgressPct,
+  recoveryMilestoneSummary = null,
   meetingsAttendedToday,
   meetingBarsLast7,
   meetingPrimaryActionLabels,
@@ -263,12 +291,13 @@ export function Dashboard({
   onCallSponsor,
   onOpenMorningRoutine,
   onOpenNightlyInventory,
-  onOpenChat,
+  onOpenNotifications,
   onOpenSoberHouseKpi,
   onCallHouseManager,
   onOpenRecoverySettings,
   onOpenPrivacyStatement,
   onOpenMeetings,
+  onOpenRecoveryRoadmap,
   supervisionPanel,
   upcomingMeetingsPanel,
   onOpenAttendance,
@@ -276,7 +305,6 @@ export function Dashboard({
   onOpenTools,
   onOpenSoberHousingSettings,
   onOpenProbationParoleSettings,
-  onRefresh,
   onLogMeeting,
   onCaptureSignature,
 }: DashboardProps) {
@@ -325,6 +353,7 @@ export function Dashboard({
   const meetingsWeekBars = meetingBarsLast7.length === 7 ? meetingBarsLast7 : [0, 0, 0, 0, 0, 0, 0];
   const meetingsWeekMax = Math.max(1, ...meetingsWeekBars);
   const meetingsWeekTotal = meetingsWeekBars.reduce((sum, value) => sum + value, 0);
+  const showNinetyDayGoalTile = daysSober <= 90 || !recoveryMilestoneSummary;
 
   const issuesOnMorningDone = Math.max(0, routineInsights.averageIssuesOnMorningCompleteDays);
   const issuesOnMorningMissed = Math.max(0, routineInsights.averageIssuesOnMorningIncompleteDays);
@@ -352,6 +381,8 @@ export function Dashboard({
     typeof wisdomText === "string" && wisdomText.trim().length > 0
       ? wisdomText
       : SPONSOR_WISDOM_TEXT;
+  const notificationItems = notificationSummary?.items ?? [];
+  const notificationBadgeCount = notificationSummary?.badgeCount ?? 0;
 
   return (
     <View style={styles.root}>
@@ -361,11 +392,18 @@ export function Dashboard({
             <Text style={styles.iconText}>☰</Text>
           </Pressable>
           <View style={styles.titleWrap}>
-            <Text style={styles.appTitle}>Sober AI</Text>
+            <Text style={styles.appTitle}>Sober²</Text>
             <Text style={styles.appSubtitle}>Recovery</Text>
           </View>
-          <Pressable onPress={onRefresh} style={styles.iconButton}>
+          <Pressable onPress={onOpenNotifications} style={styles.iconButton}>
             <Text style={styles.iconText}>🔔</Text>
+            {notificationBadgeCount > 0 ? (
+              <View style={styles.topBarBadge}>
+                <Text style={styles.topBarBadgeText}>
+                  {notificationBadgeCount > 9 ? "9+" : String(notificationBadgeCount)}
+                </Text>
+              </View>
+            ) : null}
           </Pressable>
         </View>
 
@@ -480,20 +518,126 @@ export function Dashboard({
             </ScrollView>
           </GlassCard>
         </Pressable>
-        {sponsorEnabled ? (
+        {sponsorCallAvailable ? (
           <Pressable style={styles.callSponsorButtonBelowWisdom} onPress={onCallSponsor}>
             <Text style={styles.callNowText}>📞 Call Sponsor</Text>
+          </Pressable>
+        ) : null}
+
+        {soberHouseChatPreview?.visible ? (
+          <Pressable
+            onHoverIn={() => setTileHover("chat", true)}
+            onHoverOut={() => setTileHover("chat", false)}
+            accessibilityRole="button"
+            accessibilityLabel="House manager chat preview"
+          >
+            <GlassCard
+              strong
+              blurIntensity={12}
+              style={[
+                styles.recoveryCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "chat" ? styles.liquidGlassTileHover : null,
+              ]}
+            >
+              <View style={styles.upcomingHeader}>
+                <Text style={styles.recoveryTitle}>House Manager Chat</Text>
+                <View style={styles.soberHouseTileBadge}>
+                  <Text style={styles.soberHouseTileBadgeText}>
+                    {soberHouseChatPreview.unreadCount > 0
+                      ? `${soberHouseChatPreview.unreadCount} new`
+                      : "Live"}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.recoveryText}>
+                {houseManagerContact
+                  ? `Direct operational messaging with ${houseManagerContact.name}`
+                  : "Direct operational messaging with house staff."}
+              </Text>
+              {soberHouseChatPreview.threads.slice(0, 2).map((thread) => (
+                <View
+                  key={thread.id}
+                  style={{ flexDirection: "row", gap: 8, alignItems: "flex-start", marginTop: 8 }}
+                >
+                  <View style={[styles.notificationToneDot, styles.notificationToneDotGray]} />
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={styles.recoveryTitle}>
+                      {thread.participantName} • {thread.participantRole}
+                    </Text>
+                    <Text style={styles.soberHouseTileDetail} numberOfLines={2}>
+                      {thread.preview}
+                    </Text>
+                  </View>
+                </View>
+              ))}
+              {soberHouseChatPreview.acknowledgmentPending ? (
+                <Text style={styles.soberHouseTileDetail}>Acknowledgment required</Text>
+              ) : null}
+            </GlassCard>
+          </Pressable>
+        ) : null}
+
+        {notificationSummary && notificationItems.length > 0 ? (
+          <Pressable
+            onPress={onOpenNotifications}
+            onHoverIn={() => setTileHover("messages-alerts", true)}
+            onHoverOut={() => setTileHover("messages-alerts", false)}
+            accessibilityRole="button"
+            accessibilityLabel="Open messages and alerts"
+          >
+            <GlassCard
+              strong
+              blurIntensity={12}
+              style={[
+                styles.recoveryCard,
+                styles.liquidGlassTile,
+                hoveredTileId === "messages-alerts" ? styles.liquidGlassTileHover : null,
+              ]}
+            >
+              <View style={styles.upcomingHeader}>
+                <Text style={styles.recoveryTitle}>{notificationSummary.title}</Text>
+                <View style={styles.soberHouseTileBadge}>
+                  <Text style={styles.soberHouseTileBadgeText}>
+                    {notificationBadgeCount > 0 ? notificationBadgeCount : "Clear"}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.recoveryText}>{notificationSummary.subtitle}</Text>
+              <View style={styles.notificationPreviewList}>
+                {notificationItems.slice(0, 3).map((item) => (
+                  <View key={item.id} style={styles.notificationPreviewRow}>
+                    <View
+                      style={[
+                        styles.notificationToneDot,
+                        item.tone === "green"
+                          ? styles.notificationToneDotGreen
+                          : item.tone === "yellow"
+                            ? styles.notificationToneDotYellow
+                            : item.tone === "red"
+                              ? styles.notificationToneDotRed
+                              : styles.notificationToneDotGray,
+                      ]}
+                    />
+                    <View style={styles.notificationPreviewCopy}>
+                      <Text style={styles.notificationPreviewTitle}>{item.title}</Text>
+                      <Text style={styles.notificationPreviewDetail}>{item.detail}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </GlassCard>
           </Pressable>
         ) : null}
 
         <View style={styles.metricsRow}>
           <Pressable
             style={styles.metricTilePressable}
-            onPress={onOpenAttendance}
+            onPress={onOpenRecoveryRoadmap}
             onHoverIn={() => setTileHover("ninety-day", true)}
             onHoverOut={() => setTileHover("ninety-day", false)}
             accessibilityRole="button"
-            accessibilityLabel="Open meetings logged page"
+            accessibilityLabel="Open recovery milestone roadmap"
           >
             <GlassCard
               strong
@@ -507,12 +651,16 @@ export function Dashboard({
               ]}
             >
               <View style={styles.upcomingHeader}>
-                <Text style={styles.metricHeading}>{ninetyDayGoalTarget} Meetings in 90 Days</Text>
+                <Text style={styles.metricHeading}>
+                  {showNinetyDayGoalTile
+                    ? `${ninetyDayGoalTarget} Meetings in 90 Days`
+                    : recoveryMilestoneSummary.heading}
+                </Text>
                 <Pressable
                   style={styles.upcomingMoreButton}
-                  onPress={onOpenAttendance}
+                  onPress={onOpenRecoveryRoadmap}
                   accessibilityRole="button"
-                  accessibilityLabel="Open meetings logged page"
+                  accessibilityLabel="Open recovery milestone roadmap"
                 >
                   <View style={styles.dotRow}>
                     <View style={styles.dot} />
@@ -522,16 +670,40 @@ export function Dashboard({
                 </Pressable>
               </View>
               <View style={styles.separator} />
-              <View style={styles.ringOuter}>
-                <View style={styles.ringInner}>
-                  <Text style={styles.ringValue}>
-                    {meetingsAttendedInNinetyDays}/{ninetyDayGoalTarget}
-                  </Text>
-                  <Text style={styles.ringGoal}>
-                    {ninetyDayProgressPct}% toward your 90-day goal
-                  </Text>
+              {showNinetyDayGoalTile ? (
+                <View style={styles.ringOuter}>
+                  <View style={styles.ringInner}>
+                    <Text style={styles.ringValue}>
+                      {meetingsAttendedInNinetyDays}/{ninetyDayGoalTarget}
+                    </Text>
+                    <Text style={styles.ringGoal}>
+                      {ninetyDayProgressPct}% toward your 90-day goal
+                    </Text>
+                  </View>
                 </View>
-              </View>
+              ) : recoveryMilestoneSummary ? (
+                <View style={styles.milestoneTileBody}>
+                  <MilestoneCoin
+                    label={recoveryMilestoneSummary.coinLabel}
+                    caption={recoveryMilestoneSummary.isToday ? "TODAY" : "COIN"}
+                    size={108}
+                  />
+                  <View style={styles.milestoneTileTextWrap}>
+                    <Text style={styles.milestoneTileLabel}>{recoveryMilestoneSummary.label}</Text>
+                    <Text style={styles.milestoneTileDays}>
+                      {recoveryMilestoneSummary.isToday
+                        ? "Celebrate today"
+                        : `${recoveryMilestoneSummary.daysRemaining} day${recoveryMilestoneSummary.daysRemaining === 1 ? "" : "s"} left`}
+                    </Text>
+                    <Text style={styles.milestoneTileDetail}>
+                      {recoveryMilestoneSummary.detail}
+                    </Text>
+                    <Text style={styles.milestoneTileSupportive}>
+                      {recoveryMilestoneSummary.supportiveText}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
             </GlassCard>
           </Pressable>
 
@@ -981,25 +1153,28 @@ export function Dashboard({
           </Pressable>
         )}
 
-        <ChatTile
-          enabled={chatEnabled}
-          hovered={hoveredTileId === "chat"}
-          onPress={onOpenChat}
-          onHoverIn={() => setTileHover("chat", true)}
-          onHoverOut={() => setTileHover("chat", false)}
-          title={houseManagerContact ? "House Manager Chat" : undefined}
-          subtitle={
-            houseManagerContact
-              ? `Direct operational messaging with ${houseManagerContact.name}`
-              : undefined
-          }
-          detail={
-            houseManagerContact
-              ? "Open unread messages, acknowledgment requests, and manager follow-up."
-              : undefined
-          }
-          badgeLabel={houseManagerContact ? "Live" : undefined}
-        />
+        {soberHouseSetupPrompt?.visible ? (
+          <GlassCard
+            strong
+            blurIntensity={12}
+            style={[styles.recoveryCard, styles.liquidGlassTile]}
+          >
+            <View style={styles.upcomingHeader}>
+              <Text style={styles.recoveryTitle}>{soberHouseSetupPrompt.title}</Text>
+            </View>
+            <Text style={styles.recoveryText}>{soberHouseSetupPrompt.detail}</Text>
+            <Pressable
+              style={styles.soberHouseManagerAction}
+              onPress={onOpenSoberHousingSettings}
+              accessibilityRole="button"
+              accessibilityLabel={soberHouseSetupPrompt.actionLabel}
+            >
+              <Text style={styles.soberHouseManagerActionText}>
+                {soberHouseSetupPrompt.actionLabel}
+              </Text>
+            </Pressable>
+          </GlassCard>
+        ) : null}
 
         {houseManagerContact || soberHouseResidentTiles.length > 0 ? (
           <GlassCard
@@ -1009,17 +1184,24 @@ export function Dashboard({
           >
             <View style={styles.upcomingHeader}>
               <Text style={styles.recoveryTitle}>Sober House Operations</Text>
-              {houseManagerContact && onCallHouseManager ? (
-                <Pressable style={styles.meetingsAttendanceLogPill} onPress={onCallHouseManager}>
-                  <Text style={styles.meetingsAttendanceLogPillText}>Call house manager</Text>
-                </Pressable>
-              ) : null}
             </View>
             {houseManagerContact ? (
-              <Text style={styles.recoveryText}>
-                {houseManagerContact.roleLabel}: {houseManagerContact.name} •{" "}
-                {houseManagerContact.phoneLabel}
-              </Text>
+              <>
+                <Text style={styles.recoveryText}>
+                  {houseManagerContact.roleLabel}: {houseManagerContact.name} •{" "}
+                  {houseManagerContact.phoneLabel}
+                </Text>
+                {onCallHouseManager ? (
+                  <Pressable
+                    style={styles.soberHouseManagerAction}
+                    onPress={onCallHouseManager}
+                    accessibilityRole="button"
+                    accessibilityLabel="Call house manager"
+                  >
+                    <Text style={styles.soberHouseManagerActionText}>Call house manager</Text>
+                  </Pressable>
+                ) : null}
+              </>
             ) : null}
             {soberHouseResidentTiles.length > 0 ? (
               <View style={styles.kpiGrid}>
@@ -1104,6 +1286,25 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.08)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.2)",
+  },
+  topBarBadge: {
+    position: "absolute",
+    top: 2,
+    right: 2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ef4444",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.75)",
+  },
+  topBarBadgeText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "800",
   },
   iconText: {
     color: Design.color.textPrimary,
@@ -1283,6 +1484,36 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "600",
     textAlign: "center",
+  },
+  milestoneTileBody: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingVertical: 6,
+  },
+  milestoneTileTextWrap: {
+    flex: 1,
+    gap: 4,
+  },
+  milestoneTileLabel: {
+    color: Design.color.textPrimary,
+    fontSize: 23,
+    fontWeight: "800",
+  },
+  milestoneTileDays: {
+    color: "rgba(155,255,215,0.96)",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  milestoneTileDetail: {
+    color: Design.color.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  milestoneTileSupportive: {
+    color: "rgba(216,228,255,0.82)",
+    fontSize: 12,
+    lineHeight: 17,
   },
   fuelGaugeMetaRow: {
     flexDirection: "row",
@@ -1911,6 +2142,66 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     fontWeight: "600",
   },
+  soberHouseManagerAction: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.36)",
+    backgroundColor: "rgba(255,255,255,0.18)",
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+  },
+  soberHouseManagerActionText: {
+    color: Design.color.textPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  notificationPreviewList: {
+    gap: 8,
+  },
+  notificationPreviewRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    padding: 10,
+  },
+  notificationToneDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    marginTop: 4,
+  },
+  notificationToneDotGreen: {
+    backgroundColor: "#86efac",
+  },
+  notificationToneDotYellow: {
+    backgroundColor: "#fde68a",
+  },
+  notificationToneDotRed: {
+    backgroundColor: "#fca5a5",
+  },
+  notificationToneDotGray: {
+    backgroundColor: "rgba(255,255,255,0.45)",
+  },
+  notificationPreviewCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  notificationPreviewTitle: {
+    color: Design.color.textPrimary,
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  notificationPreviewDetail: {
+    color: Design.color.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "600",
+  },
   kpiGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1928,9 +2219,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-start",
     justifyContent: "space-between",
+    flexWrap: "wrap",
     gap: 8,
   },
   soberHouseTileBadge: {
+    alignSelf: "flex-start",
+    flexShrink: 0,
+    minHeight: 24,
     borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
@@ -1938,7 +2233,8 @@ const styles = StyleSheet.create({
   },
   soberHouseTileBadgeText: {
     color: Design.color.textPrimary,
-    fontSize: 10,
+    fontSize: 9,
+    lineHeight: 12,
     fontWeight: "800",
     textTransform: "uppercase",
     letterSpacing: 0.4,
@@ -1949,6 +2245,7 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     textTransform: "uppercase",
     letterSpacing: 0.4,
+    flexShrink: 1,
   },
   kpiValue: {
     color: Design.color.textPrimary,

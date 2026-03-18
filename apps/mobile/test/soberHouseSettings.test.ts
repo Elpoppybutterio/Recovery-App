@@ -5,12 +5,18 @@ import {
   setHouseStatus,
   upsertAlertPreference,
   upsertChoreCompletionRecord,
+  upsertHouseAlertAnnouncement,
+  upsertHouseChore,
   upsertHouse,
   upsertHouseGroup,
+  upsertHouseMeeting,
   upsertHouseRuleSet,
   upsertJobApplicationRecord,
+  upsertOneOnOneSession,
   upsertOrganization,
+  upsertRecurringObligation,
   upsertResidentConsentRecord,
+  upsertResidentHouseMembership,
   upsertResidentHousingProfile,
   upsertResidentRequirementProfile,
   upsertStaffAssignment,
@@ -56,6 +62,7 @@ import {
 } from "../lib/soberHouse/reportWorkflow";
 import { requiresSoberHouseDeviceUnlock } from "../lib/soberHouse/deviceAuth";
 import { buildSoberHouseResidentDashboardSummary } from "../lib/soberHouse/dashboard";
+import { buildSoberHouseOwnerDashboardSummary } from "../lib/soberHouse/orgDashboard";
 import { getChatReceiptForMessageAndUser, getRuleSetForHouse } from "../lib/soberHouse/selectors";
 import {
   buildOneOnOneCalendarEventPlan,
@@ -258,6 +265,7 @@ function buildReportingStore() {
       linkedUserId: resident.linkedUserId,
       organizationId,
       houseId,
+      houseChoreId: null,
       completedAt: "2026-03-02T17:30:00-07:00",
       proofRequirement: ["PHOTO"],
       proofProvided: true,
@@ -275,6 +283,7 @@ function buildReportingStore() {
       linkedUserId: resident.linkedUserId,
       organizationId,
       houseId,
+      houseChoreId: null,
       completedAt: "2026-03-03T17:45:00-07:00",
       proofRequirement: ["PHOTO"],
       proofProvided: true,
@@ -1304,6 +1313,7 @@ describe("sober house compliance evaluation", () => {
         linkedUserId,
         organizationId: store.organization?.id ?? null,
         houseId: store.residentHousingProfile?.houseId ?? null,
+        houseChoreId: null,
         completedAt: "2026-03-09T17:30:00-06:00",
         proofRequirement: ["PHOTO"],
         proofProvided: false,
@@ -1320,6 +1330,7 @@ describe("sober house compliance evaluation", () => {
         linkedUserId,
         organizationId: invalidStore.organization?.id ?? null,
         houseId: invalidStore.residentHousingProfile?.houseId ?? null,
+        houseChoreId: null,
         completedAt: "2026-03-09T17:45:00-06:00",
         proofRequirement: ["PHOTO"],
         proofProvided: true,
@@ -2162,6 +2173,10 @@ describe("sober house monthly reports", () => {
       eligible: true,
       showChoreTile: true,
       showWeeklyMeetingTile: true,
+      showHouseMeetingsTile: false,
+      showOneOnOneTile: false,
+      showHouseAlertsTile: false,
+      showComplianceSnapshotTile: true,
       showHouseScheduleTile: true,
     });
   });
@@ -2241,6 +2256,7 @@ describe("sober house monthly reports", () => {
         linkedUserId: base.linkedUserId,
         organizationId: store.organization?.id ?? null,
         houseId: base.houseId,
+        houseChoreId: null,
         completedAt: "2026-03-10T17:20:00-06:00",
         proofRequirement: ["PHOTO"],
         proofProvided: true,
@@ -2263,6 +2279,241 @@ describe("sober house monthly reports", () => {
     expect(summary.choreTile.value).toBe("1/1");
     expect(summary.choreTile.tone).toBe("green");
     expect(summary.choreTile.badgeLabel).toBe("All complete");
+  });
+
+  it("wires explicit house chores, meetings, one-on-ones, alerts, and compliance snapshot into the resident dashboard", () => {
+    const base = buildChatStore();
+    let store = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-10T08:00:00-06:00",
+    ).store;
+
+    store = upsertResidentHouseMembership(
+      store,
+      ACTOR,
+      {
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        roomOrBed: "2B",
+        moveInDate: "2026-03-01",
+        moveOutDate: null,
+        isPrimary: true,
+        status: "ACTIVE",
+        notes: "Primary membership",
+      },
+      "2026-03-10T08:01:00-06:00",
+    ).store;
+
+    const recurringObligationId = upsertRecurringObligation(
+      store,
+      ACTOR,
+      {
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        obligationType: "HOUSE_MEETING",
+        title: "Weekly house business",
+        detail: "House business and announcements",
+        frequency: "WEEKLY",
+        weekday: "MON",
+        scheduledDate: null,
+        timeLocalHhmm: "18:30",
+        required: true,
+        reminderLeadMinutes: 30,
+        inAppReminderEnabled: true,
+        addToCalendar: false,
+        accountabilityMethod: "ACKNOWLEDGMENT",
+        status: "ACTIVE",
+      },
+      "2026-03-10T08:02:00-06:00",
+    ).store.recurringObligations[0]!.id;
+
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        houseId: base.houseId,
+        operations: {
+          choresEnabled: true,
+          houseMeetingsEnabled: true,
+          houseMeetingsRequired: true,
+          oneOnOneSessionsEnabled: true,
+          oneOnOneSessionsRequired: true,
+          houseAlertsEnabled: true,
+          announcementsEnabled: true,
+          complianceSnapshotEnabled: true,
+        },
+        support: {
+          defaultReminderLeadMinutes: 20,
+          defaultAddToCalendar: false,
+          defaultInAppReminders: true,
+          requireHouseMeetingAcknowledgment: true,
+          requireAnnouncementAcknowledgment: true,
+          requireOneOnOneManagerConfirmation: true,
+        },
+      },
+      "2026-03-10T08:03:00-06:00",
+    ).store;
+
+    const houseChoreId = upsertHouseChore(
+      store,
+      ACTOR,
+      {
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        recurringObligationId: null,
+        title: "Kitchen reset",
+        summary: "Reset the kitchen before lights out.",
+        frequency: "DAILY",
+        dueTimeLocalHhmm: "18:00",
+        weekday: null,
+        scheduledDate: null,
+        required: true,
+        proofRequirement: ["PHOTO"],
+        reminderLeadMinutes: 30,
+        inAppReminderEnabled: true,
+        addToCalendar: false,
+        accountabilityRequired: true,
+        status: "ACTIVE",
+      },
+      "2026-03-10T08:04:00-06:00",
+    ).store.houseChores[0]!.id;
+
+    store = upsertHouseMeeting(
+      store,
+      ACTOR,
+      {
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        recurringObligationId,
+        title: "Monday house meeting",
+        description: "Review weekly expectations.",
+        meetingKind: "HOUSE_MEETING",
+        locationLabel: "Main living room",
+        startsAt: "2026-03-10T19:00:00-06:00",
+        endsAt: "2026-03-10T20:00:00-06:00",
+        required: true,
+        reminderLeadMinutes: 30,
+        inAppReminderEnabled: true,
+        addToCalendar: false,
+        acknowledgmentRequired: true,
+        status: "ACTIVE",
+      },
+      "2026-03-10T08:05:00-06:00",
+    ).store;
+
+    store = upsertOneOnOneSession(
+      store,
+      ACTOR,
+      {
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        staffAssignmentId: base.managerContext?.staffAssignmentId ?? null,
+        recurringObligationId: null,
+        title: "Manager one-on-one",
+        notes: "Weekly resident check-in.",
+        scheduledAt: "2026-03-10T16:00:00-06:00",
+        endsAt: "2026-03-10T16:30:00-06:00",
+        required: true,
+        reminderLeadMinutes: 15,
+        inAppReminderEnabled: true,
+        addToCalendar: false,
+        managerConfirmationRequired: true,
+        status: "ACTIVE",
+      },
+      "2026-03-10T08:06:00-06:00",
+    ).store;
+
+    store = upsertHouseAlertAnnouncement(
+      store,
+      ACTOR,
+      {
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        recurringObligationId: null,
+        title: "Medication check-in tonight",
+        body: "Residents need to check in with staff before curfew.",
+        severity: "ACTION_REQUIRED",
+        startsAt: "2026-03-10T12:00:00-06:00",
+        endsAt: "2026-03-10T23:00:00-06:00",
+        reminderLeadMinutes: 60,
+        inAppReminderEnabled: true,
+        addToCalendar: false,
+        acknowledgmentRequired: true,
+        status: "ACTIVE",
+      },
+      "2026-03-10T08:07:00-06:00",
+    ).store;
+
+    store = upsertChoreCompletionRecord(
+      store,
+      ACTOR,
+      {
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        organizationId: store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseChoreId,
+        completedAt: "2026-03-10T17:20:00-06:00",
+        proofRequirement: ["PHOTO"],
+        proofProvided: true,
+        proofReference: "file:///tmp/chore-proof.jpg",
+        notes: "Kitchen reset done.",
+      },
+      "2026-03-10T17:21:00-06:00",
+    ).store;
+
+    const complianceSummary = evaluateResidentCompliance({
+      store,
+      nowIso: "2026-03-10T13:00:00-06:00",
+      currentLocation: null,
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store,
+      nowIso: "2026-03-10T13:00:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      complianceSummary,
+      upcomingMeetings: [],
+    });
+
+    expect(summary.visibility.showHouseMeetingsTile).toBe(true);
+    expect(summary.visibility.showOneOnOneTile).toBe(true);
+    expect(summary.visibility.showHouseAlertsTile).toBe(true);
+    expect(summary.visibility.showComplianceSnapshotTile).toBe(true);
+    expect(summary.houseMeetingsTile.subtitle).toBe("Monday house meeting");
+    expect(summary.oneOnOneTile.subtitle).toBe("Manager one-on-one");
+    expect(summary.houseAlertsTile.subtitle).toBe("Medication check-in tonight");
+    expect(summary.complianceSnapshotTile.visible).toBe(true);
+    expect(summary.tiles.map((tile) => tile.id)).toEqual(
+      expect.arrayContaining([
+        "chores",
+        "weekly-meetings",
+        "house-meetings",
+        "one-on-ones",
+        "house-alerts",
+        "compliance-snapshot",
+      ]),
+    );
   });
 
   it("computes the weekly meeting dashboard tile from persisted attendance", () => {
@@ -2577,5 +2828,61 @@ describe("sober house monthly reports", () => {
     expect(summary.houseScheduleTile.visible).toBe(true);
     expect(summary.houseScheduleTile.subtitle).toBe("Next one-on-one session");
     expect(summary.houseScheduleTile.badgeLabel).toBe("1:1");
+  });
+
+  it("builds owner dashboard summaries with group and house filters", () => {
+    const base = buildReportingStore();
+    let store = base.store;
+    store = upsertHouseGroup(
+      store,
+      ACTOR,
+      {
+        name: "North Campus",
+        houseIds: [base.houseId],
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-01T00:05:00.000Z",
+    ).store;
+    const groupId = store.houseGroups[0]!.id;
+    const mapleId = base.houseId;
+    store = upsertHouse(
+      store,
+      ACTOR,
+      { ...store.houses.find((house) => house.id === mapleId)!, houseGroupId: groupId },
+      "2026-03-01T00:10:00.000Z",
+    ).store;
+    store = upsertHouse(
+      store,
+      ACTOR,
+      {
+        name: "Willow",
+        address: "2 Main",
+        phone: "555",
+        geofenceRadiusFeetDefault: 200,
+        houseTypes: ["WOMEN"],
+        bedCount: 8,
+        notes: "",
+        status: "INACTIVE",
+      },
+      "2026-03-01T00:11:00.000Z",
+    ).store;
+    const willowId = store.houses.find((house) => house.name === "Willow")!.id;
+
+    const groupSummary = buildSoberHouseOwnerDashboardSummary({
+      store,
+      selectedGroupIds: [groupId],
+      selectedHouseIds: [],
+    });
+    expect(groupSummary.filteredHouseIds).toEqual([mapleId]);
+    expect(groupSummary.kpis.find((tile) => tile.id === "violations")?.value).toBe("1");
+
+    const houseSummary = buildSoberHouseOwnerDashboardSummary({
+      store,
+      selectedGroupIds: [],
+      selectedHouseIds: [willowId],
+    });
+    expect(houseSummary.filteredHouseIds).toEqual([willowId]);
+    expect(houseSummary.concerns.some((concern) => concern.title === "Willow")).toBe(true);
   });
 });

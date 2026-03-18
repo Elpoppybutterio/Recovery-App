@@ -35,12 +35,12 @@ function resolveBundleIdentifier(appEnv: AppEnv): string {
 
 function resolveAppName(appEnv: AppEnv): string {
   if (appEnv === "production") {
-    return "Sober AI";
+    return "Sober²";
   }
   if (appEnv === "preview") {
-    return "Sober AI Preview";
+    return "Sober² Preview";
   }
-  return "Sober AI Dev";
+  return "Sober² Dev";
 }
 
 function resolveIosBuildNumber(appEnv: AppEnv): string {
@@ -132,6 +132,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       infoPlist: {
         ...config.ios?.infoPlist,
         ITSAppUsesNonExemptEncryption: false,
+        NSCalendarsWriteOnlyAccessUsageDescription:
+          "Sober² adds recovery events to your calendar when you choose Add to Calendar.",
         NSLocationWhenInUseUsageDescription: "We use your location to show distance to meetings.",
         NSLocationAlwaysAndWhenInUseUsageDescription:
           "We use your location to show distance to meetings and enable geofence features if you turn them on.",

@@ -1,17 +1,32 @@
 import type { AttendanceRecordSummary, MeetingAttendanceLogRecord } from "../attendance/storage";
 import { statusToneForComplianceStatus } from "./compliance";
-import { getChatReceiptForMessageAndUser, getRuleSetForHouse } from "./selectors";
+import {
+  getActiveHouseAlertAnnouncements,
+  getChatReceiptForMessageAndUser,
+  getHouseChoresForResident,
+  getRuleSetForHouse,
+  getUpcomingHouseMeetings,
+  getUpcomingOneOnOneSessions,
+} from "./selectors";
 import { buildOneOnOneObligationSummary } from "./scheduling";
 import type {
   ChoreFrequency,
   ComplianceStatus,
   CorrectiveAction,
+  HouseChore,
   ResidentComplianceSummary,
   SoberHouseSettingsStore,
 } from "./types";
 
 export type SoberHouseDashboardTileTone = "green" | "yellow" | "red" | "gray";
-export type SoberHouseDashboardTileId = "chores" | "weekly-meetings" | "house-schedule";
+export type SoberHouseDashboardTileId =
+  | "chores"
+  | "weekly-meetings"
+  | "house-meetings"
+  | "one-on-ones"
+  | "house-alerts"
+  | "compliance-snapshot"
+  | "house-schedule";
 export type SoberHouseDashboardRouteTarget = "SOBER_HOUSE" | "MEETINGS";
 
 export type SoberHouseDashboardMeetingPreview = {
@@ -39,6 +54,10 @@ export type SoberHouseDashboardVisibility = {
   eligible: boolean;
   showChoreTile: boolean;
   showWeeklyMeetingTile: boolean;
+  showHouseMeetingsTile: boolean;
+  showOneOnOneTile: boolean;
+  showHouseAlertsTile: boolean;
+  showComplianceSnapshotTile: boolean;
   showHouseScheduleTile: boolean;
 };
 
@@ -46,6 +65,10 @@ export type SoberHouseResidentDashboardSummary = {
   visibility: SoberHouseDashboardVisibility;
   choreTile: SoberHouseDashboardTileSummary;
   weeklyMeetingTile: SoberHouseDashboardTileSummary;
+  houseMeetingsTile: SoberHouseDashboardTileSummary;
+  oneOnOneTile: SoberHouseDashboardTileSummary;
+  houseAlertsTile: SoberHouseDashboardTileSummary;
+  complianceSnapshotTile: SoberHouseDashboardTileSummary;
   houseScheduleTile: SoberHouseDashboardTileSummary;
   tiles: SoberHouseDashboardTileSummary[];
 };
@@ -248,6 +271,41 @@ function humanizeEnum(value: string): string {
     .join(" ");
 }
 
+function weekdayIndexFromCode(code: string | null | undefined): number | null {
+  switch (code) {
+    case "MON":
+      return 1;
+    case "TUE":
+      return 2;
+    case "WED":
+      return 3;
+    case "THU":
+      return 4;
+    case "FRI":
+      return 5;
+    case "SAT":
+      return 6;
+    case "SUN":
+      return 0;
+    default:
+      return null;
+  }
+}
+
+function isExplicitChoreDueToday(chore: HouseChore, now: Date): boolean {
+  if (chore.status !== "ACTIVE") {
+    return false;
+  }
+  if (chore.scheduledDate) {
+    return sameCalendarDate(new Date(chore.scheduledDate), now);
+  }
+  const weekdayIndex = weekdayIndexFromCode(chore.weekday);
+  if (weekdayIndex !== null) {
+    return now.getDay() === weekdayIndex;
+  }
+  return chore.frequency === "DAILY";
+}
+
 function resolveResidentContext(
   store: SoberHouseSettingsStore,
   nowIso: string,
@@ -325,6 +383,83 @@ function buildChoreTileSummary({
   }
 
   const now = new Date(nowIso);
+  const explicitChores = getHouseChoresForResident(store, resident.residentId, resident.houseId);
+  if (explicitChores.length > 0) {
+    const choresDueToday = explicitChores.filter((chore) => isExplicitChoreDueToday(chore, now));
+    const validCompletionByChoreId = new Set(
+      store.choreCompletionRecords
+        .filter((record) => record.residentId === resident.residentId && record.houseChoreId)
+        .filter((record) => {
+          const completedAtMs = toTimestamp(record.completedAt);
+          if (completedAtMs === null) {
+            return false;
+          }
+          if (!sameCalendarDate(new Date(completedAtMs), now)) {
+            return false;
+          }
+          if (!hasRequiredProof(record.proofRequirement)) {
+            return true;
+          }
+          return record.proofProvided;
+        })
+        .map((record) => record.houseChoreId as string),
+    );
+    const dueItems = choresDueToday.map((chore) => {
+      const dueAt = parseTimeOnDate(now, chore.dueTimeLocalHhmm);
+      const completed = validCompletionByChoreId.has(chore.id);
+      const overdue = Boolean(dueAt && now.getTime() > dueAt.getTime() && !completed);
+      return { chore, dueAt, completed, overdue };
+    });
+    const completedCount = dueItems.filter((entry) => entry.completed).length;
+    const overdueCount = dueItems.filter((entry) => entry.overdue).length;
+    const nextPending = dueItems.find((entry) => !entry.completed) ?? null;
+    const totalDueToday = dueItems.length;
+
+    let subtitle =
+      totalDueToday > 0
+        ? `${completedCount}/${totalDueToday} chores complete today`
+        : "No chores due today";
+    let detail =
+      nextPending?.chore.summary ||
+      nextPending?.chore.title ||
+      resident.assignedChoreNotes ||
+      "House chores are configured for this resident.";
+    let tone: SoberHouseDashboardTileTone =
+      overdueCount > 0
+        ? "red"
+        : totalDueToday > 0 && completedCount === totalDueToday
+          ? "green"
+          : totalDueToday > 0
+            ? "yellow"
+            : "gray";
+    let badgeLabel: string | null =
+      overdueCount > 0
+        ? `${overdueCount} overdue`
+        : totalDueToday > 0 && completedCount === totalDueToday
+          ? "All complete"
+          : totalDueToday > 0
+            ? "Pending"
+            : null;
+    if (nextPending?.dueAt) {
+      detail = `${detail} Due by ${formatTimeLabel(nextPending.chore.dueTimeLocalHhmm)}.`;
+    }
+
+    return {
+      id: "chores",
+      title: "Chore Completion",
+      value: `${completedCount}/${totalDueToday}`,
+      subtitle,
+      detail,
+      tone,
+      visible: resident.rules.operations.choresEnabled || totalDueToday > 0,
+      routeTarget: "SOBER_HOUSE",
+      badgeLabel,
+      dueAtIso: nextPending?.dueAt?.toISOString() ?? null,
+      isPending: totalDueToday > 0 && completedCount < totalDueToday && overdueCount === 0,
+      isOverdue: overdueCount > 0,
+    };
+  }
+
   const period = getChorePeriodBounds(now, resident.rules.chores.frequency, resident.moveInDate);
   const validCompletions = store.choreCompletionRecords.filter((record) => {
     if (record.residentId !== resident.residentId) {
@@ -389,6 +524,247 @@ function buildChoreTileSummary({
     dueAtIso,
     isPending: totalDueToday > 0 && validCompletions.length === 0,
     isOverdue: overdue,
+  };
+}
+
+function buildHouseMeetingsTileSummary({
+  store,
+  nowIso,
+  resident,
+}: {
+  store: SoberHouseSettingsStore;
+  nowIso: string;
+  resident: ResidentContext | null;
+}): SoberHouseDashboardTileSummary {
+  if (!resident) {
+    return buildHiddenTile("house-meetings", "SOBER_HOUSE", "Upcoming House Meetings");
+  }
+
+  const upcomingHouseMeetings = getUpcomingHouseMeetings(store, resident.houseId, nowIso);
+  const enabled =
+    resident.rules.operations.houseMeetingsEnabled || upcomingHouseMeetings.length > 0;
+  if (!enabled) {
+    return buildHiddenTile("house-meetings", "SOBER_HOUSE", "Upcoming House Meetings");
+  }
+
+  const nextMeeting = upcomingHouseMeetings[0] ?? null;
+  if (!nextMeeting) {
+    return {
+      id: "house-meetings",
+      title: "Upcoming House Meetings",
+      value: "0",
+      subtitle: "No house meetings scheduled",
+      detail: "Your house manager has not posted an upcoming house meeting yet.",
+      tone: "gray",
+      visible: true,
+      routeTarget: "SOBER_HOUSE",
+      badgeLabel: null,
+    };
+  }
+
+  const startsAt = new Date(nextMeeting.startsAt);
+  const timeUntilMs = startsAt.getTime() - new Date(nowIso).getTime();
+  return {
+    id: "house-meetings",
+    title: "Upcoming House Meetings",
+    value: formatDateTimeLabel(nextMeeting.startsAt),
+    subtitle: nextMeeting.title,
+    detail:
+      nextMeeting.locationLabel ||
+      nextMeeting.description ||
+      "Open sober-house details for the full meeting plan.",
+    tone: timeUntilMs <= 12 * 60 * 60 * 1000 ? "yellow" : "gray",
+    visible: true,
+    routeTarget: "SOBER_HOUSE",
+    badgeLabel: nextMeeting.required ? "Required" : humanizeEnum(nextMeeting.meetingKind),
+  };
+}
+
+function buildOneOnOneTileSummary({
+  store,
+  nowIso,
+  resident,
+}: {
+  store: SoberHouseSettingsStore;
+  nowIso: string;
+  resident: ResidentContext | null;
+}): SoberHouseDashboardTileSummary {
+  if (!resident) {
+    return buildHiddenTile("one-on-ones", "SOBER_HOUSE", "One-on-Ones");
+  }
+
+  const upcomingSessions = getUpcomingOneOnOneSessions(
+    store,
+    resident.residentId,
+    resident.houseId,
+    nowIso,
+  );
+  const enabled =
+    resident.rules.operations.oneOnOneSessionsEnabled ||
+    store.residentRequirementProfile?.oneOnOneRequired === true ||
+    upcomingSessions.length > 0;
+  if (!enabled) {
+    return buildHiddenTile("one-on-ones", "SOBER_HOUSE", "One-on-Ones");
+  }
+
+  const session = upcomingSessions[0] ?? null;
+  if (!session) {
+    return {
+      id: "one-on-ones",
+      title: "One-on-Ones",
+      value: "Not set",
+      subtitle: "No one-on-one scheduled",
+      detail: "Your house support schedule has not posted the next one-on-one yet.",
+      tone: store.residentRequirementProfile?.oneOnOneRequired ? "yellow" : "gray",
+      visible: true,
+      routeTarget: "SOBER_HOUSE",
+      badgeLabel: store.residentRequirementProfile?.oneOnOneRequired ? "Required" : null,
+    };
+  }
+
+  return {
+    id: "one-on-ones",
+    title: "One-on-Ones",
+    value: formatDateTimeLabel(session.scheduledAt),
+    subtitle: session.title,
+    detail: session.notes.trim() || "Open sober-house details for the assigned one-on-one session.",
+    tone: "yellow",
+    visible: true,
+    routeTarget: "SOBER_HOUSE",
+    badgeLabel: session.required ? "Required" : "Scheduled",
+  };
+}
+
+function buildHouseAlertsTileSummary({
+  store,
+  nowIso,
+  resident,
+}: {
+  store: SoberHouseSettingsStore;
+  nowIso: string;
+  resident: ResidentContext | null;
+}): SoberHouseDashboardTileSummary {
+  if (!resident) {
+    return buildHiddenTile("house-alerts", "SOBER_HOUSE", "House Alerts");
+  }
+
+  const activeAlerts = getActiveHouseAlertAnnouncements(store, resident.houseId, nowIso);
+  const enabled =
+    resident.rules.operations.houseAlertsEnabled ||
+    resident.rules.operations.announcementsEnabled ||
+    activeAlerts.length > 0;
+  if (!enabled) {
+    return buildHiddenTile("house-alerts", "SOBER_HOUSE", "House Alerts");
+  }
+
+  const latestAlert = activeAlerts[0] ?? null;
+  if (!latestAlert) {
+    return {
+      id: "house-alerts",
+      title: "House Alerts",
+      value: "0",
+      subtitle: "No active alerts",
+      detail: "House announcements and alerts will appear here when staff posts them.",
+      tone: "gray",
+      visible: true,
+      routeTarget: "SOBER_HOUSE",
+      badgeLabel: null,
+    };
+  }
+
+  const tone: SoberHouseDashboardTileTone =
+    latestAlert.severity === "URGENT"
+      ? "red"
+      : latestAlert.severity === "ACTION_REQUIRED"
+        ? "yellow"
+        : "gray";
+  return {
+    id: "house-alerts",
+    title: "House Alerts",
+    value: activeAlerts.length.toString(),
+    subtitle: latestAlert.title,
+    detail: latestAlert.body,
+    tone,
+    visible: true,
+    routeTarget: "SOBER_HOUSE",
+    badgeLabel:
+      latestAlert.severity === "URGENT"
+        ? "Urgent"
+        : latestAlert.acknowledgmentRequired
+          ? "Action"
+          : "Info",
+  };
+}
+
+function buildComplianceSnapshotTileSummary({
+  complianceSummary,
+  resident,
+}: {
+  complianceSummary: ResidentComplianceSummary | null;
+  resident: ResidentContext | null;
+}): SoberHouseDashboardTileSummary {
+  if (!resident || !resident.rules.operations.complianceSnapshotEnabled) {
+    return buildHiddenTile("compliance-snapshot", "SOBER_HOUSE", "Compliance Snapshot");
+  }
+
+  if (!complianceSummary) {
+    return {
+      id: "compliance-snapshot",
+      title: "Compliance Snapshot",
+      value: "Waiting",
+      subtitle: "Compliance engine has not evaluated yet",
+      detail: "House compliance status will appear here once enough resident data is available.",
+      tone: "gray",
+      visible: true,
+      routeTarget: "SOBER_HOUSE",
+      badgeLabel: null,
+    };
+  }
+
+  const actionable = complianceSummary.evaluations.filter(
+    (evaluation) => evaluation.status !== "not_applicable",
+  );
+  const violations = actionable.filter((evaluation) => evaluation.status === "violation").length;
+  const atRisk = actionable.filter((evaluation) => evaluation.status === "at_risk").length;
+  const incomplete = actionable.filter(
+    (evaluation) => evaluation.status === "incomplete_setup",
+  ).length;
+  const compliant = actionable.filter((evaluation) => evaluation.status === "compliant").length;
+
+  const tone: SoberHouseDashboardTileTone =
+    violations > 0 ? "red" : atRisk > 0 ? "yellow" : actionable.length > 0 ? "green" : "gray";
+  const subtitle =
+    violations > 0
+      ? `${violations} item${violations === 1 ? "" : "s"} in violation`
+      : atRisk > 0
+        ? `${atRisk} item${atRisk === 1 ? "" : "s"} at risk`
+        : incomplete > 0
+          ? `${incomplete} setup gap${incomplete === 1 ? "" : "s"} remaining`
+          : compliant > 0
+            ? `${compliant} house requirement${compliant === 1 ? "" : "s"} on track`
+            : "No active compliance data";
+  const detail =
+    violations > 0 || atRisk > 0 || incomplete > 0
+      ? `${compliant} compliant • ${atRisk} at risk • ${violations} violations • ${incomplete} setup gaps`
+      : "All current sober-house requirements are on track.";
+
+  return {
+    id: "compliance-snapshot",
+    title: "Compliance Snapshot",
+    value: actionable.length.toString(),
+    subtitle,
+    detail,
+    tone,
+    visible: true,
+    routeTarget: "SOBER_HOUSE",
+    badgeLabel:
+      violations > 0
+        ? "Violation"
+        : atRisk > 0
+          ? "Attention"
+          : incomplete > 0
+            ? "Setup"
+            : "Good standing",
   };
 }
 
@@ -546,12 +922,18 @@ function buildHouseScheduleTileSummary({
   resident,
   choreTile,
   weeklyMeetingTile,
+  houseMeetingsTile,
+  oneOnOneTile,
+  houseAlertsTile,
 }: {
   store: SoberHouseSettingsStore;
   nowIso: string;
   resident: ResidentContext | null;
   choreTile: ChoreSummary;
   weeklyMeetingTile: MeetingSummary;
+  houseMeetingsTile: SoberHouseDashboardTileSummary;
+  oneOnOneTile: SoberHouseDashboardTileSummary;
+  houseAlertsTile: SoberHouseDashboardTileSummary;
 }): SoberHouseDashboardTileSummary {
   if (!resident) {
     return buildHiddenTile("house-schedule", "SOBER_HOUSE", "House Schedule & Alerts");
@@ -571,6 +953,45 @@ function buildHouseScheduleTileSummary({
       detail: oneOnOneSummary.detail,
       tone: oneOnOneSummary.tone,
       badgeLabel: "1:1",
+    });
+  }
+  const nextHouseMeeting = getUpcomingHouseMeetings(store, resident.houseId, nowIso)[0] ?? null;
+  if (nextHouseMeeting) {
+    candidates.push({
+      dueAtMs: toTimestamp(nextHouseMeeting.startsAt) ?? now.getTime(),
+      dueAtLabel: formatDateTimeLabel(nextHouseMeeting.startsAt),
+      title: "Upcoming house meeting",
+      subtitle: nextHouseMeeting.title,
+      detail:
+        nextHouseMeeting.locationLabel || nextHouseMeeting.description || houseMeetingsTile.detail,
+      tone: houseMeetingsTile.tone,
+      badgeLabel: nextHouseMeeting.required ? "Required" : houseMeetingsTile.badgeLabel,
+    });
+  }
+  const explicitOneOnOne =
+    getUpcomingOneOnOneSessions(store, resident.residentId, resident.houseId, nowIso)[0] ?? null;
+  if (explicitOneOnOne) {
+    candidates.push({
+      dueAtMs: toTimestamp(explicitOneOnOne.scheduledAt) ?? now.getTime(),
+      dueAtLabel: formatDateTimeLabel(explicitOneOnOne.scheduledAt),
+      title: "Upcoming one-on-one",
+      subtitle: explicitOneOnOne.title,
+      detail: explicitOneOnOne.notes || oneOnOneTile.detail,
+      tone: oneOnOneTile.tone,
+      badgeLabel: explicitOneOnOne.required ? "Required" : oneOnOneTile.badgeLabel,
+    });
+  }
+  const activeAnnouncement =
+    getActiveHouseAlertAnnouncements(store, resident.houseId, nowIso)[0] ?? null;
+  if (activeAnnouncement) {
+    candidates.push({
+      dueAtMs: toTimestamp(activeAnnouncement.startsAt) ?? now.getTime(),
+      dueAtLabel: formatDateTimeLabel(activeAnnouncement.startsAt),
+      title: "House alert",
+      subtitle: activeAnnouncement.title,
+      detail: activeAnnouncement.body || houseAlertsTile.detail,
+      tone: houseAlertsTile.tone,
+      badgeLabel: houseAlertsTile.badgeLabel,
     });
   }
   candidates.push(...buildPendingAcknowledgmentCandidates(store, resident, now.getTime()));
@@ -670,12 +1091,50 @@ export function buildSoberHouseResidentDashboardSummary(
     resident,
     choreTile,
     weeklyMeetingTile,
+    houseMeetingsTile: buildHouseMeetingsTileSummary({
+      store: context.store,
+      nowIso: context.nowIso,
+      resident,
+    }),
+    oneOnOneTile: buildOneOnOneTileSummary({
+      store: context.store,
+      nowIso: context.nowIso,
+      resident,
+    }),
+    houseAlertsTile: buildHouseAlertsTileSummary({
+      store: context.store,
+      nowIso: context.nowIso,
+      resident,
+    }),
+  });
+  const houseMeetingsTile = buildHouseMeetingsTileSummary({
+    store: context.store,
+    nowIso: context.nowIso,
+    resident,
+  });
+  const oneOnOneTile = buildOneOnOneTileSummary({
+    store: context.store,
+    nowIso: context.nowIso,
+    resident,
+  });
+  const houseAlertsTile = buildHouseAlertsTileSummary({
+    store: context.store,
+    nowIso: context.nowIso,
+    resident,
+  });
+  const complianceSnapshotTile = buildComplianceSnapshotTileSummary({
+    complianceSummary: context.complianceSummary,
+    resident,
   });
 
   const visibility: SoberHouseDashboardVisibility = {
     eligible: resident !== null,
     showChoreTile: choreTile.visible,
     showWeeklyMeetingTile: weeklyMeetingTile.visible,
+    showHouseMeetingsTile: houseMeetingsTile.visible,
+    showOneOnOneTile: oneOnOneTile.visible,
+    showHouseAlertsTile: houseAlertsTile.visible,
+    showComplianceSnapshotTile: complianceSnapshotTile.visible,
     showHouseScheduleTile: houseScheduleTile.visible,
   };
 
@@ -683,7 +1142,19 @@ export function buildSoberHouseResidentDashboardSummary(
     visibility,
     choreTile,
     weeklyMeetingTile,
+    houseMeetingsTile,
+    oneOnOneTile,
+    houseAlertsTile,
+    complianceSnapshotTile,
     houseScheduleTile,
-    tiles: [choreTile, weeklyMeetingTile, houseScheduleTile].filter((tile) => tile.visible),
+    tiles: [
+      choreTile,
+      weeklyMeetingTile,
+      houseMeetingsTile,
+      oneOnOneTile,
+      houseAlertsTile,
+      complianceSnapshotTile,
+      houseScheduleTile,
+    ].filter((tile) => tile.visible),
   };
 }

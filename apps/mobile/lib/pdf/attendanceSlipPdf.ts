@@ -100,6 +100,7 @@ export type AttendanceExportDiagnostics = {
   safeMode: boolean;
   forcedPlaceholderSignatures: boolean;
   records: number;
+  chunkCount: number;
   htmlBytes: number;
   maxHtmlBytes: number;
   htmlUtilizationPct: number;
@@ -550,15 +551,14 @@ function buildHtmlChunkPlan(
   });
   const htmlBytesByChunk = chunks.map((chunk) => chunk.bytes);
   const totalHtmlBytes = htmlBytesByChunk.reduce((sum, value) => sum + value, 0);
-  const perChunkLimit = MAX_TOTAL_HTML_BYTES / Math.max(1, chunks.length);
 
   return {
     chunkCount: chunks.length,
     chunks,
     htmlBytesByChunk,
     totalHtmlBytes,
-    exceedsPerChunkCap: chunks.some((chunk) => chunk.bytes > perChunkLimit),
-    exceedsTotalCap: totalHtmlBytes > MAX_TOTAL_HTML_BYTES,
+    exceedsPerChunkCap: chunks.some((chunk) => chunk.bytes > MAX_TOTAL_HTML_BYTES),
+    exceedsTotalCap: totalHtmlBytes > MAX_TOTAL_HTML_BYTES * MAX_CHUNK_COUNT,
   };
 }
 
@@ -758,7 +758,7 @@ export async function generateAttendanceSlipPdf(
   records: AttendanceSlipRecord[],
   profile: AttendanceSlipUserProfile,
   options?: GenerateAttendanceSlipOptions,
-): Promise<{ uri: string; diagnostics: AttendanceExportDiagnostics }> {
+): Promise<{ uri: string; uris: string[]; diagnostics: AttendanceExportDiagnostics }> {
   if (attendanceSlipExportInFlight) {
     throw new Error("Export already in progress.");
   }
@@ -861,34 +861,38 @@ export async function generateAttendanceSlipPdf(
       }
     }
 
-    // Final gate: keep a single HTML payload for expo-print.
-    if (
-      !isPlanWithinCaps(plan) ||
-      plan.chunkCount !== 1 ||
-      plan.totalHtmlBytes > MAX_TOTAL_HTML_BYTES
-    ) {
+    if (!isPlanWithinCaps(plan)) {
       throw new Error("Export too large. Reduce selected records or remove signatures.");
     }
 
-    const printed = await printModule.printToFileAsync({ html: plan.chunks[0]?.html ?? "" });
-    const targetUri = `${outputDirectory}${withChunkSuffix(fileName, 1, 1)}`;
-    const existing = await fileSystemModule.getInfoAsync(targetUri);
-    if (existing.exists) {
-      await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
-    }
-    await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
+    const exportedUris: string[] = [];
+    let processedRecords = 0;
 
-    options?.onProgress?.({
-      chunkIndex: 1,
-      chunkCount: 1,
-      processedRecords: records.length,
-      totalRecords: records.length,
-    });
+    for (let index = 0; index < plan.chunks.length; index += 1) {
+      const chunk = plan.chunks[index];
+      const printed = await printModule.printToFileAsync({ html: chunk?.html ?? "" });
+      const targetUri = `${outputDirectory}${withChunkSuffix(fileName, index + 1, plan.chunkCount)}`;
+      const existing = await fileSystemModule.getInfoAsync(targetUri);
+      if (existing.exists) {
+        await fileSystemModule.deleteAsync(targetUri, { idempotent: true });
+      }
+      await fileSystemModule.moveAsync({ from: printed.uri, to: targetUri });
+      exportedUris.push(targetUri);
+      processedRecords += chunk?.records.length ?? 0;
+
+      options?.onProgress?.({
+        chunkIndex: index + 1,
+        chunkCount: plan.chunkCount,
+        processedRecords: Math.min(records.length, processedRecords),
+        totalRecords: records.length,
+      });
+    }
 
     const diagnostics: AttendanceExportDiagnostics = {
       safeMode: summary.signatureModes.placeholder > 0,
       forcedPlaceholderSignatures: summary.signatureModes.placeholder > 0,
       records: records.length,
+      chunkCount: plan.chunkCount,
       htmlBytes: summary.totalHtmlBytes,
       maxHtmlBytes: MAX_TOTAL_HTML_BYTES,
       htmlUtilizationPct:
@@ -920,7 +924,7 @@ export async function generateAttendanceSlipPdf(
       },
     };
 
-    return { uri: targetUri, diagnostics };
+    return { uri: exportedUris[0] ?? "", uris: exportedUris, diagnostics };
   } catch (error) {
     logExportFail(error, lastPlan);
     throw error;

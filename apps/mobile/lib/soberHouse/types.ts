@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 9 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 10 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -33,6 +33,20 @@ export type ScheduledWeekdayCode = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT"
 export type AlertDeliveryMethod = "EMAIL" | "SMS" | "BOTH";
 export type AlertScope = "ORGANIZATION" | "HOUSE";
 export type HouseRuleScopeType = "ORGANIZATION" | "HOUSE_GROUP" | "HOUSE";
+export type RecurringObligationType =
+  | "HOUSE_MEETING"
+  | "ONE_ON_ONE"
+  | "CHORE"
+  | "ALERT_ANNOUNCEMENT";
+export type HouseMeetingKind = "HOUSE_MEETING" | "HOUSE_BUSINESS" | "PROGRAM" | "OTHER";
+export type AlertAnnouncementSeverity = "INFO" | "ACTION_REQUIRED" | "URGENT";
+export type AccountabilityMethod =
+  | "NONE"
+  | "ACKNOWLEDGMENT"
+  | "CHECKLIST"
+  | "SIGNATURE"
+  | "PHOTO"
+  | "MANAGER_CONFIRMATION";
 export type SoberHouseEntityType =
   | "organization"
   | "userAccessProfile"
@@ -40,6 +54,12 @@ export type SoberHouseEntityType =
   | "house"
   | "staffAssignment"
   | "houseRuleSet"
+  | "residentHouseMembership"
+  | "recurringObligation"
+  | "houseMeeting"
+  | "oneOnOneSession"
+  | "houseChore"
+  | "houseAlertAnnouncement"
   | "alertPreference"
   | "residentHousingProfile"
   | "residentRequirementProfile"
@@ -430,6 +450,26 @@ export type OneOnOneRuleConfig = {
   reminderEnabledByDefault: boolean;
 };
 
+export type HouseOperationsConfig = {
+  choresEnabled: boolean;
+  houseMeetingsEnabled: boolean;
+  houseMeetingsRequired: boolean;
+  oneOnOneSessionsEnabled: boolean;
+  oneOnOneSessionsRequired: boolean;
+  houseAlertsEnabled: boolean;
+  announcementsEnabled: boolean;
+  complianceSnapshotEnabled: boolean;
+};
+
+export type HouseSupportSettingsConfig = {
+  defaultReminderLeadMinutes: number;
+  defaultAddToCalendar: boolean;
+  defaultInAppReminders: boolean;
+  requireHouseMeetingAcknowledgment: boolean;
+  requireAnnouncementAcknowledgment: boolean;
+  requireOneOnOneManagerConfirmation: boolean;
+};
+
 export type HouseRuleSet = {
   id: string;
   organizationId: string | null;
@@ -445,6 +485,8 @@ export type HouseRuleSet = {
   meetings: MeetingsRuleConfig;
   sponsorContact: SponsorContactRuleConfig;
   oneOnOne: OneOnOneRuleConfig;
+  operations: HouseOperationsConfig;
+  support: HouseSupportSettingsConfig;
   createdAt: string;
   updatedAt: string;
 };
@@ -495,6 +537,131 @@ export type ResidentHousingProfile = {
   programPhaseOnEntry: string;
   status: EntityStatus;
   notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResidentHouseMembership = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  organizationId: string | null;
+  houseId: string | null;
+  roomOrBed: string;
+  moveInDate: string;
+  moveOutDate: string | null;
+  isPrimary: boolean;
+  status: EntityStatus;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RecurringObligation = {
+  id: string;
+  organizationId: string | null;
+  houseId: string | null;
+  residentId: string | null;
+  linkedUserId: string | null;
+  obligationType: RecurringObligationType;
+  title: string;
+  detail: string;
+  frequency: ScheduledFrequency;
+  weekday: ScheduledWeekdayCode | null;
+  scheduledDate: string | null;
+  timeLocalHhmm: string;
+  required: boolean;
+  reminderLeadMinutes: number;
+  inAppReminderEnabled: boolean;
+  addToCalendar: boolean;
+  accountabilityMethod: AccountabilityMethod;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HouseMeeting = {
+  id: string;
+  organizationId: string | null;
+  houseId: string | null;
+  recurringObligationId: string | null;
+  title: string;
+  description: string;
+  meetingKind: HouseMeetingKind;
+  locationLabel: string;
+  startsAt: string;
+  endsAt: string | null;
+  required: boolean;
+  reminderLeadMinutes: number;
+  inAppReminderEnabled: boolean;
+  addToCalendar: boolean;
+  acknowledgmentRequired: boolean;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OneOnOneSession = {
+  id: string;
+  organizationId: string | null;
+  houseId: string | null;
+  residentId: string;
+  linkedUserId: string;
+  staffAssignmentId: string | null;
+  recurringObligationId: string | null;
+  title: string;
+  notes: string;
+  scheduledAt: string;
+  endsAt: string | null;
+  required: boolean;
+  reminderLeadMinutes: number;
+  inAppReminderEnabled: boolean;
+  addToCalendar: boolean;
+  managerConfirmationRequired: boolean;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HouseChore = {
+  id: string;
+  organizationId: string | null;
+  houseId: string | null;
+  residentId: string | null;
+  linkedUserId: string | null;
+  recurringObligationId: string | null;
+  title: string;
+  summary: string;
+  frequency: ChoreFrequency;
+  dueTimeLocalHhmm: string;
+  weekday: ScheduledWeekdayCode | null;
+  scheduledDate: string | null;
+  required: boolean;
+  proofRequirement: ProofRequirement[];
+  reminderLeadMinutes: number;
+  inAppReminderEnabled: boolean;
+  addToCalendar: boolean;
+  accountabilityRequired: boolean;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HouseAlertAnnouncement = {
+  id: string;
+  organizationId: string | null;
+  houseId: string | null;
+  recurringObligationId: string | null;
+  title: string;
+  body: string;
+  severity: AlertAnnouncementSeverity;
+  startsAt: string;
+  endsAt: string | null;
+  reminderLeadMinutes: number;
+  inAppReminderEnabled: boolean;
+  addToCalendar: boolean;
+  acknowledgmentRequired: boolean;
+  status: EntityStatus;
   createdAt: string;
   updatedAt: string;
 };
@@ -572,6 +739,7 @@ export type ChoreCompletionRecord = {
   linkedUserId: string;
   organizationId: string | null;
   houseId: string | null;
+  houseChoreId: string | null;
   completedAt: string;
   proofRequirement: ProofRequirement[];
   proofProvided: boolean;
@@ -952,6 +1120,12 @@ export type SoberHouseSettingsStore = {
   houses: House[];
   staffAssignments: StaffAssignment[];
   houseRuleSets: HouseRuleSet[];
+  residentHouseMemberships: ResidentHouseMembership[];
+  recurringObligations: RecurringObligation[];
+  houseMeetings: HouseMeeting[];
+  oneOnOneSessions: OneOnOneSession[];
+  houseChores: HouseChore[];
+  houseAlertAnnouncements: HouseAlertAnnouncement[];
   alertPreferences: AlertPreference[];
   residentHousingProfile: ResidentHousingProfile | null;
   residentRequirementProfile: ResidentRequirementProfile | null;

@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Sober AI",
+    "name": "Sober²",
     "slug": "sober-ai",
     "icon": "./assets/icon.png",
     "version": "0.9.5",
@@ -11,6 +11,7 @@
       "bundleIdentifier": "com.rabbithole.soberai.dev",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Use Face ID or your device passcode to unlock sober-house records.",
+        "NSCalendarsWriteOnlyAccessUsageDescription": "Sober² adds recovery events to your calendar when you choose Add to Calendar.",
         "NSLocationWhenInUseUsageDescription": "We use your location to show distance to meetings.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "We use your location to show distance to meetings and enable geofence features if you turn them on.",
         "NSLocationAlwaysUsageDescription": "We use your location to show distance to meetings and enable geofence features if you turn them on.",
