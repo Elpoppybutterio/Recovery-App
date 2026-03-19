@@ -964,7 +964,7 @@ describe("sober house settings mutations", () => {
         label: "Primary manager",
         scope: "HOUSE",
         houseId,
-        recipientStaffAssignmentId: null,
+        recipientStaffAssignmentIds: [],
         recipientName: "Jordan Hayes",
         recipientPhone: "(555) 555-9999",
         recipientEmail: "alerts@brightpath.org",

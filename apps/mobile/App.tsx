@@ -11,8 +11,6 @@ import {
   AppState,
   type AppStateStatus,
   Alert,
-  Animated,
-  Easing,
   GestureResponderEvent,
   KeyboardAvoidingView,
   Linking,
@@ -59,6 +57,12 @@ import {
   normalizeCoordinates,
 } from "./lib/meetings/distance";
 import {
+  formatUsPhoneDisplay,
+  normalizePhoneDigits,
+  normalizeUsPhoneInput,
+  toE164FromUsTenDigit,
+} from "./lib/phone";
+import {
   getCurrentLocation as getCurrentLocationFromService,
   refreshLocationPermissionStates as readLocationPermissionStates,
   requestAlwaysLocationPermission as requestAlwaysLocationPermissionFromService,
@@ -72,8 +76,18 @@ import {
   getDaysSober,
   type RecoveryMilestoneTileSummary,
 } from "./lib/recoveryMilestones";
-import { getInsightForDay } from "./lib/recoveryInsights";
+import { formatIsoToUsDate, normalizeUsDateInput, parseUsDateToIso } from "./lib/dateInput";
+import {
+  buildPhysicalRecoveryViewModel,
+  RECOVERY_SUBSTANCE_OPTIONS,
+  normalizeRecoverySubstances,
+  type RecoverySubstanceCategory,
+} from "./lib/physicalRecovery";
 import { Dashboard } from "./lib/dashboard/Dashboard";
+import {
+  buildMeetingConsistencyTrend,
+  computeMeetingConsistencyStreak,
+} from "./lib/dashboard/meetingStreak";
 import { featureFlags } from "./lib/config/featureFlags";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
 import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
@@ -569,16 +583,6 @@ function resolveMeetingDistanceMeters(
   return null;
 }
 
-function coordinatesEqual(
-  left: { lat: number; lng: number } | null,
-  right: { lat: number; lng: number },
-): boolean {
-  if (!left) {
-    return false;
-  }
-  return Math.abs(left.lat - right.lat) < 1e-6 && Math.abs(left.lng - right.lng) < 1e-6;
-}
-
 function formatDistance(distanceMeters: number | null): string {
   return formatDistanceMiles(distanceMeters);
 }
@@ -889,34 +893,6 @@ function formatHhmmForDisplay(value: string | null | undefined): string {
   const meridiem = hour24 >= 12 ? "PM" : "AM";
   const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
   return `${hour12}:${String(minute).padStart(2, "0")} ${meridiem}`;
-}
-
-function normalizePhoneDigits(value: string): string {
-  const stripped = value.replace(/\D/g, "");
-  const withoutCountryCode =
-    stripped.length === 11 && stripped.startsWith("1") ? stripped.slice(1) : stripped;
-  return withoutCountryCode.slice(0, 10);
-}
-
-function formatUsPhoneDisplay(phoneDigits: string): string {
-  const digits = normalizePhoneDigits(phoneDigits);
-  if (digits.length === 0) {
-    return "";
-  }
-  if (digits.length <= 3) {
-    return `(${digits}`;
-  }
-  if (digits.length <= 6) {
-    return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
-  }
-  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
-}
-
-function toE164FromUsTenDigit(phoneDigits: string): string | null {
-  if (phoneDigits.length !== 10) {
-    return null;
-  }
-  return `+1${phoneDigits}`;
 }
 
 function dateKeyForDate(value: Date): string {
@@ -1263,21 +1239,6 @@ function recoveryCelebrationShownStorageKey(userId: string): string {
   return `${RECOVERY_CELEBRATION_SHOWN_STORAGE_KEY_PREFIX}${userId}`;
 }
 
-function normalizeUsDateInput(value: string): string {
-  const digits = value.replace(/\D/g, "").slice(0, 8);
-  const month = digits.slice(0, 2);
-  const day = digits.slice(2, 4);
-  const year = digits.slice(4, 8);
-
-  if (digits.length <= 2) {
-    return month;
-  }
-  if (digits.length <= 4) {
-    return `${month}/${day}`;
-  }
-  return `${month}/${day}/${year}`;
-}
-
 function normalizeGoalInput(value: string): string {
   return value.replace(/\D/g, "").slice(0, 4);
 }
@@ -1315,40 +1276,6 @@ function radiusMilesFromMeetingsLocationFilter(
     return 100;
   }
   return currentRadiusMiles > 0 && currentRadiusMiles < 50 ? currentRadiusMiles : 50;
-}
-
-function parseDdMmYyyyToIso(value: string): string | null {
-  const normalized = value.trim();
-  const match = normalized.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!match) {
-    return null;
-  }
-  const month = Number(match[1]);
-  const day = Number(match[2]);
-  const year = Number(match[3]);
-  if (day < 1 || day > 31 || month < 1 || month > 12) {
-    return null;
-  }
-  const candidate = new Date(year, month - 1, day);
-  if (
-    candidate.getFullYear() !== year ||
-    candidate.getMonth() !== month - 1 ||
-    candidate.getDate() !== day
-  ) {
-    return null;
-  }
-  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-}
-
-function formatIsoToDdMmYyyy(value: string | null): string {
-  if (!value) {
-    return "";
-  }
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!match) {
-    return "";
-  }
-  return `${match[2]}/${match[3]}/${match[1]}`;
 }
 
 function toCalendarDayOfWeek(code: WeekdayCode): CalendarTypes.DayOfTheWeek {
@@ -1722,6 +1649,62 @@ function locationGroupKeyForMeeting(meeting: MeetingListItem): string {
   return `${meeting.lat?.toFixed(5)},${meeting.lng?.toFixed(5)}|${meeting.address.trim()}`;
 }
 
+function buildRegionForMeetingCollection(
+  meetings: Array<{ lat: number | null; lng: number | null }>,
+): Region | null {
+  const coordinates = meetings.filter(
+    (
+      meeting,
+    ): meeting is {
+      lat: number;
+      lng: number;
+    } => typeof meeting.lat === "number" && typeof meeting.lng === "number",
+  );
+
+  if (coordinates.length === 0) {
+    return null;
+  }
+
+  if (coordinates.length === 1) {
+    return {
+      latitude: coordinates[0].lat,
+      longitude: coordinates[0].lng,
+      latitudeDelta: DEFAULT_MAP_LATITUDE_DELTA,
+      longitudeDelta: DEFAULT_MAP_LONGITUDE_DELTA,
+    };
+  }
+
+  let minLat = coordinates[0].lat;
+  let maxLat = coordinates[0].lat;
+  let minLng = coordinates[0].lng;
+  let maxLng = coordinates[0].lng;
+
+  for (const coordinate of coordinates) {
+    minLat = Math.min(minLat, coordinate.lat);
+    maxLat = Math.max(maxLat, coordinate.lat);
+    minLng = Math.min(minLng, coordinate.lng);
+    maxLng = Math.max(maxLng, coordinate.lng);
+  }
+
+  const latitude = (minLat + maxLat) / 2;
+  const longitude = (minLng + maxLng) / 2;
+  const latitudeDelta = Math.max(
+    DEFAULT_MAP_LATITUDE_DELTA,
+    (maxLat - minLat) * 1.5 || DEFAULT_MAP_LATITUDE_DELTA,
+  );
+  const longitudeDelta = Math.max(
+    DEFAULT_MAP_LONGITUDE_DELTA,
+    (maxLng - minLng) * 1.5 || DEFAULT_MAP_LONGITUDE_DELTA,
+  );
+
+  return {
+    latitude,
+    longitude,
+    latitudeDelta,
+    longitudeDelta,
+  };
+}
+
 function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
   return meetings
     .filter((entry) => entry && typeof entry === "object")
@@ -2032,6 +2015,7 @@ export default function App() {
   const [sobrietyDateIso, setSobrietyDateIso] = useState<string | null>(null);
   const [sobrietyDateInput, setSobrietyDateInput] = useState("");
   const [sobrietyDateStatus, setSobrietyDateStatus] = useState<string | null>(null);
+  const [recoverySubstances, setRecoverySubstances] = useState<RecoverySubstanceCategory[]>([]);
   const [ninetyDayGoalTarget, setNinetyDayGoalTarget] = useState(DEFAULT_NINETY_DAY_GOAL_TARGET);
   const [ninetyDayGoalInput, setNinetyDayGoalInput] = useState(
     String(DEFAULT_NINETY_DAY_GOAL_TARGET),
@@ -2045,6 +2029,7 @@ export default function App() {
   const [activeRecoveryCelebration, setActiveRecoveryCelebration] =
     useState<RecoveryMilestoneTileSummary | null>(null);
   const [showRecoveryRoadmap, setShowRecoveryRoadmap] = useState(false);
+  const [showPhysicalRecoveryTimeline, setShowPhysicalRecoveryTimeline] = useState(false);
   const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
   const [wizardSupervisionMode, setWizardSupervisionMode] =
     useState<SetupSupervisionMode>("INDEPENDENT");
@@ -2067,6 +2052,9 @@ export default function App() {
   const [wizardSponsorKneesSuggested, setWizardSponsorKneesSuggested] = useState<boolean | null>(
     null,
   );
+  const [wizardRecoverySubstances, setWizardRecoverySubstances] = useState<
+    RecoverySubstanceCategory[]
+  >([]);
   const [wizardWantsReminders, setWizardWantsReminders] = useState<boolean | null>(null);
   const [wizardHasHomeGroup, setWizardHasHomeGroup] = useState<boolean | null>(null);
   const [wizardMeetingSignatureRequired, setWizardMeetingSignatureRequired] = useState<
@@ -2102,7 +2090,6 @@ export default function App() {
   const [soberHouseUnlockStatus, setSoberHouseUnlockStatus] = useState<string | null>(null);
   const [debugTimeCompressionEnabled] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
-  const sobrietyCelebrationSpin = useRef(new Animated.Value(0)).current;
 
   const activeAttendanceRef = useRef<AttendanceRecord | null>(null);
   const attendanceRecordsRef = useRef<AttendanceRecord[]>([]);
@@ -2947,14 +2934,9 @@ export default function App() {
       return mapRegion;
     }
 
-    const firstMeeting = mapMeetingsForDay[0];
-    if (firstMeeting && firstMeeting.lat !== null && firstMeeting.lng !== null) {
-      return {
-        latitude: firstMeeting.lat,
-        longitude: firstMeeting.lng,
-        latitudeDelta: DEFAULT_MAP_LATITUDE_DELTA,
-        longitudeDelta: DEFAULT_MAP_LONGITUDE_DELTA,
-      };
+    const meetingsRegion = buildRegionForMeetingCollection(mapMeetingsForDay);
+    if (meetingsRegion) {
+      return meetingsRegion;
     }
 
     if (currentLocation) {
@@ -3075,7 +3057,15 @@ export default function App() {
     () => buildRecoveryMilestoneRoadmap(sobrietyDateIso, clockTickMs),
     [sobrietyDateIso, clockTickMs],
   );
-  const soberInsight = useMemo(() => getInsightForDay(daysSober), [daysSober]);
+  const physicalRecoveryView = useMemo(
+    () =>
+      buildPhysicalRecoveryViewModel({
+        sobrietyDateIso,
+        nowMs: clockTickMs,
+        substances: recoverySubstances,
+      }),
+    [sobrietyDateIso, clockTickMs, recoverySubstances],
+  );
 
   const homeGroupUpcoming = useMemo(() => {
     if (homeGroupMeetingIds.length === 0) {
@@ -3174,6 +3164,22 @@ export default function App() {
       addToBar(new Date(entry.atIso).getTime());
     }
     return bars;
+  }, [attendanceRecords, meetingAttendanceLogs, clockTickMs]);
+
+  const meetingConsistencyStreakWeeks = useMemo(() => {
+    const attendedAtIsos =
+      attendanceRecords.length > 0
+        ? attendanceRecords.map((record) => record.startAt)
+        : meetingAttendanceLogs.map((entry) => entry.atIso);
+    return computeMeetingConsistencyStreak(attendedAtIsos, clockTickMs, 3);
+  }, [attendanceRecords, meetingAttendanceLogs, clockTickMs]);
+
+  const meetingConsistencyTrend = useMemo(() => {
+    const attendedAtIsos =
+      attendanceRecords.length > 0
+        ? attendanceRecords.map((record) => record.startAt)
+        : meetingAttendanceLogs.map((entry) => entry.atIso);
+    return buildMeetingConsistencyTrend(attendedAtIsos, clockTickMs, 6);
   }, [attendanceRecords, meetingAttendanceLogs, clockTickMs]);
 
   const meetingsAttendedTodayCount = useMemo(() => {
@@ -3312,6 +3318,18 @@ export default function App() {
       soberHouseComplianceSummary,
       dashboardNextFiveMeetings,
     ],
+  );
+  const soberHousingConfigured = useMemo(
+    () =>
+      wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ||
+      wizardSupervisionMode === "SOBER_HOUSE_OWNER" ||
+      soberHouseAccessProfile?.role === "HOUSE_RESIDENT" ||
+      soberHouseAccessProfile?.role === "OWNER_OPERATOR",
+    [wizardSupervisionMode, soberHouseAccessProfile?.role],
+  );
+  const availableRecoveryModeOptions = useMemo(
+    () => RECOVERY_MODE_OPTIONS.filter((option) => option.value !== "B" || soberHousingConfigured),
+    [soberHousingConfigured],
   );
   const communicationNotificationSummary = useMemo(
     () =>
@@ -5311,12 +5329,20 @@ export default function App() {
     attendanceEntryPoint === "meetings" ? "Back to upcoming meetings" : "Back to dashboard";
 
   const openSoberHousingSettings = useCallback(() => {
+    if (!soberHousingConfigured) {
+      setMode("A");
+      setHomeScreen("SETTINGS");
+      setToolsScreen("HOME");
+      setScreen("LIST");
+      setSelectedMeeting(null);
+      return;
+    }
     setMode("B");
     setHomeScreen("SETTINGS");
     setToolsScreen("HOME");
     setScreen("LIST");
     setSelectedMeeting(null);
-  }, []);
+  }, [soberHousingConfigured]);
 
   const openProbationParoleSettings = useCallback(() => {
     setMode("C");
@@ -5438,18 +5464,21 @@ export default function App() {
     setWizardSoberHouseId(soberHouseStore.userAccessProfile?.houseId ?? null);
     setWizardOrganizationName(organization?.name ?? "");
     setWizardOrganizationPrimaryContactName(organization?.primaryContactName ?? "");
-    setWizardOrganizationPrimaryPhone(organization?.primaryPhone ?? "");
+    setWizardOrganizationPrimaryPhone(formatUsPhoneDisplay(organization?.primaryPhone ?? ""));
     setWizardOrganizationPrimaryEmail(organization?.primaryEmail ?? "");
     setWizardOrganizationNotes(organization?.notes ?? "");
     setWizardResidentFirstName(residentProfile?.firstName ?? "");
     setWizardResidentLastName(residentProfile?.lastName ?? "");
-    setWizardResidentMoveInDate(residentProfile?.moveInDate ?? "");
+    setWizardResidentMoveInDate(formatIsoToUsDate(residentProfile?.moveInDate ?? ""));
     setWizardResidentRoomOrBed(residentProfile?.roomOrBed ?? "");
     setWizardResidentEmergencyContactName(residentProfile?.emergencyContactName ?? "");
-    setWizardResidentEmergencyContactPhone(residentProfile?.emergencyContactPhone ?? "");
+    setWizardResidentEmergencyContactPhone(
+      formatUsPhoneDisplay(residentProfile?.emergencyContactPhone ?? ""),
+    );
     setWizardResidentProgramPhase(residentProfile?.programPhaseOnEntry ?? "");
     setWizardJusticeTrack(mode === "C" ? "PROBATION_PAROLE" : "NONE");
     setWizardSponsorKneesSuggested(sponsorEnabled ? (sponsorKneesSuggested ?? true) : null);
+    setWizardRecoverySubstances(recoverySubstances);
     setWizardMeetingSignatureRequired(meetingSignatureRequired);
     setScreen("LIST");
     setSelectedMeeting(null);
@@ -5464,6 +5493,7 @@ export default function App() {
     soberHouseStore.userAccessProfile?.role,
     sponsorEnabled,
     sponsorKneesSuggested,
+    recoverySubstances,
   ]);
 
   const nextSetupStep = useCallback(async () => {
@@ -5474,9 +5504,9 @@ export default function App() {
         setSetupStep(2);
         return;
       }
-      const parsedDateIso = parseDdMmYyyyToIso(sobrietyDateInput);
+      const parsedDateIso = parseUsDateToIso(sobrietyDateInput);
       if (!parsedDateIso) {
-        setSetupError("Enter sobriety date as MM/DD/YYYY.");
+        setSetupError("Enter sobriety date as MM-DD-YYYY.");
         return;
       }
       const parsedGoal = parseGoalTargetInput(ninetyDayGoalInput);
@@ -5501,8 +5531,8 @@ export default function App() {
           setSetupError("Enter your first and last name for sober-house placement.");
           return;
         }
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(wizardResidentMoveInDate)) {
-          setSetupError("Move-in date must use YYYY-MM-DD.");
+        if (!parseUsDateToIso(wizardResidentMoveInDate)) {
+          setSetupError("Move-in date must use MM-DD-YYYY.");
           return;
         }
         if (!wizardResidentRoomOrBed.trim()) {
@@ -5680,29 +5710,6 @@ export default function App() {
   const previousSetupStep = useCallback(() => {
     setSetupError(null);
     setSetupStep((current) => (current <= 1 ? 1 : ((current - 1) as SetupStep)));
-  }, []);
-
-  const updateMapCenter = useCallback((center: MapBoundaryCenter) => {
-    setMapCenter((previous) => (coordinatesEqual(previous, center) ? previous : center));
-    setMapRegion((previous: Region | null) => {
-      const latitudeDelta = previous?.latitudeDelta ?? DEFAULT_MAP_LATITUDE_DELTA;
-      const longitudeDelta = previous?.longitudeDelta ?? DEFAULT_MAP_LONGITUDE_DELTA;
-      if (
-        previous &&
-        Math.abs(previous.latitude - center.lat) < 1e-6 &&
-        Math.abs(previous.longitude - center.lng) < 1e-6 &&
-        Math.abs(previous.latitudeDelta - latitudeDelta) < 1e-9 &&
-        Math.abs(previous.longitudeDelta - longitudeDelta) < 1e-9
-      ) {
-        return previous;
-      }
-      return {
-        latitude: center.lat,
-        longitude: center.lng,
-        latitudeDelta,
-        longitudeDelta,
-      };
-    });
   }, []);
 
   const onMapRegionChangeComplete = useCallback(
@@ -6111,7 +6118,7 @@ export default function App() {
 
         const milestones = buildSobrietyMilestones(sobrietyDateIso);
         const createdIds: string[] = [];
-        const sobrietyDateLabel = formatIsoToDdMmYyyy(sobrietyDateIso);
+        const sobrietyDateLabel = formatIsoToUsDate(sobrietyDateIso);
 
         for (const milestone of milestones) {
           const eventId = await Calendar.createEventAsync(calendarId, {
@@ -6720,9 +6727,9 @@ export default function App() {
     const parsedDateIso =
       wizardSupervisionMode === "SOBER_HOUSE_OWNER"
         ? sobrietyDateIso
-        : parseDdMmYyyyToIso(sobrietyDateInput);
+        : parseUsDateToIso(sobrietyDateInput);
     if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedDateIso) {
-      setSetupError("Enter sobriety date as MM/DD/YYYY.");
+      setSetupError("Enter sobriety date as MM-DD-YYYY.");
       setSetupStep(1);
       return;
     }
@@ -6746,8 +6753,8 @@ export default function App() {
         setSetupStep(2);
         return;
       }
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(wizardResidentMoveInDate)) {
-        setSetupError("Move-in date must use YYYY-MM-DD.");
+      if (!parseUsDateToIso(wizardResidentMoveInDate)) {
+        setSetupError("Move-in date must use MM-DD-YYYY.");
         setSetupStep(2);
         return;
       }
@@ -6852,6 +6859,7 @@ export default function App() {
       setSobrietyDateIso(resolvedSobrietyDateIso);
       setNinetyDayGoalTarget(resolvedGoalTarget);
       setNinetyDayGoalInput(String(resolvedGoalTarget));
+      setRecoverySubstances(normalizeRecoverySubstances(wizardRecoverySubstances));
       setMeetingSignatureRequired(resolvedMeetingSignatureRequired);
       setSponsorEnabled(hasSponsor);
       setSponsorActive(wantsReminders);
@@ -6888,7 +6896,7 @@ export default function App() {
           id: nextSoberHouseStore.organization?.id,
           name: wizardOrganizationName.trim(),
           primaryContactName: wizardOrganizationPrimaryContactName.trim(),
-          primaryPhone: wizardOrganizationPrimaryPhone.trim(),
+          primaryPhone: formatUsPhoneDisplay(wizardOrganizationPrimaryPhone),
           primaryEmail: wizardOrganizationPrimaryEmail.trim(),
           notes: wizardOrganizationNotes.trim(),
           status: "ACTIVE",
@@ -6910,7 +6918,7 @@ export default function App() {
             wizardOrganizationPrimaryContactName.trim().split(" ").slice(0, 1).join(" ") || "Owner",
           lastName:
             wizardOrganizationPrimaryContactName.trim().split(" ").slice(1).join(" ") || "Operator",
-          phone: wizardOrganizationPrimaryPhone.trim(),
+          phone: formatUsPhoneDisplay(wizardOrganizationPrimaryPhone),
           email: wizardOrganizationPrimaryEmail.trim(),
           role: "OWNER",
           assignedHouseIds: existingOwnerAssignment?.assignedHouseIds ?? [],
@@ -6964,10 +6972,10 @@ export default function App() {
         currentStep: 2,
         firstName: wizardResidentFirstName.trim(),
         lastName: wizardResidentLastName.trim(),
-        moveInDate: wizardResidentMoveInDate,
+        moveInDate: parseUsDateToIso(wizardResidentMoveInDate) ?? wizardResidentMoveInDate,
         roomOrBed: wizardResidentRoomOrBed.trim(),
         emergencyContactName: wizardResidentEmergencyContactName.trim(),
-        emergencyContactPhone: wizardResidentEmergencyContactPhone.trim(),
+        emergencyContactPhone: formatUsPhoneDisplay(wizardResidentEmergencyContactPhone),
         programPhaseOnEntry: wizardResidentProgramPhase.trim(),
         sponsorPresent: hasSponsor,
         sponsorName: hasSponsor ? normalizedSponsorName : "",
@@ -7078,13 +7086,13 @@ export default function App() {
   }, [sobrietyDateIso, sponsorEnabled, saveSponsorConfig, refreshMeetings]);
 
   const saveSobrietyDateFromSettings = useCallback(() => {
-    const parsedDateIso = parseDdMmYyyyToIso(sobrietyDateInput);
+    const parsedDateIso = parseUsDateToIso(sobrietyDateInput);
     if (!parsedDateIso) {
-      setSobrietyDateStatus("Enter date as MM/DD/YYYY.");
+      setSobrietyDateStatus("Enter date as MM-DD-YYYY.");
       return;
     }
     setSobrietyDateIso(parsedDateIso);
-    setSobrietyDateInput(formatIsoToDdMmYyyy(parsedDateIso));
+    setSobrietyDateInput(formatIsoToUsDate(parsedDateIso));
     setSobrietyDateStatus("Sobriety date saved.");
   }, [sobrietyDateInput]);
 
@@ -8974,6 +8982,8 @@ export default function App() {
 
   useEffect(() => {
     setSelectedLocationKey(null);
+    setMapDraggedOutsideBoundary(false);
+    setMapRegion(null);
   }, [selectedDay.dayOfWeek, meetingsViewMode]);
 
   useEffect(() => {
@@ -8999,7 +9009,6 @@ export default function App() {
       if (!mapBoundaryCenter) {
         setMapBoundaryCenter(center);
       }
-      updateMapCenter(center);
       return;
     }
 
@@ -9011,9 +9020,8 @@ export default function App() {
       if (!mapBoundaryCenter) {
         setMapBoundaryCenter(fallback);
       }
-      updateMapCenter(fallback);
     }
-  }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter, updateMapCenter]);
+  }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter]);
 
   useEffect(() => {
     if (iosLaunchSafeMode) {
@@ -9408,7 +9416,7 @@ export default function App() {
 
         if (sobrietyDateRaw) {
           setSobrietyDateIso(sobrietyDateRaw);
-          setSobrietyDateInput(formatIsoToDdMmYyyy(sobrietyDateRaw));
+          setSobrietyDateInput(formatIsoToUsDate(sobrietyDateRaw));
         }
 
         let hasLocalSponsorProfile = false;
@@ -9418,6 +9426,7 @@ export default function App() {
             homeGroupMeetingIds?: string[];
             sponsorEnabledAtIso?: string | null;
             ninetyDayGoalTarget?: number;
+            recoverySubstances?: RecoverySubstanceCategory[];
             meetingSignatureRequired?: boolean;
             sponsorName?: string;
             sponsorPhoneDigits?: string;
@@ -9458,6 +9467,13 @@ export default function App() {
             );
             setNinetyDayGoalTarget(nextGoal);
             setNinetyDayGoalInput(String(nextGoal));
+          }
+          if (Array.isArray(parsedProfile.recoverySubstances)) {
+            const normalizedSubstances = normalizeRecoverySubstances(
+              parsedProfile.recoverySubstances,
+            );
+            setRecoverySubstances(normalizedSubstances);
+            setWizardRecoverySubstances(normalizedSubstances);
           }
           if (typeof parsedProfile.meetingSignatureRequired === "boolean") {
             setMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
@@ -9689,6 +9705,13 @@ export default function App() {
   }, [mode, setupComplete, homeScreen]);
 
   useEffect(() => {
+    if (!bootstrapped || mode !== "B" || soberHousingConfigured) {
+      return;
+    }
+    setMode("A");
+  }, [bootstrapped, mode, soberHousingConfigured]);
+
+  useEffect(() => {
     if (!bootstrapped) {
       return;
     }
@@ -9786,6 +9809,7 @@ export default function App() {
         homeGroupMeetingIds,
         sponsorEnabledAtIso,
         ninetyDayGoalTarget,
+        recoverySubstances,
         meetingSignatureRequired,
         sponsorName,
         sponsorPhoneDigits,
@@ -9806,6 +9830,7 @@ export default function App() {
     homeGroupMeetingIds,
     sponsorEnabledAtIso,
     ninetyDayGoalTarget,
+    recoverySubstances,
     meetingSignatureRequired,
     sponsorName,
     sponsorPhoneDigits,
@@ -9822,29 +9847,6 @@ export default function App() {
     profileStorage,
     bootstrapped,
   ]);
-
-  useEffect(() => {
-    if (!activeRecoveryCelebration) {
-      sobrietyCelebrationSpin.stopAnimation();
-      sobrietyCelebrationSpin.setValue(0);
-      return;
-    }
-
-    const loop = Animated.loop(
-      Animated.timing(sobrietyCelebrationSpin, {
-        toValue: 1,
-        duration: 3200,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      }),
-    );
-    loop.start();
-    return () => {
-      loop.stop();
-      sobrietyCelebrationSpin.stopAnimation();
-      sobrietyCelebrationSpin.setValue(0);
-    };
-  }, [activeRecoveryCelebration, sobrietyCelebrationSpin]);
 
   useEffect(() => {
     if (!bootstrapped || !setupComplete || homeScreen !== "DASHBOARD" || mode !== "A") {
@@ -9909,20 +9911,6 @@ export default function App() {
       setOpenMeetingsFilterDropdown(null);
     }
   }, [homeScreen]);
-
-  const sobrietyCelebrationSpinStyle = useMemo(
-    () => ({
-      transform: [
-        {
-          rotate: sobrietyCelebrationSpin.interpolate({
-            inputRange: [0, 1],
-            outputRange: ["0deg", "360deg"],
-          }),
-        },
-      ],
-    }),
-    [sobrietyCelebrationSpin],
-  );
 
   useEffect(() => {
     const shouldRefreshSelectedDayMeetings =
@@ -10406,6 +10394,21 @@ export default function App() {
     });
   }
 
+  function toggleRecoverySubstanceSelection(
+    value: RecoverySubstanceCategory,
+    mode: "wizard" | "settings",
+  ) {
+    const applyToggle = (current: RecoverySubstanceCategory[]) =>
+      current.includes(value) ? current.filter((entry) => entry !== value) : [...current, value];
+
+    if (mode === "wizard") {
+      setWizardRecoverySubstances((current) => normalizeRecoverySubstances(applyToggle(current)));
+      return;
+    }
+
+    setRecoverySubstances((current) => normalizeRecoverySubstances(applyToggle(current)));
+  }
+
   function onDayPress(option: DayOption) {
     if (selectedMeeting && screen === "DETAIL") {
       Alert.alert(
@@ -10516,7 +10519,7 @@ export default function App() {
 
           {SHOW_MODE_TILES && homeScreen !== "DASHBOARD" ? (
             <View style={styles.modeRow}>
-              {RECOVERY_MODE_OPTIONS.map((option) => (
+              {availableRecoveryModeOptions.map((option) => (
                 <Pressable
                   key={option.value}
                   onPress={() => handleModeSelect(option.value)}
@@ -10548,7 +10551,8 @@ export default function App() {
           homeScreen !== "SETTINGS" ? (
             <GlassCard style={styles.card} strong>
               <Text style={styles.sectionTitle}>
-                {RECOVERY_MODE_OPTIONS.find((item) => item.value === mode)?.title}
+                {availableRecoveryModeOptions.find((item) => item.value === mode)?.title ??
+                  RECOVERY_MODE_OPTIONS.find((item) => item.value === mode)?.title}
               </Text>
               <Text style={styles.sectionMeta}>
                 This mode is visible for planning and will be implemented in a future slice.
@@ -10644,7 +10648,7 @@ export default function App() {
                             onChangeText={(value) =>
                               setSobrietyDateInput(normalizeUsDateInput(value))
                             }
-                            placeholder="MM/DD/YYYY"
+                            placeholder="MM-DD-YYYY"
                             keyboardType="number-pad"
                             maxLength={10}
                           />
@@ -10714,8 +10718,10 @@ export default function App() {
                           <TextInput
                             style={styles.input}
                             value={wizardResidentMoveInDate}
-                            onChangeText={setWizardResidentMoveInDate}
-                            placeholder="YYYY-MM-DD"
+                            onChangeText={(value) =>
+                              setWizardResidentMoveInDate(normalizeUsDateInput(value))
+                            }
+                            placeholder="MM-DD-YYYY"
                             autoCapitalize="none"
                           />
                           <Text style={styles.label}>Room / bed</Text>
@@ -10736,7 +10742,9 @@ export default function App() {
                           <TextInput
                             style={styles.input}
                             value={wizardResidentEmergencyContactPhone}
-                            onChangeText={setWizardResidentEmergencyContactPhone}
+                            onChangeText={(value) =>
+                              setWizardResidentEmergencyContactPhone(normalizeUsPhoneInput(value))
+                            }
                             placeholder="(555) 555-1234"
                             keyboardType="phone-pad"
                           />
@@ -10784,7 +10792,9 @@ export default function App() {
                           <TextInput
                             style={styles.input}
                             value={wizardOrganizationPrimaryPhone}
-                            onChangeText={setWizardOrganizationPrimaryPhone}
+                            onChangeText={(value) =>
+                              setWizardOrganizationPrimaryPhone(normalizeUsPhoneInput(value))
+                            }
                             placeholder="(555) 555-1234"
                             keyboardType="phone-pad"
                           />
@@ -10807,9 +10817,45 @@ export default function App() {
                           />
                         </>
                       ) : (
-                        <Text style={styles.sectionMeta}>
-                          Independent recovery mode keeps your personal recovery settings editable.
-                        </Text>
+                        <>
+                          <Text style={styles.sectionMeta}>
+                            Independent recovery mode keeps your personal recovery settings
+                            editable.
+                          </Text>
+                          <Text style={styles.label}>
+                            Which substances are part of your recovery?
+                          </Text>
+                          <Text style={styles.sectionMeta}>
+                            Select all that apply so the Physical Recovery timeline can explain what
+                            healing may look like over time.
+                          </Text>
+                          <View style={styles.chipRow}>
+                            {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
+                              const selected = wizardRecoverySubstances.includes(option.value);
+                              return (
+                                <Pressable
+                                  key={option.value}
+                                  style={[styles.chip, selected ? styles.chipSelected : null]}
+                                  onPress={() =>
+                                    toggleRecoverySubstanceSelection(option.value, "wizard")
+                                  }
+                                >
+                                  <Text
+                                    style={[
+                                      styles.chipText,
+                                      selected ? styles.chipTextSelected : null,
+                                    ]}
+                                  >
+                                    {option.label}
+                                  </Text>
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                          <Text style={styles.sectionMeta}>
+                            You can update this later in Recovery Settings.
+                          </Text>
+                        </>
                       )}
                     </>
                   ) : null}
@@ -10876,7 +10922,9 @@ export default function App() {
                             style={styles.input}
                             value={formatUsPhoneDisplay(sponsorPhoneDigits)}
                             onChangeText={(value) =>
-                              setSponsorPhoneDigits(normalizePhoneDigits(value))
+                              setSponsorPhoneDigits(
+                                normalizePhoneDigits(normalizeUsPhoneInput(value)),
+                              )
                             }
                             keyboardType="phone-pad"
                             placeholder="(555) 555-1234"
@@ -11303,7 +11351,7 @@ export default function App() {
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Emergency contact: {wizardResidentEmergencyContactName || "Not set"} •{" "}
-                            {wizardResidentEmergencyContactPhone || "Not set"}
+                            {formatUsPhoneDisplay(wizardResidentEmergencyContactPhone) || "Not set"}
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Program phase: {wizardResidentProgramPhase || "Not set"}
@@ -11319,7 +11367,8 @@ export default function App() {
                             Primary contact: {wizardOrganizationPrimaryContactName || "Not set"}
                           </Text>
                           <Text style={styles.sectionMeta}>
-                            Phone: {wizardOrganizationPrimaryPhone || "Not set"}
+                            Phone:{" "}
+                            {formatUsPhoneDisplay(wizardOrganizationPrimaryPhone) || "Not set"}
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Email: {wizardOrganizationPrimaryEmail || "Not set"}
@@ -11397,6 +11446,19 @@ export default function App() {
                           <Text style={styles.sectionMeta}>90-day goal: {ninetyDayGoalTarget}</Text>
                           <Text style={styles.sectionMeta}>Supervision: Independent recovery</Text>
                           <Text style={styles.sectionMeta}>
+                            Recovery profile:{" "}
+                            {wizardRecoverySubstances.length > 0
+                              ? wizardRecoverySubstances
+                                  .map(
+                                    (value) =>
+                                      RECOVERY_SUBSTANCE_OPTIONS.find(
+                                        (option) => option.value === value,
+                                      )?.label ?? value,
+                                  )
+                                  .join(", ")
+                              : "Not personalized yet"}
+                          </Text>
+                          <Text style={styles.sectionMeta}>
                             Justice track:{" "}
                             {wizardJusticeTrack === "NONE"
                               ? "None"
@@ -11468,8 +11530,8 @@ export default function App() {
                   <Dashboard
                     daysSober={daysSober}
                     sobrietyDateIso={sobrietyDateIso}
-                    sobrietyDateLabel={formatIsoToDdMmYyyy(sobrietyDateIso)}
-                    insight={soberInsight}
+                    sobrietyDateLabel={formatIsoToUsDate(sobrietyDateIso)}
+                    physicalRecoverySummary={physicalRecoveryView.summary}
                     locationEnabled={locationPermission === "granted"}
                     nextMeetings={dashboardNextFiveMeetings}
                     showingOnlineMeetingsFallback={dashboardShowsOnlineFallback}
@@ -11520,7 +11582,9 @@ export default function App() {
                         ? {
                             name: soberHouseManagerContact.name,
                             roleLabel: soberHouseManagerContact.roleLabel,
-                            phoneLabel: soberHouseManagerContact.phone || "No phone on file",
+                            phoneLabel:
+                              formatUsPhoneDisplay(soberHouseManagerContact.phone || "") ||
+                              "No phone on file",
                           }
                         : null
                     }
@@ -11543,6 +11607,8 @@ export default function App() {
                       count: meetingsAttendedTodayCount,
                       goal: DEFAULT_DAILY_MEETINGS_GOAL_TARGET,
                     }}
+                    meetingConsistencyStreakWeeks={meetingConsistencyStreakWeeks}
+                    meetingConsistencyTrend={meetingConsistencyTrend}
                     meetingBarsLast7={meetingsWeekBarsMonSun}
                     meetingPrimaryActionLabels={dashboardMeetingPrimaryActionLabels}
                     morningRoutine={morningRoutineStats}
@@ -11827,6 +11893,7 @@ export default function App() {
                     }}
                     onOpenMeetings={openMeetingsHub}
                     onOpenRecoveryRoadmap={() => setShowRecoveryRoadmap(true)}
+                    onOpenPhysicalRecovery={() => setShowPhysicalRecoveryTimeline(true)}
                     onOpenRecoverySettings={openSettingsHub}
                     onOpenPrivacyStatement={openPrivacyStatement}
                     supervisionPanel={
@@ -11905,7 +11972,6 @@ export default function App() {
                     onCaptureSignature={(meetingId) => {
                       captureMeetingSignatureFromDashboard(meetingId);
                     }}
-                    onLearnMore={openSettingsHub}
                   />
                 )
               ) : null}
@@ -13309,7 +13375,7 @@ export default function App() {
                   <GlassCard style={styles.card} strong>
                     <Text style={styles.sectionTitle}>Sobriety Date</Text>
                     <Text style={styles.sectionMeta}>
-                      Used for Days Sober on the dashboard. Format: MM/DD/YYYY
+                      Used for Days Sober on the dashboard. Format: MM-DD-YYYY
                     </Text>
                     <TextInput
                       style={styles.input}
@@ -13318,12 +13384,48 @@ export default function App() {
                         setSobrietyDateInput(normalizeUsDateInput(value));
                         setSobrietyDateStatus(null);
                       }}
-                      placeholder="MM/DD/YYYY"
+                      placeholder="MM-DD-YYYY"
                       keyboardType="number-pad"
                       maxLength={10}
                     />
                     <Text style={styles.sectionMeta}>
-                      Current: {sobrietyDateIso ? formatIsoToDdMmYyyy(sobrietyDateIso) : "Not set"}
+                      Current: {sobrietyDateIso ? formatIsoToUsDate(sobrietyDateIso) : "Not set"}
+                    </Text>
+                    <Text style={styles.label}>Recovery profile</Text>
+                    <Text style={styles.sectionMeta}>
+                      Select the substances in your recovery to personalize the Physical Recovery
+                      timeline.
+                    </Text>
+                    <View style={styles.chipRow}>
+                      {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
+                        const selected = recoverySubstances.includes(option.value);
+                        return (
+                          <Pressable
+                            key={option.value}
+                            style={[styles.chip, selected ? styles.chipSelected : null]}
+                            onPress={() =>
+                              toggleRecoverySubstanceSelection(option.value, "settings")
+                            }
+                          >
+                            <Text
+                              style={[styles.chipText, selected ? styles.chipTextSelected : null]}
+                            >
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    <Text style={styles.sectionMeta}>
+                      {recoverySubstances.length > 0
+                        ? `Personalized for ${recoverySubstances
+                            .map(
+                              (value) =>
+                                RECOVERY_SUBSTANCE_OPTIONS.find((option) => option.value === value)
+                                  ?.label ?? value,
+                            )
+                            .join(", ")}.`
+                        : "Choose at least one substance to personalize the Physical Recovery tile."}
                     </Text>
                     <Text style={styles.label}>90-day meeting goal</Text>
                     <TextInput
@@ -13391,7 +13493,9 @@ export default function App() {
                           style={styles.input}
                           value={formatUsPhoneDisplay(sponsorPhoneDigits)}
                           onChangeText={(value) =>
-                            setSponsorPhoneDigits(normalizePhoneDigits(value))
+                            setSponsorPhoneDigits(
+                              normalizePhoneDigits(normalizeUsPhoneInput(value)),
+                            )
                           }
                           keyboardType="phone-pad"
                           placeholder="(555) 555-1234"
@@ -14393,13 +14497,13 @@ export default function App() {
                   ? `You earned your ${activeRecoveryCelebration.label.toLowerCase()} recovery coin today. Keep protecting the life you are building.`
                   : ""}
               </Text>
-              <Animated.View style={sobrietyCelebrationSpinStyle}>
-                <MilestoneCoin
-                  label={activeRecoveryCelebration?.coinLabel ?? "1D"}
-                  caption="SOBER²"
-                  size={168}
-                />
-              </Animated.View>
+              <MilestoneCoin
+                label={activeRecoveryCelebration?.coinLabel ?? "1D"}
+                caption="SOBER²"
+                size={168}
+                autoSpin
+                spinDurationMs={3200}
+              />
               <Text style={styles.recoveryCelebrationSupportText}>
                 One day at a time still works. Keep showing up for the next right thing.
               </Text>
@@ -14462,13 +14566,13 @@ export default function App() {
                             <View style={styles.recoveryRoadmapCardTop}>
                               <MilestoneCoin
                                 label={entry.coinLabel}
-                                caption={entry.status === "today" ? "TODAY" : "COIN"}
+                                caption={entry.status === "today" ? "TODAY" : "SOBER²"}
                                 size={86}
                               />
                               <View style={styles.recoveryRoadmapCopy}>
                                 <Text style={styles.recoveryRoadmapLabel}>{entry.label}</Text>
                                 <Text style={styles.recoveryRoadmapDate}>
-                                  {formatIsoToDdMmYyyy(entry.milestoneDateIso)}
+                                  {formatIsoToUsDate(entry.milestoneDateIso)}
                                 </Text>
                                 <Text style={styles.recoveryRoadmapStatus}>
                                   {entry.status === "achieved"
@@ -14489,6 +14593,143 @@ export default function App() {
                     </Text>
                   )}
                 </GlassCard>
+              </ScrollView>
+            </View>
+          </LiquidBackground>
+        </Modal>
+
+        <Modal
+          visible={showPhysicalRecoveryTimeline}
+          animationType="slide"
+          presentationStyle="pageSheet"
+          onRequestClose={() => setShowPhysicalRecoveryTimeline(false)}
+        >
+          <LiquidBackground>
+            <View style={styles.container}>
+              <ScrollView
+                contentContainerStyle={styles.contentContainer}
+                showsVerticalScrollIndicator={false}
+              >
+                <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                  <View style={styles.meetingsHeaderRow}>
+                    <Text style={styles.sectionTitle}>Physical Recovery</Text>
+                    <AppButton
+                      title="Done"
+                      variant="secondary"
+                      onPress={() => setShowPhysicalRecoveryTimeline(false)}
+                    />
+                  </View>
+                  <Text style={styles.sectionMeta}>{physicalRecoveryView.summary.snapshot}</Text>
+                  <Text style={styles.sectionMeta}>{physicalRecoveryView.disclaimer}</Text>
+                </GlassCard>
+
+                {!physicalRecoveryView.hasProfile ? (
+                  <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                    <Text style={styles.label}>Personalize this feed</Text>
+                    <Text style={styles.sectionMeta}>
+                      Select alcohol, opioids, or meth/stimulants in your recovery profile to get a
+                      stage-based guide for what healing may still be working through.
+                    </Text>
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title="Open Recovery Settings"
+                        onPress={() => {
+                          setShowPhysicalRecoveryTimeline(false);
+                          openSettingsHub();
+                        }}
+                      />
+                    </View>
+                  </GlassCard>
+                ) : (
+                  <>
+                    {physicalRecoveryView.currentFocus ? (
+                      <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                        <Text style={styles.label}>{physicalRecoveryView.currentFocus.title}</Text>
+                        <Text style={styles.sectionMeta}>
+                          {physicalRecoveryView.currentFocus.stageTimeWindow}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          {physicalRecoveryView.currentFocus.summary}
+                        </Text>
+                      </GlassCard>
+                    ) : null}
+
+                    {physicalRecoveryView.substanceTracks.length > 0 ? (
+                      <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                        <Text style={styles.label}>Timeline snapshot</Text>
+                        <View style={styles.physicalRecoveryTrackList}>
+                          {physicalRecoveryView.substanceTracks.map((track) => (
+                            <View key={track.substance} style={styles.physicalRecoveryTrackRow}>
+                              <View style={styles.physicalRecoveryTrackDot} />
+                              <View style={styles.physicalRecoveryTrackCopy}>
+                                <Text style={styles.physicalRecoveryTrackLabel}>
+                                  {track.substanceLabel}
+                                </Text>
+                                <Text style={styles.sectionMeta}>
+                                  Now: {track.currentStageLabel} ({track.currentWindowLabel})
+                                </Text>
+                                <Text style={styles.sectionMeta}>
+                                  {track.nextStageLabel
+                                    ? `Next: ${track.nextStageLabel}`
+                                    : "Next: Long-term healing can continue over time"}
+                                </Text>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+                      </GlassCard>
+                    ) : null}
+
+                    {physicalRecoveryView.detailItems.map((item) => (
+                      <GlassCard
+                        key={item.id}
+                        strong
+                        blurIntensity={14}
+                        darken
+                        gradientDark
+                        style={styles.card}
+                      >
+                        <Text style={styles.label}>{item.title}</Text>
+                        <Text style={styles.sectionMeta}>{item.stageTimeWindow}</Text>
+                        <Text style={styles.sectionMeta}>{item.summary}</Text>
+
+                        <Text style={styles.physicalRecoverySectionTitle}>
+                          What may be happening
+                        </Text>
+                        {item.whatMayBeHappening.map((entry) => (
+                          <Text key={`${item.id}-happening-${entry}`} style={styles.sectionMeta}>
+                            • {entry}
+                          </Text>
+                        ))}
+
+                        <Text style={styles.physicalRecoverySectionTitle}>
+                          What may feel normal
+                        </Text>
+                        {item.whatMayFeelNormal.map((entry) => (
+                          <Text key={`${item.id}-normal-${entry}`} style={styles.sectionMeta}>
+                            • {entry}
+                          </Text>
+                        ))}
+
+                        <Text style={styles.physicalRecoverySectionTitle}>
+                          What often improves next
+                        </Text>
+                        {item.whatOftenImprovesNext.map((entry) => (
+                          <Text key={`${item.id}-next-${entry}`} style={styles.sectionMeta}>
+                            • {entry}
+                          </Text>
+                        ))}
+
+                        {item.encouragement ? (
+                          <>
+                            <Text style={styles.physicalRecoverySectionTitle}>Encouragement</Text>
+                            <Text style={styles.sectionMeta}>{item.encouragement}</Text>
+                          </>
+                        ) : null}
+                      </GlassCard>
+                    ))}
+                  </>
+                )}
               </ScrollView>
             </View>
           </LiquidBackground>
@@ -14753,6 +14994,43 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
     color: "rgba(157,250,255,0.96)",
+  },
+  physicalRecoveryTrackList: {
+    marginTop: 6,
+    gap: 12,
+  },
+  physicalRecoveryTrackRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  physicalRecoveryTrackDot: {
+    width: 10,
+    height: 10,
+    marginTop: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(157,250,255,0.95)",
+    shadowColor: "rgba(157,250,255,0.8)",
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  physicalRecoveryTrackCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  physicalRecoveryTrackLabel: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: colors.textPrimary,
+  },
+  physicalRecoverySectionTitle: {
+    marginTop: 10,
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
+    color: "rgba(157,250,255,0.92)",
   },
   meta: {
     color: colors.textSecondary,

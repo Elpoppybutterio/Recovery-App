@@ -18,6 +18,7 @@ describe("recovery milestones", () => {
     const summary = buildRecoveryMilestoneTileSummary("2026-01-01", nowMs);
 
     expect(getDaysSober("2026-01-01", nowMs)).toBe(149);
+    expect(summary?.heading).toBe("Next Recovery Milestone");
     expect(summary?.label).toBe("6 Months");
     expect(summary?.coinLabel).toBe("6M");
     expect(summary?.daysRemaining).toBe(32);
@@ -28,12 +29,17 @@ describe("recovery milestones", () => {
       "2025-03-18",
       new Date("2026-03-18T12:00:00.000Z").getTime(),
     );
+    const exactSummary = buildRecoveryMilestoneTileSummary(
+      "2025-03-18",
+      new Date("2026-03-18T12:00:00.000Z").getTime(),
+    );
     const next = getNextRecoveryMilestone(
       "2024-03-18",
       new Date("2026-03-19T12:00:00.000Z").getTime(),
     );
 
     expect(exact?.label).toBe("1 Year");
+    expect(exactSummary?.heading).toBe("Recovery Milestone Today");
     expect(next?.label).toBe("3 Years");
     expect(next?.coinLabel).toBe("3Y");
   });

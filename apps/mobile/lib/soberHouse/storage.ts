@@ -28,6 +28,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     version !== 6 &&
     version !== 7 &&
     version !== 8 &&
+    version !== 10 &&
     version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
   ) {
     return createDefaultSoberHouseSettingsStore();
@@ -151,7 +152,27 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     houseAlertAnnouncements: Array.isArray(candidate.houseAlertAnnouncements)
       ? candidate.houseAlertAnnouncements
       : [],
-    alertPreferences: Array.isArray(candidate.alertPreferences) ? candidate.alertPreferences : [],
+    alertPreferences: Array.isArray(candidate.alertPreferences)
+      ? candidate.alertPreferences.map((preference) => {
+          const legacyPreference = preference as Record<string, unknown>;
+          const explicitIds = Array.isArray(legacyPreference.recipientStaffAssignmentIds)
+            ? legacyPreference.recipientStaffAssignmentIds.filter(
+                (value): value is string => typeof value === "string" && value.length > 0,
+              )
+            : [];
+          const legacyId =
+            typeof legacyPreference.recipientStaffAssignmentId === "string" &&
+            legacyPreference.recipientStaffAssignmentId.length > 0
+              ? legacyPreference.recipientStaffAssignmentId
+              : null;
+
+          return {
+            ...preference,
+            recipientStaffAssignmentIds:
+              explicitIds.length > 0 ? explicitIds : legacyId ? [legacyId] : [],
+          };
+        })
+      : [],
     residentHousingProfile: candidate.residentHousingProfile ?? null,
     residentRequirementProfile: candidate.residentRequirementProfile
       ? {

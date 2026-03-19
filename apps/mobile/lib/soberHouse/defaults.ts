@@ -271,7 +271,7 @@ export function createDefaultAlertPreference(
     houseId: null,
     label: "",
     scope: "ORGANIZATION",
-    recipientStaffAssignmentId: null,
+    recipientStaffAssignmentIds: [],
     recipientName: "",
     recipientPhone: "",
     recipientEmail: "",

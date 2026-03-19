@@ -258,12 +258,12 @@ export function buildRecoveryMilestoneTileSummary(
     atIso: milestone.at.toISOString(),
     daysRemaining,
     isToday,
-    heading: isToday ? `${milestone.label} coin day` : `Next coin: ${milestone.label}`,
+    heading: isToday ? "Recovery Milestone Today" : "Next Recovery Milestone",
     detail: isToday
       ? `Today marks your ${milestone.label.toLowerCase()} recovery milestone.`
-      : `${pluralize(daysRemaining, "day", "days")} left until ${milestone.label.toLowerCase()}.`,
+      : `${pluralize(daysRemaining, "day", "days")} left until your ${milestone.label.toLowerCase()} coin.`,
     supportiveText: isToday
-      ? "Celebrate the milestone and keep working the next right day."
+      ? "Honor the win, stay grateful, and keep working the next right day."
       : "Keep stacking one day at a time. Your next benchmark is already in motion.",
     celebrationKey: `${milestone.id}:${milestone.milestoneDateIso}`,
   };

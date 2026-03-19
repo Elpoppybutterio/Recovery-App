@@ -1,11 +1,12 @@
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useEffect, useState, type ReactNode } from "react";
+import Svg, { Circle, Line, Polyline } from "react-native-svg";
 import type { CommunicationNotificationSummary } from "../communication/summary";
+import type { PhysicalRecoveryTileSummary } from "../physicalRecovery";
 import type { RecoveryMilestoneTileSummary } from "../recoveryMilestones";
 import { GlassCard } from "../ui/GlassCard";
 import { MilestoneCoin } from "../ui/MilestoneCoin";
 import { Design } from "../ui/design";
-import type { RecoveryInsight } from "../recoveryInsights";
 import type { SoberHouseDashboardTileSummary } from "../soberHouse/dashboard";
 
 type DashboardMeeting = {
@@ -17,11 +18,27 @@ type DashboardMeeting = {
   format: "IN_PERSON" | "ONLINE" | "HYBRID";
 };
 
+function formatDashboardMilestoneDate(value: string): string {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return value;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  const date = new Date(year, month, day, 12, 0, 0, 0);
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 type DashboardProps = {
   daysSober: number;
   sobrietyDateIso: string | null;
   sobrietyDateLabel: string;
-  insight: RecoveryInsight;
+  physicalRecoverySummary: PhysicalRecoveryTileSummary;
   locationEnabled: boolean;
   nextMeetings: DashboardMeeting[];
   showingOnlineMeetingsFallback: boolean;
@@ -84,6 +101,8 @@ type DashboardProps = {
     count: number;
     goal: number;
   };
+  meetingConsistencyStreakWeeks: number;
+  meetingConsistencyTrend: number[];
   meetingBarsLast7: number[];
   meetingPrimaryActionLabels: Record<string, string>;
   morningRoutine: {
@@ -113,6 +132,7 @@ type DashboardProps = {
   onOpenPrivacyStatement: () => void;
   onOpenMeetings: () => void;
   onOpenRecoveryRoadmap: () => void;
+  onOpenPhysicalRecovery: () => void;
   supervisionPanel?: ReactNode;
   upcomingMeetingsPanel?: ReactNode;
   onOpenAttendance: () => void;
@@ -123,7 +143,6 @@ type DashboardProps = {
   onRefresh: () => void;
   onLogMeeting: (meetingId: string) => void;
   onCaptureSignature: (meetingId: string) => void;
-  onLearnMore: () => void;
 };
 
 function toTwelveHour(hhmm: string): string {
@@ -263,7 +282,7 @@ export function Dashboard({
   daysSober,
   sobrietyDateIso,
   sobrietyDateLabel,
-  insight,
+  physicalRecoverySummary,
   locationEnabled,
   nextMeetings,
   showingOnlineMeetingsFallback,
@@ -281,6 +300,8 @@ export function Dashboard({
   ninetyDayProgressPct,
   recoveryMilestoneSummary = null,
   meetingsAttendedToday,
+  meetingConsistencyStreakWeeks,
+  meetingConsistencyTrend,
   meetingBarsLast7,
   meetingPrimaryActionLabels,
   morningRoutine,
@@ -298,6 +319,7 @@ export function Dashboard({
   onOpenPrivacyStatement,
   onOpenMeetings,
   onOpenRecoveryRoadmap,
+  onOpenPhysicalRecovery,
   supervisionPanel,
   upcomingMeetingsPanel,
   onOpenAttendance,
@@ -353,6 +375,27 @@ export function Dashboard({
   const meetingsWeekBars = meetingBarsLast7.length === 7 ? meetingBarsLast7 : [0, 0, 0, 0, 0, 0, 0];
   const meetingsWeekMax = Math.max(1, ...meetingsWeekBars);
   const meetingsWeekTotal = meetingsWeekBars.reduce((sum, value) => sum + value, 0);
+  const meetingConsistencySeries =
+    meetingConsistencyTrend.length === 6 ? meetingConsistencyTrend : [0, 0, 0, 0, 0, 0];
+  const meetingConsistencyChartMax = Math.max(3, ...meetingConsistencySeries, 1);
+  const meetingConsistencyChartWidth = 156;
+  const meetingConsistencyChartHeight = 40;
+  const meetingConsistencyThresholdY =
+    meetingConsistencyChartHeight -
+    (Math.min(3, meetingConsistencyChartMax) / meetingConsistencyChartMax) *
+      meetingConsistencyChartHeight;
+  const meetingConsistencyPoints = meetingConsistencySeries
+    .map((count, index) => {
+      const x =
+        meetingConsistencySeries.length === 1
+          ? meetingConsistencyChartWidth / 2
+          : (index / (meetingConsistencySeries.length - 1)) * meetingConsistencyChartWidth;
+      const y =
+        meetingConsistencyChartHeight -
+        (Math.max(0, count) / meetingConsistencyChartMax) * meetingConsistencyChartHeight;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
   const showNinetyDayGoalTile = daysSober <= 90 || !recoveryMilestoneSummary;
 
   const issuesOnMorningDone = Math.max(0, routineInsights.averageIssuesOnMorningCompleteDays);
@@ -641,7 +684,7 @@ export function Dashboard({
           >
             <GlassCard
               strong
-              blurIntensity={12}
+              blurIntensity={24}
               darken
               gradientDark
               style={[
@@ -683,20 +726,23 @@ export function Dashboard({
                 </View>
               ) : recoveryMilestoneSummary ? (
                 <View style={styles.milestoneTileBody}>
+                  <View style={styles.milestoneTileTopCopy}>
+                    <Text style={styles.milestoneTileLabel}>{recoveryMilestoneSummary.label}</Text>
+                    <Text style={styles.milestoneTileDate}>
+                      {formatDashboardMilestoneDate(recoveryMilestoneSummary.milestoneDateIso)}
+                    </Text>
+                  </View>
                   <MilestoneCoin
                     label={recoveryMilestoneSummary.coinLabel}
-                    caption={recoveryMilestoneSummary.isToday ? "TODAY" : "COIN"}
-                    size={108}
+                    caption={recoveryMilestoneSummary.isToday ? "TODAY" : "SOBER²"}
+                    size={118}
+                    autoSpin
                   />
-                  <View style={styles.milestoneTileTextWrap}>
-                    <Text style={styles.milestoneTileLabel}>{recoveryMilestoneSummary.label}</Text>
+                  <View style={styles.milestoneTileBottomCopy}>
                     <Text style={styles.milestoneTileDays}>
                       {recoveryMilestoneSummary.isToday
                         ? "Celebrate today"
                         : `${recoveryMilestoneSummary.daysRemaining} day${recoveryMilestoneSummary.daysRemaining === 1 ? "" : "s"} left`}
-                    </Text>
-                    <Text style={styles.milestoneTileDetail}>
-                      {recoveryMilestoneSummary.detail}
                     </Text>
                     <Text style={styles.milestoneTileSupportive}>
                       {recoveryMilestoneSummary.supportiveText}
@@ -752,6 +798,76 @@ export function Dashboard({
                 <Text style={styles.fuelGaugeScaleText}>F</Text>
               </View>
               <Text style={styles.streakLabel}>{meetingsTodaySummary}</Text>
+              <View style={styles.separator} />
+              <View style={styles.meetingConsistencyRow}>
+                <Text style={styles.meetingConsistencyLabel}>Current streak</Text>
+                <Text style={styles.meetingConsistencyCenteredValue}>
+                  {meetingConsistencyStreakWeeks}
+                  <Text style={styles.meetingConsistencyCenteredUnit}>w</Text>
+                </Text>
+                <Text style={styles.meetingConsistencyTarget}>3+ meetings each week</Text>
+                <View style={styles.meetingConsistencyChartShell}>
+                  <Svg
+                    width={meetingConsistencyChartWidth}
+                    height={meetingConsistencyChartHeight}
+                    viewBox={`0 0 ${meetingConsistencyChartWidth} ${meetingConsistencyChartHeight}`}
+                  >
+                    <Line
+                      x1="0"
+                      y1={meetingConsistencyThresholdY}
+                      x2={meetingConsistencyChartWidth}
+                      y2={meetingConsistencyThresholdY}
+                      stroke="rgba(241, 206, 112, 0.58)"
+                      strokeWidth="1.5"
+                      strokeDasharray="4 4"
+                    />
+                    <Polyline
+                      points={meetingConsistencyPoints}
+                      fill="none"
+                      stroke="rgba(155,255,215,0.96)"
+                      strokeWidth="3"
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                    {meetingConsistencySeries.map((count, index) => {
+                      const x =
+                        meetingConsistencySeries.length === 1
+                          ? meetingConsistencyChartWidth / 2
+                          : (index / (meetingConsistencySeries.length - 1)) *
+                            meetingConsistencyChartWidth;
+                      const y =
+                        meetingConsistencyChartHeight -
+                        (Math.max(0, count) / meetingConsistencyChartMax) *
+                          meetingConsistencyChartHeight;
+                      return (
+                        <Circle
+                          key={`meeting-consistency-point-${index}`}
+                          cx={x}
+                          cy={y}
+                          r="3.5"
+                          fill={
+                            count >= 3 ? "rgba(241, 206, 112, 0.98)" : "rgba(201, 217, 255, 0.92)"
+                          }
+                        />
+                      );
+                    })}
+                  </Svg>
+                  <View style={styles.meetingConsistencyWeekTicks}>
+                    {meetingConsistencySeries.map((_, index) => (
+                      <View
+                        key={`meeting-consistency-tick-${index}`}
+                        style={styles.meetingConsistencyWeekTickWrap}
+                      >
+                        <Text style={styles.meetingConsistencyWeekTick}>
+                          {index === meetingConsistencySeries.length - 1
+                            ? "Now"
+                            : `-${meetingConsistencySeries.length - 1 - index}`}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              </View>
               <View style={styles.separator} />
               <View style={styles.weeklyHeaderRow}>
                 <Text style={styles.metricMeta}>{`Week's Meetings ${meetingsWeekTotal}`}</Text>
@@ -1234,6 +1350,7 @@ export function Dashboard({
         ) : null}
 
         <Pressable
+          onPress={onOpenPhysicalRecovery}
           onHoverIn={() => setTileHover("physical-recovery", true)}
           onHoverOut={() => setTileHover("physical-recovery", false)}
           accessible={false}
@@ -1255,7 +1372,12 @@ export function Dashboard({
                 <View style={styles.dot} />
               </View>
             </View>
-            <Text style={styles.recoveryText}>{insight.body}</Text>
+            <Text style={styles.physicalRecoveryStage}>{physicalRecoverySummary.stageLabel}</Text>
+            <Text style={styles.recoveryText}>{physicalRecoverySummary.snapshot}</Text>
+            <Text style={styles.physicalRecoveryNext}>{physicalRecoverySummary.nextLabel}</Text>
+            <Text style={styles.physicalRecoveryDisclaimer}>
+              {physicalRecoverySummary.disclaimer}
+            </Text>
           </GlassCard>
         </Pressable>
       </ScrollView>
@@ -1486,34 +1608,52 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   milestoneTileBody: {
-    flexDirection: "row",
     alignItems: "center",
-    gap: 14,
-    paddingVertical: 6,
+    justifyContent: "center",
+    gap: 6,
+    paddingTop: 10,
+    paddingBottom: 12,
+  },
+  milestoneTileTopCopy: {
+    alignItems: "center",
+    gap: 1,
+    marginBottom: 2,
+  },
+  milestoneTileBottomCopy: {
+    alignItems: "center",
+    gap: 3,
+    width: "100%",
+    paddingHorizontal: 6,
+    marginTop: 4,
   },
   milestoneTileTextWrap: {
     flex: 1,
+    alignItems: "center",
     gap: 4,
   },
   milestoneTileLabel: {
     color: Design.color.textPrimary,
-    fontSize: 23,
+    fontSize: 21,
     fontWeight: "800",
+    textAlign: "center",
+  },
+  milestoneTileDate: {
+    color: "rgba(242, 213, 140, 0.95)",
+    fontSize: 11,
+    fontWeight: "700",
+    textAlign: "center",
   },
   milestoneTileDays: {
     color: "rgba(155,255,215,0.96)",
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: "700",
-  },
-  milestoneTileDetail: {
-    color: Design.color.textSecondary,
-    fontSize: 12,
-    lineHeight: 17,
+    textAlign: "center",
   },
   milestoneTileSupportive: {
     color: "rgba(216,228,255,0.82)",
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: 11,
+    lineHeight: 15,
+    textAlign: "center",
   },
   fuelGaugeMetaRow: {
     flexDirection: "row",
@@ -1976,6 +2116,59 @@ const styles = StyleSheet.create({
     fontSize: 11,
     textAlign: "center",
   },
+  meetingConsistencyRow: {
+    alignItems: "center",
+    gap: 6,
+  },
+  meetingConsistencyLabel: {
+    color: "rgba(216,228,255,0.78)",
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    textAlign: "center",
+  },
+  meetingConsistencyCenteredValue: {
+    color: Design.color.textPrimary,
+    fontSize: 26,
+    fontWeight: "900",
+    includeFontPadding: false,
+    textAlign: "center",
+  },
+  meetingConsistencyCenteredUnit: {
+    color: "rgba(216,228,255,0.82)",
+    fontSize: 13,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  meetingConsistencyChartShell: {
+    width: "100%",
+    alignItems: "center",
+    gap: 5,
+  },
+  meetingConsistencyWeekTicks: {
+    width: 156,
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  meetingConsistencyWeekTickWrap: {
+    width: 20,
+    alignItems: "center",
+  },
+  meetingConsistencyWeekTick: {
+    color: Design.color.textSecondary,
+    fontSize: 8,
+    fontWeight: "700",
+  },
+  meetingConsistencyTarget: {
+    color: Design.color.textSecondary,
+    fontSize: 9,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.35,
+    textAlign: "center",
+  },
   upcomingCard: {
     padding: 16,
     gap: 12,
@@ -2141,6 +2334,23 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
     fontWeight: "600",
+  },
+  physicalRecoveryStage: {
+    color: Design.color.textPrimary,
+    fontSize: 17,
+    lineHeight: 22,
+    fontWeight: "800",
+  },
+  physicalRecoveryNext: {
+    color: "rgba(242, 213, 140, 0.92)",
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "700",
+  },
+  physicalRecoveryDisclaimer: {
+    color: "rgba(216,228,255,0.68)",
+    fontSize: 10,
+    lineHeight: 14,
   },
   soberHouseManagerAction: {
     alignSelf: "flex-start",
