@@ -118,7 +118,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     name: resolveAppName(appEnv),
     slug: "sober-ai",
     icon: "./assets/icon.png",
-    version: "0.9.5",
+    version: "0.1.1",
     orientation: "portrait",
     scheme: APP_SCHEME,
     userInterfaceStyle: "light",
