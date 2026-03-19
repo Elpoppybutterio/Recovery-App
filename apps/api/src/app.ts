@@ -21,6 +21,7 @@ import {
   ingestMeetingGuideFeedsForTenant,
   parseConfiguredMeetingGuideFeeds,
 } from "./meeting-guide-ingest";
+import { selectMeetingGuideFeedsForLocation } from "./meeting-guide";
 import { mapTypeCodesToLabels } from "./meeting-guide";
 import { requirePermission, requireRole, requireSupervisorAssignment } from "./rbac";
 import { getDailyWisdomQuote, wisdomDailyQuerySchema } from "./wisdom";
@@ -244,6 +245,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     ),
   );
   let warnedNoMeetingGuideFeeds = false;
+  const meetingGuideLocationWarmupByKeyMs = new Map<string, number>();
 
   logger.info("meeting_guide.config", {
     autoIngest: env.MEETING_GUIDE_AUTO_INGEST,
@@ -269,13 +271,16 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     });
   }
 
-  const resolveTenantFeedConfigs = (tenantId: string) => {
+  const resolveTenantFeedConfigs = (
+    tenantId: string,
+    location?: { lat: number; lng: number } | null,
+  ) => {
     const scoped = configuredMeetingGuideFeeds.filter(
       (feed) => !feed.tenantId || feed.tenantId === tenantId,
     );
 
     if (scoped.length > 0) {
-      return scoped;
+      return selectMeetingGuideFeedsForLocation(scoped, location ?? undefined);
     }
 
     if (legacyMeetingFeedUrls.length > 0) {
@@ -320,8 +325,11 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     }));
   };
 
-  const runMeetingGuideIngestForTenant = async (tenantId: string) => {
-    const feeds = resolveTenantFeedConfigs(tenantId);
+  const runMeetingGuideIngestForTenant = async (
+    tenantId: string,
+    location?: { lat: number; lng: number } | null,
+  ) => {
+    const feeds = resolveTenantFeedConfigs(tenantId, location);
     if (feeds.length === 0) {
       return {
         feedsAttempted: 0,
@@ -347,6 +355,30 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       geocodeUserAgent: env.MEETING_GUIDE_GEOCODE_USER_AGENT,
       githubToken: env.MEETING_GUIDE_GITHUB_TOKEN,
     });
+  };
+
+  const warmMeetingGuideFeedsForLocation = async (
+    tenantId: string,
+    location: { lat: number; lng: number },
+  ) => {
+    const feedConfigs = resolveTenantFeedConfigs(tenantId, location);
+    if (feedConfigs.length === 0) {
+      return null;
+    }
+
+    const locationKey = `${tenantId}:${feedConfigs
+      .map((feed) => feed.url)
+      .sort()
+      .join("|")}:${location.lat.toFixed(2)}:${location.lng.toFixed(2)}`;
+    const minWarmupIntervalMs = env.NODE_ENV === "production" ? 15 * 60_000 : 30_000;
+    const lastWarmupMs = meetingGuideLocationWarmupByKeyMs.get(locationKey) ?? 0;
+    const elapsedMs = now().getTime() - lastWarmupMs;
+    if (elapsedMs >= 0 && elapsedMs < minWarmupIntervalMs) {
+      return null;
+    }
+
+    meetingGuideLocationWarmupByKeyMs.set(locationKey, now().getTime());
+    return runMeetingGuideIngestForTenant(tenantId, location);
   };
 
   const autoIngestTenantId =
@@ -1005,6 +1037,23 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
 
       const query = parsedQuery.data;
       const requestedDayOfWeek = query.dayOfWeek ?? query.day;
+      const hasLocationFilter = typeof query.lat === "number" && typeof query.lng === "number";
+
+      if (hasLocationFilter) {
+        try {
+          await warmMeetingGuideFeedsForLocation(actor.tenantId, {
+            lat: query.lat!,
+            lng: query.lng!,
+          });
+        } catch (error) {
+          logger.warn("meeting_guide.location_warmup_failed", {
+            tenantId: actor.tenantId,
+            route: "/v1/meetings",
+            reason: error instanceof Error ? error.message : "unknown",
+          });
+        }
+      }
+
       const [manualMeetings, meetingGuideMeetings] = await Promise.all([
         tenantRepositories.meetings.list(actor),
         tenantRepositories.meetingGuide.list(actor, {
@@ -1014,7 +1063,6 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       ]);
       const resolvedRadiusMiles = query.radiusMiles ?? env.MEETING_IMPORT_RADIUS_MILES;
       const resolvedRadiusMeters = resolvedRadiusMiles * MILES_TO_METERS;
-      const hasLocationFilter = typeof query.lat === "number" && typeof query.lng === "number";
 
       const scopedManualMeetings = hasLocationFilter
         ? manualMeetings.filter((meeting) => {
@@ -1156,6 +1204,19 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
             .map((entry) => entry.trim().toUpperCase())
             .filter((entry) => entry.length > 0)
         : [];
+
+      try {
+        await warmMeetingGuideFeedsForLocation(actor.tenantId, {
+          lat: parsedQuery.data.lat,
+          lng: parsedQuery.data.lng,
+        });
+      } catch (error) {
+        logger.warn("meeting_guide.location_warmup_failed", {
+          tenantId: actor.tenantId,
+          route: "/v1/meetings/nearby",
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+      }
 
       const meetings = await tenantRepositories.meetingGuide.nearby(
         actor,

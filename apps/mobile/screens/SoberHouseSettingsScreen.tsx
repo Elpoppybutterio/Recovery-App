@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { GlassCard } from "../lib/ui/GlassCard";
 import { AppButton } from "../lib/ui/AppButton";
+import { formatUsPhoneDisplay, normalizeUsPhoneInput } from "../lib/phone";
 import { SoberHouseResidentManager } from "../components/SoberHouseResidentManager";
 import { SoberHouseComplianceSection } from "../components/SoberHouseComplianceSection";
 import { SoberHouseInterventionSection } from "../components/SoberHouseInterventionSection";
@@ -185,7 +186,7 @@ type AlertPreferenceDraft = {
   label: string;
   scope: AlertScope;
   houseId: string | null;
-  recipientStaffAssignmentId: string | null;
+  recipientStaffAssignmentIds: string[];
   recipientName: string;
   recipientPhone: string;
   recipientEmail: string;
@@ -212,7 +213,7 @@ function createOrganizationDraft(value: Organization | null): OrganizationDraft 
     id: value.id,
     name: value.name,
     primaryContactName: value.primaryContactName,
-    primaryPhone: value.primaryPhone,
+    primaryPhone: formatUsPhoneDisplay(value.primaryPhone),
     primaryEmail: value.primaryEmail,
     notes: value.notes,
     isActive: value.status === "ACTIVE",
@@ -251,7 +252,7 @@ function createHouseDraft(value: House | null): HouseDraft {
     houseGroupId: value.houseGroupId,
     name: value.name,
     address: value.address,
-    phone: value.phone,
+    phone: formatUsPhoneDisplay(value.phone),
     geofenceCenterLat: value.geofenceCenterLat === null ? "" : String(value.geofenceCenterLat),
     geofenceCenterLng: value.geofenceCenterLng === null ? "" : String(value.geofenceCenterLng),
     geofenceRadiusFeetDefault: String(value.geofenceRadiusFeetDefault),
@@ -308,7 +309,7 @@ function createStaffAssignmentDraft(value: StaffAssignment | null): StaffAssignm
     id: value.id,
     firstName: value.firstName,
     lastName: value.lastName,
-    phone: value.phone,
+    phone: formatUsPhoneDisplay(value.phone),
     email: value.email,
     role: value.role,
     assignedHouseIds: [...value.assignedHouseIds],
@@ -379,7 +380,7 @@ function createAlertPreferenceDraft(value: AlertPreference | null): AlertPrefere
       label: "",
       scope: "ORGANIZATION",
       houseId: null,
-      recipientStaffAssignmentId: null,
+      recipientStaffAssignmentIds: [],
       recipientName: "",
       recipientPhone: "",
       recipientEmail: "",
@@ -396,9 +397,9 @@ function createAlertPreferenceDraft(value: AlertPreference | null): AlertPrefere
     label: value.label,
     scope: value.scope,
     houseId: value.houseId,
-    recipientStaffAssignmentId: value.recipientStaffAssignmentId,
+    recipientStaffAssignmentIds: [...value.recipientStaffAssignmentIds],
     recipientName: value.recipientName,
-    recipientPhone: value.recipientPhone,
+    recipientPhone: formatUsPhoneDisplay(value.recipientPhone),
     recipientEmail: value.recipientEmail,
     deliveryMethod: value.deliveryMethod,
     sendRealTimeViolationAlerts: value.sendRealTimeViolationAlerts,
@@ -410,6 +411,12 @@ function createAlertPreferenceDraft(value: AlertPreference | null): AlertPrefere
 
 function digitsOnly(value: string): string {
   return value.replace(/[^\d]/g, "");
+}
+
+function uniqueNonEmptyStrings(values: string[]): string[] {
+  return Array.from(
+    new Set(values.map((value) => value.trim()).filter((value) => value.length > 0)),
+  );
 }
 
 function normalizeIntegerInput(value: string): string {
@@ -769,7 +776,7 @@ export function SoberHouseSettingsScreen({
         id: organizationDraft.id,
         name: organizationDraft.name.trim(),
         primaryContactName: organizationDraft.primaryContactName.trim(),
-        primaryPhone: organizationDraft.primaryPhone.trim(),
+        primaryPhone: formatUsPhoneDisplay(organizationDraft.primaryPhone),
         primaryEmail: organizationDraft.primaryEmail.trim(),
         notes: organizationDraft.notes.trim(),
         status: organizationDraft.isActive ? "ACTIVE" : "INACTIVE",
@@ -881,7 +888,7 @@ export function SoberHouseSettingsScreen({
         houseGroupId: houseDraft.houseGroupId,
         name: houseDraft.name.trim(),
         address: houseDraft.address.trim(),
-        phone: houseDraft.phone.trim(),
+        phone: formatUsPhoneDisplay(houseDraft.phone),
         geofenceCenterLat: geofenceLat,
         geofenceCenterLng: geofenceLng,
         geofenceRadiusFeetDefault: parseNonNegativeInt(houseDraft.geofenceRadiusFeetDefault, 200),
@@ -927,7 +934,7 @@ export function SoberHouseSettingsScreen({
         id: editingStaffAssignmentId ?? staffDraft.id,
         firstName: staffDraft.firstName.trim(),
         lastName: staffDraft.lastName.trim(),
-        phone: staffDraft.phone.trim(),
+        phone: formatUsPhoneDisplay(staffDraft.phone),
         email: staffDraft.email.trim(),
         role: staffDraft.role,
         assignedHouseIds: [...staffDraft.assignedHouseIds],
@@ -1068,15 +1075,29 @@ export function SoberHouseSettingsScreen({
       return;
     }
 
-    const selectedStaff = alertDraft.recipientStaffAssignmentId
-      ? getStaffAssignmentById(store, alertDraft.recipientStaffAssignmentId)
-      : null;
+    const selectedStaff = alertDraft.recipientStaffAssignmentIds
+      .map((assignmentId) => getStaffAssignmentById(store, assignmentId))
+      .filter((assignment): assignment is NonNullable<typeof assignment> => assignment !== null);
     const recipientName =
-      selectedStaff !== null
-        ? `${selectedStaff.firstName} ${selectedStaff.lastName}`.trim()
+      selectedStaff.length > 0
+        ? uniqueNonEmptyStrings(
+            selectedStaff.map((assignment) =>
+              `${assignment.firstName} ${assignment.lastName}`.trim(),
+            ),
+          ).join(", ")
         : alertDraft.recipientName.trim();
-    const recipientEmail = selectedStaff?.email?.trim() || alertDraft.recipientEmail.trim();
-    const recipientPhone = selectedStaff?.phone?.trim() || alertDraft.recipientPhone.trim();
+    const recipientEmail =
+      selectedStaff.length > 0
+        ? uniqueNonEmptyStrings(selectedStaff.map((assignment) => assignment.email)).join(", ")
+        : alertDraft.recipientEmail.trim();
+    const recipientPhone =
+      selectedStaff.length > 0
+        ? uniqueNonEmptyStrings(
+            selectedStaff
+              .map((assignment) => formatUsPhoneDisplay(assignment.phone))
+              .filter((value) => value.length > 0),
+          ).join(", ")
+        : formatUsPhoneDisplay(alertDraft.recipientPhone.trim());
 
     if (recipientName.length === 0) {
       setStatusMessage("Alert recipient name is required.");
@@ -1106,7 +1127,7 @@ export function SoberHouseSettingsScreen({
         label: alertDraft.label.trim(),
         scope: alertDraft.scope,
         houseId: alertDraft.scope === "HOUSE" ? alertDraft.houseId : null,
-        recipientStaffAssignmentId: alertDraft.recipientStaffAssignmentId,
+        recipientStaffAssignmentIds: [...alertDraft.recipientStaffAssignmentIds],
         recipientName,
         recipientPhone,
         recipientEmail,
@@ -1392,7 +1413,10 @@ export function SoberHouseSettingsScreen({
                 style={styles.input}
                 value={organizationDraft.primaryPhone}
                 onChangeText={(value) =>
-                  setOrganizationDraft((current) => ({ ...current, primaryPhone: value }))
+                  setOrganizationDraft((current) => ({
+                    ...current,
+                    primaryPhone: normalizeUsPhoneInput(value),
+                  }))
                 }
                 keyboardType="phone-pad"
                 placeholder="(555) 555-1212"
@@ -1822,7 +1846,10 @@ export function SoberHouseSettingsScreen({
                       style={styles.input}
                       value={houseDraft.phone}
                       onChangeText={(value) =>
-                        setHouseDraft((current) => ({ ...current, phone: value }))
+                        setHouseDraft((current) => ({
+                          ...current,
+                          phone: normalizeUsPhoneInput(value),
+                        }))
                       }
                       keyboardType="phone-pad"
                       placeholder="(555) 555-3434"
@@ -2062,7 +2089,10 @@ export function SoberHouseSettingsScreen({
                   style={styles.input}
                   value={staffDraft.phone}
                   onChangeText={(value) =>
-                    setStaffDraft((current) => ({ ...current, phone: value }))
+                    setStaffDraft((current) => ({
+                      ...current,
+                      phone: normalizeUsPhoneInput(value),
+                    }))
                   }
                   keyboardType="phone-pad"
                   placeholder="(555) 555-9898"
@@ -2786,28 +2816,34 @@ export function SoberHouseSettingsScreen({
             <View style={styles.chipRow}>
               <OptionChip
                 label="Custom"
-                selected={alertDraft.recipientStaffAssignmentId === null}
+                selected={alertDraft.recipientStaffAssignmentIds.length === 0}
                 onPress={() =>
-                  setAlertDraft((current) => ({ ...current, recipientStaffAssignmentId: null }))
+                  setAlertDraft((current) => ({ ...current, recipientStaffAssignmentIds: [] }))
                 }
               />
               {store.staffAssignments.map((assignment) => (
                 <OptionChip
                   key={assignment.id}
                   label={`${assignment.firstName} ${assignment.lastName}`}
-                  selected={alertDraft.recipientStaffAssignmentId === assignment.id}
+                  selected={alertDraft.recipientStaffAssignmentIds.includes(assignment.id)}
                   onPress={() =>
                     setAlertDraft((current) => ({
                       ...current,
-                      recipientStaffAssignmentId: assignment.id,
-                      recipientName: `${assignment.firstName} ${assignment.lastName}`.trim(),
-                      recipientPhone: assignment.phone,
-                      recipientEmail: assignment.email,
+                      recipientStaffAssignmentIds: current.recipientStaffAssignmentIds.includes(
+                        assignment.id,
+                      )
+                        ? current.recipientStaffAssignmentIds.filter((id) => id !== assignment.id)
+                        : [...current.recipientStaffAssignmentIds, assignment.id],
                     }))
                   }
                 />
               ))}
             </View>
+            <Text style={styles.sectionMeta}>
+              {alertDraft.recipientStaffAssignmentIds.length > 0
+                ? `${alertDraft.recipientStaffAssignmentIds.length} staff recipient${alertDraft.recipientStaffAssignmentIds.length === 1 ? "" : "s"} selected.`
+                : "Select Custom to enter one manual recipient, or choose one or more staff members."}
+            </Text>
             <View style={styles.twoColumnRow}>
               <View style={styles.column}>
                 <FieldLabel>Recipient name</FieldLabel>
@@ -2817,6 +2853,7 @@ export function SoberHouseSettingsScreen({
                   onChangeText={(value) =>
                     setAlertDraft((current) => ({ ...current, recipientName: value }))
                   }
+                  editable={alertDraft.recipientStaffAssignmentIds.length === 0}
                   placeholder="Manager name"
                   placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
                 />
@@ -2827,8 +2864,12 @@ export function SoberHouseSettingsScreen({
                   style={styles.input}
                   value={alertDraft.recipientPhone}
                   onChangeText={(value) =>
-                    setAlertDraft((current) => ({ ...current, recipientPhone: value }))
+                    setAlertDraft((current) => ({
+                      ...current,
+                      recipientPhone: normalizeUsPhoneInput(value),
+                    }))
                   }
+                  editable={alertDraft.recipientStaffAssignmentIds.length === 0}
                   keyboardType="phone-pad"
                   placeholder="(555) 555-4545"
                   placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
@@ -2842,6 +2883,7 @@ export function SoberHouseSettingsScreen({
               onChangeText={(value) =>
                 setAlertDraft((current) => ({ ...current, recipientEmail: value }))
               }
+              editable={alertDraft.recipientStaffAssignmentIds.length === 0}
               autoCapitalize="none"
               placeholder="alerts@example.org"
               placeholderTextColor={INPUT_PLACEHOLDER_COLOR}

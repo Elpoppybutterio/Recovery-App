@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Sober AI</string>
+	<string>Sober²</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,7 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<string>Sober²</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -51,11 +51,11 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your microphone</string>
+	<string>Allow Sober² to access your microphone</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your reminders</string>
+	<string>Allow Sober² to access your reminders</string>
 	<key>NSRemindersUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to access your reminders</string>
+	<string>Allow Sober² to access your reminders</string>
 	<key>RCTNewArchEnabled</key>
 	<false/>
 	<key>UIBackgroundModes</key>

@@ -5,14 +5,48 @@ import { Design } from "../lib/ui/design";
 type ChatComingSoonScreenProps = {
   enabled: boolean;
   onBack: () => void;
+  mode: "RECOVERY" | "SOBER_HOUSE" | "JUSTICE";
 };
 
-export function ChatComingSoonScreen({ enabled, onBack }: ChatComingSoonScreenProps) {
+export function ChatComingSoonScreen({ enabled, onBack, mode }: ChatComingSoonScreenProps) {
+  const content =
+    mode === "RECOVERY"
+      ? {
+          title: "Recovery Chat",
+          body: "Sponsor direct chat and recovery group chat will live here.",
+          bullets: [
+            "• Sponsor direct chat",
+            "• Recovery group chat",
+            "• Shared message history across recovery mode",
+            "• Notifications and deep links into active threads",
+          ],
+        }
+      : mode === "JUSTICE"
+        ? {
+            title: "Probation / Parole Chat",
+            body: "Direct supervision communication will live here.",
+            bullets: [
+              "• Direct officer/client messaging",
+              "• Audit-safe message history",
+              "• Acknowledgment-required notices",
+              "• Mode-safe separation from recovery and sober-house chat",
+            ],
+          }
+        : {
+            title: "Sober House Chat",
+            body: "Direct house-manager threads and resident group chat live here.",
+            bullets: [
+              "• House manager direct chat",
+              "• Resident house group chat",
+              "• Acknowledgment and corrective-action notices",
+              "• Operational follow-up in one place",
+            ],
+          };
   return (
     <ScrollView contentContainerStyle={styles.wrap} showsVerticalScrollIndicator={false}>
       <GlassCard style={styles.card} strong darken blurIntensity={14}>
         <View style={styles.headerRow}>
-          <Text style={styles.title}>Intranet / Group Chat</Text>
+          <Text style={styles.title}>{content.title}</Text>
           <Pressable onPress={onBack} style={styles.backButton}>
             <Text style={styles.backText}>Back to Dashboard</Text>
           </Pressable>
@@ -20,14 +54,13 @@ export function ChatComingSoonScreen({ enabled, onBack }: ChatComingSoonScreenPr
         <View style={styles.badge}>
           <Text style={styles.badgeText}>{enabled ? "Preview" : "Coming Soon"}</Text>
         </View>
-        <Text style={styles.body}>
-          A private communication space for sponsor and sponsee conversations is planned.
-        </Text>
+        <Text style={styles.body}>{content.body}</Text>
         <Text style={styles.section}>Planned capabilities</Text>
-        <Text style={styles.bullet}>• 1:1 and small-group sponsor threads</Text>
-        <Text style={styles.bullet}>• Contact-based invites and opt-in membership</Text>
-        <Text style={styles.bullet}>• Push notifications and deep links into messages</Text>
-        <Text style={styles.bullet}>• Tenant-safe moderation and audit controls</Text>
+        {content.bullets.map((bullet) => (
+          <Text key={bullet} style={styles.bullet}>
+            {bullet}
+          </Text>
+        ))}
         <Text style={styles.notifyPlaceholder}>Notify me when released (coming soon)</Text>
       </GlassCard>
     </ScrollView>

@@ -208,6 +208,7 @@ export function SoberHouseComplianceSection({
         linkedUserId: housing.linkedUserId,
         organizationId: housing.organizationId,
         houseId: housing.houseId,
+        houseChoreId: null,
         completedAt: now,
         proofRequirement: ruleSet.chores.proofRequirement,
         proofProvided: choreProofProvided,

@@ -10,11 +10,17 @@ import {
   createDefaultCorrectiveAction,
   createDefaultEvidenceItem,
   createDefaultHouse,
+  createDefaultHouseAlertAnnouncement,
+  createDefaultHouseChore,
   createDefaultHouseGroup,
+  createDefaultHouseMeeting,
   createDefaultHouseRuleSet,
   createDefaultJobApplicationRecord,
   createDefaultMonthlyReport,
+  createDefaultOneOnOneSession,
   createDefaultOrganization,
+  createDefaultRecurringObligation,
+  createDefaultResidentHouseMembership,
   createDefaultSoberHouseUserAccessProfile,
   createDefaultStaffAssignment,
   createDefaultViolation,
@@ -31,12 +37,18 @@ import type {
   CorrectiveAction,
   EvidenceItem,
   House,
+  HouseAlertAnnouncement,
+  HouseChore,
   HouseGroup,
+  HouseMeeting,
   HouseRuleSet,
   JobApplicationRecord,
   MonthlyReport,
+  OneOnOneSession,
   Organization,
+  RecurringObligation,
   ResidentConsentRecord,
+  ResidentHouseMembership,
   ResidentHousingProfile,
   ResidentRequirementProfile,
   ResidentWizardDraft,
@@ -417,6 +429,8 @@ export function upsertHouseRuleSet(
     meetings: { ...base.meetings, ...(fields.meetings ?? {}) },
     sponsorContact: { ...base.sponsorContact, ...(fields.sponsorContact ?? {}) },
     oneOnOne: { ...base.oneOnOne, ...(fields.oneOnOne ?? {}) },
+    operations: { ...base.operations, ...(fields.operations ?? {}) },
+    support: { ...base.support, ...(fields.support ?? {}) },
     id: base.id,
     organizationId: store.organization?.id ?? null,
     scopeType,
@@ -505,6 +519,235 @@ export function setAlertPreferenceStatus(
   }
 
   return upsertAlertPreference(store, actor, { ...previous, status }, timestamp);
+}
+
+export function upsertResidentHouseMembership(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<ResidentHouseMembership, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous =
+    store.residentHouseMemberships.find((membership) => membership.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultResidentHouseMembership(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: ResidentHouseMembership = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "residentHouseMembership",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      residentHouseMemberships: replaceById(draftStore.residentHouseMemberships, nextValue),
+    }),
+    timestamp,
+  );
+}
+
+export function upsertRecurringObligation(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<RecurringObligation, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous =
+    store.recurringObligations.find((obligation) => obligation.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultRecurringObligation(
+      timestamp,
+      fields.organizationId,
+      fields.houseId,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.id,
+    );
+  const nextValue: RecurringObligation = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "recurringObligation",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      recurringObligations: replaceById(draftStore.recurringObligations, nextValue),
+    }),
+    timestamp,
+  );
+}
+
+export function upsertHouseMeeting(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<HouseMeeting, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.houseMeetings.find((meeting) => meeting.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultHouseMeeting(timestamp, fields.organizationId, fields.houseId, fields.id);
+  const nextValue: HouseMeeting = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "houseMeeting",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      houseMeetings: replaceById(draftStore.houseMeetings, nextValue),
+    }),
+    timestamp,
+  );
+}
+
+export function upsertOneOnOneSession(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<OneOnOneSession, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.oneOnOneSessions.find((session) => session.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultOneOnOneSession(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: OneOnOneSession = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "oneOnOneSession",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      oneOnOneSessions: replaceById(draftStore.oneOnOneSessions, nextValue),
+    }),
+    timestamp,
+  );
+}
+
+export function upsertHouseChore(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<HouseChore, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.houseChores.find((chore) => chore.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultHouseChore(
+      timestamp,
+      fields.organizationId,
+      fields.houseId,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.id,
+    );
+  const nextValue: HouseChore = {
+    ...base,
+    ...fields,
+    id: base.id,
+    proofRequirement: fields.proofRequirement ?? base.proofRequirement,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "houseChore",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      houseChores: replaceById(draftStore.houseChores, nextValue),
+    }),
+    timestamp,
+  );
+}
+
+export function upsertHouseAlertAnnouncement(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<HouseAlertAnnouncement, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous =
+    store.houseAlertAnnouncements.find((announcement) => announcement.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultHouseAlertAnnouncement(
+      timestamp,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: HouseAlertAnnouncement = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "houseAlertAnnouncement",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      houseAlertAnnouncements: replaceById(draftStore.houseAlertAnnouncements, nextValue),
+    }),
+    timestamp,
+  );
 }
 
 export function upsertResidentHousingProfile(

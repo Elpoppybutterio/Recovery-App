@@ -35,12 +35,12 @@ function resolveBundleIdentifier(appEnv: AppEnv): string {
 
 function resolveAppName(appEnv: AppEnv): string {
   if (appEnv === "production") {
-    return "Sober AI";
+    return "Sober²";
   }
   if (appEnv === "preview") {
-    return "Sober AI Preview";
+    return "Sober² Preview";
   }
-  return "Sober AI Dev";
+  return "Sober² Dev";
 }
 
 function resolveIosBuildNumber(appEnv: AppEnv): string {

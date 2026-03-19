@@ -28,6 +28,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     version !== 6 &&
     version !== 7 &&
     version !== 8 &&
+    version !== 10 &&
     version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
   ) {
     return createDefaultSoberHouseSettingsStore();
@@ -106,9 +107,72 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
             addToCalendarByDefault: ruleSet.oneOnOne?.addToCalendarByDefault ?? true,
             reminderEnabledByDefault: ruleSet.oneOnOne?.reminderEnabledByDefault ?? true,
           },
+          operations: {
+            choresEnabled: ruleSet.operations?.choresEnabled ?? ruleSet.chores?.enabled ?? false,
+            houseMeetingsEnabled: ruleSet.operations?.houseMeetingsEnabled ?? false,
+            houseMeetingsRequired: ruleSet.operations?.houseMeetingsRequired ?? false,
+            oneOnOneSessionsEnabled:
+              ruleSet.operations?.oneOnOneSessionsEnabled ?? ruleSet.oneOnOne?.enabled ?? false,
+            oneOnOneSessionsRequired: ruleSet.operations?.oneOnOneSessionsRequired ?? false,
+            houseAlertsEnabled: ruleSet.operations?.houseAlertsEnabled ?? false,
+            announcementsEnabled: ruleSet.operations?.announcementsEnabled ?? false,
+            complianceSnapshotEnabled: ruleSet.operations?.complianceSnapshotEnabled ?? true,
+          },
+          support: {
+            defaultReminderLeadMinutes: ruleSet.support?.defaultReminderLeadMinutes ?? 30,
+            defaultAddToCalendar: ruleSet.support?.defaultAddToCalendar ?? false,
+            defaultInAppReminders: ruleSet.support?.defaultInAppReminders ?? false,
+            requireHouseMeetingAcknowledgment:
+              ruleSet.support?.requireHouseMeetingAcknowledgment ?? false,
+            requireAnnouncementAcknowledgment:
+              ruleSet.support?.requireAnnouncementAcknowledgment ?? false,
+            requireOneOnOneManagerConfirmation:
+              ruleSet.support?.requireOneOnOneManagerConfirmation ?? false,
+          },
         }))
       : [],
-    alertPreferences: Array.isArray(candidate.alertPreferences) ? candidate.alertPreferences : [],
+    residentHouseMemberships: Array.isArray(candidate.residentHouseMemberships)
+      ? candidate.residentHouseMemberships
+      : [],
+    recurringObligations: Array.isArray(candidate.recurringObligations)
+      ? candidate.recurringObligations
+      : [],
+    houseMeetings: Array.isArray(candidate.houseMeetings) ? candidate.houseMeetings : [],
+    oneOnOneSessions: Array.isArray(candidate.oneOnOneSessions) ? candidate.oneOnOneSessions : [],
+    houseChores: Array.isArray(candidate.houseChores)
+      ? candidate.houseChores.map((chore) => ({
+          ...chore,
+          proofRequirement: Array.isArray(chore.proofRequirement)
+            ? chore.proofRequirement
+            : chore.proofRequirement
+              ? [chore.proofRequirement]
+              : ["NONE"],
+        }))
+      : [],
+    houseAlertAnnouncements: Array.isArray(candidate.houseAlertAnnouncements)
+      ? candidate.houseAlertAnnouncements
+      : [],
+    alertPreferences: Array.isArray(candidate.alertPreferences)
+      ? candidate.alertPreferences.map((preference) => {
+          const legacyPreference = preference as Record<string, unknown>;
+          const explicitIds = Array.isArray(legacyPreference.recipientStaffAssignmentIds)
+            ? legacyPreference.recipientStaffAssignmentIds.filter(
+                (value): value is string => typeof value === "string" && value.length > 0,
+              )
+            : [];
+          const legacyId =
+            typeof legacyPreference.recipientStaffAssignmentId === "string" &&
+            legacyPreference.recipientStaffAssignmentId.length > 0
+              ? legacyPreference.recipientStaffAssignmentId
+              : null;
+
+          return {
+            ...preference,
+            recipientStaffAssignmentIds:
+              explicitIds.length > 0 ? explicitIds : legacyId ? [legacyId] : [],
+          };
+        })
+      : [],
     residentHousingProfile: candidate.residentHousingProfile ?? null,
     residentRequirementProfile: candidate.residentRequirementProfile
       ? {

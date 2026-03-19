@@ -6,6 +6,18 @@ export type MeetingGuideFeedConfig = {
   tenantId?: string;
   entity?: string;
   entityUrl?: string;
+  coverageCenterLat?: number;
+  coverageCenterLng?: number;
+  coverageRadiusMiles?: number;
+  coverageStates?: string[];
+  coverageCountryCodes?: string[];
+};
+
+export type MeetingGuideFeedLocation = {
+  lat: number;
+  lng: number;
+  state?: string | null;
+  countryCode?: string | null;
 };
 
 export type NormalizedMeetingGuideMeeting = {
@@ -70,6 +82,15 @@ function asNumber(value: unknown): number | null {
   return null;
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => asString(entry)?.toUpperCase() ?? null)
+    .filter((entry): entry is string => entry !== null);
+}
+
 function normalizeDay(value: unknown): number | null {
   const day = asNumber(value);
   if (day === null) {
@@ -132,11 +153,117 @@ export function parseMeetingGuideFeedsJson(value: string): MeetingGuideFeedConfi
         tenantId: asString(entry.tenantId) ?? undefined,
         entity: asString(entry.entity) ?? undefined,
         entityUrl: asString(entry.entityUrl) ?? undefined,
+        coverageCenterLat: asNumber(entry.coverageCenterLat ?? entry.centerLat) ?? undefined,
+        coverageCenterLng: asNumber(entry.coverageCenterLng ?? entry.centerLng) ?? undefined,
+        coverageRadiusMiles: asNumber(entry.coverageRadiusMiles ?? entry.radiusMiles) ?? undefined,
+        coverageStates: asStringArray(entry.coverageStates ?? entry.states),
+        coverageCountryCodes: asStringArray(entry.coverageCountryCodes ?? entry.countryCodes),
       }))
       .filter((entry) => entry.url.length > 0);
   } catch {
     return [];
   }
+}
+
+function feedCoverageDistanceMiles(
+  feed: MeetingGuideFeedConfig,
+  location: MeetingGuideFeedLocation,
+): number | null {
+  if (
+    typeof feed.coverageCenterLat !== "number" ||
+    typeof feed.coverageCenterLng !== "number" ||
+    typeof feed.coverageRadiusMiles !== "number"
+  ) {
+    return null;
+  }
+
+  return (
+    haversineDistanceMeters(
+      location.lat,
+      location.lng,
+      feed.coverageCenterLat,
+      feed.coverageCenterLng,
+    ) / MILES_TO_METERS
+  );
+}
+
+function matchesAdministrativeCoverage(
+  feed: MeetingGuideFeedConfig,
+  location: MeetingGuideFeedLocation,
+): boolean {
+  const allowedCountries = feed.coverageCountryCodes ?? [];
+  if (allowedCountries.length > 0) {
+    const country = (location.countryCode ?? "").trim().toUpperCase();
+    if (!country || !allowedCountries.includes(country)) {
+      return false;
+    }
+  }
+
+  const allowedStates = feed.coverageStates ?? [];
+  if (allowedStates.length > 0) {
+    const state = (location.state ?? "").trim().toUpperCase();
+    if (!state || !allowedStates.includes(state)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export function selectMeetingGuideFeedsForLocation(
+  feeds: MeetingGuideFeedConfig[],
+  location: MeetingGuideFeedLocation | null | undefined,
+): MeetingGuideFeedConfig[] {
+  if (!location || !Number.isFinite(location.lat) || !Number.isFinite(location.lng)) {
+    return feeds;
+  }
+
+  const scored = feeds
+    .map((feed) => {
+      if (!matchesAdministrativeCoverage(feed, location)) {
+        return null;
+      }
+      const distanceMiles = feedCoverageDistanceMiles(feed, location);
+      const insideRadius =
+        distanceMiles === null ||
+        typeof feed.coverageRadiusMiles !== "number" ||
+        distanceMiles <= feed.coverageRadiusMiles;
+      return {
+        feed,
+        distanceMiles,
+        insideRadius,
+      };
+    })
+    .filter(
+      (
+        entry,
+      ): entry is {
+        feed: MeetingGuideFeedConfig;
+        distanceMiles: number | null;
+        insideRadius: boolean;
+      } => entry !== null,
+    );
+
+  const inside = scored
+    .filter((entry) => entry.insideRadius)
+    .sort(
+      (left, right) =>
+        (left.distanceMiles ?? Number.POSITIVE_INFINITY) -
+        (right.distanceMiles ?? Number.POSITIVE_INFINITY),
+    )
+    .map((entry) => entry.feed);
+  if (inside.length > 0) {
+    return inside;
+  }
+
+  const adminOnly = scored
+    .filter((entry) => entry.distanceMiles === null)
+    .map((entry) => entry.feed);
+  if (adminOnly.length > 0) {
+    return adminOnly;
+  }
+
+  return feeds;
 }
 
 export function normalizeMeetingGuideMeeting(value: unknown): NormalizedMeetingGuideMeeting | null {

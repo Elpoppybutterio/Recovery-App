@@ -9,6 +9,7 @@ import {
   type GestureResponderEvent,
 } from "react-native";
 import Svg, { Path } from "react-native-svg";
+import { normalizeUsDateInput, parseUsDateToIso } from "../lib/dateInput";
 import {
   applyHouseDefaultsToResidentDraft,
   createResidentConsentRecordFromDraft,
@@ -38,6 +39,7 @@ import {
   normalizeSignatureValueToRef,
   type SignatureRef,
 } from "../lib/signatures/signatureStore";
+import { normalizeUsPhoneInput } from "../lib/phone";
 import { getRuleSetForHouse } from "../lib/soberHouse/selectors";
 
 const INPUT_PLACEHOLDER_COLOR = "rgba(245,243,255,0.45)";
@@ -86,7 +88,7 @@ function normalizeIntegerInput(value: string): string {
 }
 
 function isValidDateInput(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+  return parseUsDateToIso(value) !== null;
 }
 
 function isValidTimeInput(value: string): boolean {
@@ -269,7 +271,7 @@ export function SoberHouseResidentManager({
         return;
       }
       if (!isValidDateInput(draft.moveInDate)) {
-        setResidentStatus("Move-in date must be YYYY-MM-DD.");
+        setResidentStatus("Move-in date must be MM-DD-YYYY.");
         return;
       }
     }
@@ -638,9 +640,12 @@ export function SoberHouseResidentManager({
                 style={styles.input}
                 value={draft.moveInDate}
                 onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, moveInDate: value }))
+                  updateDraft((current) => ({
+                    ...current,
+                    moveInDate: normalizeUsDateInput(value),
+                  }))
                 }
-                placeholder="YYYY-MM-DD"
+                placeholder="MM-DD-YYYY"
                 placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
               />
               <Text style={styles.label}>Room / bed</Text>
@@ -668,7 +673,10 @@ export function SoberHouseResidentManager({
                 style={styles.input}
                 value={draft.emergencyContactPhone}
                 onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, emergencyContactPhone: value }))
+                  updateDraft((current) => ({
+                    ...current,
+                    emergencyContactPhone: normalizeUsPhoneInput(value),
+                  }))
                 }
                 keyboardType="phone-pad"
                 placeholder="(555) 555-1212"
@@ -801,7 +809,10 @@ export function SoberHouseResidentManager({
                         style={styles.input}
                         value={draft.employerPhone}
                         onChangeText={(value) =>
-                          updateDraft((current) => ({ ...current, employerPhone: value }))
+                          updateDraft((current) => ({
+                            ...current,
+                            employerPhone: normalizeUsPhoneInput(value),
+                          }))
                         }
                         keyboardType="phone-pad"
                         placeholder="(555) 555-3131"
@@ -924,7 +935,10 @@ export function SoberHouseResidentManager({
                     style={styles.input}
                     value={draft.sponsorPhone}
                     onChangeText={(value) =>
-                      updateDraft((current) => ({ ...current, sponsorPhone: value }))
+                      updateDraft((current) => ({
+                        ...current,
+                        sponsorPhone: normalizeUsPhoneInput(value),
+                      }))
                     }
                     keyboardType="phone-pad"
                     placeholder="(555) 555-4242"
@@ -1143,10 +1157,10 @@ export function SoberHouseResidentManager({
                             onChangeText={(value) =>
                               updateDraft((current) => ({
                                 ...current,
-                                oneOnOneScheduledDate: value,
+                                oneOnOneScheduledDate: normalizeUsDateInput(value),
                               }))
                             }
-                            placeholder="YYYY-MM-DD"
+                            placeholder="MM-DD-YYYY"
                             placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
                           />
                         </>

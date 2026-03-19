@@ -1,4 +1,6 @@
 import { loadSignatureFileSystemModule } from "../signatures/signatureStore";
+import { formatIsoToUsDate, parseUsDateToIso } from "../dateInput";
+import { formatUsPhoneDisplay } from "../phone";
 import { createEntityId } from "./defaults";
 import { getRuleSetForHouse } from "./selectors";
 import type {
@@ -94,10 +96,10 @@ export function createResidentWizardDraftFromProfiles(
     firstName: housing.firstName,
     lastName: housing.lastName,
     assignedHouseId: housing.houseId,
-    moveInDate: housing.moveInDate,
+    moveInDate: formatIsoToUsDate(housing.moveInDate),
     roomOrBed: housing.roomOrBed,
     emergencyContactName: housing.emergencyContactName,
-    emergencyContactPhone: housing.emergencyContactPhone,
+    emergencyContactPhone: formatUsPhoneDisplay(housing.emergencyContactPhone),
     programPhaseOnEntry: housing.programPhaseOnEntry,
     housingNotes: housing.notes,
     isHouseManager: requirement.isHouseManager,
@@ -109,7 +111,7 @@ export function createResidentWizardDraftFromProfiles(
     oneOnOneAssignedStaffAssignmentId: requirement.oneOnOneAssignedStaffAssignmentId,
     oneOnOneFrequency: requirement.oneOnOneFrequency,
     oneOnOneWeekday: requirement.oneOnOneWeekday,
-    oneOnOneScheduledDate: requirement.oneOnOneScheduledDate,
+    oneOnOneScheduledDate: formatIsoToUsDate(requirement.oneOnOneScheduledDate),
     oneOnOneTimeLocalHhmm: requirement.oneOnOneTimeLocalHhmm,
     oneOnOneLeadTimeMinutes: requirement.oneOnOneLeadTimeMinutes,
     oneOnOneAddToCalendar: requirement.oneOnOneAddToCalendar,
@@ -118,14 +120,14 @@ export function createResidentWizardDraftFromProfiles(
     currentlyEmployed: requirement.currentlyEmployed,
     employerName: requirement.employerName,
     employerAddress: requirement.employerAddress,
-    employerPhone: requirement.employerPhone,
+    employerPhone: formatUsPhoneDisplay(requirement.employerPhone),
     expectedWorkScheduleNotes: requirement.expectedWorkScheduleNotes,
     jobApplicationsRequiredPerWeek: requirement.jobApplicationsRequiredPerWeek,
     meetingsRequiredWeekly: requirement.meetingsRequiredWeekly,
     meetingsRequiredCount: requirement.meetingsRequiredCount,
     sponsorPresent: requirement.sponsorPresent,
     sponsorName: requirement.sponsorName,
-    sponsorPhone: requirement.sponsorPhone,
+    sponsorPhone: formatUsPhoneDisplay(requirement.sponsorPhone),
     sponsorContactFrequency: requirement.sponsorContactFrequency,
     residentCurfewOverrideEnabled: requirement.residentCurfewOverrideEnabled,
     residentCurfewWeekday: requirement.residentCurfewWeekday,
@@ -202,10 +204,10 @@ export function createResidentHousingProfileFromDraft(
     houseId: draft.assignedHouseId,
     firstName: draft.firstName.trim(),
     lastName: draft.lastName.trim(),
-    moveInDate: draft.moveInDate,
+    moveInDate: parseUsDateToIso(draft.moveInDate) ?? draft.moveInDate,
     roomOrBed: draft.roomOrBed.trim(),
     emergencyContactName: draft.emergencyContactName.trim(),
-    emergencyContactPhone: draft.emergencyContactPhone.trim(),
+    emergencyContactPhone: formatUsPhoneDisplay(draft.emergencyContactPhone),
     programPhaseOnEntry: draft.programPhaseOnEntry.trim(),
     status: "ACTIVE",
     notes: draft.housingNotes.trim(),
@@ -238,7 +240,7 @@ export function createResidentRequirementProfileFromDraft(
     currentlyEmployed: draft.currentlyEmployed,
     employerName: draft.currentlyEmployed ? draft.employerName.trim() : "",
     employerAddress: draft.currentlyEmployed ? draft.employerAddress.trim() : "",
-    employerPhone: draft.currentlyEmployed ? draft.employerPhone.trim() : "",
+    employerPhone: draft.currentlyEmployed ? formatUsPhoneDisplay(draft.employerPhone) : "",
     expectedWorkScheduleNotes: draft.currentlyEmployed
       ? draft.expectedWorkScheduleNotes.trim()
       : "",
@@ -248,7 +250,7 @@ export function createResidentRequirementProfileFromDraft(
     meetingsRequiredCount: draft.meetingsRequiredWeekly ? draft.meetingsRequiredCount : 0,
     sponsorPresent: draft.sponsorPresent,
     sponsorName: draft.sponsorPresent ? draft.sponsorName.trim() : "",
-    sponsorPhone: draft.sponsorPresent ? draft.sponsorPhone.trim() : "",
+    sponsorPhone: draft.sponsorPresent ? formatUsPhoneDisplay(draft.sponsorPhone) : "",
     sponsorContactFrequency: draft.sponsorPresent ? draft.sponsorContactFrequency.trim() : "",
     residentCurfewOverrideEnabled: draft.residentCurfewOverrideEnabled,
     residentCurfewWeekday: draft.residentCurfewOverrideEnabled ? draft.residentCurfewWeekday : "",
@@ -270,7 +272,7 @@ export function createResidentRequirementProfileFromDraft(
       draft.oneOnOneRequired && draft.oneOnOneFrequency !== "ONCE" ? draft.oneOnOneWeekday : null,
     oneOnOneScheduledDate:
       draft.oneOnOneRequired && draft.oneOnOneFrequency === "ONCE"
-        ? draft.oneOnOneScheduledDate
+        ? (parseUsDateToIso(draft.oneOnOneScheduledDate ?? "") ?? draft.oneOnOneScheduledDate)
         : null,
     oneOnOneTimeLocalHhmm: draft.oneOnOneRequired ? draft.oneOnOneTimeLocalHhmm : "",
     oneOnOneLeadTimeMinutes: draft.oneOnOneRequired ? draft.oneOnOneLeadTimeMinutes : 0,

@@ -8,10 +8,14 @@ import type {
   CorrectiveAction,
   EvidenceItem,
   House,
+  HouseAlertAnnouncement,
+  HouseChore,
   HouseGroup,
+  HouseMeeting,
   HouseRuleSet,
   HouseRuleScopeType,
   MonthlyReport,
+  OneOnOneSession,
   SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
   StaffAssignment,
@@ -56,6 +60,34 @@ export function getStaffAssignmentById(
   assignmentId: string,
 ): StaffAssignment | null {
   return store.staffAssignments.find((assignment) => assignment.id === assignmentId) ?? null;
+}
+
+export function getResidentHouseMemberships(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+): SoberHouseSettingsStore["residentHouseMemberships"] {
+  return store.residentHouseMemberships.filter(
+    (membership) => membership.residentId === residentId,
+  );
+}
+
+export function getActiveResidentHouseMemberships(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+): SoberHouseSettingsStore["residentHouseMemberships"] {
+  return getResidentHouseMemberships(store, residentId).filter(
+    (membership) => membership.status === "ACTIVE",
+  );
+}
+
+export function getPrimaryResidentHouseMembership(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+): SoberHouseSettingsStore["residentHouseMemberships"][number] | null {
+  const activeMemberships = getActiveResidentHouseMemberships(store, residentId);
+  return (
+    activeMemberships.find((membership) => membership.isPrimary) ?? activeMemberships[0] ?? null
+  );
 }
 
 export function getRuleSetForHouse(
@@ -120,6 +152,76 @@ export function getAlertPreferencesForHouse(
       ? houseId === null || preference.houseId === null
       : preference.houseId === houseId,
   );
+}
+
+export function getHouseChoresForResident(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+  houseId: string | null,
+): HouseChore[] {
+  return store.houseChores.filter(
+    (chore) =>
+      chore.status === "ACTIVE" &&
+      chore.houseId === houseId &&
+      (chore.residentId === null || chore.residentId === residentId),
+  );
+}
+
+export function getUpcomingHouseMeetings(
+  store: SoberHouseSettingsStore,
+  houseId: string | null,
+  nowIso: string,
+): HouseMeeting[] {
+  const nowMs = new Date(nowIso).getTime();
+  return [...store.houseMeetings]
+    .filter((meeting) => meeting.status === "ACTIVE" && meeting.houseId === houseId)
+    .filter((meeting) => {
+      const startsAtMs = new Date(meeting.startsAt).getTime();
+      return Number.isFinite(startsAtMs) && startsAtMs >= nowMs;
+    })
+    .sort((left, right) => new Date(left.startsAt).getTime() - new Date(right.startsAt).getTime());
+}
+
+export function getUpcomingOneOnOneSessions(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+  houseId: string | null,
+  nowIso: string,
+): OneOnOneSession[] {
+  const nowMs = new Date(nowIso).getTime();
+  return [...store.oneOnOneSessions]
+    .filter(
+      (session) =>
+        session.status === "ACTIVE" &&
+        session.residentId === residentId &&
+        session.houseId === houseId,
+    )
+    .filter((session) => {
+      const scheduledAtMs = new Date(session.scheduledAt).getTime();
+      return Number.isFinite(scheduledAtMs) && scheduledAtMs >= nowMs;
+    })
+    .sort(
+      (left, right) => new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime(),
+    );
+}
+
+export function getActiveHouseAlertAnnouncements(
+  store: SoberHouseSettingsStore,
+  houseId: string | null,
+  nowIso: string,
+): HouseAlertAnnouncement[] {
+  const nowMs = new Date(nowIso).getTime();
+  return [...store.houseAlertAnnouncements]
+    .filter((announcement) => announcement.status === "ACTIVE" && announcement.houseId === houseId)
+    .filter((announcement) => {
+      const startsAtMs = new Date(announcement.startsAt).getTime();
+      const endsAtMs = announcement.endsAt ? new Date(announcement.endsAt).getTime() : null;
+      if (!Number.isFinite(startsAtMs)) {
+        return false;
+      }
+      return startsAtMs <= nowMs && (endsAtMs === null || endsAtMs >= nowMs);
+    })
+    .sort((left, right) => new Date(right.startsAt).getTime() - new Date(left.startsAt).getTime());
 }
 
 export function getViolationById(
