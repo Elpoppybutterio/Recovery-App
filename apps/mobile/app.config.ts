@@ -104,6 +104,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   const apiUrl = resolveApiUrl(appEnv);
   const jsEngine = resolveJsEngine();
   const newArchEnabled = resolveNewArchEnabled();
+  const runtimeVersion = { policy: "appVersion" as const };
   const updatesConfig =
     appEnv === "production"
       ? config.updates
@@ -119,6 +120,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     slug: "sober-ai",
     icon: "./assets/icon.png",
     version: "0.1.1",
+    runtimeVersion,
     orientation: "portrait",
     scheme: APP_SCHEME,
     userInterfaceStyle: "light",
@@ -129,6 +131,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       icon: "./assets/icon.png",
       bundleIdentifier,
       buildNumber: iosBuildNumber,
+      runtimeVersion,
       infoPlist: {
         ...config.ios?.infoPlist,
         ITSAppUsesNonExemptEncryption: false,
