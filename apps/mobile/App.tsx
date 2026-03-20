@@ -1,7 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { geocodeAsync } from "expo-location";
-import type * as CalendarTypes from "expo-calendar";
 import type * as NotificationsTypes from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -230,6 +229,8 @@ type SponsorConfigResponse = SponsorConfigPayload;
 type SaveSponsorConfigOverrides = {
   sponsorEnabled?: boolean;
   sponsorActive?: boolean;
+  allowCalendarSync?: boolean;
+  allowNotificationReschedule?: boolean;
 };
 
 type LocationStamp = {
@@ -363,7 +364,20 @@ type NotificationBuckets = {
 
 type NotificationContentInputCompat = NotificationsTypes.NotificationContentInput;
 type NotificationDateTriggerInputCompat = NotificationsTypes.DateTriggerInput;
-type CalendarEventInputCompat = Omit<Partial<CalendarTypes.Event>, "id">;
+type CalendarRecurrenceFrequencyCompat = "weekly" | "monthly";
+type CalendarEventInputCompat = {
+  title?: string;
+  notes?: string;
+  startDate?: Date;
+  endDate?: Date;
+  location?: string;
+  alarms?: Array<{ relativeOffset: number }>;
+  recurrenceRule?: {
+    frequency: CalendarRecurrenceFrequencyCompat;
+    interval?: number;
+    daysOfTheWeek?: Array<{ dayOfTheWeek: number }>;
+  };
+};
 type CalendarDialogResultCompat = {
   action?: string;
   id?: string | null;
@@ -1194,6 +1208,33 @@ function sponsorCalendarEventFingerprintStorageKey(userId: string): string {
   return `${SPONSOR_CALENDAR_EVENT_FINGERPRINT_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+const CALENDAR_EVENT_ID_MAX_LENGTH = 1024;
+const CALENDAR_FINGERPRINT_MAX_LENGTH = 512;
+
+function isPlausibleCalendarEventId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.trim().length <= CALENDAR_EVENT_ID_MAX_LENGTH
+  );
+}
+
+function isPlausibleCalendarFingerprint(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.trim().length <= CALENDAR_FINGERPRINT_MAX_LENGTH
+  );
+}
+
+function isPlausibleCalendarEventIdArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) => isPlausibleCalendarEventId(entry)) &&
+    value.length <= 64
+  );
+}
+
 function sponsorAlertFingerprintStorageKey(userId: string): string {
   return `${SPONSOR_ALERT_FINGERPRINT_STORAGE_KEY_PREFIX}${userId}`;
 }
@@ -1281,24 +1322,160 @@ function radiusMilesFromMeetingsLocationFilter(
   return currentRadiusMiles > 0 && currentRadiusMiles < 50 ? currentRadiusMiles : 50;
 }
 
-function toCalendarDayOfWeek(code: WeekdayCode): CalendarTypes.DayOfTheWeek {
+function toCalendarDayOfWeek(code: WeekdayCode): number {
   switch (code) {
     case "MON":
-      return Calendar.DayOfTheWeek.Monday;
+      return 1;
     case "TUE":
-      return Calendar.DayOfTheWeek.Tuesday;
+      return 2;
     case "WED":
-      return Calendar.DayOfTheWeek.Wednesday;
+      return 3;
     case "THU":
-      return Calendar.DayOfTheWeek.Thursday;
+      return 4;
     case "FRI":
-      return Calendar.DayOfTheWeek.Friday;
+      return 5;
     case "SAT":
-      return Calendar.DayOfTheWeek.Saturday;
+      return 6;
     case "SUN":
     default:
-      return Calendar.DayOfTheWeek.Sunday;
+      return 7;
   }
+}
+
+function toIcsWeekday(dayOfWeek: number): string {
+  switch (dayOfWeek) {
+    case 1:
+      return "MO";
+    case 2:
+      return "TU";
+    case 3:
+      return "WE";
+    case 4:
+      return "TH";
+    case 5:
+      return "FR";
+    case 6:
+      return "SA";
+    case 7:
+    default:
+      return "SU";
+  }
+}
+
+function formatIcsDateUtc(date: Date): string {
+  const year = date.getUTCFullYear().toString().padStart(4, "0");
+  const month = (date.getUTCMonth() + 1).toString().padStart(2, "0");
+  const day = date.getUTCDate().toString().padStart(2, "0");
+  const hours = date.getUTCHours().toString().padStart(2, "0");
+  const minutes = date.getUTCMinutes().toString().padStart(2, "0");
+  const seconds = date.getUTCSeconds().toString().padStart(2, "0");
+  return `${year}${month}${day}T${hours}${minutes}${seconds}Z`;
+}
+
+function escapeIcsText(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\r?\n/g, "\\n")
+    .replace(/;/g, "\\;")
+    .replace(/,/g, "\\,");
+}
+
+function buildIcsAlarmTrigger(relativeOffsetMinutes: number): string {
+  const absoluteMinutes = Math.max(0, Math.trunc(Math.abs(relativeOffsetMinutes)));
+  return `${relativeOffsetMinutes > 0 ? "" : "-"}PT${absoluteMinutes}M`;
+}
+
+function buildIcsRecurrenceRule(
+  recurrenceRule: CalendarEventInputCompat["recurrenceRule"],
+): string | null {
+  if (!recurrenceRule) {
+    return null;
+  }
+
+  const frequency =
+    recurrenceRule.frequency === "monthly"
+      ? "FREQ=MONTHLY"
+      : recurrenceRule.frequency === "weekly"
+        ? "FREQ=WEEKLY"
+        : null;
+  if (!frequency) {
+    return null;
+  }
+
+  const parts = [frequency];
+  if (
+    typeof recurrenceRule.interval === "number" &&
+    Number.isFinite(recurrenceRule.interval) &&
+    recurrenceRule.interval > 1
+  ) {
+    parts.push(`INTERVAL=${Math.trunc(recurrenceRule.interval)}`);
+  }
+  if (recurrenceRule.frequency === "weekly" && recurrenceRule.daysOfTheWeek?.length) {
+    parts.push(
+      `BYDAY=${recurrenceRule.daysOfTheWeek.map((entry) => toIcsWeekday(entry.dayOfTheWeek)).join(",")}`,
+    );
+  }
+  return parts.join(";");
+}
+
+function sanitizeCalendarFilenameSegment(value: string): string {
+  const sanitized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return sanitized.length > 0 ? sanitized.slice(0, 48) : "event";
+}
+
+function buildCalendarFileContents(eventDetails: CalendarEventInputCompat, uid: string): string {
+  const now = new Date();
+  const startDate = eventDetails.startDate ?? now;
+  const endDate =
+    eventDetails.endDate && eventDetails.endDate > startDate
+      ? eventDetails.endDate
+      : new Date(startDate.getTime() + 60 * 60 * 1000);
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Sober AI//Recovery Calendar//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "BEGIN:VEVENT",
+    `UID:${uid}`,
+    `DTSTAMP:${formatIcsDateUtc(now)}`,
+    `DTSTART:${formatIcsDateUtc(startDate)}`,
+    `DTEND:${formatIcsDateUtc(endDate)}`,
+    `SUMMARY:${escapeIcsText(eventDetails.title?.trim() || "Sober AI Event")}`,
+  ];
+
+  if (eventDetails.location?.trim()) {
+    lines.push(`LOCATION:${escapeIcsText(eventDetails.location.trim())}`);
+  }
+  if (eventDetails.notes?.trim()) {
+    lines.push(`DESCRIPTION:${escapeIcsText(eventDetails.notes.trim())}`);
+  }
+
+  const recurrenceRule = buildIcsRecurrenceRule(eventDetails.recurrenceRule);
+  if (recurrenceRule) {
+    lines.push(`RRULE:${recurrenceRule}`);
+  }
+
+  for (const alarm of eventDetails.alarms ?? []) {
+    if (
+      typeof alarm?.relativeOffset !== "number" ||
+      !Number.isFinite(alarm.relativeOffset) ||
+      Math.abs(alarm.relativeOffset) > 7 * 24 * 60
+    ) {
+      continue;
+    }
+    lines.push("BEGIN:VALARM");
+    lines.push(`TRIGGER:${buildIcsAlarmTrigger(alarm.relativeOffset)}`);
+    lines.push("ACTION:DISPLAY");
+    lines.push(`DESCRIPTION:${escapeIcsText(eventDetails.title?.trim() || "Sober AI Event")}`);
+    lines.push("END:VALARM");
+  }
+
+  lines.push("END:VEVENT", "END:VCALENDAR");
+  return lines.join("\r\n");
 }
 
 function formatError(error: unknown): string {
@@ -1455,9 +1632,6 @@ function loadOptionalModule<T>(moduleName: string): T | null {
       case "react-native-maps":
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("react-native-maps") as T;
-      case "expo-calendar":
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        return require("expo-calendar") as T;
       case "expo-notifications":
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-notifications") as T;
@@ -1469,6 +1643,9 @@ function loadOptionalModule<T>(moduleName: string): T | null {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           return require("expo-file-system") as T;
         }
+      case "expo-sharing":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        return require("expo-sharing") as T;
       case "expo-speech":
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-speech") as T;
@@ -1487,33 +1664,6 @@ const mapsModule = loadOptionalModule<typeof import("react-native-maps")>("react
 const MapViewCompat: any = mapsModule?.default ?? null;
 const MarkerCompat: any = mapsModule?.Marker ?? null;
 const mapsRuntimeAvailable = Boolean(MapViewCompat && MarkerCompat);
-
-const calendarModuleRaw = loadOptionalModule<typeof import("expo-calendar")>("expo-calendar");
-const calendarModule =
-  calendarModuleRaw ??
-  ({
-    DayOfTheWeek: {
-      Monday: 1,
-      Tuesday: 2,
-      Wednesday: 3,
-      Thursday: 4,
-      Friday: 5,
-      Saturday: 6,
-      Sunday: 7,
-    },
-    Frequency: {
-      WEEKLY: "weekly",
-      MONTHLY: "monthly",
-    },
-    EntityTypes: {
-      EVENT: "event",
-    },
-    createEventInCalendarAsync: async () => {
-      throw new Error("calendar_unavailable");
-    },
-  } as const);
-const Calendar: any = calendarModule;
-const calendarRuntimeAvailable = Boolean(calendarModuleRaw);
 
 const notificationsModuleRaw =
   loadOptionalModule<typeof import("expo-notifications")>("expo-notifications");
@@ -1773,13 +1923,15 @@ export default function App() {
       disableDeviceFallback?: boolean;
     }) => Promise<{ success: boolean; error?: string }>;
   };
-  const iosLaunchSafeMode =
+  const iosForcedSafeBoot =
     Platform.OS === "ios" && process.env.EXPO_PUBLIC_IOS_SAFE_BOOT?.trim() === "1";
   const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
   const appEnvFromProcess = typeof process.env.APP_ENV === "string" ? process.env.APP_ENV : "";
   const appEnvFromConfig = typeof extra.appEnv === "string" ? extra.appEnv : "";
   const resolvedAppEnv = appEnvFromProcess || appEnvFromConfig || "development";
-  const isDiagnosticsEnabled = process.env.APP_ENV !== "production";
+  const isDiagnosticsEnabled = resolvedAppEnv !== "production";
+  const iosStartupCompatibilityGuardEnabled =
+    Platform.OS === "ios" && (iosForcedSafeBoot || !__DEV__);
   const apiUrlFromEnv =
     typeof process.env.EXPO_PUBLIC_API_URL === "string"
       ? process.env.EXPO_PUBLIC_API_URL.trim()
@@ -2004,6 +2156,7 @@ export default function App() {
   const [sponsorActive, setSponsorActive] = useState(true);
   const [sponsorLeadMinutes, setSponsorLeadMinutes] = useState<SponsorLeadMinutes>(5);
   const [sponsorSaving, setSponsorSaving] = useState(false);
+  const [setupFinishing, setSetupFinishing] = useState(false);
   const [sponsorStatus, setSponsorStatus] = useState<string | null>(null);
   const [calendarStatus, setCalendarStatus] = useState("Sponsor calendar not added yet.");
   const [meetingAutoAddToCalendar, setMeetingAutoAddToCalendar] = useState(true);
@@ -2099,6 +2252,7 @@ export default function App() {
   const [locationIssue, setLocationIssue] = useState<LocationIssue>(null);
   const locationIssueRef = useRef<LocationIssue>(null);
   const locationPermissionAlertShownRef = useRef<LocationIssue>(null);
+  const locationPermissionAlertArmedRef = useRef(false);
   const mapRef = useRef<any>(null);
   const rootScrollRef = useRef<ScrollView | null>(null);
   const meetingsRequestInFlightRef = useRef(false);
@@ -2107,7 +2261,6 @@ export default function App() {
   const refreshMeetingsRef = useRef<
     ((options?: { location?: LocationStamp | null; radiusMiles?: number }) => Promise<void>) | null
   >(null);
-  const requestLocationPermissionRef = useRef<(() => Promise<LocationStamp | null>) | null>(null);
   const currentLocationRef = useRef<LocationStamp | null>(null);
   const geocodedAddressCacheRef = useRef<
     Record<string, { lat: number; lng: number; source: MeetingGeoSource } | null>
@@ -2117,14 +2270,12 @@ export default function App() {
   const bootstrapStartedRef = useRef(false);
   const soberHouseUnlockPromptedRef = useRef(false);
   const soberHouseScheduleSyncKeyRef = useRef<string | null>(null);
+  const dashboardLocationHandoffHandledRef = useRef(false);
   const localAuthenticationModuleRef = useRef<LocalAuthenticationModule | null | undefined>(
     undefined,
   );
   const setupStep4RefreshLocationKeyRef = useRef<string | null>(null);
   const departurePromptedAttendanceRef = useRef<string | null>(null);
-  const saveSponsorConfigRef = useRef<(overrides?: SaveSponsorConfigOverrides) => Promise<boolean>>(
-    async () => false,
-  );
   const playbackRef = useRef<any>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
@@ -3543,7 +3694,7 @@ export default function App() {
     [isLocalhostApiUrl],
   );
   const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
-  const calendarRuntimeEnabled = Platform.OS === "ios" && calendarRuntimeAvailable;
+  const calendarRuntimeEnabled = Platform.OS === "ios";
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
     if (!notificationsRuntimeEnabled) {
@@ -3567,7 +3718,37 @@ export default function App() {
       eventId: string | null;
       errorCode: "none" | "permission" | "unavailable";
     }> => {
-      if (!calendarRuntimeEnabled || typeof Calendar.createEventInCalendarAsync !== "function") {
+      if (!calendarRuntimeEnabled) {
+        return {
+          saved: false,
+          action: null,
+          eventId: null,
+          errorCode: "unavailable",
+        };
+      }
+
+      type FileSystemWriteModule = {
+        cacheDirectory?: string | null;
+        writeAsStringAsync?: (uri: string, contents: string) => Promise<void>;
+      };
+      type SharingModule = {
+        isAvailableAsync?: () => Promise<boolean>;
+        shareAsync?: (
+          uri: string,
+          options?: {
+            UTI?: string;
+            mimeType?: string;
+            dialogTitle?: string;
+          },
+        ) => Promise<void>;
+      };
+
+      const fileSystemModule = loadOptionalModule<FileSystemWriteModule>("expo-file-system");
+      const sharingModule = loadOptionalModule<SharingModule>("expo-sharing");
+      if (
+        !fileSystemModule?.cacheDirectory ||
+        typeof fileSystemModule.writeAsStringAsync !== "function"
+      ) {
         return {
           saved: false,
           action: null,
@@ -3577,23 +3758,63 @@ export default function App() {
       }
 
       try {
-        const result = (await Calendar.createEventInCalendarAsync(
-          eventDetails,
-        )) as CalendarDialogResultCompat;
-        const action = typeof result?.action === "string" ? result.action : null;
-        return {
-          saved: action === "saved" || action === "done",
+        const title = eventDetails.title?.trim() || "Sober AI Event";
+        const uid = `soberai-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const fileUri = `${fileSystemModule.cacheDirectory}${sanitizeCalendarFilenameSegment(title)}-${Date.now()}.ics`;
+        const contents = buildCalendarFileContents(eventDetails, uid);
+        console.log("[calendar] composer open", {
+          title,
+        });
+
+        await fileSystemModule.writeAsStringAsync(fileUri, contents);
+
+        const sharingAvailable =
+          typeof sharingModule?.isAvailableAsync === "function"
+            ? await sharingModule.isAvailableAsync()
+            : false;
+
+        if (sharingAvailable && typeof sharingModule?.shareAsync === "function") {
+          await sharingModule.shareAsync(fileUri, {
+            UTI: "com.apple.ical.ics",
+            mimeType: "text/calendar",
+            dialogTitle: title,
+          });
+        } else {
+          await Share.share({
+            title,
+            url: fileUri,
+            message: `Import "${title}" into Calendar.`,
+          });
+        }
+
+        const result: CalendarDialogResultCompat = {
+          action: "shared",
+          id: `ics:${uid}`,
+        };
+        const action = result.action ?? null;
+        console.log("[calendar] composer result", {
+          title,
           action,
-          eventId: typeof result?.id === "string" && result.id.length > 0 ? result.id : null,
+          saved: true,
+          hasEventId: true,
+        });
+        return {
+          saved: true,
+          action,
+          eventId: result.id ?? null,
           errorCode: "none",
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
+        console.log("[calendar] composer failed", {
+          title: eventDetails.title ?? "untitled",
+          message,
+        });
         return {
           saved: false,
           action: null,
           eventId: null,
-          errorCode: /calendar|permission/i.test(message) ? "permission" : "unavailable",
+          errorCode: /permission/i.test(message) ? "permission" : "unavailable",
         };
       }
     },
@@ -3730,8 +3951,10 @@ export default function App() {
   );
 
   const requestLocationPermission = useCallback(async (): Promise<LocationStamp | null> => {
+    locationPermissionAlertArmedRef.current = true;
     const position = await readCurrentLocation(true);
     if (position) {
+      locationPermissionAlertArmedRef.current = false;
       setMeetingsStatus("Location enabled for distance and arrival detection.");
       return position;
     }
@@ -3752,7 +3975,7 @@ export default function App() {
   }, [readCurrentLocation]);
 
   const refreshDeviceLocationOnFocus = useCallback(async (): Promise<LocationStamp | null> => {
-    if (iosLaunchSafeMode) {
+    if (iosStartupCompatibilityGuardEnabled) {
       return null;
     }
     const permissionState = await readLocationPermissionStates();
@@ -3776,7 +3999,7 @@ export default function App() {
       await refreshMeetingsRef.current?.({ location: position });
     }
     return position;
-  }, [iosLaunchSafeMode, readCurrentLocation]);
+  }, [iosStartupCompatibilityGuardEnabled, readCurrentLocation]);
 
   const refreshDiagnosticsLocation = useCallback(async () => {
     const permissions = await readLocationPermissionStates();
@@ -5142,10 +5365,6 @@ export default function App() {
   }, [refreshMeetings]);
 
   useEffect(() => {
-    requestLocationPermissionRef.current = requestLocationPermission;
-  }, [requestLocationPermission]);
-
-  useEffect(() => {
     currentLocationRef.current = currentLocation;
   }, [currentLocation]);
 
@@ -5443,7 +5662,7 @@ export default function App() {
       formatUsPhoneDisplay(residentProfile?.emergencyContactPhone ?? ""),
     );
     setWizardResidentProgramPhase(residentProfile?.programPhaseOnEntry ?? "");
-    setWizardJusticeTrack(mode === "C" ? "PROBATION_PAROLE" : "NONE");
+    setWizardJusticeTrack(wizardJusticeTrack);
     setWizardSponsorKneesSuggested(sponsorEnabled ? (sponsorKneesSuggested ?? true) : null);
     setWizardRecoverySubstances(recoverySubstances);
     setWizardMeetingSignatureRequired(meetingSignatureRequired);
@@ -5461,6 +5680,7 @@ export default function App() {
     sponsorEnabled,
     sponsorKneesSuggested,
     recoverySubstances,
+    wizardJusticeTrack,
   ]);
 
   const nextSetupStep = useCallback(async () => {
@@ -5613,15 +5833,6 @@ export default function App() {
         setSponsorEnabled(true);
         setSponsorActive(wizardWantsReminders);
         setSponsorEnabledAtIso((current) => current ?? new Date().toISOString());
-        void (async () => {
-          const saved = await saveSponsorConfigRef.current({
-            sponsorEnabled: true,
-            sponsorActive: wizardWantsReminders,
-          });
-          if (!saved) {
-            setSponsorStatus("Sponsor auto-save failed. You can continue and retry from Settings.");
-          }
-        })();
       } else {
         setWizardWantsReminders(false);
       }
@@ -5784,6 +5995,78 @@ export default function App() {
     }
   }, [apiUrl, authHeader, enableSponsorApiSync, formatApiErrorWithHint]);
 
+  const sanitizeStoredCalendarStateOnLaunch = useCallback(async () => {
+    console.log("[startup] calendar state audit begin");
+
+    const clearedKeys: string[] = [];
+    const removeCalendarKey = async (storageKey: string, label: string) => {
+      try {
+        await AsyncStorage.removeItem(storageKey);
+      } catch {
+        // Best effort cleanup only.
+      }
+      clearedKeys.push(label);
+    };
+
+    try {
+      const sponsorEventId = await AsyncStorage.getItem(sponsorCalendarEventStorage);
+      if (sponsorEventId !== null && !isPlausibleCalendarEventId(sponsorEventId)) {
+        await removeCalendarKey(sponsorCalendarEventStorage, "sponsorEventId");
+      }
+    } catch {
+      await removeCalendarKey(sponsorCalendarEventStorage, "sponsorEventId");
+    }
+
+    try {
+      const sponsorFingerprint = await AsyncStorage.getItem(sponsorCalendarEventFingerprintStorage);
+      if (sponsorFingerprint !== null && !isPlausibleCalendarFingerprint(sponsorFingerprint)) {
+        await removeCalendarKey(sponsorCalendarEventFingerprintStorage, "sponsorEventFingerprint");
+      }
+    } catch {
+      await removeCalendarKey(sponsorCalendarEventFingerprintStorage, "sponsorEventFingerprint");
+    }
+
+    try {
+      const milestoneEventIdsRaw = await AsyncStorage.getItem(sobrietyMilestoneEventIdsStorage);
+      if (milestoneEventIdsRaw !== null) {
+        try {
+          const parsed = JSON.parse(milestoneEventIdsRaw) as unknown;
+          if (!isPlausibleCalendarEventIdArray(parsed)) {
+            await removeCalendarKey(sobrietyMilestoneEventIdsStorage, "sobrietyMilestoneEventIds");
+          }
+        } catch {
+          await removeCalendarKey(sobrietyMilestoneEventIdsStorage, "sobrietyMilestoneEventIds");
+        }
+      }
+    } catch {
+      await removeCalendarKey(sobrietyMilestoneEventIdsStorage, "sobrietyMilestoneEventIds");
+    }
+
+    try {
+      const milestoneSyncDate = await AsyncStorage.getItem(sobrietyMilestoneSyncDateStorage);
+      if (
+        milestoneSyncDate !== null &&
+        !/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(milestoneSyncDate.trim())
+      ) {
+        await removeCalendarKey(sobrietyMilestoneSyncDateStorage, "sobrietyMilestoneSyncDate");
+      }
+    } catch {
+      await removeCalendarKey(sobrietyMilestoneSyncDateStorage, "sobrietyMilestoneSyncDate");
+    }
+
+    if (clearedKeys.length > 0) {
+      console.log("[startup] calendar state audit cleared", { clearedKeys });
+      return;
+    }
+
+    console.log("[startup] calendar state audit ok");
+  }, [
+    sobrietyMilestoneEventIdsStorage,
+    sobrietyMilestoneSyncDateStorage,
+    sponsorCalendarEventFingerprintStorage,
+    sponsorCalendarEventStorage,
+  ]);
+
   const openPhoneCall = useCallback(
     async (phoneE164?: string | null, source: "button" | "notification" = "button") => {
       const fallbackE164 = toE164FromUsTenDigit(sponsorPhoneDigits);
@@ -5906,12 +6189,13 @@ export default function App() {
 
   const syncSponsorCalendarEvent = useCallback(
     async (reason: string): Promise<boolean> => {
+      console.log("[calendar] sponsor sync requested", { reason });
       if (Platform.OS !== "ios") {
         setCalendarStatus("Calendar sync is iOS-only in this MVP.");
         return false;
       }
       if (!calendarRuntimeEnabled) {
-        setCalendarStatus("Calendar module unavailable in this build. Reinstall the app.");
+        setCalendarStatus("Calendar export is unavailable in this build.");
         return false;
       }
 
@@ -5934,14 +6218,14 @@ export default function App() {
           ? "Monthly"
           : `${sponsorRepeatInterval === 2 ? "Bi-weekly" : "Weekly"} on ${describeWeekdays(sponsorRepeatDaysSorted)}`;
 
-      const recurrenceRule: CalendarTypes.RecurrenceRule =
+      const recurrenceRule: NonNullable<CalendarEventInputCompat["recurrenceRule"]> =
         sponsorRepeatUnit === "MONTHLY"
           ? {
-              frequency: Calendar.Frequency.MONTHLY,
+              frequency: "monthly",
               interval: 1,
             }
           : {
-              frequency: Calendar.Frequency.WEEKLY,
+              frequency: "weekly",
               interval: sponsorRepeatInterval,
               daysOfTheWeek: sponsorRepeatDaysSorted.map((day) => ({
                 dayOfTheWeek: toCalendarDayOfWeek(day),
@@ -5966,13 +6250,11 @@ export default function App() {
       const result = await openCalendarComposer(eventDetails);
       if (!result.saved) {
         if (result.action === "canceled") {
-          setCalendarStatus("Sponsor calendar add canceled.");
+          setCalendarStatus("Sponsor calendar export canceled.");
         } else if (result.errorCode === "permission") {
-          setCalendarStatus(
-            "Calendar add requires the iOS system add flow or previously granted calendar access on this device.",
-          );
+          setCalendarStatus("Calendar export requires an available share destination.");
         } else {
-          setCalendarStatus("Could not open the Calendar add sheet.");
+          setCalendarStatus("Could not open the Calendar export sheet.");
         }
         return false;
       }
@@ -5988,7 +6270,7 @@ export default function App() {
         startAt: nextStart.toISOString(),
         recurrenceSummary,
       });
-      setCalendarStatus(`Sponsor call added to Calendar (${formatDateTimeLabel(nextStart)}).`);
+      setCalendarStatus(`Sponsor calendar file opened (${formatDateTimeLabel(nextStart)}).`);
       return true;
     },
     [
@@ -6011,7 +6293,7 @@ export default function App() {
         return;
       }
       if (!calendarRuntimeEnabled) {
-        setMilestoneCalendarStatus("Calendar module unavailable in this build.");
+        setMilestoneCalendarStatus("Calendar export is unavailable in this build.");
         return;
       }
       if (!sobrietyDateIso) {
@@ -6039,13 +6321,11 @@ export default function App() {
 
       if (!result.saved) {
         if (result.action === "canceled") {
-          setMilestoneCalendarStatus("Sobriety milestone add canceled.");
+          setMilestoneCalendarStatus("Sobriety milestone export canceled.");
         } else if (result.errorCode === "permission") {
-          setMilestoneCalendarStatus(
-            "Calendar add requires the iOS system add flow or previously granted calendar access on this device.",
-          );
+          setMilestoneCalendarStatus("Calendar export requires an available share destination.");
         } else {
-          setMilestoneCalendarStatus("Could not open the Calendar add sheet.");
+          setMilestoneCalendarStatus("Could not open the Calendar export sheet.");
         }
         return;
       }
@@ -6060,7 +6340,9 @@ export default function App() {
         eventId: result.eventId,
         title: nextMilestone.label,
       });
-      setMilestoneCalendarStatus(`Next sobriety milestone added (${nextMilestone.label}).`);
+      setMilestoneCalendarStatus(
+        `Sobriety milestone calendar file opened (${nextMilestone.label}).`,
+      );
     },
     [
       calendarRuntimeEnabled,
@@ -6321,6 +6603,8 @@ export default function App() {
       const effectiveSponsorEnabled = overrides?.sponsorEnabled ?? sponsorEnabled;
       const effectiveSponsorActive = overrides?.sponsorActive ?? sponsorActive;
       const effectivePayloadActive = effectiveSponsorEnabled && effectiveSponsorActive;
+      const allowCalendarSync = overrides?.allowCalendarSync === true;
+      const allowNotificationReschedule = overrides?.allowNotificationReschedule !== false;
 
       if (!effectiveSponsorEnabled) {
         setSponsorStatus("Sponsor is disabled.");
@@ -6374,12 +6658,25 @@ export default function App() {
 
         setSponsorStatus(enableSponsorApiSync ? null : "Sponsor settings saved locally.");
 
-        const [storedEventFingerprint, storedAlertFingerprint] = await Promise.all([
+        const [storedEventFingerprintRaw, storedAlertFingerprint] = await Promise.all([
           AsyncStorage.getItem(sponsorCalendarEventFingerprintStorage),
           AsyncStorage.getItem(sponsorAlertFingerprintStorage),
         ]);
+        const storedEventFingerprint = isPlausibleCalendarFingerprint(storedEventFingerprintRaw)
+          ? storedEventFingerprintRaw
+          : null;
+        if (storedEventFingerprintRaw !== null && storedEventFingerprint === null) {
+          await AsyncStorage.removeItem(sponsorCalendarEventFingerprintStorage);
+          console.log("[calendar] cleared invalid sponsor fingerprint", {
+            reason: "save",
+          });
+        }
 
-        if (storedEventFingerprint !== sponsorEventFingerprint) {
+        if (!allowCalendarSync) {
+          console.log("[calendar] sponsor sync deferred", {
+            reason: "save:not-explicit",
+          });
+        } else if (storedEventFingerprint !== sponsorEventFingerprint) {
           const calendarSaved = await syncSponsorCalendarEvent("save:event-changed");
           if (calendarSaved) {
             await AsyncStorage.setItem(
@@ -6390,7 +6687,16 @@ export default function App() {
             await AsyncStorage.removeItem(sponsorCalendarEventFingerprintStorage);
           }
         } else {
-          const storedEventId = await AsyncStorage.getItem(sponsorCalendarEventStorage);
+          const storedEventIdRaw = await AsyncStorage.getItem(sponsorCalendarEventStorage);
+          const storedEventId = isPlausibleCalendarEventId(storedEventIdRaw)
+            ? storedEventIdRaw
+            : null;
+          if (storedEventIdRaw !== null && storedEventId === null) {
+            await AsyncStorage.removeItem(sponsorCalendarEventStorage);
+            console.log("[calendar] cleared invalid sponsor event id", {
+              reason: "save",
+            });
+          }
           if (storedEventId) {
             setCalendarStatus("Calendar event unchanged.");
           } else {
@@ -6404,9 +6710,9 @@ export default function App() {
           }
         }
 
-        if (storedAlertFingerprint !== sponsorAlertFingerprint) {
+        if (allowNotificationReschedule && storedAlertFingerprint !== sponsorAlertFingerprint) {
           await rescheduleSponsorNotifications("save:alert-changed");
-        } else {
+        } else if (allowNotificationReschedule) {
           setNotificationStatus("Sponsor notifications unchanged.");
         }
         return true;
@@ -6440,9 +6746,145 @@ export default function App() {
     ],
   );
 
-  useEffect(() => {
-    saveSponsorConfigRef.current = saveSponsorConfig;
-  }, [saveSponsorConfig]);
+  const persistRecoveryStateSnapshot = useCallback(
+    async (
+      overrides?: Partial<{
+        mode: RecoveryMode;
+        setupComplete: boolean;
+        sobrietyDateIso: string | null;
+        ninetyDayGoalTarget: number;
+        recoverySubstances: RecoverySubstanceCategory[];
+        meetingSignatureRequired: boolean;
+        sponsorEnabled: boolean;
+        sponsorActive: boolean;
+        sponsorEnabledAtIso: string | null;
+        sponsorKneesSuggested: boolean | null;
+        meetingAutoAddToCalendar: boolean;
+        homeGroupMeetingIds: string[];
+        sponsorName: string;
+        sponsorPhoneDigits: string;
+        sponsorHour12: number;
+        sponsorMinute: number;
+        sponsorMeridiem: "AM" | "PM";
+        sponsorRepeatPreset: RepeatPreset;
+        sponsorRepeatDays: WeekdayCode[];
+        sponsorLeadMinutes: SponsorLeadMinutes;
+        wizardSupervisionMode: SetupSupervisionMode;
+        wizardJusticeTrack: SetupJusticeTrack;
+      }>,
+    ) => {
+      const resolvedSobrietyDateIso = overrides?.sobrietyDateIso ?? sobrietyDateIso;
+      const resolvedSponsorEnabledAtIso =
+        overrides?.sponsorEnabledAtIso !== undefined
+          ? overrides.sponsorEnabledAtIso
+          : sponsorEnabledAtIso;
+      const resolvedProfile = {
+        radiusMiles: meetingRadiusMiles,
+        homeGroupMeetingIds: overrides?.homeGroupMeetingIds ?? homeGroupMeetingIds,
+        sponsorEnabledAtIso: resolvedSponsorEnabledAtIso,
+        ninetyDayGoalTarget: overrides?.ninetyDayGoalTarget ?? ninetyDayGoalTarget,
+        recoverySubstances: overrides?.recoverySubstances ?? recoverySubstances,
+        meetingSignatureRequired: overrides?.meetingSignatureRequired ?? meetingSignatureRequired,
+        sponsorName: overrides?.sponsorName ?? sponsorName,
+        sponsorPhoneDigits: overrides?.sponsorPhoneDigits ?? sponsorPhoneDigits,
+        sponsorHour12: overrides?.sponsorHour12 ?? sponsorHour12,
+        sponsorMinute: overrides?.sponsorMinute ?? sponsorMinute,
+        sponsorMeridiem: overrides?.sponsorMeridiem ?? sponsorMeridiem,
+        sponsorRepeatPreset: overrides?.sponsorRepeatPreset ?? sponsorRepeatPreset,
+        sponsorRepeatDays: overrides?.sponsorRepeatDays ?? sponsorRepeatDaysSorted,
+        sponsorEnabled: overrides?.sponsorEnabled ?? sponsorEnabled,
+        sponsorActive: overrides?.sponsorActive ?? sponsorActive,
+        sponsorLeadMinutes: overrides?.sponsorLeadMinutes ?? sponsorLeadMinutes,
+        sponsorKneesSuggested: overrides?.sponsorKneesSuggested ?? sponsorKneesSuggested,
+        meetingAutoAddToCalendar: overrides?.meetingAutoAddToCalendar ?? meetingAutoAddToCalendar,
+        wizardSupervisionMode: overrides?.wizardSupervisionMode ?? wizardSupervisionMode,
+        wizardJusticeTrack: overrides?.wizardJusticeTrack ?? wizardJusticeTrack,
+      };
+
+      const writes: Promise<unknown>[] = [
+        AsyncStorage.setItem(modeStorage, overrides?.mode ?? mode),
+        AsyncStorage.setItem(
+          setupCompleteStorage,
+          (overrides?.setupComplete ?? setupComplete) ? "true" : "false",
+        ),
+        AsyncStorage.setItem(profileStorage, JSON.stringify(resolvedProfile)),
+        AsyncStorage.setItem(
+          ninetyDayGoalStorage,
+          String(overrides?.ninetyDayGoalTarget ?? ninetyDayGoalTarget),
+        ),
+      ];
+
+      if (resolvedSobrietyDateIso) {
+        writes.push(AsyncStorage.setItem(sobrietyDateStorage, resolvedSobrietyDateIso));
+      } else {
+        writes.push(AsyncStorage.removeItem(sobrietyDateStorage));
+      }
+
+      if (resolvedSponsorEnabledAtIso) {
+        writes.push(AsyncStorage.setItem(sponsorEnabledAtStorage, resolvedSponsorEnabledAtIso));
+      } else {
+        writes.push(AsyncStorage.removeItem(sponsorEnabledAtStorage));
+      }
+
+      await Promise.all(writes);
+    },
+    [
+      homeGroupMeetingIds,
+      meetingAutoAddToCalendar,
+      meetingRadiusMiles,
+      meetingSignatureRequired,
+      mode,
+      modeStorage,
+      ninetyDayGoalStorage,
+      ninetyDayGoalTarget,
+      profileStorage,
+      recoverySubstances,
+      setupComplete,
+      setupCompleteStorage,
+      sobrietyDateIso,
+      sobrietyDateStorage,
+      sponsorActive,
+      sponsorEnabled,
+      sponsorEnabledAtIso,
+      sponsorEnabledAtStorage,
+      sponsorHour12,
+      sponsorKneesSuggested,
+      sponsorLeadMinutes,
+      sponsorMeridiem,
+      sponsorMinute,
+      sponsorName,
+      sponsorPhoneDigits,
+      sponsorRepeatDaysSorted,
+      sponsorRepeatPreset,
+      wizardJusticeTrack,
+      wizardSupervisionMode,
+    ],
+  );
+
+  const completeSetupIntoDashboard = useCallback(
+    async (reason: "wizard-finish" | "settings-save") => {
+      console.log("[wizard] completion handoff", { reason });
+      dashboardLocationHandoffHandledRef.current = true;
+      setMode("A");
+      setHomeScreen("DASHBOARD");
+      setSelectedDayOffset(0);
+      setScreen("LIST");
+      setSelectedMeeting(null);
+
+      console.log("[location] prompt start", { reason });
+      const location = await requestLocationPermission();
+      if (location) {
+        console.log("[location] prompt granted", { reason });
+      } else {
+        console.log("[location] prompt fallback", {
+          reason,
+          locationIssue: locationIssueRef.current ?? "none",
+        });
+      }
+      await refreshMeetings({ location });
+    },
+    [refreshMeetings, requestLocationPermission],
+  );
 
   const syncSoberHouseResidentScheduling = useCallback(
     async (reason: string) => {
@@ -6592,317 +7034,392 @@ export default function App() {
   ]);
 
   const finishSetup = useCallback(async () => {
-    setSetupError(null);
-    const parsedDateIso =
-      wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-        ? sobrietyDateIso
-        : parseUsDateToIso(sobrietyDateInput);
-    if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedDateIso) {
-      setSetupError("Enter sobriety date as MM-DD-YYYY.");
-      setSetupStep(1);
-      return;
-    }
-    const parsedGoal =
-      wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-        ? ninetyDayGoalTarget
-        : parseGoalTargetInput(ninetyDayGoalInput);
-    if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedGoal) {
-      setSetupError("Enter a valid 90-day meeting goal (1 or higher).");
-      setSetupStep(1);
-      return;
-    }
-    if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && !wizardSoberHouseId) {
-      setSetupError("Select the sober house you live in.");
-      setSetupStep(2);
-      return;
-    }
-    if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
-      if (!wizardResidentFirstName.trim() || !wizardResidentLastName.trim()) {
-        setSetupError("Enter your first and last name for sober-house placement.");
-        setSetupStep(2);
-        return;
-      }
-      if (!parseUsDateToIso(wizardResidentMoveInDate)) {
-        setSetupError("Move-in date must use MM-DD-YYYY.");
-        setSetupStep(2);
-        return;
-      }
-      if (!wizardResidentRoomOrBed.trim()) {
-        setSetupError("Enter your room or bed assignment.");
-        setSetupStep(2);
-        return;
-      }
-      if (
-        !wizardResidentEmergencyContactName.trim() ||
-        !wizardResidentEmergencyContactPhone.trim()
-      ) {
-        setSetupError("Enter emergency contact name and phone.");
-        setSetupStep(2);
-        return;
-      }
-      if (!wizardResidentProgramPhase.trim()) {
-        setSetupError("Enter your current program phase.");
-        setSetupStep(2);
-        return;
-      }
-    }
-    if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
-      if (!wizardOrganizationName.trim()) {
-        setSetupError("Enter your organization name.");
-        setSetupStep(2);
-        return;
-      }
-      if (!wizardOrganizationPrimaryContactName.trim()) {
-        setSetupError("Enter the primary contact name.");
-        setSetupStep(2);
-        return;
-      }
-      if (
-        !wizardOrganizationPrimaryEmail.trim() ||
-        !/\S+@\S+\.\S+/.test(wizardOrganizationPrimaryEmail.trim())
-      ) {
-        setSetupError("Enter a valid primary email.");
-        setSetupStep(2);
-        return;
-      }
-    }
-
-    const hasSponsor = wizardHasSponsor === true;
-    const wantsReminders = hasSponsor && wizardWantsReminders === true;
-    if (
-      wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" &&
-      wizardRequiresSponsorDetails &&
-      !hasSponsor
-    ) {
-      setSetupError("Your sober house requires sponsor details.");
-      setSetupStep(3);
-      return;
-    }
-    if (
-      wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-      hasSponsor &&
-      (!normalizedSponsorName || !sponsorPhoneE164)
-    ) {
-      setSetupError("Enter sponsor name and phone.");
-      setSetupStep(3);
-      return;
-    }
-    if (
-      wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-      hasSponsor &&
-      wizardSponsorKneesSuggested === null
-    ) {
-      setSetupError("Choose whether your sponsor suggests praying on your knees.");
-      setSetupStep(4);
-      return;
-    }
-    if (
-      wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-      wantsReminders &&
-      sponsorRepeatUnit === "WEEKLY" &&
-      sponsorRepeatDaysSorted.length === 0
-    ) {
-      setSetupError("Select at least one reminder day.");
-      setSetupStep(6);
-      return;
-    }
-    if (
-      wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-      wizardHasHomeGroup === true &&
-      homeGroupMeetingIds.length === 0
-    ) {
-      setSetupError("Select a home group meeting.");
-      setSetupStep(7);
-      return;
-    }
-    if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && wizardMeetingSignatureRequired === null) {
-      setSetupError("Choose whether signatures are required at meetings.");
-      setSetupStep(7);
+    if (setupFinishing) {
       return;
     }
 
-    if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER") {
-      const resolvedSobrietyDateIso = parsedDateIso as string;
-      const resolvedGoalTarget = parsedGoal as number;
-      const resolvedMeetingSignatureRequired = wizardMeetingSignatureRequired as boolean;
-      setSobrietyDateIso(resolvedSobrietyDateIso);
-      setNinetyDayGoalTarget(resolvedGoalTarget);
-      setNinetyDayGoalInput(String(resolvedGoalTarget));
-      setRecoverySubstances(normalizeRecoverySubstances(wizardRecoverySubstances));
-      setMeetingSignatureRequired(resolvedMeetingSignatureRequired);
-      setSponsorEnabled(hasSponsor);
-      setSponsorActive(wantsReminders);
-      setSponsorKneesSuggested(hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null);
-      if (!hasSponsor) {
-        setSponsorName("");
-        setSponsorPhoneDigits("");
-        setSponsorStatus(null);
-        await cancelNotificationBucket("sponsor");
-      } else {
-        setSponsorEnabledAtIso((current) => current ?? new Date().toISOString());
-        const saved = await saveSponsorConfig({
-          sponsorEnabled: hasSponsor,
-          sponsorActive: wantsReminders,
-        });
-        if (!saved) {
-          setSponsorStatus("Sponsor auto-save failed. Open Settings to retry.");
+    setSetupFinishing(true);
+    try {
+      setSetupError(null);
+      const parsedDateIso =
+        wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+          ? sobrietyDateIso
+          : parseUsDateToIso(sobrietyDateInput);
+      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedDateIso) {
+        setSetupError("Enter sobriety date as MM-DD-YYYY.");
+        setSetupStep(1);
+        return;
+      }
+      const parsedGoal =
+        wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+          ? ninetyDayGoalTarget
+          : parseGoalTargetInput(ninetyDayGoalInput);
+      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedGoal) {
+        setSetupError("Enter a valid 90-day meeting goal (1 or higher).");
+        setSetupStep(1);
+        return;
+      }
+      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && !wizardSoberHouseId) {
+        setSetupError("Select the sober house you live in.");
+        setSetupStep(2);
+        return;
+      }
+      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
+        if (!wizardResidentFirstName.trim() || !wizardResidentLastName.trim()) {
+          setSetupError("Enter your first and last name for sober-house placement.");
+          setSetupStep(2);
+          return;
+        }
+        if (!parseUsDateToIso(wizardResidentMoveInDate)) {
+          setSetupError("Move-in date must use MM-DD-YYYY.");
+          setSetupStep(2);
+          return;
+        }
+        if (!wizardResidentRoomOrBed.trim()) {
+          setSetupError("Enter your room or bed assignment.");
+          setSetupStep(2);
+          return;
+        }
+        if (
+          !wizardResidentEmergencyContactName.trim() ||
+          !wizardResidentEmergencyContactPhone.trim()
+        ) {
+          setSetupError("Enter emergency contact name and phone.");
+          setSetupStep(2);
+          return;
+        }
+        if (!wizardResidentProgramPhase.trim()) {
+          setSetupError("Enter your current program phase.");
+          setSetupStep(2);
+          return;
         }
       }
-    }
+      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
+        if (!wizardOrganizationName.trim()) {
+          setSetupError("Enter your organization name.");
+          setSetupStep(2);
+          return;
+        }
+        if (!wizardOrganizationPrimaryContactName.trim()) {
+          setSetupError("Enter the primary contact name.");
+          setSetupStep(2);
+          return;
+        }
+        if (
+          !wizardOrganizationPrimaryEmail.trim() ||
+          !/\S+@\S+\.\S+/.test(wizardOrganizationPrimaryEmail.trim())
+        ) {
+          setSetupError("Enter a valid primary email.");
+          setSetupStep(2);
+          return;
+        }
+      }
 
-    if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && wizardHasHomeGroup !== true) {
-      setHomeGroupMeetingIds([]);
-    }
+      const hasSponsor = wizardHasSponsor === true;
+      const wantsReminders = hasSponsor && wizardWantsReminders === true;
+      if (
+        wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" &&
+        wizardRequiresSponsorDetails &&
+        !hasSponsor
+      ) {
+        setSetupError("Your sober house requires sponsor details.");
+        setSetupStep(3);
+        return;
+      }
+      if (
+        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
+        hasSponsor &&
+        (!normalizedSponsorName || !sponsorPhoneE164)
+      ) {
+        setSetupError("Enter sponsor name and phone.");
+        setSetupStep(3);
+        return;
+      }
+      if (
+        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
+        hasSponsor &&
+        wizardSponsorKneesSuggested === null
+      ) {
+        setSetupError("Choose whether your sponsor suggests praying on your knees.");
+        setSetupStep(4);
+        return;
+      }
+      if (
+        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
+        wantsReminders &&
+        sponsorRepeatUnit === "WEEKLY" &&
+        sponsorRepeatDaysSorted.length === 0
+      ) {
+        setSetupError("Select at least one reminder day.");
+        setSetupStep(6);
+        return;
+      }
+      if (
+        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
+        wizardHasHomeGroup === true &&
+        homeGroupMeetingIds.length === 0
+      ) {
+        setSetupError("Select a home group meeting.");
+        setSetupStep(7);
+        return;
+      }
+      if (
+        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
+        wizardMeetingSignatureRequired === null
+      ) {
+        setSetupError("Choose whether signatures are required at meetings.");
+        setSetupStep(7);
+        return;
+      }
 
-    let nextSoberHouseStore = soberHouseStore;
-    const soberHouseTimestamp = new Date().toISOString();
-    const actor = { id: devAuthUserId, name: devUserDisplayName };
-    if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
-      nextSoberHouseStore = upsertOrganization(
-        nextSoberHouseStore,
-        actor,
-        {
-          id: nextSoberHouseStore.organization?.id,
-          name: wizardOrganizationName.trim(),
-          primaryContactName: wizardOrganizationPrimaryContactName.trim(),
-          primaryPhone: formatUsPhoneDisplay(wizardOrganizationPrimaryPhone),
-          primaryEmail: wizardOrganizationPrimaryEmail.trim(),
-          notes: wizardOrganizationNotes.trim(),
-          status: "ACTIVE",
-        },
-        soberHouseTimestamp,
-      ).store;
-      const existingOwnerAssignment = nextSoberHouseStore.staffAssignments.find(
-        (assignment) =>
-          assignment.role === "OWNER" &&
-          assignment.email.trim().toLowerCase() ===
-            wizardOrganizationPrimaryEmail.trim().toLowerCase(),
-      );
-      nextSoberHouseStore = upsertStaffAssignment(
-        nextSoberHouseStore,
-        actor,
-        {
-          id: existingOwnerAssignment?.id,
-          firstName:
-            wizardOrganizationPrimaryContactName.trim().split(" ").slice(0, 1).join(" ") || "Owner",
-          lastName:
-            wizardOrganizationPrimaryContactName.trim().split(" ").slice(1).join(" ") || "Operator",
-          phone: formatUsPhoneDisplay(wizardOrganizationPrimaryPhone),
-          email: wizardOrganizationPrimaryEmail.trim(),
-          role: "OWNER",
-          assignedHouseIds: existingOwnerAssignment?.assignedHouseIds ?? [],
-          receiveRealTimeViolationAlerts: true,
-          receiveNearMissAlerts: true,
-          receiveMonthlyReports: true,
-          canApproveExceptions: true,
-          canIssueCorrectiveActions: true,
-          canViewResidentEvidence: true,
-          status: "ACTIVE",
-        },
-        soberHouseTimestamp,
-      ).store;
-      nextSoberHouseStore = upsertUserAccessProfile(
-        nextSoberHouseStore,
-        actor,
-        {
-          linkedUserId: devAuthUserId,
-          role: "OWNER_OPERATOR",
-          organizationId: nextSoberHouseStore.organization?.id ?? null,
-          houseId: null,
-          houseGroupId: null,
-          status: "ACTIVE",
-        },
-        soberHouseTimestamp,
-      ).store;
-    } else if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
-      const residentHouse =
-        nextSoberHouseStore.houses.find((house) => house.id === wizardSoberHouseId) ?? null;
-      nextSoberHouseStore = upsertUserAccessProfile(
-        nextSoberHouseStore,
-        actor,
-        {
-          linkedUserId: devAuthUserId,
-          role: "HOUSE_RESIDENT",
-          organizationId: nextSoberHouseStore.organization?.id ?? null,
-          houseId: wizardSoberHouseId,
-          houseGroupId: residentHouse?.houseGroupId ?? null,
-          status: "ACTIVE",
-        },
-        soberHouseTimestamp,
-      ).store;
-      const baseResidentDraft = applyHouseDefaultsToResidentDraft(
-        nextSoberHouseStore,
-        devAuthUserId,
-        wizardSoberHouseId,
-        createDefaultResidentWizardDraft(devAuthUserId),
-      );
-      nextSoberHouseStore = saveResidentWizardDraft(nextSoberHouseStore, {
-        ...baseResidentDraft,
-        currentStep: 2,
-        firstName: wizardResidentFirstName.trim(),
-        lastName: wizardResidentLastName.trim(),
-        moveInDate: parseUsDateToIso(wizardResidentMoveInDate) ?? wizardResidentMoveInDate,
-        roomOrBed: wizardResidentRoomOrBed.trim(),
-        emergencyContactName: wizardResidentEmergencyContactName.trim(),
-        emergencyContactPhone: formatUsPhoneDisplay(wizardResidentEmergencyContactPhone),
-        programPhaseOnEntry: wizardResidentProgramPhase.trim(),
-        sponsorPresent: hasSponsor,
+      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER") {
+        const resolvedSobrietyDateIso = parsedDateIso as string;
+        const resolvedGoalTarget = parsedGoal as number;
+        const resolvedMeetingSignatureRequired = wizardMeetingSignatureRequired as boolean;
+        setSobrietyDateIso(resolvedSobrietyDateIso);
+        setNinetyDayGoalTarget(resolvedGoalTarget);
+        setNinetyDayGoalInput(String(resolvedGoalTarget));
+        setRecoverySubstances(normalizeRecoverySubstances(wizardRecoverySubstances));
+        setMeetingSignatureRequired(resolvedMeetingSignatureRequired);
+        setSponsorEnabled(hasSponsor);
+        setSponsorActive(wantsReminders);
+        setSponsorKneesSuggested(hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null);
+        if (!hasSponsor) {
+          setSponsorName("");
+          setSponsorPhoneDigits("");
+          setSponsorStatus(null);
+          await cancelNotificationBucket("sponsor");
+        } else {
+          const nextSponsorEnabledAtIso = sponsorEnabledAtIso ?? new Date().toISOString();
+          setSponsorEnabledAtIso(nextSponsorEnabledAtIso);
+          const saved = await saveSponsorConfig({
+            sponsorEnabled: hasSponsor,
+            sponsorActive: wantsReminders,
+            allowCalendarSync: false,
+            allowNotificationReschedule: true,
+          });
+          if (!saved) {
+            setSponsorStatus("Sponsor auto-save failed. Open Settings to retry.");
+          }
+          await persistRecoveryStateSnapshot({
+            mode: "A",
+            setupComplete: true,
+            sobrietyDateIso: resolvedSobrietyDateIso,
+            ninetyDayGoalTarget: resolvedGoalTarget,
+            recoverySubstances: normalizeRecoverySubstances(wizardRecoverySubstances),
+            meetingSignatureRequired: resolvedMeetingSignatureRequired,
+            sponsorEnabled: hasSponsor,
+            sponsorActive: wantsReminders,
+            sponsorEnabledAtIso: nextSponsorEnabledAtIso,
+            sponsorKneesSuggested: hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null,
+            meetingAutoAddToCalendar,
+            homeGroupMeetingIds: wizardHasHomeGroup === true ? homeGroupMeetingIds : [],
+            sponsorName: normalizedSponsorName,
+            sponsorPhoneDigits,
+            wizardSupervisionMode,
+            wizardJusticeTrack,
+          });
+        }
+        if (!hasSponsor) {
+          await persistRecoveryStateSnapshot({
+            mode: "A",
+            setupComplete: true,
+            sobrietyDateIso: resolvedSobrietyDateIso,
+            ninetyDayGoalTarget: resolvedGoalTarget,
+            recoverySubstances: normalizeRecoverySubstances(wizardRecoverySubstances),
+            meetingSignatureRequired: resolvedMeetingSignatureRequired,
+            sponsorEnabled: false,
+            sponsorActive: false,
+            sponsorEnabledAtIso: null,
+            sponsorKneesSuggested: null,
+            meetingAutoAddToCalendar,
+            homeGroupMeetingIds: wizardHasHomeGroup === true ? homeGroupMeetingIds : [],
+            sponsorName: "",
+            sponsorPhoneDigits: "",
+            wizardSupervisionMode,
+            wizardJusticeTrack,
+          });
+        }
+      }
+
+      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && wizardHasHomeGroup !== true) {
+        setHomeGroupMeetingIds([]);
+      }
+
+      let nextSoberHouseStore = soberHouseStore;
+      const soberHouseTimestamp = new Date().toISOString();
+      const actor = { id: devAuthUserId, name: devUserDisplayName };
+      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
+        nextSoberHouseStore = upsertOrganization(
+          nextSoberHouseStore,
+          actor,
+          {
+            id: nextSoberHouseStore.organization?.id,
+            name: wizardOrganizationName.trim(),
+            primaryContactName: wizardOrganizationPrimaryContactName.trim(),
+            primaryPhone: formatUsPhoneDisplay(wizardOrganizationPrimaryPhone),
+            primaryEmail: wizardOrganizationPrimaryEmail.trim(),
+            notes: wizardOrganizationNotes.trim(),
+            status: "ACTIVE",
+          },
+          soberHouseTimestamp,
+        ).store;
+        const existingOwnerAssignment = nextSoberHouseStore.staffAssignments.find(
+          (assignment) =>
+            assignment.role === "OWNER" &&
+            assignment.email.trim().toLowerCase() ===
+              wizardOrganizationPrimaryEmail.trim().toLowerCase(),
+        );
+        nextSoberHouseStore = upsertStaffAssignment(
+          nextSoberHouseStore,
+          actor,
+          {
+            id: existingOwnerAssignment?.id,
+            firstName:
+              wizardOrganizationPrimaryContactName.trim().split(" ").slice(0, 1).join(" ") ||
+              "Owner",
+            lastName:
+              wizardOrganizationPrimaryContactName.trim().split(" ").slice(1).join(" ") ||
+              "Operator",
+            phone: formatUsPhoneDisplay(wizardOrganizationPrimaryPhone),
+            email: wizardOrganizationPrimaryEmail.trim(),
+            role: "OWNER",
+            assignedHouseIds: existingOwnerAssignment?.assignedHouseIds ?? [],
+            receiveRealTimeViolationAlerts: true,
+            receiveNearMissAlerts: true,
+            receiveMonthlyReports: true,
+            canApproveExceptions: true,
+            canIssueCorrectiveActions: true,
+            canViewResidentEvidence: true,
+            status: "ACTIVE",
+          },
+          soberHouseTimestamp,
+        ).store;
+        nextSoberHouseStore = upsertUserAccessProfile(
+          nextSoberHouseStore,
+          actor,
+          {
+            linkedUserId: devAuthUserId,
+            role: "OWNER_OPERATOR",
+            organizationId: nextSoberHouseStore.organization?.id ?? null,
+            houseId: null,
+            houseGroupId: null,
+            status: "ACTIVE",
+          },
+          soberHouseTimestamp,
+        ).store;
+      } else if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
+        const residentHouse =
+          nextSoberHouseStore.houses.find((house) => house.id === wizardSoberHouseId) ?? null;
+        nextSoberHouseStore = upsertUserAccessProfile(
+          nextSoberHouseStore,
+          actor,
+          {
+            linkedUserId: devAuthUserId,
+            role: "HOUSE_RESIDENT",
+            organizationId: nextSoberHouseStore.organization?.id ?? null,
+            houseId: wizardSoberHouseId,
+            houseGroupId: residentHouse?.houseGroupId ?? null,
+            status: "ACTIVE",
+          },
+          soberHouseTimestamp,
+        ).store;
+        const baseResidentDraft = applyHouseDefaultsToResidentDraft(
+          nextSoberHouseStore,
+          devAuthUserId,
+          wizardSoberHouseId,
+          createDefaultResidentWizardDraft(devAuthUserId),
+        );
+        nextSoberHouseStore = saveResidentWizardDraft(nextSoberHouseStore, {
+          ...baseResidentDraft,
+          currentStep: 2,
+          firstName: wizardResidentFirstName.trim(),
+          lastName: wizardResidentLastName.trim(),
+          moveInDate: parseUsDateToIso(wizardResidentMoveInDate) ?? wizardResidentMoveInDate,
+          roomOrBed: wizardResidentRoomOrBed.trim(),
+          emergencyContactName: wizardResidentEmergencyContactName.trim(),
+          emergencyContactPhone: formatUsPhoneDisplay(wizardResidentEmergencyContactPhone),
+          programPhaseOnEntry: wizardResidentProgramPhase.trim(),
+          sponsorPresent: hasSponsor,
+          sponsorName: hasSponsor ? normalizedSponsorName : "",
+          sponsorPhone: hasSponsor ? formatUsPhoneDisplay(sponsorPhoneDigits) : "",
+          sponsorContactFrequency: wizardSelectedSoberHouseRules?.sponsorContact
+            .contactsRequiredPerWeek
+            ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek} per week`
+            : baseResidentDraft.sponsorContactFrequency,
+          updatedAt: soberHouseTimestamp,
+        });
+      } else {
+        nextSoberHouseStore = upsertUserAccessProfile(
+          nextSoberHouseStore,
+          actor,
+          {
+            linkedUserId: devAuthUserId,
+            role: "UNASSIGNED",
+            organizationId: nextSoberHouseStore.organization?.id ?? null,
+            houseId: null,
+            houseGroupId: null,
+            status: "ACTIVE",
+          },
+          soberHouseTimestamp,
+        ).store;
+      }
+      await persistSoberHouseStore(nextSoberHouseStore);
+      await persistRecoveryStateSnapshot({
+        mode: "A",
+        setupComplete: true,
+        sobrietyDateIso:
+          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+            ? sobrietyDateIso
+            : (parsedDateIso as string | null),
+        ninetyDayGoalTarget:
+          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+            ? ninetyDayGoalTarget
+            : (parsedGoal as number),
+        recoverySubstances:
+          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+            ? recoverySubstances
+            : normalizeRecoverySubstances(wizardRecoverySubstances),
+        meetingSignatureRequired:
+          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+            ? meetingSignatureRequired
+            : (wizardMeetingSignatureRequired as boolean),
+        sponsorEnabled: hasSponsor,
+        sponsorActive: wantsReminders,
+        sponsorEnabledAtIso: hasSponsor ? (sponsorEnabledAtIso ?? new Date().toISOString()) : null,
+        sponsorKneesSuggested: hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null,
+        meetingAutoAddToCalendar,
+        homeGroupMeetingIds: wizardHasHomeGroup === true ? homeGroupMeetingIds : [],
         sponsorName: hasSponsor ? normalizedSponsorName : "",
-        sponsorPhone: hasSponsor ? formatUsPhoneDisplay(sponsorPhoneDigits) : "",
-        sponsorContactFrequency: wizardSelectedSoberHouseRules?.sponsorContact
-          .contactsRequiredPerWeek
-          ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek} per week`
-          : baseResidentDraft.sponsorContactFrequency,
-        updatedAt: soberHouseTimestamp,
+        sponsorPhoneDigits: hasSponsor ? sponsorPhoneDigits : "",
+        wizardSupervisionMode,
+        wizardJusticeTrack,
       });
-    } else {
-      nextSoberHouseStore = upsertUserAccessProfile(
-        nextSoberHouseStore,
-        actor,
-        {
-          linkedUserId: devAuthUserId,
-          role: "UNASSIGNED",
-          organizationId: nextSoberHouseStore.organization?.id ?? null,
-          houseId: null,
-          houseGroupId: null,
-          status: "ACTIVE",
-        },
-        soberHouseTimestamp,
-      ).store;
-    }
-    await persistSoberHouseStore(nextSoberHouseStore);
 
-    setSetupComplete(true);
-    setSetupStep(1);
-    if (
-      wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ||
-      wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-    ) {
-      setMode("B");
-      setHomeScreen("SETTINGS");
-    } else if (wizardJusticeTrack !== "NONE") {
-      setMode("C");
-      setHomeScreen("SETTINGS");
-    } else {
-      setMode("A");
-      setHomeScreen("DASHBOARD");
+      setSetupComplete(true);
+      setSetupStep(1);
+      await completeSetupIntoDashboard("wizard-finish");
+    } finally {
+      setSetupFinishing(false);
     }
-    setSelectedDayOffset(0);
-    setScreen("LIST");
-    setSelectedMeeting(null);
-    void refreshMeetings();
   }, [
     cancelNotificationBucket,
+    completeSetupIntoDashboard,
     devAuthUserId,
     devUserDisplayName,
     homeGroupMeetingIds.length,
+    homeGroupMeetingIds,
+    meetingAutoAddToCalendar,
+    meetingSignatureRequired,
     normalizedSponsorName,
     ninetyDayGoalInput,
+    persistRecoveryStateSnapshot,
     persistSoberHouseStore,
-    refreshMeetings,
     saveSponsorConfig,
     soberHouseStore,
     sobrietyDateInput,
+    sobrietyDateIso,
+    sponsorEnabledAtIso,
     wizardOrganizationName,
     wizardOrganizationNotes,
     wizardOrganizationPrimaryContactName,
@@ -6929,6 +7446,12 @@ export default function App() {
     wizardSoberHouseId,
     wizardSupervisionMode,
     wizardWantsReminders,
+    setupFinishing,
+    sponsorEnabled,
+    sponsorActive,
+    sponsorKneesSuggested,
+    recoverySubstances,
+    ninetyDayGoalTarget,
   ]);
 
   const saveRecoveryTileAndOpenDashboard = useCallback(async () => {
@@ -6940,21 +7463,38 @@ export default function App() {
     }
 
     if (sponsorEnabled) {
-      const saved = await saveSponsorConfig();
+      const saved = await saveSponsorConfig({
+        allowCalendarSync: false,
+        allowNotificationReschedule: true,
+      });
       if (!saved) {
         return;
       }
     }
 
+    await persistRecoveryStateSnapshot({
+      mode: "A",
+      setupComplete: true,
+    });
     setSetupComplete(true);
+    setMode("A");
     setHomeScreen("DASHBOARD");
     setScreen("LIST");
     setSelectedMeeting(null);
     setSelectedDayOffset(0);
-    void refreshMeetings();
-  }, [sobrietyDateIso, sponsorEnabled, saveSponsorConfig, refreshMeetings]);
+    await refreshMeetings({
+      location: currentLocationRef.current ?? (await readCurrentLocation(false)),
+    });
+  }, [
+    persistRecoveryStateSnapshot,
+    readCurrentLocation,
+    refreshMeetings,
+    sobrietyDateIso,
+    sponsorEnabled,
+    saveSponsorConfig,
+  ]);
 
-  const saveSobrietyDateFromSettings = useCallback(() => {
+  const saveSobrietyDateFromSettings = useCallback(async () => {
     const parsedDateIso = parseUsDateToIso(sobrietyDateInput);
     if (!parsedDateIso) {
       setSobrietyDateStatus("Enter date as MM-DD-YYYY.");
@@ -6962,17 +7502,19 @@ export default function App() {
     }
     setSobrietyDateIso(parsedDateIso);
     setSobrietyDateInput(formatIsoToUsDate(parsedDateIso));
+    await persistRecoveryStateSnapshot({ sobrietyDateIso: parsedDateIso });
     setSobrietyDateStatus("Sobriety date saved.");
-  }, [sobrietyDateInput]);
+  }, [persistRecoveryStateSnapshot, sobrietyDateInput]);
 
-  const clearSobrietyDateFromSettings = useCallback(() => {
+  const clearSobrietyDateFromSettings = useCallback(async () => {
     setSobrietyDateIso(null);
     setSobrietyDateInput("");
     setSobrietyDateStatus("Sobriety date cleared.");
     setSetupComplete(false);
-  }, []);
+    await persistRecoveryStateSnapshot({ setupComplete: false, sobrietyDateIso: null });
+  }, [persistRecoveryStateSnapshot]);
 
-  const saveNinetyDayGoalFromSettings = useCallback(() => {
+  const saveNinetyDayGoalFromSettings = useCallback(async () => {
     const parsedGoal = parseGoalTargetInput(ninetyDayGoalInput);
     if (!parsedGoal) {
       setSobrietyDateStatus("Enter a valid 90-day goal (1 or higher).");
@@ -6980,14 +7522,18 @@ export default function App() {
     }
     setNinetyDayGoalTarget(parsedGoal);
     setNinetyDayGoalInput(String(parsedGoal));
+    await persistRecoveryStateSnapshot({ ninetyDayGoalTarget: parsedGoal });
     setSobrietyDateStatus("90-day meeting goal saved.");
-  }, [ninetyDayGoalInput]);
+  }, [ninetyDayGoalInput, persistRecoveryStateSnapshot]);
 
-  const resetNinetyDayGoalFromSettings = useCallback(() => {
+  const resetNinetyDayGoalFromSettings = useCallback(async () => {
     setNinetyDayGoalTarget(DEFAULT_NINETY_DAY_GOAL_TARGET);
     setNinetyDayGoalInput(String(DEFAULT_NINETY_DAY_GOAL_TARGET));
+    await persistRecoveryStateSnapshot({
+      ninetyDayGoalTarget: DEFAULT_NINETY_DAY_GOAL_TARGET,
+    });
     setSobrietyDateStatus("90-day meeting goal reset to 90.");
-  }, []);
+  }, [persistRecoveryStateSnapshot]);
 
   const getScheduledWindowForAttendance = useCallback((record: AttendanceRecord) => {
     const startedAt = new Date(record.startAt);
@@ -7008,7 +7554,7 @@ export default function App() {
   const attachCalendarEventToAttendance = useCallback(
     async (recordId: string): Promise<boolean> => {
       if (!calendarRuntimeEnabled) {
-        setAttendanceStatus("Calendar module unavailable in this build.");
+        setAttendanceStatus("Calendar export is unavailable in this build.");
         return false;
       }
 
@@ -7046,13 +7592,11 @@ export default function App() {
       });
       if (!result.saved) {
         if (result.action === "canceled") {
-          setAttendanceStatus("Calendar add canceled.");
+          setAttendanceStatus("Calendar export canceled.");
         } else if (result.errorCode === "permission") {
-          setAttendanceStatus(
-            "Calendar add requires the iOS system add flow or previously granted calendar access on this device.",
-          );
+          setAttendanceStatus("Calendar export requires an available share destination.");
         } else {
-          setAttendanceStatus("Could not open the Calendar add sheet.");
+          setAttendanceStatus("Could not open the Calendar export sheet.");
         }
         return false;
       }
@@ -7065,7 +7609,7 @@ export default function App() {
       if (activeAttendanceRef.current?.id === next.id) {
         setActiveAttendance(next);
       }
-      setAttendanceStatus("Meeting added to calendar.");
+      setAttendanceStatus("Meeting calendar file opened.");
       return true;
     },
     [
@@ -8706,6 +9250,7 @@ export default function App() {
       return;
     }
 
+    console.log("[startup] notification center init begin");
     try {
       Notifications.setNotificationHandler({
         handleNotification: async () => ({
@@ -8716,6 +9261,7 @@ export default function App() {
           shouldShowList: true,
         }),
       });
+      console.log("[startup] notification center init ready");
     } catch (error) {
       console.log("[notifications] setNotificationHandler failed", error);
     }
@@ -8787,9 +9333,14 @@ export default function App() {
       return;
     }
 
+    if (!locationPermissionAlertArmedRef.current) {
+      return;
+    }
+
     if (locationPermissionAlertShownRef.current === locationIssue) {
       return;
     }
+    locationPermissionAlertArmedRef.current = false;
     locationPermissionAlertShownRef.current = locationIssue;
 
     if (locationIssue === "services_disabled") {
@@ -8878,14 +9429,18 @@ export default function App() {
   }, [currentLocation, mapMeetingsForDay, mapCenter, mapBoundaryCenter]);
 
   useEffect(() => {
-    if (iosLaunchSafeMode) {
+    if (iosStartupCompatibilityGuardEnabled) {
       return;
     }
+    console.log("[startup] bootstrap begin", {
+      appEnv: resolvedAppEnv,
+      iosStartupCompatibilityGuardEnabled,
+    });
     void refreshDeviceLocationOnFocus();
-  }, [iosLaunchSafeMode, refreshDeviceLocationOnFocus]);
+  }, [iosStartupCompatibilityGuardEnabled, refreshDeviceLocationOnFocus, resolvedAppEnv]);
 
   useEffect(() => {
-    if (iosLaunchSafeMode) {
+    if (iosStartupCompatibilityGuardEnabled) {
       return;
     }
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -8896,7 +9451,7 @@ export default function App() {
     return () => {
       subscription.remove();
     };
-  }, [iosLaunchSafeMode, refreshDeviceLocationOnFocus]);
+  }, [iosStartupCompatibilityGuardEnabled, refreshDeviceLocationOnFocus]);
 
   useEffect(() => {
     if (bootstrapStartedRef.current) {
@@ -8908,6 +9463,10 @@ export default function App() {
       let recoveredModeFromPreviousCrash = false;
       let bootstrapCompletedSuccessfully = false;
       const startedAtIso = new Date().toISOString();
+      console.log("[startup] hydrate begin", {
+        appEnv: resolvedAppEnv,
+        iosStartupCompatibilityGuardEnabled,
+      });
 
       try {
         const guardRaw = await AsyncStorage.getItem(bootGuardStorage);
@@ -8943,19 +9502,31 @@ export default function App() {
         // Ignore guard write failures and continue boot.
       }
 
-      if (iosLaunchSafeMode || recoveredModeFromPreviousCrash) {
+      await sanitizeStoredCalendarStateOnLaunch();
+
+      if (iosStartupCompatibilityGuardEnabled || recoveredModeFromPreviousCrash) {
         try {
           await refreshMeetings();
+          setMeetingsStatus(
+            recoveredModeFromPreviousCrash
+              ? "Recovered mode enabled: meetings loaded without startup location."
+              : "iOS launch-safe mode enabled: meetings loaded without startup location.",
+          );
           setAttendanceStatus(
             recoveredModeFromPreviousCrash
               ? "Recovered mode enabled: local attendance history loads after app stabilization."
-              : "iOS safe boot mode enabled: attendance history loads after app stabilization.",
+              : "iOS launch-safe mode enabled: attendance history loads after app stabilization.",
           );
           bootstrapCompletedSuccessfully = true;
         } catch {
           setMeetingsStatus("Unable to load meetings.");
         } finally {
           setBootstrapped(true);
+          console.log("[startup] hydrate complete", {
+            success: bootstrapCompletedSuccessfully,
+            recoveredModeFromPreviousCrash,
+            iosStartupCompatibilityGuardEnabled,
+          });
           try {
             await AsyncStorage.setItem(
               bootGuardStorage,
@@ -8966,7 +9537,8 @@ export default function App() {
                 finishedAtIso: new Date().toISOString(),
                 appVersion,
                 buildNumber,
-                recoveredMode: recoveredModeFromPreviousCrash || iosLaunchSafeMode,
+                recoveredMode:
+                  recoveredModeFromPreviousCrash || iosStartupCompatibilityGuardEnabled,
               }),
             );
           } catch {
@@ -8977,9 +9549,6 @@ export default function App() {
       }
 
       try {
-        const position = await requestLocationPermission();
-        await refreshMeetings({ location: position });
-
         const [
           modeRaw,
           sponsorUiPrefsRaw,
@@ -8995,6 +9564,7 @@ export default function App() {
           meetingAttendanceLogRaw,
           recoveryCelebrationShownRaw,
           loadedRoutinesStore,
+          initialLocation,
         ] = await Promise.all([
           AsyncStorage.getItem(modeStorage),
           AsyncStorage.getItem(sponsorUiPrefsStorage),
@@ -9010,13 +9580,19 @@ export default function App() {
           AsyncStorage.getItem(meetingAttendanceLogStorage),
           AsyncStorage.getItem(recoveryCelebrationShownStorage),
           loadRoutinesStore(devAuthUserId),
+          readCurrentLocation(false),
         ]);
+
+        await refreshMeetings({ location: initialLocation });
+        if (!initialLocation) {
+          console.log("[location] startup fallback", {
+            reason: "hydrate",
+            locationIssue: locationIssueRef.current ?? "none",
+          });
+        }
 
         const resolvedMode: RecoveryMode =
           modeRaw === "A" || modeRaw === "B" || modeRaw === "C" ? modeRaw : "A";
-        if (modeRaw === "A" || modeRaw === "B" || modeRaw === "C") {
-          setMode(modeRaw);
-        }
 
         if (sponsorUiPrefsRaw) {
           const parsedPrefs = JSON.parse(sponsorUiPrefsRaw) as { leadMinutes?: number };
@@ -9046,6 +9622,7 @@ export default function App() {
               let migratedSignatureCount = 0;
               let skippedRecordCount = 0;
               let missingFileSignatureCount = 0;
+              let clearedCalendarEventIdCount = 0;
 
               for (let index = 0; index < cappedAttendance.length; index += 1) {
                 const rawRecord = cappedAttendance[index];
@@ -9119,6 +9696,15 @@ export default function App() {
                     record.meetingAddress.trim().length > 0
                       ? record.meetingAddress.trim()
                       : "Address unavailable";
+                  const calendarEventId =
+                    typeof record.calendarEventId === "string" &&
+                    record.calendarEventId.trim().length > 0 &&
+                    record.calendarEventId.trim().length <= CALENDAR_EVENT_ID_MAX_LENGTH
+                      ? record.calendarEventId
+                      : null;
+                  if (record.calendarEventId !== undefined && calendarEventId === null) {
+                    clearedCalendarEventIdCount += 1;
+                  }
 
                   normalizedAttendance.push({
                     schemaVersion: ATTENDANCE_SCHEMA_VERSION,
@@ -9179,11 +9765,7 @@ export default function App() {
                       typeof record.signatureCapturedAtIso === "string"
                         ? record.signatureCapturedAtIso
                         : null,
-                    calendarEventId:
-                      typeof record.calendarEventId === "string" &&
-                      record.calendarEventId.trim().length > 0
-                        ? record.calendarEventId
-                        : null,
+                    calendarEventId,
                     leaveNotificationId:
                       typeof record.leaveNotificationId === "string" &&
                       record.leaveNotificationId.trim().length > 0
@@ -9243,6 +9825,11 @@ export default function App() {
               if (skippedRecordCount > 0) {
                 recoveryMessages.push(`skipped ${skippedRecordCount} corrupt record(s)`);
               }
+              if (clearedCalendarEventIdCount > 0) {
+                recoveryMessages.push(
+                  `cleared ${clearedCalendarEventIdCount} invalid calendar reference(s)`,
+                );
+              }
               if (recoveryMessages.length > 0) {
                 setAttendanceStatus(`Recovered local data: ${recoveryMessages.join("; ")}.`);
               }
@@ -9294,6 +9881,8 @@ export default function App() {
             sponsorLeadMinutes?: SponsorLeadMinutes;
             sponsorKneesSuggested?: boolean | null;
             meetingAutoAddToCalendar?: boolean;
+            wizardSupervisionMode?: SetupSupervisionMode;
+            wizardJusticeTrack?: SetupJusticeTrack;
           };
           if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
             setMeetingRadiusMiles(parsedProfile.radiusMiles);
@@ -9399,6 +9988,20 @@ export default function App() {
           if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
             setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
           }
+          if (
+            parsedProfile.wizardSupervisionMode === "INDEPENDENT" ||
+            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ||
+            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+          ) {
+            setWizardSupervisionMode(parsedProfile.wizardSupervisionMode);
+          }
+          if (
+            parsedProfile.wizardJusticeTrack === "NONE" ||
+            parsedProfile.wizardJusticeTrack === "DRUG_COURT" ||
+            parsedProfile.wizardJusticeTrack === "PROBATION_PAROLE"
+          ) {
+            setWizardJusticeTrack(parsedProfile.wizardJusticeTrack);
+          }
         }
 
         if (enableSponsorApiSync && !hasLocalSponsorProfile) {
@@ -9454,16 +10057,18 @@ export default function App() {
 
         setRoutinesStore(loadedRoutinesStore);
 
-        if (resolvedMode === "A") {
-          setHomeScreen(resolvedSetupComplete ? "DASHBOARD" : "SETUP");
-        } else {
-          setHomeScreen("SETTINGS");
-        }
+        setMode(resolvedSetupComplete ? "A" : resolvedMode);
+        setHomeScreen(resolvedSetupComplete ? "DASHBOARD" : "SETUP");
         bootstrapCompletedSuccessfully = true;
       } catch {
         setAttendanceStatus("Unable to load local attendance history.");
       } finally {
         setBootstrapped(true);
+        console.log("[startup] hydrate complete", {
+          success: bootstrapCompletedSuccessfully,
+          recoveredModeFromPreviousCrash,
+          iosStartupCompatibilityGuardEnabled,
+        });
         try {
           await AsyncStorage.setItem(
             bootGuardStorage,
@@ -9501,12 +10106,14 @@ export default function App() {
     devAuthUserId,
     enableSponsorApiSync,
     fetchSponsorConfig,
+    readCurrentLocation,
     refreshMeetings,
-    requestLocationPermission,
+    sanitizeStoredCalendarStateOnLaunch,
     signatureStorageSubdirectory,
-    iosLaunchSafeMode,
+    iosStartupCompatibilityGuardEnabled,
     appVersion,
     buildNumber,
+    resolvedAppEnv,
   ]);
 
   useEffect(() => {
@@ -9775,8 +10382,15 @@ export default function App() {
     meetingsAutoRefreshKeyRef.current = nextKey;
 
     void (async () => {
+      if (dashboardLocationHandoffHandledRef.current) {
+        dashboardLocationHandoffHandledRef.current = false;
+        await refreshMeetingsRef.current?.({ location: currentLocationRef.current });
+        return;
+      }
+
       const location =
-        currentLocationRef.current ?? (await requestLocationPermissionRef.current?.());
+        currentLocationRef.current ??
+        (iosStartupCompatibilityGuardEnabled ? null : await readCurrentLocation(false));
       await refreshMeetingsRef.current?.({ location });
     })();
   }, [
@@ -9788,6 +10402,8 @@ export default function App() {
     meetingsTimeFilter,
     meetingsLocationFilter,
     meetingRadiusMiles,
+    iosStartupCompatibilityGuardEnabled,
+    readCurrentLocation,
   ]);
 
   useEffect(() => {
@@ -10319,6 +10935,11 @@ export default function App() {
       homeScreen === "CHAT" ||
       homeScreen === "ATTENDANCE" ||
       homeScreen === "TOOLS");
+  const dashboardTabTextProps = {
+    numberOfLines: 1 as const,
+    adjustsFontSizeToFit: true,
+    minimumFontScale: 0.82,
+  };
   const shouldLockOuterScroll = isSignatureCaptureVisible;
 
   return (
@@ -11348,7 +11969,11 @@ export default function App() {
                     {setupStep < 8 ? (
                       <AppButton title="Next" onPress={() => void nextSetupStep()} />
                     ) : (
-                      <AppButton title="Save & Finish" onPress={() => void finishSetup()} />
+                      <AppButton
+                        title={setupFinishing ? "Saving..." : "Save & Finish"}
+                        onPress={() => void finishSetup()}
+                        disabled={setupFinishing}
+                      />
                     )}
                   </View>
                 </GlassCard>
@@ -13526,7 +14151,12 @@ export default function App() {
                         <Text style={styles.sectionMeta}>Calendar status: {calendarStatus}</Text>
                         <AppButton
                           title={sponsorSaving ? "Saving..." : "Save Sponsor Config"}
-                          onPress={() => void saveSponsorConfig()}
+                          onPress={() =>
+                            void saveSponsorConfig({
+                              allowCalendarSync: true,
+                              allowNotificationReschedule: true,
+                            })
+                          }
                           disabled={sponsorSaving}
                         />
                       </>
@@ -14228,13 +14858,14 @@ export default function App() {
                 >
                   <Text style={styles.dashboardTabIcon}>📈</Text>
                   <Text
+                    {...dashboardTabTextProps}
                     style={
                       homeScreen === "DASHBOARD"
                         ? styles.dashboardTabTextActive
                         : styles.dashboardTabText
                     }
                   >
-                    Dashboard
+                    Home
                   </Text>
                 </Pressable>
                 <Pressable
@@ -14246,6 +14877,7 @@ export default function App() {
                 >
                   <Text style={styles.dashboardTabIcon}>🗓</Text>
                   <Text
+                    {...dashboardTabTextProps}
                     style={
                       homeScreen === "MEETINGS"
                         ? styles.dashboardTabTextActive
@@ -14264,6 +14896,7 @@ export default function App() {
                 >
                   <Text style={styles.dashboardTabIcon}>💬</Text>
                   <Text
+                    {...dashboardTabTextProps}
                     style={
                       homeScreen === "CHAT"
                         ? styles.dashboardTabTextActive
@@ -14282,6 +14915,7 @@ export default function App() {
                 >
                   <Text style={styles.dashboardTabIcon}>☀️🌙</Text>
                   <Text
+                    {...dashboardTabTextProps}
                     style={
                       homeScreen === "TOOLS"
                         ? styles.dashboardTabTextActive
@@ -14293,7 +14927,9 @@ export default function App() {
                 </Pressable>
                 <Pressable style={styles.dashboardTabItem} onPress={openSettingsHub}>
                   <Text style={styles.dashboardTabIcon}>•••</Text>
-                  <Text style={styles.dashboardTabText}>More</Text>
+                  <Text {...dashboardTabTextProps} style={styles.dashboardTabText}>
+                    More
+                  </Text>
                 </Pressable>
               </View>
             </View>
@@ -14665,7 +15301,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   contentContainerWithFooterNav: {
-    paddingBottom: 8,
+    paddingBottom: DASHBOARD_FOOTER_NAV_HEIGHT + 20,
   },
   scrollViewWithFooterNav: {
     marginBottom: DASHBOARD_FOOTER_NAV_HEIGHT,
@@ -15302,11 +15938,13 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
+    zIndex: 40,
+    backgroundColor: "#1c103f",
   },
   dashboardBottomMenu: {
     position: "relative",
-    paddingTop: 9,
-    paddingBottom: Platform.OS === "ios" ? 20 : 10,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "ios" ? 22 : 12,
     paddingHorizontal: 8,
     borderTopLeftRadius: 0,
     borderTopRightRadius: 0,
@@ -15314,9 +15952,9 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 0,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.2)",
-    backgroundColor: "rgba(255,255,255,0.1)",
+    backgroundColor: "#1c103f",
     shadowColor: "rgba(31,38,135,0.85)",
-    shadowOpacity: 0.25,
+    shadowOpacity: 0.34,
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 10 },
     elevation: 10,
@@ -15327,9 +15965,9 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     top: 0,
-    height: "62%",
-    backgroundColor: "rgba(255,255,255,0.12)",
-    opacity: 0.35,
+    bottom: 0,
+    backgroundColor: "rgba(78,48,168,0.04)",
+    opacity: 1,
   },
   dashboardBottomMenuInset: {
     position: "absolute",
@@ -15337,7 +15975,7 @@ const styles = StyleSheet.create({
     right: 1,
     top: 1,
     height: 1,
-    backgroundColor: "rgba(255,255,255,0.5)",
+    backgroundColor: "rgba(255,255,255,0.22)",
   },
   dashboardBottomTabsRow: {
     flexDirection: "row",
@@ -15347,11 +15985,12 @@ const styles = StyleSheet.create({
   },
   dashboardTabItem: {
     flex: 1,
+    minWidth: 0,
     alignItems: "center",
     justifyContent: "center",
     gap: 4,
     paddingVertical: 2,
-    paddingHorizontal: 0,
+    paddingHorizontal: 2,
     opacity: 0.9,
   },
   dashboardTabItemActive: {
@@ -15366,11 +16005,17 @@ const styles = StyleSheet.create({
     color: Design.color.textPrimary,
     fontSize: 12,
     fontWeight: "800",
+    width: "100%",
+    textAlign: "center",
+    flexShrink: 1,
   },
   dashboardTabText: {
     color: Design.color.textSecondary,
     fontSize: 12,
     fontWeight: "700",
+    width: "100%",
+    textAlign: "center",
+    flexShrink: 1,
   },
   mapContainer: {
     borderWidth: 1,

@@ -10,6 +10,10 @@ This repo now supports a production-aligned Expo Development Build workflow whil
 - `preview`: internal distribution, `APP_ENV=preview`
 - `production`: store distribution, `APP_ENV=production`
 
+Known-good iOS launch baseline:
+
+- Apple/TestFlight build `45` is the current confirmed-good iPhone launch build after the release-startup and calendar-linkage fixes.
+
 ## App identifiers
 
 Identifiers are environment-aware via `apps/mobile/app.config.ts`:

@@ -424,7 +424,6 @@ export function Dashboard({
     typeof wisdomText === "string" && wisdomText.trim().length > 0
       ? wisdomText
       : SPONSOR_WISDOM_TEXT;
-  const notificationItems = notificationSummary?.items ?? [];
   const notificationBadgeCount = notificationSummary?.badgeCount ?? 0;
 
   return (
@@ -617,58 +616,6 @@ export function Dashboard({
               {soberHouseChatPreview.acknowledgmentPending ? (
                 <Text style={styles.soberHouseTileDetail}>Acknowledgment required</Text>
               ) : null}
-            </GlassCard>
-          </Pressable>
-        ) : null}
-
-        {notificationSummary && notificationItems.length > 0 ? (
-          <Pressable
-            onPress={onOpenNotifications}
-            onHoverIn={() => setTileHover("messages-alerts", true)}
-            onHoverOut={() => setTileHover("messages-alerts", false)}
-            accessibilityRole="button"
-            accessibilityLabel="Open messages and alerts"
-          >
-            <GlassCard
-              strong
-              blurIntensity={12}
-              style={[
-                styles.recoveryCard,
-                styles.liquidGlassTile,
-                hoveredTileId === "messages-alerts" ? styles.liquidGlassTileHover : null,
-              ]}
-            >
-              <View style={styles.upcomingHeader}>
-                <Text style={styles.recoveryTitle}>{notificationSummary.title}</Text>
-                <View style={styles.soberHouseTileBadge}>
-                  <Text style={styles.soberHouseTileBadgeText}>
-                    {notificationBadgeCount > 0 ? notificationBadgeCount : "Clear"}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.recoveryText}>{notificationSummary.subtitle}</Text>
-              <View style={styles.notificationPreviewList}>
-                {notificationItems.slice(0, 3).map((item) => (
-                  <View key={item.id} style={styles.notificationPreviewRow}>
-                    <View
-                      style={[
-                        styles.notificationToneDot,
-                        item.tone === "green"
-                          ? styles.notificationToneDotGreen
-                          : item.tone === "yellow"
-                            ? styles.notificationToneDotYellow
-                            : item.tone === "red"
-                              ? styles.notificationToneDotRed
-                              : styles.notificationToneDotGray,
-                      ]}
-                    />
-                    <View style={styles.notificationPreviewCopy}>
-                      <Text style={styles.notificationPreviewTitle}>{item.title}</Text>
-                      <Text style={styles.notificationPreviewDetail}>{item.detail}</Text>
-                    </View>
-                  </View>
-                ))}
-              </View>
             </GlassCard>
           </Pressable>
         ) : null}

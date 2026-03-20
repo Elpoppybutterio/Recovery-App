@@ -44,18 +44,10 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSCalendarsUsageDescription</key>
-	<string>Sober AI adds recovery events to your calendar, such as meetings, sober house obligations, and one-on-one sessions, so you receive reminders and stay on schedule. For example, when you tap 'Add to Calendar' on a meeting, Sober AI saves that meeting to your calendar.</string>
-	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
-	<string>Sober AI adds recovery events to your calendar, such as meetings, sober house obligations, and one-on-one sessions, so you receive reminders and stay on schedule. For example, when you tap 'Add to Calendar' on a meeting, Sober AI saves that meeting to your calendar.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Allow Sober² to access your microphone</string>
-	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>Allow Sober² to access your reminders</string>
-	<key>NSRemindersUsageDescription</key>
-	<string>Allow Sober² to access your reminders</string>
 	<key>RCTNewArchEnabled</key>
 	<false/>
 	<key>UIBackgroundModes</key>
