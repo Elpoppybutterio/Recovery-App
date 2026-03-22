@@ -42,6 +42,11 @@ export function createEntityId(prefix: string): string {
 export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore {
   return {
     version: SOBER_HOUSE_SETTINGS_STORE_VERSION,
+    security: {
+      biometricUnlockEnabled: true,
+      customPasscodeHash: null,
+      customPasscodeUpdatedAt: null,
+    },
     userAccessProfile: null,
     organization: null,
     houseGroups: [],
@@ -745,6 +750,9 @@ export function createDefaultMonthlyReport(
 export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouseSettingsStore {
   return {
     version: store.version,
+    security: {
+      ...store.security,
+    },
     userAccessProfile: store.userAccessProfile ? { ...store.userAccessProfile } : null,
     organization: store.organization ? { ...store.organization } : null,
     houseGroups: store.houseGroups.map((group) => ({

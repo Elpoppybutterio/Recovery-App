@@ -6,6 +6,7 @@ import type {
   MeditationLink,
   MorningRoutineDayState,
   MorningRoutineTemplate,
+  RoutineChecklistItem as MorningRoutineChecklistItem,
 } from "../lib/routines/types";
 import { routineTheme } from "../theme/tokens";
 
@@ -48,7 +49,12 @@ export function MorningRoutineScreen({
   onSetDailyReflectionsLink: (value: string) => void;
   onSetDailyReflectionsText: (value: string) => void;
   onSetNotes: (value: string) => void;
-  onOpenReader: (itemId: string, title: string, url: string | null) => void;
+  onOpenReader: (
+    itemId: string,
+    title: string,
+    url: string | null,
+    mode?: MorningRoutineChecklistItem["readerMode"],
+  ) => void;
   onReadDailyReflections: () => void;
   onListenDailyReflections: () => void;
   onSendAmTextSponsor: () => void;
@@ -90,6 +96,7 @@ export function MorningRoutineScreen({
           const isThirdStepPrayer = item.id === "prayer-third-step";
           const isSeventhStepPrayer = item.id === "prayer-seventh-step";
           const isEleventhStepPrayer = item.id === "prayer-eleventh-step";
+          const supportsPlay = item.supportsPlay !== false;
           const displayTitle = isEleventhStepPrayer ? "11th Step AM Prayer" : item.title;
           const listenText =
             item.voiceText !== undefined && item.voiceText.trim().length > 0
@@ -115,16 +122,7 @@ export function MorningRoutineScreen({
                         ? () => onListenText(listenText)
                         : undefined
                 }
-                onPlay={
-                  isDailyReflections ||
-                  isSponsorCheckIn ||
-                  isAdditionalSuggestions ||
-                  isThirdStepPrayer ||
-                  isSeventhStepPrayer ||
-                  isEleventhStepPrayer
-                    ? undefined
-                    : () => onPlayItem(item.id)
-                }
+                onPlay={supportsPlay ? () => onPlayItem(item.id) : undefined}
                 onOpenReader={
                   isDailyReflections
                     ? onReadDailyReflections
@@ -135,7 +133,13 @@ export function MorningRoutineScreen({
                         : isEleventhStepPrayer
                           ? onReadEleventhStepPrayer
                           : item.readerLabel
-                            ? () => onOpenReader(item.id, displayTitle, item.readerUrl ?? null)
+                            ? () =>
+                                onOpenReader(
+                                  item.id,
+                                  displayTitle,
+                                  item.readerUrl ?? null,
+                                  item.readerMode,
+                                )
                             : undefined
                 }
               />

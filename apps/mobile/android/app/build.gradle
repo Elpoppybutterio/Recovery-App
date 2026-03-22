@@ -87,9 +87,9 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.recovery.accountability'
+    namespace 'com.rabbithole.soberai'
     defaultConfig {
-        applicationId 'com.recovery.accountability'
+        applicationId 'com.rabbithole.soberai'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

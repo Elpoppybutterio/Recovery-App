@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   completeMorningItemIfEnabled,
   computeMorningCompletedAt,
+  reconcileMorningCompletionOnItemEnableToggle,
 } from "../lib/routines/completion";
 import type { MorningRoutineDayState, RoutineChecklistItem } from "../lib/routines/types";
 
@@ -114,5 +115,21 @@ describe("morning routine completion", () => {
 
     expect(result.reason).toBe("completed");
     expect(result.nextDayState.completedByItemId["bb-86-88"]).toBe("2026-02-26T09:00:00.000Z");
+  });
+
+  it("clears stale sponsor completion when re-enabling sponsor check-in", () => {
+    expect(
+      reconcileMorningCompletionOnItemEnableToggle("sponsor-check-in", false, true, {
+        "sponsor-check-in": "2026-02-26T07:30:00.000Z",
+      }),
+    ).toEqual({});
+  });
+
+  it("preserves completion state for unrelated item enable toggles", () => {
+    expect(
+      reconcileMorningCompletionOnItemEnableToggle("bb-86-88", false, true, {
+        "bb-86-88": "2026-02-26T07:30:00.000Z",
+      }),
+    ).toEqual({ "bb-86-88": "2026-02-26T07:30:00.000Z" });
   });
 });

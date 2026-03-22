@@ -97,7 +97,7 @@ function resolveNewArchEnabled(): boolean {
 }
 
 export default ({ config }: ConfigContext): ExpoConfig => {
-  const appVersion = "0.1.1";
+  const appVersion = "0.1.2";
   const appEnv = resolveAppEnv(process.env.APP_ENV);
   const bundleIdentifier = resolveBundleIdentifier(appEnv);
   const iosBuildNumber = resolveIosBuildNumber(appEnv);
@@ -152,6 +152,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       permissions: ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "ACCESS_BACKGROUND_LOCATION"],
     },
     assetBundlePatterns: ["**/*"],
+    plugins: [...(config.plugins ?? []), "@react-native-community/datetimepicker"],
     updates: updatesConfig,
     extra: {
       ...config.extra,

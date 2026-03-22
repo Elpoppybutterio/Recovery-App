@@ -1,6 +1,8 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   DAILY_REFLECTIONS_URL,
+  DEFAULT_MEDITATION_LINK_TITLE,
+  DEFAULT_MEDITATION_SPOTIFY_URL,
   createDefaultRoutinesStore,
   createEmptyMorningRoutineDayState,
   createEmptyNightlyInventoryDayState,
@@ -69,6 +71,32 @@ export async function loadRoutinesStore(userId: string): Promise<RecoveryRoutine
       mergedMorningTemplate.dailyReflectionsLink.trim().length > 0
         ? mergedMorningTemplate.dailyReflectionsLink
         : DAILY_REFLECTIONS_URL;
+    const parsedMeditationLinks = Array.isArray(mergedMorningTemplate.meditationLinks)
+      ? mergedMorningTemplate.meditationLinks
+          .filter((entry) => Boolean(entry) && typeof entry === "object")
+          .map((entry, index) => {
+            const url =
+              typeof entry.url === "string" && entry.url.trim().length > 0 ? entry.url.trim() : "";
+            const isDefaultSpotifyUrl = url === DEFAULT_MEDITATION_SPOTIFY_URL;
+            const title =
+              typeof entry.title === "string" && entry.title.trim().length > 0
+                ? entry.title.trim()
+                : isDefaultSpotifyUrl
+                  ? DEFAULT_MEDITATION_LINK_TITLE
+                  : "Meditation Link";
+            return {
+              id:
+                typeof entry.id === "string" && entry.id.trim().length > 0
+                  ? entry.id
+                  : `meditation-${index}`,
+              title,
+              url,
+            };
+          })
+      : [];
+    const normalizedMeditationLinks = parsedMeditationLinks.some((entry) => entry.url.length > 0)
+      ? parsedMeditationLinks
+      : defaultStore.morningTemplate.meditationLinks;
 
     return {
       ...defaultStore,
@@ -77,6 +105,7 @@ export async function loadRoutinesStore(userId: string): Promise<RecoveryRoutine
         ...mergedMorningTemplate,
         items: normalizedItems,
         dailyReflectionsLink,
+        meditationLinks: normalizedMeditationLinks,
       },
       morningByDate: parsed.morningByDate ?? {},
       nightlyByDate: parsed.nightlyByDate ?? {},

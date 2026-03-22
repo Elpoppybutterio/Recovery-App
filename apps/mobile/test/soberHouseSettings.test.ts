@@ -60,7 +60,13 @@ import {
   transitionMonthlyReportStatus,
   updateMonthlyReportFinalNotes,
 } from "../lib/soberHouse/reportWorkflow";
-import { requiresSoberHouseDeviceUnlock } from "../lib/soberHouse/deviceAuth";
+import {
+  hashSoberHousePasscode,
+  isValidSoberHousePasscode,
+  normalizeSoberHousePasscodeInput,
+  requiresSoberHouseDeviceUnlock,
+  verifySoberHousePasscode,
+} from "../lib/soberHouse/deviceAuth";
 import { buildSoberHouseResidentDashboardSummary } from "../lib/soberHouse/dashboard";
 import { buildSoberHouseOwnerDashboardSummary } from "../lib/soberHouse/orgDashboard";
 import { getChatReceiptForMessageAndUser, getRuleSetForHouse } from "../lib/soberHouse/selectors";
@@ -450,6 +456,17 @@ describe("sober house settings mutations", () => {
     expect(requiresSoberHouseDeviceUnlock("UNASSIGNED")).toBe(false);
     expect(requiresSoberHouseDeviceUnlock("DRUG_COURT_PARTICIPANT")).toBe(false);
     expect(requiresSoberHouseDeviceUnlock("PROBATION_PAROLE_PARTICIPANT")).toBe(false);
+  });
+
+  it("normalizes and verifies the sober-house 7-digit passcode fallback", () => {
+    expect(normalizeSoberHousePasscodeInput("12a34-56789")).toBe("1234567");
+    expect(isValidSoberHousePasscode("1234567")).toBe(true);
+    expect(isValidSoberHousePasscode("12345")).toBe(false);
+
+    const hash = hashSoberHousePasscode("1234567", "enduser-a1");
+    expect(verifySoberHousePasscode("1234567", "enduser-a1", hash)).toBe(true);
+    expect(verifySoberHousePasscode("7654321", "enduser-a1", hash)).toBe(false);
+    expect(verifySoberHousePasscode("1234567", "enduser-a2", hash)).toBe(false);
   });
 
   it("supports multi-house records and audits staff assignment changes", () => {

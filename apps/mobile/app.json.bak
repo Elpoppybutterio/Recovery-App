@@ -1,9 +1,9 @@
 {
   "expo": {
-    "name": "Sober\u00b2",
+    "name": "Sober²",
     "slug": "sober-ai",
     "icon": "./assets/icon.png",
-    "version": "0.1.2",
+    "version": "0.1.1",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
@@ -22,7 +22,7 @@
         "foregroundImage": "./assets/icon-foreground.png",
         "backgroundImage": "./assets/icon-background.png"
       },
-      "package": "com.rabbithole.soberai",
+      "package": "com.rabbithole.soberai.dev",
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",

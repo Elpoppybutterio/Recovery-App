@@ -73,3 +73,22 @@ export function completeMorningItemIfEnabled(
     reason: "completed",
   };
 }
+
+export function reconcileMorningCompletionOnItemEnableToggle(
+  itemId: string,
+  wasEnabled: boolean,
+  nextEnabled: boolean,
+  completedByItemId: Record<string, string>,
+): Record<string, string> {
+  if (itemId !== "sponsor-check-in" || wasEnabled || !nextEnabled) {
+    return completedByItemId;
+  }
+
+  if (!completedByItemId[itemId]) {
+    return completedByItemId;
+  }
+
+  const nextCompletedByItemId = { ...completedByItemId };
+  delete nextCompletedByItemId[itemId];
+  return nextCompletedByItemId;
+}
