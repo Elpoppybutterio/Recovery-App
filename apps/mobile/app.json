@@ -3,7 +3,7 @@
     "name": "Sober²",
     "slug": "sober-ai",
     "icon": "./assets/icon.png",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
