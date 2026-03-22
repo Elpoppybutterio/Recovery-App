@@ -21,6 +21,7 @@ import {
   SPONSOR_PROOF_TYPE_OPTIONS,
   STAFF_ROLE_OPTIONS,
   type AlertPreference,
+  type AuditLogEntry,
   type AlertScope,
   type AuditActor,
   type House,
@@ -57,6 +58,7 @@ import {
   upsertStaffAssignment,
   upsertUserAccessProfile,
 } from "../lib/soberHouse/mutations";
+import { appendAuditEntries, buildAuditActionEntry } from "../lib/soberHouse/audit";
 import {
   getHouseGroupById,
   getRuleSetForScope,
@@ -68,6 +70,11 @@ import {
   loadSoberHouseSettingsStore,
   saveSoberHouseSettingsStore,
 } from "../lib/soberHouse/storage";
+import {
+  hashSoberHousePasscode,
+  isValidSoberHousePasscode,
+  normalizeSoberHousePasscodeInput,
+} from "../lib/soberHouse/deviceAuth";
 
 type SoberHouseSettingsScreenProps = {
   userId: string;
@@ -629,6 +636,9 @@ export function SoberHouseSettingsScreen({
     violationId: string;
     correctiveActionId?: string | null;
   } | null>(null);
+  const [biometricUnlockEnabledDraft, setBiometricUnlockEnabledDraft] = useState(true);
+  const [customPasscodeDraft, setCustomPasscodeDraft] = useState("");
+  const [customPasscodeConfirmDraft, setCustomPasscodeConfirmDraft] = useState("");
   const [organizationDraft, setOrganizationDraft] = useState<OrganizationDraft>(
     createOrganizationDraft(null),
   );
@@ -669,6 +679,9 @@ export function SoberHouseSettingsScreen({
       }
 
       setStore(nextStore);
+      setBiometricUnlockEnabledDraft(nextStore.security.biometricUnlockEnabled);
+      setCustomPasscodeDraft("");
+      setCustomPasscodeConfirmDraft("");
       setAccessDraft(createAccessDraft(nextStore.userAccessProfile));
       setOrganizationDraft(createOrganizationDraft(nextStore.organization));
       setHouseGroupDraft(createHouseGroupDraft(null));
@@ -823,6 +836,137 @@ export function SoberHouseSettingsScreen({
     );
     setAccessDraft(createAccessDraft(result.store.userAccessProfile));
   }, [accessDraft, actor, persistStore, store, userId]);
+
+  const saveSecuritySettings = useCallback(async () => {
+    if (!store) {
+      return;
+    }
+
+    const normalizedPasscode = normalizeSoberHousePasscodeInput(customPasscodeDraft);
+    const normalizedConfirmation = normalizeSoberHousePasscodeInput(customPasscodeConfirmDraft);
+    if (normalizedPasscode.length > 0 || normalizedConfirmation.length > 0) {
+      if (!isValidSoberHousePasscode(normalizedPasscode)) {
+        setStatusMessage("Use exactly 7 digits for the sober-house passcode.");
+        return;
+      }
+      if (normalizedPasscode !== normalizedConfirmation) {
+        setStatusMessage("The 7-digit passcode confirmation does not match.");
+        return;
+      }
+    }
+
+    const timestamp = new Date().toISOString();
+    const nextSecurity = {
+      ...store.security,
+      biometricUnlockEnabled: biometricUnlockEnabledDraft,
+      customPasscodeHash:
+        normalizedPasscode.length > 0
+          ? hashSoberHousePasscode(normalizedPasscode, userId)
+          : store.security.customPasscodeHash,
+      customPasscodeUpdatedAt:
+        normalizedPasscode.length > 0 ? timestamp : store.security.customPasscodeUpdatedAt,
+    };
+    const entityType = store.userAccessProfile ? "userAccessProfile" : "organization";
+    const entityId = store.userAccessProfile?.id ?? store.organization?.id ?? userId;
+    const auditEntries: AuditLogEntry[] = [];
+
+    if (store.security.biometricUnlockEnabled !== biometricUnlockEnabledDraft) {
+      auditEntries.push(
+        buildAuditActionEntry({
+          actor,
+          timestamp,
+          entityType,
+          entityId,
+          actionTaken: biometricUnlockEnabledDraft
+            ? "Enabled sober-house Face ID/device authentication"
+            : "Disabled sober-house Face ID/device authentication",
+          fieldChanged: "security.biometricUnlockEnabled",
+          oldValue: String(store.security.biometricUnlockEnabled),
+          newValue: String(biometricUnlockEnabledDraft),
+        }),
+      );
+    }
+
+    if (normalizedPasscode.length > 0) {
+      auditEntries.push(
+        buildAuditActionEntry({
+          actor,
+          timestamp,
+          entityType,
+          entityId,
+          actionTaken: store.security.customPasscodeHash
+            ? "Updated sober-house 7-digit passcode"
+            : "Configured sober-house 7-digit passcode",
+          fieldChanged: "security.customPasscodeHash",
+          oldValue: store.security.customPasscodeHash ? "[configured]" : null,
+          newValue: "[configured]",
+        }),
+      );
+    }
+
+    if (auditEntries.length === 0) {
+      setStatusMessage("No sober-house security changes to save.");
+      return;
+    }
+
+    const nextStore = appendAuditEntries(
+      {
+        ...store,
+        security: nextSecurity,
+      },
+      auditEntries,
+    );
+    await persistStore(
+      nextStore,
+      `Security settings saved with ${auditEntries.length} audit entr${auditEntries.length === 1 ? "y" : "ies"}.`,
+    );
+    setCustomPasscodeDraft("");
+    setCustomPasscodeConfirmDraft("");
+  }, [
+    actor,
+    biometricUnlockEnabledDraft,
+    customPasscodeConfirmDraft,
+    customPasscodeDraft,
+    persistStore,
+    store,
+    userId,
+  ]);
+
+  const clearCustomPasscode = useCallback(async () => {
+    if (!store?.security.customPasscodeHash) {
+      setStatusMessage("No 7-digit passcode is configured.");
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    const entityType = store.userAccessProfile ? "userAccessProfile" : "organization";
+    const entityId = store.userAccessProfile?.id ?? store.organization?.id ?? userId;
+    const nextStore = appendAuditEntries(
+      {
+        ...store,
+        security: {
+          ...store.security,
+          customPasscodeHash: null,
+          customPasscodeUpdatedAt: timestamp,
+        },
+      },
+      [
+        buildAuditActionEntry({
+          actor,
+          timestamp,
+          entityType,
+          entityId,
+          actionTaken: "Cleared sober-house 7-digit passcode",
+          fieldChanged: "security.customPasscodeHash",
+          oldValue: "[configured]",
+          newValue: null,
+        }),
+      ],
+    );
+    await persistStore(nextStore, "Removed the sober-house 7-digit passcode.");
+    setCustomPasscodeDraft("");
+    setCustomPasscodeConfirmDraft("");
+  }, [actor, persistStore, store, userId]);
 
   const saveHouseGroup = useCallback(async () => {
     if (!store) {
@@ -1217,6 +1361,85 @@ export function SoberHouseSettingsScreen({
           </View>
         </View>
         <SaveStatus message={statusMessage} />
+      </GlassCard>
+
+      <GlassCard style={styles.card} strong>
+        <SectionHeader
+          title="Settings Access"
+          meta="Protect sober-house settings with Face ID and a 7-digit fallback code for this account."
+        />
+        <View style={styles.toggleRow}>
+          <View style={styles.column}>
+            <FieldLabel>Use Face ID / device authentication</FieldLabel>
+            <Text style={styles.entityMeta}>
+              When enabled, the app will prompt for Face ID first and fall back to the 7-digit
+              sober-house code when needed.
+            </Text>
+          </View>
+          <Switch
+            value={biometricUnlockEnabledDraft}
+            onValueChange={setBiometricUnlockEnabledDraft}
+            trackColor={{ false: "rgba(255,255,255,0.24)", true: colors.neonLavender }}
+            thumbColor={biometricUnlockEnabledDraft ? "#ffffff" : "#f3f4f6"}
+          />
+        </View>
+        <Text style={styles.entityMeta}>
+          Passcode status: {store.security.customPasscodeHash ? "Configured" : "Not configured"}
+          {store.security.customPasscodeUpdatedAt
+            ? ` • Updated ${new Date(store.security.customPasscodeUpdatedAt).toLocaleDateString()}`
+            : ""}
+        </Text>
+        <View style={styles.twoColumnRow}>
+          <View style={styles.column}>
+            <FieldLabel>7-digit passcode</FieldLabel>
+            <TextInput
+              style={styles.input}
+              value={customPasscodeDraft}
+              onChangeText={(value) =>
+                setCustomPasscodeDraft(normalizeSoberHousePasscodeInput(value))
+              }
+              keyboardType="number-pad"
+              secureTextEntry
+              maxLength={7}
+              placeholder="Enter 7 digits"
+              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+              textContentType="oneTimeCode"
+            />
+          </View>
+          <View style={styles.column}>
+            <FieldLabel>Confirm passcode</FieldLabel>
+            <TextInput
+              style={styles.input}
+              value={customPasscodeConfirmDraft}
+              onChangeText={(value) =>
+                setCustomPasscodeConfirmDraft(normalizeSoberHousePasscodeInput(value))
+              }
+              keyboardType="number-pad"
+              secureTextEntry
+              maxLength={7}
+              placeholder="Re-enter 7 digits"
+              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+              textContentType="oneTimeCode"
+            />
+          </View>
+        </View>
+        <Text style={styles.entityMeta}>
+          Leave both fields blank if you only want to save the Face ID setting. Enter both fields to
+          create or update the 7-digit fallback code.
+        </Text>
+        <View style={styles.buttonRow}>
+          <AppButton title="Save security" onPress={() => void saveSecuritySettings()} />
+          {store.security.customPasscodeHash ? (
+            <>
+              <View style={styles.buttonSpacer} />
+              <AppButton
+                title="Clear passcode"
+                variant="secondary"
+                onPress={() => void clearCustomPasscode()}
+              />
+            </>
+          ) : null}
+        </View>
       </GlassCard>
 
       {showAdminControls ? (

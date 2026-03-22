@@ -1,4 +1,4 @@
-package com.recovery.accountability
+package com.rabbithole.soberai
 
 import android.app.Application
 import android.content.res.Configuration

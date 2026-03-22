@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 11 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 12 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -161,6 +161,12 @@ export type SoberHouseAccessRole =
   | "HOUSE_RESIDENT"
   | "DRUG_COURT_PARTICIPANT"
   | "PROBATION_PAROLE_PARTICIPANT";
+
+export type SoberHouseSecuritySettings = {
+  biometricUnlockEnabled: boolean;
+  customPasscodeHash: string | null;
+  customPasscodeUpdatedAt: string | null;
+};
 
 export type Option<Value extends string> = {
   value: Value;
@@ -1114,6 +1120,7 @@ export type ResidentWizardDraft = {
 
 export type SoberHouseSettingsStore = {
   version: typeof SOBER_HOUSE_SETTINGS_STORE_VERSION;
+  security: SoberHouseSecuritySettings;
   userAccessProfile: SoberHouseUserAccessProfile | null;
   organization: Organization | null;
   houseGroups: HouseGroup[];
