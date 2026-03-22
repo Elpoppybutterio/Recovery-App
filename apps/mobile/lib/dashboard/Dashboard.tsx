@@ -1,6 +1,16 @@
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useEffect, useState, type ReactNode } from "react";
-import Svg, { Circle, Line, Polyline } from "react-native-svg";
+import Svg, {
+  Circle,
+  Defs,
+  G,
+  LinearGradient,
+  Line,
+  Path,
+  Polyline,
+  Stop,
+  Text as SvgText,
+} from "react-native-svg";
 import type { CommunicationNotificationSummary } from "../communication/summary";
 import type { PhysicalRecoveryTileSummary } from "../physicalRecovery";
 import type { RecoveryMilestoneTileSummary } from "../recoveryMilestones";
@@ -132,7 +142,7 @@ type DashboardProps = {
   onOpenPrivacyStatement: () => void;
   onOpenMeetings: () => void;
   onOpenRecoveryRoadmap: () => void;
-  onOpenPhysicalRecovery: () => void;
+  onOpenPhysicalRecovery: (lens?: "mental" | "physical") => void;
   supervisionPanel?: ReactNode;
   upcomingMeetingsPanel?: ReactNode;
   onOpenAttendance: () => void;
@@ -186,6 +196,140 @@ function clampPercent(value: number): number {
     return 0;
   }
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function RecoveryRepairGauge({
+  eyebrow,
+  title,
+  percent,
+  accentFrom,
+  accentMid,
+  accentTo,
+  detail,
+  onPress,
+}: {
+  eyebrow: string;
+  title: string;
+  percent: number;
+  accentFrom: string;
+  accentMid: string;
+  accentTo: string;
+  detail: string;
+  onPress: () => void;
+}) {
+  const normalized = clampPercent(percent);
+  const radius = 78;
+  const stroke = 14;
+  const normalizedRadius = radius - stroke / 2;
+  const circumference = Math.PI * normalizedRadius;
+  const dashOffset = circumference * (1 - normalized / 100);
+  const angle = Math.PI * (1 - normalized / 100);
+  const x2 = 110 + Math.cos(angle) * 68;
+  const y2 = 110 - Math.sin(angle) * 68;
+  const safeId = eyebrow.replace(/\s+/g, "-").toLowerCase();
+
+  return (
+    <Pressable style={styles.recoveryGaugeMetric} onPress={onPress}>
+      <Text style={styles.recoveryGaugeEyebrow}>{eyebrow}</Text>
+      <Text style={styles.recoveryGaugeTitle}>{title}</Text>
+      <Text style={styles.recoveryGaugeDetail}>{detail}</Text>
+      <View style={styles.recoveryGaugePreviewWrap}>
+        <Svg width={236} height={236} viewBox="0 0 220 236">
+          <Defs>
+            <LinearGradient id={`track-${safeId}`} x1="0%" y1="0%" x2="100%" y2="0%">
+              <Stop offset="0%" stopColor="rgba(255,255,255,0.18)" />
+              <Stop offset="100%" stopColor="rgba(255,255,255,0.08)" />
+            </LinearGradient>
+            <LinearGradient id={`value-${safeId}`} x1="0%" y1="0%" x2="100%" y2="0%">
+              <Stop offset="0%" stopColor={accentFrom} />
+              <Stop offset="50%" stopColor={accentMid} />
+              <Stop offset="100%" stopColor={accentTo} />
+            </LinearGradient>
+          </Defs>
+
+          <Path
+            d="M 30 110 A 80 80 0 0 1 190 110"
+            fill="none"
+            stroke={`url(#track-${safeId})`}
+            strokeWidth={14}
+            strokeLinecap="round"
+          />
+
+          <Path
+            d="M 30 110 A 80 80 0 0 1 190 110"
+            fill="none"
+            stroke={`url(#value-${safeId})`}
+            strokeWidth={14}
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={dashOffset}
+          />
+
+          {[0, 25, 50, 75, 100].map((tick) => {
+            const tickAngle = Math.PI * (1 - tick / 100);
+            const x1 = 110 + Math.cos(tickAngle) * 72;
+            const y1 = 110 - Math.sin(tickAngle) * 72;
+            const x2 = 110 + Math.cos(tickAngle) * 86;
+            const y2 = 110 - Math.sin(tickAngle) * 86;
+            const lx = 110 + Math.cos(tickAngle) * 102;
+            const ly = 110 - Math.sin(tickAngle) * 102;
+            return (
+              <G key={String(tick)}>
+                <Line
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke="rgba(255,255,255,0.35)"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                />
+                <SvgText
+                  x={lx}
+                  y={ly + 3}
+                  fill="rgba(255,255,255,0.65)"
+                  fontSize="10"
+                  fontWeight="700"
+                  textAnchor="middle"
+                >
+                  {tick}
+                </SvgText>
+              </G>
+            );
+          })}
+
+          <Line
+            x1={110}
+            y1={110}
+            x2={x2}
+            y2={y2}
+            stroke="rgba(255,255,255,0.95)"
+            strokeWidth={4}
+            strokeLinecap="round"
+          />
+          <Circle cx={110} cy={110} r={7} fill="rgba(255,255,255,0.95)" />
+        </Svg>
+        <View style={styles.recoveryGaugeValueWrap}>
+          <View style={styles.recoveryGaugeValueRow}>
+            <Text
+              style={[
+                styles.recoveryGaugePercent,
+                accentFrom === "#7C3AED"
+                  ? styles.recoveryGaugeValuePurple
+                  : styles.recoveryGaugeValueCyan,
+              ]}
+            >
+              {normalized}
+            </Text>
+            <Text style={styles.recoveryGaugePercentUnit}>%</Text>
+          </View>
+          <View style={styles.recoveryGaugeTapPill}>
+            <Text style={styles.recoveryGaugeTapPillText}>Tap for weekly detail</Text>
+          </View>
+        </View>
+      </View>
+    </Pressable>
+  );
 }
 
 function dailyChecklistMessage(percent: number): string {
@@ -330,6 +474,7 @@ export function Dashboard({
   onLogMeeting,
   onCaptureSignature,
 }: DashboardProps) {
+  const { width: windowWidth } = useWindowDimensions();
   const [menuOpen, setMenuOpen] = useState(false);
   const [hoveredTileId, setHoveredTileId] = useState<string | null>(null);
   const [tickerNowMs, setTickerNowMs] = useState(Date.now());
@@ -1297,7 +1442,7 @@ export function Dashboard({
         ) : null}
 
         <Pressable
-          onPress={onOpenPhysicalRecovery}
+          onPress={() => onOpenPhysicalRecovery()}
           onHoverIn={() => setTileHover("physical-recovery", true)}
           onHoverOut={() => setTileHover("physical-recovery", false)}
           accessible={false}
@@ -1312,16 +1457,38 @@ export function Dashboard({
             ]}
           >
             <View style={styles.upcomingHeader}>
-              <Text style={styles.recoveryTitle}>Physical Recovery</Text>
+              <Text style={styles.recoveryTitle}>Recovery Repair</Text>
               <View style={styles.dotRow}>
                 <View style={styles.dot} />
                 <View style={styles.dot} />
                 <View style={styles.dot} />
               </View>
             </View>
-            <Text style={styles.physicalRecoveryStage}>{physicalRecoverySummary.stageLabel}</Text>
-            <Text style={styles.recoveryText}>{physicalRecoverySummary.snapshot}</Text>
-            <Text style={styles.physicalRecoveryNext}>{physicalRecoverySummary.nextLabel}</Text>
+            <View
+              style={[
+                styles.recoveryGaugeRow,
+                windowWidth >= 720 ? styles.recoveryGaugeRowWide : null,
+              ]}
+            >
+              {physicalRecoverySummary.gauges.map((gauge) => (
+                <RecoveryRepairGauge
+                  key={gauge.id}
+                  eyebrow={gauge.label}
+                  title={gauge.statusLabel}
+                  percent={gauge.percent}
+                  accentFrom={gauge.id === "mental" ? "#7C3AED" : "#22D3EE"}
+                  accentMid={gauge.id === "mental" ? "#A855F7" : "#38BDF8"}
+                  accentTo={gauge.id === "mental" ? "#C084FC" : "#67E8F9"}
+                  detail={gauge.supportingText}
+                  onPress={() => onOpenPhysicalRecovery(gauge.id)}
+                />
+              ))}
+            </View>
+            <View style={styles.recoverySummaryBlock}>
+              <Text style={styles.physicalRecoveryStage}>{physicalRecoverySummary.stageLabel}</Text>
+              <Text style={styles.recoveryText}>{physicalRecoverySummary.snapshot}</Text>
+              <Text style={styles.physicalRecoveryNext}>{physicalRecoverySummary.nextLabel}</Text>
+            </View>
             <Text style={styles.physicalRecoveryDisclaimer}>
               {physicalRecoverySummary.disclaimer}
             </Text>
@@ -2288,16 +2455,112 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     fontWeight: "800",
   },
+  recoveryGaugeRow: {
+    flexDirection: "column",
+    gap: 10,
+    alignItems: "stretch",
+  },
+  recoveryGaugeRowWide: {
+    flexDirection: "row",
+  },
+  recoveryGaugeMetric: {
+    flex: 1,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 16,
+  },
+  recoveryGaugeEyebrow: {
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 12,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 2.2,
+  },
+  recoveryGaugeTitle: {
+    marginTop: 4,
+    color: Design.color.textPrimary,
+    fontSize: 30,
+    fontWeight: "900",
+    letterSpacing: -0.8,
+  },
+  recoveryGaugeDetail: {
+    marginTop: 4,
+    minHeight: 56,
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 14,
+    lineHeight: 24,
+  },
+  recoveryGaugePreviewWrap: {
+    position: "relative",
+    alignSelf: "center",
+    width: 236,
+    height: 236,
+    marginTop: 6,
+  },
+  recoveryGaugePercent: {
+    fontSize: 56,
+    fontWeight: "900",
+    lineHeight: 58,
+    letterSpacing: -1.6,
+  },
+  recoveryGaugePercentUnit: {
+    color: "rgba(216,228,255,0.62)",
+    fontSize: 18,
+    fontWeight: "800",
+    marginBottom: 6,
+    marginLeft: 4,
+  },
+  recoveryGaugeValuePurple: {
+    color: "#E9D5FF",
+  },
+  recoveryGaugeValueCyan: {
+    color: "#CFFAFE",
+  },
+  recoveryGaugeValueWrap: {
+    position: "absolute",
+    left: "50%",
+    bottom: 8,
+    alignItems: "center",
+    transform: [{ translateX: -54 }],
+  },
+  recoveryGaugeValueRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+  },
+  recoveryGaugeTapPill: {
+    marginTop: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    backgroundColor: "rgba(0,0,0,0.2)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  recoveryGaugeTapPillText: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  recoverySummaryBlock: {
+    marginTop: 16,
+    gap: 6,
+  },
   physicalRecoveryNext: {
     color: "rgba(242, 213, 140, 0.92)",
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: "700",
+    marginTop: 4,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "800",
   },
   physicalRecoveryDisclaimer: {
     color: "rgba(216,228,255,0.68)",
-    fontSize: 10,
-    lineHeight: 14,
+    marginTop: 8,
+    fontSize: 12,
+    lineHeight: 20,
   },
   soberHouseManagerAction: {
     alignSelf: "flex-start",

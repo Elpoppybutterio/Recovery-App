@@ -152,6 +152,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       permissions: ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "ACCESS_BACKGROUND_LOCATION"],
     },
     assetBundlePatterns: ["**/*"],
+    plugins: [...(config.plugins ?? []), "@react-native-community/datetimepicker"],
     updates: updatesConfig,
     extra: {
       ...config.extra,

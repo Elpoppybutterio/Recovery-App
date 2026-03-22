@@ -29,6 +29,7 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     version !== 7 &&
     version !== 8 &&
     version !== 10 &&
+    version !== 11 &&
     version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
   ) {
     return createDefaultSoberHouseSettingsStore();
@@ -59,6 +60,19 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
 
   return {
     version: SOBER_HOUSE_SETTINGS_STORE_VERSION,
+    security: {
+      biometricUnlockEnabled: candidate.security?.biometricUnlockEnabled ?? true,
+      customPasscodeHash:
+        typeof candidate.security?.customPasscodeHash === "string" &&
+        candidate.security.customPasscodeHash.trim().length > 0
+          ? candidate.security.customPasscodeHash
+          : null,
+      customPasscodeUpdatedAt:
+        typeof candidate.security?.customPasscodeUpdatedAt === "string" &&
+        candidate.security.customPasscodeUpdatedAt.trim().length > 0
+          ? candidate.security.customPasscodeUpdatedAt
+          : null,
+    },
     userAccessProfile: candidate.userAccessProfile ?? null,
     organization: candidate.organization ?? null,
     houseGroups: Array.isArray(candidate.houseGroups)

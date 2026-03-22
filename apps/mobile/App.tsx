@@ -33,6 +33,11 @@ import {
   type MeetingsApiHealthEvent,
 } from "./lib/meetings/source";
 import {
+  ONLINE_MEETING_DIRECTORY_URL,
+  pickOnlineMeetingNow,
+  sliceDashboardMeetingsPreview,
+} from "./lib/meetings/dashboard";
+import {
   classifyGeo,
   distanceMiles,
   isValidLatLng,
@@ -79,6 +84,7 @@ import {
   buildPhysicalRecoveryViewModel,
   RECOVERY_SUBSTANCE_OPTIONS,
   normalizeRecoverySubstances,
+  type PhysicalRecoveryLens,
   type RecoverySubstanceCategory,
 } from "./lib/physicalRecovery";
 import { Dashboard } from "./lib/dashboard/Dashboard";
@@ -88,7 +94,11 @@ import {
 } from "./lib/dashboard/meetingStreak";
 import { featureFlags } from "./lib/config/featureFlags";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
-import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
+import {
+  completeMorningItemIfEnabled,
+  computeMorningCompletedAt,
+  reconcileMorningCompletionOnItemEnableToggle,
+} from "./lib/routines/completion";
 import {
   DAILY_REFLECTIONS_ITEM_ID,
   DAILY_REFLECTIONS_URL,
@@ -109,7 +119,11 @@ import {
   computeNightlyInventoryStats,
   computeRoutineInsights,
 } from "./lib/routines/stats";
-import type { NightlyInventoryDayState, RecoveryRoutinesStore } from "./lib/routines/types";
+import type {
+  NightlyInventoryDayState,
+  RecoveryRoutinesStore,
+  RoutineChecklistItem,
+} from "./lib/routines/types";
 import { AppButton } from "./lib/ui/AppButton";
 import { GlassCard } from "./lib/ui/GlassCard";
 import { LiquidBackground } from "./lib/ui/LiquidBackground";
@@ -126,6 +140,7 @@ import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
 import { SoberHouseSettingsScreen } from "./screens/SoberHouseSettingsScreen";
 import { SoberHouseChatSection } from "./components/SoberHouseChatSection";
 import { SoberHouseOwnerDashboard } from "./components/SoberHouseOwnerDashboard";
+import { TimePickerField } from "./components/TimePickerField";
 import {
   buildCommunicationNotificationSummary,
   type CommunicationMode,
@@ -157,7 +172,12 @@ import {
 } from "./lib/soberHouse/scheduling";
 import { loadSoberHouseSettingsStore, saveSoberHouseSettingsStore } from "./lib/soberHouse/storage";
 import type { SoberHouseSettingsStore } from "./lib/soberHouse/types";
-import { requiresSoberHouseDeviceUnlock } from "./lib/soberHouse/deviceAuth";
+import {
+  isValidSoberHousePasscode,
+  normalizeSoberHousePasscodeInput,
+  requiresSoberHouseDeviceUnlock,
+  verifySoberHousePasscode,
+} from "./lib/soberHouse/deviceAuth";
 import {
   buildChatThreadSummaries,
   getChatViewerContexts,
@@ -206,6 +226,7 @@ const MORNING_PRAYER_ITEM_IDS = new Set<string>([
   SEVENTH_STEP_PRAYER_ITEM_ID,
   ELEVENTH_STEP_PRAYER_ITEM_ID,
 ]);
+const DEFAULT_SPONSOR_TIME_LOCAL_HHMM = "08:00";
 
 type RecoveryMode = "A" | "B" | "C";
 type AppScreen = "LIST" | "DETAIL" | "SESSION" | "SIGNATURE";
@@ -997,7 +1018,7 @@ function from24HourText(value: string): { hour12: number; minute: number; meridi
   const hours = Number(hoursText);
   const minutes = Number(minutesText);
 
-  const normalizedHours = Number.isFinite(hours) ? Math.max(0, Math.min(23, hours)) : 17;
+  const normalizedHours = Number.isFinite(hours) ? Math.max(0, Math.min(23, hours)) : 8;
   const normalizedMinutes = Number.isFinite(minutes) ? Math.max(0, Math.min(59, minutes)) : 0;
   const meridiem: "AM" | "PM" = normalizedHours >= 12 ? "PM" : "AM";
   const base = normalizedHours % 12;
@@ -2086,6 +2107,7 @@ export default function App() {
   const [loadingMeetings, setLoadingMeetings] = useState(false);
   const [meetingsStatus, setMeetingsStatus] = useState("Meetings not loaded yet.");
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
+  const [dashboardMeetingsExpanded, setDashboardMeetingsExpanded] = useState(false);
   const [lastMeetingsApiEvent, setLastMeetingsApiEvent] = useState<MeetingsApiHealthEvent | null>(
     null,
   );
@@ -2145,9 +2167,9 @@ export default function App() {
 
   const [sponsorName, setSponsorName] = useState("");
   const [sponsorPhoneDigits, setSponsorPhoneDigits] = useState("");
-  const [sponsorHour12, setSponsorHour12] = useState(5);
+  const [sponsorHour12, setSponsorHour12] = useState(8);
   const [sponsorMinute, setSponsorMinute] = useState(0);
-  const [sponsorMeridiem, setSponsorMeridiem] = useState<"AM" | "PM">("PM");
+  const [sponsorMeridiem, setSponsorMeridiem] = useState<"AM" | "PM">("AM");
   const [sponsorRepeatPreset, setSponsorRepeatPreset] = useState<RepeatPreset>("WEEKLY");
   const [sponsorRepeatDays, setSponsorRepeatDays] = useState<WeekdayCode[]>([
     getCurrentWeekdayCode(new Date()),
@@ -2181,6 +2203,12 @@ export default function App() {
     useState<RecoveryMilestoneTileSummary | null>(null);
   const [showRecoveryRoadmap, setShowRecoveryRoadmap] = useState(false);
   const [showPhysicalRecoveryTimeline, setShowPhysicalRecoveryTimeline] = useState(false);
+  const [showPhysicalRecoverySubstanceEditor, setShowPhysicalRecoverySubstanceEditor] =
+    useState(false);
+  const [physicalRecoveryLens, setPhysicalRecoveryLens] = useState<PhysicalRecoveryLens>("mental");
+  const [physicalRecoverySubstanceDraft, setPhysicalRecoverySubstanceDraft] = useState<
+    RecoverySubstanceCategory[]
+  >([]);
   const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
   const [wizardSupervisionMode, setWizardSupervisionMode] =
     useState<SetupSupervisionMode>("INDEPENDENT");
@@ -2239,6 +2267,7 @@ export default function App() {
   const [soberHouseUnlocked, setSoberHouseUnlocked] = useState(false);
   const [soberHouseUnlocking, setSoberHouseUnlocking] = useState(false);
   const [soberHouseUnlockStatus, setSoberHouseUnlockStatus] = useState<string | null>(null);
+  const [soberHouseUnlockCode, setSoberHouseUnlockCode] = useState("");
   const [debugTimeCompressionEnabled] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
 
@@ -2296,6 +2325,12 @@ export default function App() {
     () => to24HourText(sponsorHour12, sponsorMinute, sponsorMeridiem),
     [sponsorHour12, sponsorMinute, sponsorMeridiem],
   );
+  const setSponsorCallTimeFromHhmm = useCallback((nextValue: string) => {
+    const parsed = from24HourText(nextValue || DEFAULT_SPONSOR_TIME_LOCAL_HHMM);
+    setSponsorHour12(parsed.hour12);
+    setSponsorMinute(parsed.minute);
+    setSponsorMeridiem(parsed.meridiem);
+  }, []);
   const sponsorRepeatUnit = useMemo<RepeatUnit>(
     () => (sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY"),
     [sponsorRepeatPreset],
@@ -2453,6 +2488,11 @@ export default function App() {
     homeScreen === "SETTINGS" &&
     soberHouseRequiresDeviceUnlock &&
     !soberHouseUnlocked;
+  const soberHouseBiometricUnlockEnabled = soberHouseStore.security?.biometricUnlockEnabled ?? true;
+  const soberHouseCustomPasscodeHash = soberHouseStore.security?.customPasscodeHash ?? null;
+  const soberHouseHasCustomPasscode = Boolean(
+    soberHouseCustomPasscodeHash && soberHouseCustomPasscodeHash.trim().length > 0,
+  );
   const isIosSimulator = Platform.OS === "ios" && Constants.isDevice === false;
   const hasNativeLocalAuthentication =
     NativeModules != null &&
@@ -2482,14 +2522,58 @@ export default function App() {
         return null;
       }
     }, [hasNativeLocalAuthentication]);
+  const unlockSoberHouseWithCustomPasscode = useCallback(() => {
+    if (!soberHouseRequiresDeviceUnlock || soberHouseUnlocking) {
+      return;
+    }
+
+    const normalized = normalizeSoberHousePasscodeInput(soberHouseUnlockCode);
+    if (!soberHouseHasCustomPasscode) {
+      setSoberHouseUnlockStatus(
+        "No 7-digit sober-house passcode has been set yet. Unlock once, then add one in Settings Access.",
+      );
+      return;
+    }
+    if (!isValidSoberHousePasscode(normalized)) {
+      setSoberHouseUnlockStatus("Enter the full 7-digit sober-house passcode.");
+      return;
+    }
+    if (!verifySoberHousePasscode(normalized, devAuthUserId, soberHouseCustomPasscodeHash)) {
+      setSoberHouseUnlockStatus("Incorrect 7-digit passcode. Try again.");
+      return;
+    }
+
+    setSoberHouseUnlocked(true);
+    setSoberHouseUnlockCode("");
+    setSoberHouseUnlockStatus(null);
+  }, [
+    devAuthUserId,
+    soberHouseCustomPasscodeHash,
+    soberHouseHasCustomPasscode,
+    soberHouseRequiresDeviceUnlock,
+    soberHouseUnlockCode,
+    soberHouseUnlocking,
+  ]);
   const unlockSoberHouseAccess = useCallback(async () => {
     if (!soberHouseRequiresDeviceUnlock || soberHouseUnlocking) {
       return;
     }
 
-    if (canUseSimulatorSoberHouseUnlock) {
+    if (canUseSimulatorSoberHouseUnlock && !soberHouseHasCustomPasscode) {
       setSoberHouseUnlocked(true);
-      setSoberHouseUnlockStatus(null);
+      setSoberHouseUnlockCode("");
+      setSoberHouseUnlockStatus(
+        "Simulator bypass active. Set a 7-digit sober-house passcode in Settings Access to test the fallback lock flow.",
+      );
+      return;
+    }
+
+    if (!soberHouseBiometricUnlockEnabled) {
+      setSoberHouseUnlockStatus(
+        soberHouseHasCustomPasscode
+          ? "Face ID is off for this account. Enter the 7-digit passcode to continue."
+          : "Face ID is off and no 7-digit passcode is configured yet. Re-enable Face ID in Settings Access after your next unlock.",
+      );
       return;
     }
 
@@ -2499,7 +2583,9 @@ export default function App() {
       const localAuthentication = await loadLocalAuthenticationModule();
       if (!localAuthentication) {
         setSoberHouseUnlockStatus(
-          "This build does not include device authentication. Rebuild the app with Face ID / passcode support to open sober-house records.",
+          soberHouseHasCustomPasscode
+            ? "Face ID is unavailable in this build. Enter the 7-digit sober-house passcode to continue."
+            : "This build does not include device authentication. Rebuild the app with Face ID support or configure a 7-digit sober-house passcode.",
         );
         return;
       }
@@ -2513,13 +2599,16 @@ export default function App() {
 
       if (result.success) {
         setSoberHouseUnlocked(true);
+        setSoberHouseUnlockCode("");
         setSoberHouseUnlockStatus(null);
         return;
       }
 
       if (result.error === "user_cancel" || result.error === "system_cancel") {
         setSoberHouseUnlockStatus(
-          "Unlock canceled. Use Face ID or your device passcode to continue.",
+          soberHouseHasCustomPasscode
+            ? "Unlock canceled. Use Face ID again or enter the 7-digit sober-house passcode."
+            : "Unlock canceled. Use Face ID or your device passcode to continue.",
         );
         return;
       }
@@ -2530,21 +2619,31 @@ export default function App() {
         result.error === "passcode_not_set"
       ) {
         setSoberHouseUnlockStatus(
-          "Device authentication is unavailable. Enable Face ID, Touch ID, or an iPhone passcode to open sober-house records.",
+          soberHouseHasCustomPasscode
+            ? "Face ID is unavailable on this device. Enter the 7-digit sober-house passcode to continue."
+            : "Device authentication is unavailable. Enable Face ID, Touch ID, or an iPhone passcode to open sober-house records.",
         );
         return;
       }
 
-      setSoberHouseUnlockStatus("Unlock failed. Try Face ID or your device passcode again.");
+      setSoberHouseUnlockStatus(
+        soberHouseHasCustomPasscode
+          ? "Unlock failed. Try Face ID again or enter the 7-digit sober-house passcode."
+          : "Unlock failed. Try Face ID or your device passcode again.",
+      );
     } catch {
       setSoberHouseUnlockStatus(
-        "Device authentication could not start. Try Face ID or your device passcode again.",
+        soberHouseHasCustomPasscode
+          ? "Face ID could not start. Enter the 7-digit sober-house passcode to continue."
+          : "Device authentication could not start. Try Face ID or your device passcode again.",
       );
     } finally {
       setSoberHouseUnlocking(false);
     }
   }, [
     canUseSimulatorSoberHouseUnlock,
+    soberHouseBiometricUnlockEnabled,
+    soberHouseHasCustomPasscode,
     loadLocalAuthenticationModule,
     soberHouseRequiresDeviceUnlock,
     soberHouseUnlocking,
@@ -2571,7 +2670,11 @@ export default function App() {
 
     if (canUseSimulatorSoberHouseUnlock) {
       soberHouseUnlockPromptedRef.current = false;
-      setSoberHouseUnlockStatus("Simulator mode: tap Enter Code to open sober-house settings.");
+      setSoberHouseUnlockStatus(
+        soberHouseHasCustomPasscode
+          ? "Simulator mode: enter the 7-digit sober-house passcode to open settings."
+          : "Simulator mode: Face ID is unavailable here. Use the bypass, then set a 7-digit sober-house passcode to test the fallback flow.",
+      );
       return;
     }
 
@@ -2585,6 +2688,7 @@ export default function App() {
     homeScreen,
     mode,
     canUseSimulatorSoberHouseUnlock,
+    soberHouseHasCustomPasscode,
     soberHouseRequiresDeviceUnlock,
     soberHouseUnlocked,
     unlockSoberHouseAccess,
@@ -2594,6 +2698,7 @@ export default function App() {
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "inactive" || nextState === "background") {
         setSoberHouseUnlocked(false);
+        setSoberHouseUnlockCode("");
         soberHouseUnlockPromptedRef.current = false;
       }
     });
@@ -2775,6 +2880,15 @@ export default function App() {
     () => meetingsForMeetingsScreen.slice(0, 5),
     [meetingsForMeetingsScreen],
   );
+  const dashboardVisibleMeetings = useMemo<MeetingListItem[]>(
+    () => sliceDashboardMeetingsPreview(dashboardMeetingsForPanel, dashboardMeetingsExpanded),
+    [dashboardMeetingsExpanded, dashboardMeetingsForPanel],
+  );
+  useEffect(() => {
+    if (dashboardMeetingsForPanel.length <= 1 && dashboardMeetingsExpanded) {
+      setDashboardMeetingsExpanded(false);
+    }
+  }, [dashboardMeetingsExpanded, dashboardMeetingsForPanel.length]);
   const selectedMeetingsFormatLabel = useMemo(
     () =>
       MEETINGS_FORMAT_OPTIONS.find((option) => option.value === meetingsFormatFilter)?.label ??
@@ -3014,6 +3128,14 @@ export default function App() {
       ),
     [meetingsTodayUpcoming],
   );
+  const dashboardNowMinutes = useMemo(() => {
+    const now = new Date(clockTickMs);
+    return now.getHours() * 60 + now.getMinutes();
+  }, [clockTickMs]);
+  const dashboardOnlineMeetingNow = useMemo(
+    () => pickOnlineMeetingNow(dashboardUpcomingOnline, dashboardNowMinutes),
+    [dashboardNowMinutes, dashboardUpcomingOnline],
+  );
   const dashboardNextFiveMeetings = useMemo(() => {
     const nearbyInPerson = dashboardUpcomingInPerson.filter(
       (meeting) =>
@@ -3032,10 +3154,8 @@ export default function App() {
   }, [dashboardUpcomingInPerson, dashboardUpcomingOnline]);
   const dashboardMeetingPrimaryActionLabels = useMemo(() => {
     const labels: Record<string, string> = {};
-    const now = new Date(clockTickMs);
-    const nowMinutes = now.getHours() * 60 + now.getMinutes();
     for (const meeting of dashboardNextFiveMeetings) {
-      const meetingInProgress = isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
+      const meetingInProgress = isMeetingInProgress(meeting.startsAtLocal, dashboardNowMinutes);
       labels[meeting.id] = meetingInProgress ? "Attend now" : "Attend";
     }
     if (activeAttendance && !activeAttendance.endAt) {
@@ -3047,7 +3167,7 @@ export default function App() {
         elapsedSeconds >= MIN_VALID_MEETING_MINUTES * 60 ? "End meeting" : "In progress";
     }
     return labels;
-  }, [dashboardNextFiveMeetings, activeAttendance, clockTickMs, sessionNowMs]);
+  }, [dashboardNextFiveMeetings, activeAttendance, dashboardNowMinutes, sessionNowMs]);
   const dashboardShowsOnlineFallback = useMemo(
     () => dashboardUpcomingInPerson.length === 0 && dashboardUpcomingOnline.length > 0,
     [dashboardUpcomingInPerson, dashboardUpcomingOnline],
@@ -3215,6 +3335,20 @@ export default function App() {
         substances: recoverySubstances,
       }),
     [sobrietyDateIso, clockTickMs, recoverySubstances],
+  );
+  const physicalRecoverySelectedSubstanceLabels = useMemo(
+    () =>
+      recoverySubstances
+        .map(
+          (value) =>
+            RECOVERY_SUBSTANCE_OPTIONS.find((option) => option.value === value)?.label ?? value,
+        )
+        .join(", "),
+    [recoverySubstances],
+  );
+  const selectedPhysicalRecoveryLensDetail = useMemo(
+    () => physicalRecoveryView.lensDetails[physicalRecoveryLens],
+    [physicalRecoveryLens, physicalRecoveryView],
   );
 
   const homeGroupUpcoming = useMemo(() => {
@@ -4592,43 +4726,6 @@ export default function App() {
     [routineDateKey, updateRoutinesStore],
   );
 
-  const autoCompleteSponsorCheckIn = useCallback(() => {
-    updateRoutinesStore((store) => {
-      const todayKey = dateKeyForRoutines(new Date());
-      const currentDay = getMorningDayState(store, todayKey);
-      if (currentDay.completedByItemId["sponsor-check-in"]) {
-        return store;
-      }
-
-      const completedByItemId = {
-        ...currentDay.completedByItemId,
-        "sponsor-check-in": new Date().toISOString(),
-      };
-      const enabledItemIds = new Set(
-        store.morningTemplate.items.filter((item) => item.enabled).map((item) => item.id),
-      );
-      const completedEnabledCount = Object.keys(completedByItemId).filter((itemId) =>
-        enabledItemIds.has(itemId),
-      ).length;
-      const nextCompletedAt =
-        enabledItemIds.size > 0 && completedEnabledCount >= enabledItemIds.size
-          ? new Date().toISOString()
-          : null;
-
-      return {
-        ...store,
-        morningByDate: {
-          ...store.morningByDate,
-          [todayKey]: {
-            ...currentDay,
-            completedByItemId,
-            completedAt: nextCompletedAt,
-          },
-        },
-      };
-    });
-  }, [updateRoutinesStore]);
-
   const completeMorningItemForCurrentDayIfEnabled = useCallback(
     (itemId: string): "completed" | "disabled" | "already-complete" => {
       const currentDay = getMorningDayState(routinesStore, routineDateKey);
@@ -4815,8 +4912,7 @@ export default function App() {
   }, [completeMorningItemForCurrentDayIfEnabled, speakRoutineText]);
 
   const sendMorningSponsorTextNow = useCallback(async () => {
-    const completionReason = completeMorningItemForCurrentDayIfEnabled("sponsor-check-in");
-    if (completionReason === "disabled") {
+    if (!isMorningItemEnabled("sponsor-check-in")) {
       setRoutinesStatus("Turn this checklist item on first.");
       return;
     }
@@ -4836,6 +4932,7 @@ export default function App() {
     for (const url of candidateUrls) {
       try {
         await Linking.openURL(url);
+        completeMorningItemForCurrentDayIfEnabled("sponsor-check-in");
         setRoutinesStatus("Opened SMS draft for sponsor.");
         return;
       } catch {
@@ -4844,7 +4941,12 @@ export default function App() {
     }
 
     setRoutinesStatus("Unable to open SMS on this device.");
-  }, [completeMorningItemForCurrentDayIfEnabled, sponsorPhoneDigits, sponsorPhoneE164]);
+  }, [
+    completeMorningItemForCurrentDayIfEnabled,
+    isMorningItemEnabled,
+    sponsorPhoneDigits,
+    sponsorPhoneE164,
+  ]);
 
   const onReadSeventhStepPrayer = useCallback(() => {
     if (!isMorningItemEnabled(SEVENTH_STEP_PRAYER_ITEM_ID)) {
@@ -4906,10 +5008,28 @@ export default function App() {
     updateNightlyDayState,
   ]);
 
+  const openRoutineReaderLink = useCallback(async (url: string) => {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      setRoutinesStatus("Unable to open this link.");
+    }
+  }, []);
+
   const openRoutineReader = useCallback(
-    (itemId: string, title: string, url: string | null) => {
+    (
+      itemId: string,
+      title: string,
+      url: string | null,
+      mode: RoutineChecklistItem["readerMode"] = "reader",
+    ) => {
       if (!isMorningItemEnabled(itemId)) {
         setRoutinesStatus("Turn this checklist item on first.");
+        return;
+      }
+
+      if (mode === "external" && url) {
+        void openRoutineReaderLink(url);
         return;
       }
 
@@ -4931,16 +5051,8 @@ export default function App() {
       setRoutineReader({ title, url, bodyText: null, itemId, requiredDwellSeconds });
       setToolsScreen("READER");
     },
-    [isMorningItemEnabled, resolveMorningReadRequiredSeconds],
+    [isMorningItemEnabled, openRoutineReaderLink, resolveMorningReadRequiredSeconds],
   );
-
-  const openRoutineReaderLink = useCallback(async (url: string) => {
-    try {
-      await Linking.openURL(url);
-    } catch {
-      setRoutinesStatus("Unable to open this link.");
-    }
-  }, []);
 
   const routineReaderMorningPrayerItemId = useMemo(() => {
     if (routineReaderBackScreen !== "MORNING") {
@@ -5483,6 +5595,33 @@ export default function App() {
     setScreen("LIST");
     setSelectedMeeting(null);
   }, []);
+
+  const openPhysicalRecoveryTimeline = useCallback(
+    (lens?: PhysicalRecoveryLens) => {
+      setPhysicalRecoverySubstanceDraft(recoverySubstances);
+      setShowPhysicalRecoverySubstanceEditor(false);
+      if (lens) {
+        setPhysicalRecoveryLens(lens);
+      }
+      setShowPhysicalRecoveryTimeline(true);
+    },
+    [recoverySubstances],
+  );
+
+  const closePhysicalRecoveryTimeline = useCallback(() => {
+    setShowPhysicalRecoverySubstanceEditor(false);
+    setShowPhysicalRecoveryTimeline(false);
+  }, []);
+
+  const openPhysicalRecoverySubstanceEditor = useCallback(() => {
+    setPhysicalRecoverySubstanceDraft(recoverySubstances);
+    setShowPhysicalRecoverySubstanceEditor(true);
+  }, [recoverySubstances]);
+
+  const closePhysicalRecoverySubstanceEditor = useCallback(() => {
+    setPhysicalRecoverySubstanceDraft(recoverySubstances);
+    setShowPhysicalRecoverySubstanceEditor(false);
+  }, [recoverySubstances]);
 
   const openDashboard = useCallback(() => {
     setHomeScreen("DASHBOARD");
@@ -6087,14 +6226,12 @@ export default function App() {
         await Linking.openURL(primaryUrl);
         setSponsorStatus(null);
         appendSponsorCallLog({ sponsorPhoneE164: normalizedE164, source, success: true });
-        autoCompleteSponsorCheckIn();
         return;
       } catch {
         try {
           await Linking.openURL(fallbackUrl);
           setSponsorStatus(null);
           appendSponsorCallLog({ sponsorPhoneE164: normalizedE164, source, success: true });
-          autoCompleteSponsorCheckIn();
           return;
         } catch {
           setSponsorStatus("Calling is not supported on this device (simulator).");
@@ -6102,7 +6239,7 @@ export default function App() {
         }
       }
     },
-    [appendSponsorCallLog, autoCompleteSponsorCheckIn, sponsorPhoneDigits],
+    [appendSponsorCallLog, sponsorPhoneDigits],
   );
   const callHouseManagerFromDashboard = useCallback(async () => {
     if (!soberHouseManagerContact?.phone) {
@@ -6137,6 +6274,21 @@ export default function App() {
 
     await Linking.openURL(url);
   }, []);
+
+  const openOnlineMeetingsNow = useCallback(async () => {
+    const targetUrl = dashboardOnlineMeetingNow?.onlineUrl ?? ONLINE_MEETING_DIRECTORY_URL;
+
+    try {
+      await Linking.openURL(targetUrl);
+      setMeetingsStatus(
+        dashboardOnlineMeetingNow
+          ? `Opening online meeting: ${dashboardOnlineMeetingNow.name}.`
+          : "Opening the Online Intergroup meeting directory.",
+      );
+    } catch {
+      setMeetingsStatus("Unable to open online meetings right now.");
+    }
+  }, [dashboardOnlineMeetingNow]);
 
   const buildDriveSchedulePreview = useCallback(
     (
@@ -7534,6 +7686,14 @@ export default function App() {
     });
     setSobrietyDateStatus("90-day meeting goal reset to 90.");
   }, [persistRecoveryStateSnapshot]);
+
+  const savePhysicalRecoverySubstances = useCallback(async () => {
+    const normalized = normalizeRecoverySubstances(physicalRecoverySubstanceDraft);
+    setRecoverySubstances(normalized);
+    setWizardRecoverySubstances(normalized);
+    await persistRecoveryStateSnapshot({ recoverySubstances: normalized });
+    setShowPhysicalRecoverySubstanceEditor(false);
+  }, [persistRecoveryStateSnapshot, physicalRecoverySubstanceDraft]);
 
   const getScheduledWindowForAttendance = useCallback((record: AttendanceRecord) => {
     const startedAt = new Date(record.startAt);
@@ -10825,32 +10985,6 @@ export default function App() {
     });
   }
 
-  function incrementHour(delta: number) {
-    setSponsorHour12((previous) => {
-      const next = previous + delta;
-      if (next > 12) {
-        return 1;
-      }
-      if (next < 1) {
-        return 12;
-      }
-      return next;
-    });
-  }
-
-  function incrementMinute(delta: number) {
-    setSponsorMinute((previous) => {
-      const next = previous + delta;
-      if (next > 59) {
-        return 0;
-      }
-      if (next < 0) {
-        return 59;
-      }
-      return next;
-    });
-  }
-
   function toggleRecoverySubstanceSelection(
     value: RecoverySubstanceCategory,
     mode: "wizard" | "settings",
@@ -11457,38 +11591,11 @@ export default function App() {
                       {wizardHasSponsor ? (
                         <>
                           <Text style={styles.label}>Sponsor call time</Text>
-                          <View style={styles.timeRow}>
-                            <Pressable style={styles.stepButton} onPress={() => incrementHour(-1)}>
-                              <Text style={styles.stepButtonText}>-</Text>
-                            </Pressable>
-                            <Text style={styles.timeValue}>
-                              {String(sponsorHour12).padStart(2, "0")}
-                            </Text>
-                            <Pressable style={styles.stepButton} onPress={() => incrementHour(1)}>
-                              <Text style={styles.stepButtonText}>+</Text>
-                            </Pressable>
-                            <Text style={styles.timeDivider}>:</Text>
-                            <Pressable
-                              style={styles.stepButton}
-                              onPress={() => incrementMinute(-1)}
-                            >
-                              <Text style={styles.stepButtonText}>-</Text>
-                            </Pressable>
-                            <Text style={styles.timeValue}>
-                              {String(sponsorMinute).padStart(2, "0")}
-                            </Text>
-                            <Pressable style={styles.stepButton} onPress={() => incrementMinute(1)}>
-                              <Text style={styles.stepButtonText}>+</Text>
-                            </Pressable>
-                            <Pressable
-                              style={styles.meridiemButton}
-                              onPress={() =>
-                                setSponsorMeridiem((current) => (current === "AM" ? "PM" : "AM"))
-                              }
-                            >
-                              <Text style={styles.meridiemText}>{sponsorMeridiem}</Text>
-                            </Pressable>
-                          </View>
+                          <TimePickerField
+                            label="Sponsor call time"
+                            value={sponsorCallTimeLocalHhmm}
+                            onChange={setSponsorCallTimeFromHhmm}
+                          />
                           <Text style={styles.sectionMeta}>
                             Next step configures calendar notifications and alerts for this call
                             time.
@@ -12120,16 +12227,44 @@ export default function App() {
                             available.
                           </Text>
                         ) : null}
-                        <Pressable
-                          style={styles.dashboardMeetingsAttendancePill}
-                          onPress={() => openAttendanceHub("dashboard")}
-                          accessibilityRole="button"
-                          accessibilityLabel="Open meetings attendance log page"
-                        >
-                          <Text style={styles.dashboardMeetingsAttendancePillText}>
-                            Meetings Attendance Log
-                          </Text>
-                        </Pressable>
+                        <View style={styles.dashboardMeetingsActionRow}>
+                          <Pressable
+                            style={styles.dashboardMeetingsAttendancePill}
+                            onPress={() => openAttendanceHub("dashboard")}
+                            accessibilityRole="button"
+                            accessibilityLabel="Open meetings attendance log page"
+                          >
+                            <Text style={styles.dashboardMeetingsAttendancePillText}>
+                              Meetings Attendance Log
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            style={styles.dashboardMeetingsAttendancePill}
+                            onPress={() => void openOnlineMeetingsNow()}
+                            accessibilityRole="button"
+                            accessibilityLabel="Open an online meeting now"
+                          >
+                            <Text style={styles.dashboardMeetingsAttendancePillText}>
+                              Online meetings now
+                            </Text>
+                          </Pressable>
+                          {dashboardMeetingsForPanel.length > 1 ? (
+                            <Pressable
+                              style={styles.dashboardMeetingsAttendancePill}
+                              onPress={() => setDashboardMeetingsExpanded((current) => !current)}
+                              accessibilityRole="button"
+                              accessibilityLabel={
+                                dashboardMeetingsExpanded
+                                  ? "Show only the next meeting"
+                                  : "Show the next five meetings"
+                              }
+                            >
+                              <Text style={styles.dashboardMeetingsAttendancePillText}>
+                                {dashboardMeetingsExpanded ? "Show next meeting" : "Show next 5"}
+                              </Text>
+                            </Pressable>
+                          ) : null}
+                        </View>
                         <View style={styles.meetingsFilterItem}>
                           <Text style={styles.meetingsFilterLabel}>Day</Text>
                           <Pressable
@@ -12273,14 +12408,17 @@ export default function App() {
                           </>
                         ) : (
                           <>
-                            {dashboardMeetingsForPanel.map((meeting) => (
-                              <View key={meeting.id} style={styles.meetingCard}>
-                                <Text style={styles.meetingName}>{meeting.name}</Text>
-                                <Text style={styles.sectionMeta}>
+                            {dashboardVisibleMeetings.map((meeting) => (
+                              <View
+                                key={meeting.id}
+                                style={[styles.meetingCard, styles.dashboardMeetingCardCompact]}
+                              >
+                                <Text style={styles.dashboardMeetingName}>{meeting.name}</Text>
+                                <Text style={styles.dashboardMeetingMeta}>
                                   {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
                                   {meeting.openness || "Unknown"} • {meeting.format || "Unknown"}
                                 </Text>
-                                <Text style={styles.sectionMeta}>
+                                <Text style={styles.dashboardMeetingMeta}>
                                   {meeting.format === "ONLINE"
                                     ? "Online"
                                     : meeting.address || "Unknown address"}{" "}
@@ -12292,29 +12430,39 @@ export default function App() {
                                     locationIssue,
                                   )}
                                 </Text>
-                                <View style={styles.buttonRow}>
-                                  <AppButton
-                                    title="Details"
+                                <View style={styles.dashboardMeetingActionsCompact}>
+                                  <Pressable
+                                    style={styles.dashboardMeetingActionPill}
                                     onPress={() => {
                                       openMeetingsHub();
                                       setSelectedMeeting(meeting);
                                       setScreen("DETAIL");
                                     }}
-                                    variant="primary"
-                                  />
-                                  <View style={styles.buttonSpacer} />
-                                  <AppButton
-                                    title={
-                                      dashboardMeetingPrimaryActionLabels[meeting.id] ?? "Attend"
-                                    }
+                                  >
+                                    <Text style={styles.dashboardMeetingActionPillText}>
+                                      Details
+                                    </Text>
+                                  </Pressable>
+                                  <Pressable
+                                    style={styles.dashboardMeetingActionPill}
                                     onPress={() =>
                                       void handleDashboardMeetingPrimaryAction(meeting.id)
                                     }
-                                    variant="secondary"
-                                  />
+                                  >
+                                    <Text style={styles.dashboardMeetingActionPillText}>
+                                      {dashboardMeetingPrimaryActionLabels[meeting.id] ?? "Attend"}
+                                    </Text>
+                                  </Pressable>
                                 </View>
                               </View>
                             ))}
+                            {!loadingMeetings &&
+                            !dashboardMeetingsExpanded &&
+                            dashboardMeetingsForPanel.length > 1 ? (
+                              <Text style={styles.sectionMeta}>
+                                Showing the next meeting. Tap Show next 5 to expand this list.
+                              </Text>
+                            ) : null}
                             {!loadingMeetings && meetingsForMeetingsScreen.length > 5 ? (
                               <Text style={styles.sectionMeta}>
                                 Showing the first 5 meetings. Open Meetings for the full list.
@@ -12359,7 +12507,7 @@ export default function App() {
                     }}
                     onOpenMeetings={openMeetingsHub}
                     onOpenRecoveryRoadmap={() => setShowRecoveryRoadmap(true)}
-                    onOpenPhysicalRecovery={() => setShowPhysicalRecoveryTimeline(true)}
+                    onOpenPhysicalRecovery={openPhysicalRecoveryTimeline}
                     onOpenRecoverySettings={openSettingsHub}
                     onOpenPrivacyStatement={openPrivacyStatement}
                     supervisionPanel={
@@ -13539,11 +13687,20 @@ export default function App() {
                       }}
                       onToggleItemEnabled={(itemId) => {
                         updateRoutinesStore((store) => {
+                          const currentItem = store.morningTemplate.items.find(
+                            (item) => item.id === itemId,
+                          );
                           const nextItems = store.morningTemplate.items.map((item) =>
                             item.id === itemId ? { ...item, enabled: !item.enabled } : item,
                           );
                           const currentDay = getMorningDayState(store, routineDateKey);
-                          const completedByItemId = { ...currentDay.completedByItemId };
+                          const toggledEnabled = currentItem ? !currentItem.enabled : false;
+                          const completedByItemId = reconcileMorningCompletionOnItemEnableToggle(
+                            itemId,
+                            currentItem?.enabled === true,
+                            toggledEnabled,
+                            { ...currentDay.completedByItemId },
+                          );
                           const nowIso = new Date().toISOString();
                           const nextCompletedAt = computeMorningCompletedAt(
                             nextItems,
@@ -13635,7 +13792,11 @@ export default function App() {
                           ...template,
                           meditationLinks: [
                             ...template.meditationLinks,
-                            { id: createId("meditation"), title: "", url: "" },
+                            {
+                              id: createId("meditation"),
+                              title: "",
+                              url: "",
+                            },
                           ],
                         }))
                       }
@@ -13999,47 +14160,11 @@ export default function App() {
                         {sponsorActive ? (
                           <>
                             <Text style={styles.label}>Call time</Text>
-                            <View style={styles.timeRow}>
-                              <Pressable
-                                style={styles.stepButton}
-                                onPress={() => incrementHour(-1)}
-                              >
-                                <Text style={styles.stepButtonText}>-</Text>
-                              </Pressable>
-                              <Text style={styles.timeValue}>
-                                {String(sponsorHour12).padStart(2, "0")}
-                              </Text>
-                              <Pressable style={styles.stepButton} onPress={() => incrementHour(1)}>
-                                <Text style={styles.stepButtonText}>+</Text>
-                              </Pressable>
-
-                              <Text style={styles.timeDivider}>:</Text>
-
-                              <Pressable
-                                style={styles.stepButton}
-                                onPress={() => incrementMinute(-1)}
-                              >
-                                <Text style={styles.stepButtonText}>-</Text>
-                              </Pressable>
-                              <Text style={styles.timeValue}>
-                                {String(sponsorMinute).padStart(2, "0")}
-                              </Text>
-                              <Pressable
-                                style={styles.stepButton}
-                                onPress={() => incrementMinute(1)}
-                              >
-                                <Text style={styles.stepButtonText}>+</Text>
-                              </Pressable>
-
-                              <Pressable
-                                style={styles.meridiemButton}
-                                onPress={() =>
-                                  setSponsorMeridiem((current) => (current === "AM" ? "PM" : "AM"))
-                                }
-                              >
-                                <Text style={styles.meridiemText}>{sponsorMeridiem}</Text>
-                              </Pressable>
-                            </View>
+                            <TimePickerField
+                              label="Sponsor call time"
+                              value={sponsorCallTimeLocalHhmm}
+                              onChange={setSponsorCallTimeFromHhmm}
+                            />
 
                             <Text style={styles.label}>Repeat</Text>
                             <View style={styles.chipRow}>
@@ -14788,24 +14913,69 @@ export default function App() {
                   <Text style={styles.sectionTitle}>Unlock Sober House</Text>
                   <Text style={styles.sectionMeta}>
                     {canUseSimulatorSoberHouseUnlock
-                      ? "Simulator mode requires the sober-house test passcode before records can be opened."
-                      : "Owner/operator and resident sober-house records require Face ID, Touch ID, or your iPhone passcode before they can be opened."}
+                      ? "Simulator mode can use the 7-digit sober-house passcode fallback when one is configured."
+                      : soberHouseHasCustomPasscode
+                        ? "Owner/operator and resident sober-house records can be opened with Face ID or the 7-digit sober-house passcode."
+                        : "Owner/operator and resident sober-house records require Face ID or your device passcode until a 7-digit sober-house fallback is configured."}
                   </Text>
                   {soberHouseUnlockStatus ? (
                     <Text style={styles.sectionMeta}>{soberHouseUnlockStatus}</Text>
+                  ) : null}
+                  {soberHouseHasCustomPasscode ? (
+                    <View style={styles.lockPasscodeSection}>
+                      <Text style={styles.label}>7-digit sober-house passcode</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={soberHouseUnlockCode}
+                        onChangeText={(value) => {
+                          setSoberHouseUnlockCode(normalizeSoberHousePasscodeInput(value));
+                          setSoberHouseUnlockStatus(null);
+                        }}
+                        keyboardType="number-pad"
+                        secureTextEntry
+                        maxLength={7}
+                        placeholder="Enter 7-digit code"
+                        placeholderTextColor={colors.textSecondary}
+                        textContentType="oneTimeCode"
+                      />
+                    </View>
                   ) : null}
                   <View style={styles.buttonRow}>
                     <AppButton
                       title={
                         canUseSimulatorSoberHouseUnlock
-                          ? "Enter Code"
+                          ? soberHouseHasCustomPasscode
+                            ? "Unlock with 7-digit code"
+                            : "Bypass simulator lock"
                           : soberHouseUnlocking
                             ? "Unlocking..."
-                            : "Unlock with Face ID / Passcode"
+                            : "Unlock with Face ID"
                       }
-                      onPress={() => void unlockSoberHouseAccess()}
-                      disabled={soberHouseUnlocking}
+                      onPress={() =>
+                        canUseSimulatorSoberHouseUnlock && soberHouseHasCustomPasscode
+                          ? unlockSoberHouseWithCustomPasscode()
+                          : void unlockSoberHouseAccess()
+                      }
+                      disabled={
+                        soberHouseUnlocking ||
+                        (canUseSimulatorSoberHouseUnlock &&
+                          soberHouseHasCustomPasscode &&
+                          !isValidSoberHousePasscode(soberHouseUnlockCode))
+                      }
                     />
+                    {soberHouseHasCustomPasscode && !canUseSimulatorSoberHouseUnlock ? (
+                      <>
+                        <View style={styles.buttonSpacer} />
+                        <AppButton
+                          title="Use 7-digit code"
+                          variant="secondary"
+                          onPress={unlockSoberHouseWithCustomPasscode}
+                          disabled={
+                            soberHouseUnlocking || !isValidSoberHousePasscode(soberHouseUnlockCode)
+                          }
+                        />
+                      </>
+                    ) : null}
                     <View style={styles.buttonSpacer} />
                     <AppButton title="Back to Recovery" onPress={() => handleModeSelect("A")} />
                   </View>
@@ -15068,7 +15238,7 @@ export default function App() {
           visible={showPhysicalRecoveryTimeline}
           animationType="slide"
           presentationStyle="pageSheet"
-          onRequestClose={() => setShowPhysicalRecoveryTimeline(false)}
+          onRequestClose={closePhysicalRecoveryTimeline}
         >
           <LiquidBackground>
             <View style={styles.container}>
@@ -15078,36 +15248,198 @@ export default function App() {
               >
                 <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
                   <View style={styles.meetingsHeaderRow}>
-                    <Text style={styles.sectionTitle}>Physical Recovery</Text>
-                    <AppButton
-                      title="Done"
-                      variant="secondary"
-                      onPress={() => setShowPhysicalRecoveryTimeline(false)}
-                    />
+                    <Text style={styles.sectionTitle}>
+                      {showPhysicalRecoverySubstanceEditor
+                        ? "Change substances"
+                        : "Recovery Repair"}
+                    </Text>
+                    <View style={styles.meetingsHeaderActions}>
+                      {showPhysicalRecoverySubstanceEditor ? (
+                        <>
+                          <AppButton
+                            title="Back to Recovery"
+                            variant="secondary"
+                            onPress={closePhysicalRecoverySubstanceEditor}
+                          />
+                          <AppButton
+                            title="Save"
+                            onPress={() => void savePhysicalRecoverySubstances()}
+                          />
+                        </>
+                      ) : (
+                        <>
+                          <AppButton
+                            title="Change substances"
+                            variant="secondary"
+                            onPress={openPhysicalRecoverySubstanceEditor}
+                          />
+                          <AppButton
+                            title="Done"
+                            variant="secondary"
+                            onPress={closePhysicalRecoveryTimeline}
+                          />
+                        </>
+                      )}
+                    </View>
                   </View>
-                  <Text style={styles.sectionMeta}>{physicalRecoveryView.summary.snapshot}</Text>
-                  <Text style={styles.sectionMeta}>{physicalRecoveryView.disclaimer}</Text>
+                  {showPhysicalRecoverySubstanceEditor ? (
+                    <>
+                      <Text style={styles.sectionMeta}>
+                        Select all substances that are part of recovery, then save to return here.
+                      </Text>
+                      <View style={styles.chipRow}>
+                        {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
+                          const selected = physicalRecoverySubstanceDraft.includes(option.value);
+                          return (
+                            <Pressable
+                              key={option.value}
+                              style={[styles.chip, selected ? styles.chipSelected : null]}
+                              onPress={() =>
+                                setPhysicalRecoverySubstanceDraft((current) =>
+                                  normalizeRecoverySubstances(
+                                    current.includes(option.value)
+                                      ? current.filter((entry) => entry !== option.value)
+                                      : [...current, option.value],
+                                  ),
+                                )
+                              }
+                            >
+                              <Text
+                                style={[styles.chipText, selected ? styles.chipTextSelected : null]}
+                              >
+                                {option.label}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                      <Text style={styles.sectionMeta}>
+                        {physicalRecoverySubstanceDraft.length > 0
+                          ? `Selected: ${physicalRecoverySubstanceDraft
+                              .map(
+                                (value) =>
+                                  RECOVERY_SUBSTANCE_OPTIONS.find(
+                                    (option) => option.value === value,
+                                  )?.label ?? value,
+                              )
+                              .join(", ")}`
+                          : "Choose at least one substance to personalize the Physical Recovery feed."}
+                      </Text>
+                    </>
+                  ) : (
+                    <>
+                      <Text style={styles.sectionMeta}>
+                        {physicalRecoveryView.summary.snapshot}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        {physicalRecoverySelectedSubstanceLabels
+                          ? `Tracking: ${physicalRecoverySelectedSubstanceLabels}`
+                          : "Tracking: none selected yet"}
+                      </Text>
+                      <View style={styles.physicalRecoveryLensRow}>
+                        {physicalRecoveryView.summary.gauges.map((gauge) => {
+                          const selected = physicalRecoveryLens === gauge.id;
+                          return (
+                            <Pressable
+                              key={gauge.id}
+                              style={[
+                                styles.physicalRecoveryLensCard,
+                                selected ? styles.physicalRecoveryLensCardActive : null,
+                              ]}
+                              onPress={() => setPhysicalRecoveryLens(gauge.id)}
+                            >
+                              <Text style={styles.physicalRecoveryLensLabel}>{gauge.label}</Text>
+                              <Text style={styles.physicalRecoveryLensPercent}>
+                                {gauge.percent}%
+                              </Text>
+                              <Text style={styles.physicalRecoveryLensStatus}>
+                                {gauge.statusLabel}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                      <Text style={styles.sectionMeta}>{physicalRecoveryView.disclaimer}</Text>
+                    </>
+                  )}
                 </GlassCard>
 
-                {!physicalRecoveryView.hasProfile ? (
+                {showPhysicalRecoverySubstanceEditor ? null : !physicalRecoveryView.hasProfile ? (
                   <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
                     <Text style={styles.label}>Personalize this feed</Text>
                     <Text style={styles.sectionMeta}>
-                      Select alcohol, opioids, or meth/stimulants in your recovery profile to get a
+                      Select alcohol, opioids, meth/stimulants, marijuana, or kratom to get a
                       stage-based guide for what healing may still be working through.
                     </Text>
                     <View style={styles.buttonRow}>
                       <AppButton
-                        title="Open Recovery Settings"
-                        onPress={() => {
-                          setShowPhysicalRecoveryTimeline(false);
-                          openSettingsHub();
-                        }}
+                        title="Choose substances"
+                        onPress={openPhysicalRecoverySubstanceEditor}
                       />
                     </View>
                   </GlassCard>
                 ) : (
                   <>
+                    <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                      <Text style={styles.label}>{selectedPhysicalRecoveryLensDetail.label}</Text>
+                      <Text style={styles.sectionMeta}>
+                        {selectedPhysicalRecoveryLensDetail.weekLabel} •{" "}
+                        {selectedPhysicalRecoveryLensDetail.stageLabel}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        {selectedPhysicalRecoveryLensDetail.headline} •{" "}
+                        {selectedPhysicalRecoveryLensDetail.statusLabel}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        {selectedPhysicalRecoveryLensDetail.summary}
+                      </Text>
+
+                      <Text style={styles.physicalRecoverySectionTitle}>
+                        {selectedPhysicalRecoveryLensDetail.primaryTitle}
+                      </Text>
+                      {selectedPhysicalRecoveryLensDetail.primaryPoints.map((point) => (
+                        <Text
+                          key={`${selectedPhysicalRecoveryLensDetail.id}-primary-${point}`}
+                          style={styles.sectionMeta}
+                        >
+                          • {point}
+                        </Text>
+                      ))}
+
+                      <Text style={styles.physicalRecoverySectionTitle}>
+                        {selectedPhysicalRecoveryLensDetail.secondaryTitle}
+                      </Text>
+                      {selectedPhysicalRecoveryLensDetail.secondaryPoints.map((point) => (
+                        <Text
+                          key={`${selectedPhysicalRecoveryLensDetail.id}-secondary-${point}`}
+                          style={styles.sectionMeta}
+                        >
+                          • {point}
+                        </Text>
+                      ))}
+
+                      <Text style={styles.physicalRecoverySectionTitle}>
+                        {selectedPhysicalRecoveryLensDetail.nextTitle}
+                      </Text>
+                      {selectedPhysicalRecoveryLensDetail.nextPoints.map((point) => (
+                        <Text
+                          key={`${selectedPhysicalRecoveryLensDetail.id}-next-${point}`}
+                          style={styles.sectionMeta}
+                        >
+                          • {point}
+                        </Text>
+                      ))}
+
+                      {selectedPhysicalRecoveryLensDetail.encouragement ? (
+                        <>
+                          <Text style={styles.physicalRecoverySectionTitle}>Encouragement</Text>
+                          <Text style={styles.sectionMeta}>
+                            {selectedPhysicalRecoveryLensDetail.encouragement}
+                          </Text>
+                        </>
+                      ) : null}
+                    </GlassCard>
+
                     {physicalRecoveryView.currentFocus ? (
                       <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
                         <Text style={styles.label}>{physicalRecoveryView.currentFocus.title}</Text>
@@ -15461,6 +15793,43 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: "rgba(157,250,255,0.96)",
   },
+  physicalRecoveryLensRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 10,
+  },
+  physicalRecoveryLensCard: {
+    flex: 1,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    gap: 4,
+  },
+  physicalRecoveryLensCardActive: {
+    borderColor: "rgba(157,250,255,0.52)",
+    backgroundColor: "rgba(61,34,126,0.5)",
+  },
+  physicalRecoveryLensLabel: {
+    color: "rgba(216,228,255,0.78)",
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  physicalRecoveryLensPercent: {
+    color: colors.textPrimary,
+    fontSize: 28,
+    fontWeight: "900",
+    lineHeight: 32,
+  },
+  physicalRecoveryLensStatus: {
+    color: "rgba(242, 213, 140, 0.92)",
+    fontSize: 12,
+    fontWeight: "700",
+  },
   physicalRecoveryTrackList: {
     marginTop: 6,
     gap: 12,
@@ -15604,46 +15973,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontWeight: "600",
   },
-  timeRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    flexWrap: "wrap",
-  },
-  stepButton: {
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.2)",
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: "rgba(255,255,255,0.14)",
-  },
-  stepButtonText: {
-    fontWeight: "700",
-    color: colors.textPrimary,
-  },
-  timeValue: {
-    minWidth: 28,
-    textAlign: "center",
-    fontWeight: "700",
-    color: colors.textPrimary,
-  },
-  timeDivider: {
-    fontWeight: "700",
-    color: colors.textPrimary,
-  },
-  meridiemButton: {
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.2)",
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    backgroundColor: "rgba(255,255,255,0.14)",
-  },
-  meridiemText: {
-    fontWeight: "600",
-    color: colors.textPrimary,
-  },
   chipRow: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -15725,6 +16054,12 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     fontSize: 13,
     fontWeight: "600",
+  },
+  dashboardMeetingsActionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
   },
   filterDropdownTrigger: {
     borderWidth: 2,
@@ -15855,6 +16190,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     flexWrap: "wrap",
   },
+  lockPasscodeSection: {
+    marginTop: 12,
+    gap: 6,
+  },
   buttonSpacer: {
     width: 8,
     height: 8,
@@ -15875,11 +16214,47 @@ const styles = StyleSheet.create({
     gap: 4,
     backgroundColor: "rgba(255,255,255,0.08)",
   },
+  dashboardMeetingCardCompact: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 3,
+  },
   meetingName: {
     fontWeight: "700",
     color: colors.textPrimary,
     flex: 1,
     flexShrink: 1,
+  },
+  dashboardMeetingName: {
+    fontWeight: "700",
+    color: colors.textPrimary,
+    fontSize: 15,
+    lineHeight: 20,
+    flexShrink: 1,
+  },
+  dashboardMeetingMeta: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  dashboardMeetingActionsCompact: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 4,
+  },
+  dashboardMeetingActionPill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(196,181,253,0.36)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  dashboardMeetingActionPillText: {
+    color: colors.textPrimary,
+    fontSize: 12,
+    fontWeight: "700",
   },
   checkboxRow: {
     flexDirection: "row",

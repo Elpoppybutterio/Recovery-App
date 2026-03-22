@@ -3,8 +3,10 @@ export type RoutineChecklistItem = {
   title: string;
   enabled: boolean;
   detail?: string;
+  supportsPlay?: boolean;
   readerLabel?: string;
   readerUrl?: string | null;
+  readerMode?: "reader" | "external";
   voiceText?: string;
 };
 
