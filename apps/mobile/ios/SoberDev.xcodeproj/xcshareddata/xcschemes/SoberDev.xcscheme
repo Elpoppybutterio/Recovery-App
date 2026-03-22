@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-               BuildableName = "SoberAI.app"
-               BlueprintName = "SoberAI"
-               ReferencedContainer = "container:SoberAI.xcodeproj">
+               BuildableName = "SoberDev.app"
+               BlueprintName = "SoberDev"
+               ReferencedContainer = "container:SoberDev.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -33,9 +33,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "00E356ED1AD99517003FC87E"
-               BuildableName = "SoberAITests.xctest"
-               BlueprintName = "SoberAITests"
-               ReferencedContainer = "container:SoberAI.xcodeproj">
+               BuildableName = "SoberDevTests.xctest"
+               BlueprintName = "SoberDevTests"
+               ReferencedContainer = "container:SoberDev.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -55,18 +55,11 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-            BuildableName = "SoberAI.app"
-            BlueprintName = "SoberAI"
-            ReferencedContainer = "container:SoberAI.xcodeproj">
+            BuildableName = "SoberDev.app"
+            BlueprintName = "SoberDev"
+            ReferencedContainer = "container:SoberDev.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
-      <EnvironmentVariables>
-         <EnvironmentVariable
-            key = "APP_ENV = production"
-            value = ""
-            isEnabled = "YES">
-         </EnvironmentVariable>
-      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -79,9 +72,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-            BuildableName = "SoberAI.app"
-            BlueprintName = "SoberAI"
-            ReferencedContainer = "container:SoberAI.xcodeproj">
+            BuildableName = "SoberDev.app"
+            BlueprintName = "SoberDev"
+            ReferencedContainer = "container:SoberDev.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

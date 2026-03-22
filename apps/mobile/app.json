@@ -8,7 +8,7 @@
     "userInterfaceStyle": "light",
     "ios": {
       "icon": "./assets/icon.png",
-      "bundleIdentifier": "com.rabbithole.soberai.dev",
+      "bundleIdentifier": "com.rabbithole.soberai",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Use Face ID or your device passcode to unlock sober-house records.",
         "NSLocationWhenInUseUsageDescription": "Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.",
@@ -43,7 +43,7 @@
       "enableSponsorApiSync": false,
       "appEnv": "development",
       "appScheme": "soberai",
-      "appBundleIdentifier": "com.sober.ai.dev",
+      "appBundleIdentifier": "com.rabbithole.soberai",
       "eas": {
         "projectId": "b4ee8eed-aaa7-4aa9-870a-e796c31c8f51"
       }
