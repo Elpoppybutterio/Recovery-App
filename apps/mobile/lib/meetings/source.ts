@@ -58,7 +58,7 @@ type SourceConfig = {
   feedUrl?: string;
   apiUrl: string;
   fallbackApiUrls?: string[];
-  authHeader: string;
+  authHeader?: string | null;
   radiusMiles?: number;
   onApiEvent?: (event: MeetingsApiHealthEvent) => void;
 };
@@ -609,6 +609,17 @@ export function createMeetingsSource(config: SourceConfig): MeetingsSource {
           });
           warning = "Meeting feed unavailable";
         }
+      }
+
+      if (!config.authHeader) {
+        emitApiEvent({
+          endpointPath: "/v1/meetings",
+          statusCode: null,
+          errorMessage: "Meetings auth unavailable",
+          errorBodySnippet: null,
+          source: "meetings",
+        });
+        throw new Error("Meetings auth unavailable");
       }
 
       const headers = {

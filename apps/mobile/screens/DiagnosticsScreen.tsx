@@ -7,6 +7,9 @@ export type DiagnosticsBuildInfo = {
   apiUrl: string;
   appVersion: string;
   buildNumber: string;
+  timeZone: string;
+  devAuthUserId: string;
+  hasAuthHeader: boolean;
 };
 
 export type DiagnosticsMeetingsApiHealth = {
@@ -127,6 +130,11 @@ export function DiagnosticsScreen({
         <Text style={styles.meta}>EXPO_PUBLIC_API_URL: {buildInfo.apiUrl || "unset"}</Text>
         <Text style={styles.meta}>App version: {buildInfo.appVersion}</Text>
         <Text style={styles.meta}>Build number: {buildInfo.buildNumber}</Text>
+        <Text style={styles.meta}>Time zone: {buildInfo.timeZone}</Text>
+        <Text style={styles.meta}>DEV auth user: {buildInfo.devAuthUserId || "unset"}</Text>
+        <Text style={styles.meta}>
+          Meetings auth header: {buildInfo.hasAuthHeader ? "attached" : "missing"}
+        </Text>
       </GlassCard>
 
       <GlassCard style={styles.card} strong>
