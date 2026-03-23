@@ -435,6 +435,7 @@ export function Dashboard({
 }: DashboardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [hoveredTileId, setHoveredTileId] = useState<string | null>(null);
+  const [upcomingExpanded, setUpcomingExpanded] = useState(false);
   const [tickerNowMs, setTickerNowMs] = useState(Date.now());
   useEffect(() => {
     const timer = setInterval(() => {
@@ -452,7 +453,9 @@ export function Dashboard({
   const dailyChecklistSummary = dailyChecklist.summary;
   const dailyChecklistTitle = dailyChecklist.title ?? "Sponsor Suggested Daily Checklist";
   const dailyChecklistInsight = dailyChecklistMessage(dailyChecklistPct);
-  const upcoming = nextMeetings.slice(0, 5);
+  const upcomingAll = nextMeetings.slice(0, 5);
+  const upcomingDefault = upcomingAll.slice(0, 2);
+  const upcomingVisible = upcomingExpanded ? upcomingAll : upcomingDefault;
   const todayTotal = Math.max(1, morningRoutine.todayTotalCount);
   const todayCompleted = Math.max(0, Math.min(morningRoutine.todayCompletedCount, todayTotal));
   const morningCompletionPct = clampPercent((todayCompleted / todayTotal) * 100);
@@ -1234,54 +1237,78 @@ export function Dashboard({
             >
               <View style={styles.upcomingHeader}>
                 <Text style={styles.upcomingTitle}>Current & Upcoming Meetings</Text>
-                <Pressable
-                  style={styles.upcomingMoreButton}
-                  onPress={onOpenMeetings}
-                  accessibilityRole="button"
-                  accessibilityLabel="Open meetings page"
-                >
-                  <View style={styles.dotRow}>
-                    <View style={styles.dot} />
-                    <View style={styles.dot} />
-                    <View style={styles.dot} />
-                  </View>
-                </Pressable>
+                <View style={styles.upcomingHeaderActions}>
+                  {upcomingAll.length > 2 ? (
+                    <Pressable
+                      style={styles.upcomingExpandButton}
+                      onPress={() => setUpcomingExpanded((current) => !current)}
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        upcomingExpanded
+                          ? "Show fewer upcoming meetings"
+                          : "Show more upcoming meetings"
+                      }
+                    >
+                      <Text style={styles.upcomingExpandButtonText}>
+                        {upcomingExpanded ? "Show less" : `Show ${upcomingAll.length}`}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable
+                    style={styles.upcomingMoreButton}
+                    onPress={onOpenMeetings}
+                    accessibilityRole="button"
+                    accessibilityLabel="Open meetings page"
+                  >
+                    <View style={styles.dotRow}>
+                      <View style={styles.dot} />
+                      <View style={styles.dot} />
+                      <View style={styles.dot} />
+                    </View>
+                  </Pressable>
+                </View>
               </View>
               {showingOnlineMeetingsFallback ? (
                 <Text style={styles.upcomingNotice}>
                   No in-person meetings available for the rest of today. Showing online meetings.
                 </Text>
               ) : null}
-              <Pressable
-                style={styles.meetingsAttendanceLogPill}
-                onPress={onOpenAttendance}
-                accessibilityRole="button"
-                accessibilityLabel="Open meetings attendance log page"
-              >
-                <Text style={styles.meetingsAttendanceLogPillText}>Meetings Attendance Log</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.meetingsAttendanceLogPill, styles.onlineMeetingsNowPill]}
-                onPress={onOpenOnlineMeetingsNow}
-                accessibilityRole="button"
-                accessibilityLabel="Open online meetings happening now"
-              >
-                <Text style={styles.meetingsAttendanceLogPillText}>Online Meetings Now</Text>
-              </Pressable>
+              <View style={styles.upcomingPillRow}>
+                <Pressable
+                  style={styles.meetingsAttendanceLogPill}
+                  onPress={onOpenAttendance}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open meetings attendance log page"
+                >
+                  <Text style={styles.meetingsAttendanceLogPillText}>Attendance Log</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.meetingsAttendanceLogPill, styles.onlineMeetingsNowPill]}
+                  onPress={onOpenOnlineMeetingsNow}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open online meetings happening now"
+                >
+                  <Text
+                    style={[styles.meetingsAttendanceLogPillText, styles.onlineMeetingsNowPillText]}
+                  >
+                    Online Meetings Now
+                  </Text>
+                </Pressable>
+              </View>
 
-              {upcoming.map((meeting, index) => (
+              {upcomingVisible.map((meeting, index) => (
                 <View key={meeting.id} style={styles.meetingItem}>
                   <Pressable
                     style={styles.meetingDetailsButton}
                     onPress={() => onMeetingPress(meeting.id)}
                   >
-                    <View style={[styles.meetingIcon, index === 2 ? styles.meetingIconPink : null]}>
+                    <View style={[styles.meetingIcon, index === 1 ? styles.meetingIconPink : null]}>
                       <Text style={styles.meetingIconText}>
-                        {index === 1 ? "🔒" : index === 2 ? "✦" : "↪"}
+                        {index === 0 ? "↪" : index === 1 ? "✦" : "•"}
                       </Text>
                     </View>
                     <View style={styles.meetingTextCol}>
-                      <Text numberOfLines={2} style={styles.meetingName}>
+                      <Text numberOfLines={1} style={styles.meetingName}>
                         {meeting.name}
                       </Text>
                       <View style={styles.meetingMetaRow}>
@@ -1314,7 +1341,26 @@ export function Dashboard({
                 </View>
               ))}
 
-              {upcoming.length === 0 ? (
+              {upcomingAll.length > 2 ? (
+                <Pressable
+                  style={styles.upcomingToggleButton}
+                  onPress={() => setUpcomingExpanded((current) => !current)}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    upcomingExpanded
+                      ? "Collapse upcoming meetings list"
+                      : "Expand upcoming meetings list"
+                  }
+                >
+                  <Text style={styles.upcomingToggleButtonText}>
+                    {upcomingExpanded
+                      ? "Collapse meetings"
+                      : `Expand to ${upcomingAll.length} meetings`}
+                  </Text>
+                </Pressable>
+              ) : null}
+
+              {upcomingAll.length === 0 ? (
                 <Pressable style={styles.emptyMeetingCta} onPress={onSearchArea}>
                   <Text style={styles.emptyMeetingText}>
                     {locationEnabled
@@ -2224,9 +2270,14 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 10,
   },
+  upcomingHeaderActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   upcomingTitle: {
     color: Design.color.textPrimary,
-    fontSize: 19,
+    fontSize: 18,
     fontWeight: "800",
     flex: 1,
   },
@@ -2239,30 +2290,50 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
+  upcomingExpandButton: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.28)",
+    backgroundColor: "rgba(255,255,255,0.14)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  upcomingExpandButtonText: {
+    color: Design.color.textPrimary,
+    fontSize: 11,
+    fontWeight: "700",
+  },
   upcomingNotice: {
     color: Design.color.textSecondary,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "600",
-    marginBottom: 2,
+    marginBottom: 1,
+  },
+  upcomingPillRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
   },
   meetingsAttendanceLogPill: {
     alignSelf: "flex-start",
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.36)",
-    backgroundColor: "rgba(255,255,255,0.18)",
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    marginBottom: 4,
+    borderColor: "rgba(95,73,179,0.18)",
+    backgroundColor: "rgba(255,255,255,0.96)",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
   },
   meetingsAttendanceLogPillText: {
-    color: Design.color.textPrimary,
-    fontSize: 13,
+    color: "#2F2380",
+    fontSize: 12,
     fontWeight: "700",
   },
   onlineMeetingsNowPill: {
-    borderColor: "rgba(125,211,252,0.52)",
-    backgroundColor: "rgba(14,165,233,0.18)",
+    borderColor: "rgba(14,165,233,0.28)",
+    backgroundColor: "rgba(232,247,255,0.98)",
+  },
+  onlineMeetingsNowPillText: {
+    color: "#0f4c81",
   },
   dot: {
     width: 7,
@@ -2271,9 +2342,9 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.55)",
   },
   meetingItem: {
-    gap: 12,
-    padding: 16,
-    borderRadius: 22,
+    gap: 10,
+    padding: 12,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: "rgba(71,52,152,0.16)",
     backgroundColor: "rgba(255,255,255,0.96)",
@@ -2286,12 +2357,12 @@ const styles = StyleSheet.create({
   meetingDetailsButton: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 14,
+    gap: 12,
   },
   meetingIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 36,
+    height: 36,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#6D4FD8",
@@ -2306,7 +2377,7 @@ const styles = StyleSheet.create({
   },
   meetingIconText: {
     color: "#fff",
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: "700",
   },
   meetingTextCol: {
@@ -2316,9 +2387,9 @@ const styles = StyleSheet.create({
   },
   meetingName: {
     color: "#2B1F72",
-    fontSize: 17,
+    fontSize: 15,
     fontWeight: "800",
-    lineHeight: 22,
+    lineHeight: 19,
   },
   meetingMetaRow: {
     flexDirection: "row",
@@ -2328,33 +2399,44 @@ const styles = StyleSheet.create({
   },
   meetingDistance: {
     color: "#1F1457",
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: "800",
   },
   meetingMeta: {
     color: "#3F2E88",
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: "700",
   },
   meetingActionsRow: {
     flexDirection: "row",
-    gap: 12,
+    gap: 8,
   },
   meetingLogButton: {
     flex: 1,
-    borderRadius: 16,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: "rgba(95,73,179,0.22)",
     backgroundColor: "#E9E1F8",
     paddingHorizontal: 12,
-    paddingVertical: 13,
+    paddingVertical: 10,
     alignItems: "center",
     justifyContent: "center",
   },
   meetingLogButtonText: {
     color: "#2F2380",
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "800",
+  },
+  upcomingToggleButton: {
+    alignSelf: "center",
+    marginTop: 2,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  upcomingToggleButtonText: {
+    color: "rgba(216,228,255,0.82)",
+    fontSize: 12,
+    fontWeight: "700",
   },
   emptyMeetingCta: {
     borderRadius: 12,
