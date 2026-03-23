@@ -25,6 +25,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Device location fetch made deterministic with explicit service checks (`hasServicesEnabledAsync`), robust foreground permission handling, timeout behavior, and last-known location fallback.
 - Meetings refresh now re-checks permission and current location on app focus/return, restoring distance rendering after Settings changes without reinstall.
 - Location-state UX now differentiates denied permission vs. disabled Location Services vs. missing meeting coordinates, preventing false generic `Location unavailable` states.
+- Sponsor time picker crash hardening: keep Android on the native dialog, replace iOS with a sheet-based selector, and add a defensive fallback if the native Android picker cannot open.
 
 ## Slice A (DONE)
 
