@@ -78,11 +78,15 @@ import {
 } from "./lib/recoveryMilestones";
 import { formatIsoToUsDate, normalizeUsDateInput, parseUsDateToIso } from "./lib/dateInput";
 import {
-  buildPhysicalRecoveryViewModel,
   RECOVERY_SUBSTANCE_OPTIONS,
   normalizeRecoverySubstances,
   type RecoverySubstanceCategory,
 } from "./lib/physicalRecovery";
+import {
+  buildRecoveryDashboardViewModel,
+  buildRecoveryInsightDetailViewModel,
+  type RecoveryInsightKind,
+} from "./lib/recoveryInsights";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import {
   buildMeetingConsistencyTrend,
@@ -2282,7 +2286,10 @@ export default function App() {
   const [activeRecoveryCelebration, setActiveRecoveryCelebration] =
     useState<RecoveryMilestoneTileSummary | null>(null);
   const [showRecoveryRoadmap, setShowRecoveryRoadmap] = useState(false);
-  const [showPhysicalRecoveryTimeline, setShowPhysicalRecoveryTimeline] = useState(false);
+  const [activeRecoveryInsightKind, setActiveRecoveryInsightKind] =
+    useState<RecoveryInsightKind | null>(null);
+  const [activeRecoveryInsightSubstance, setActiveRecoveryInsightSubstance] =
+    useState<RecoverySubstanceCategory | null>(null);
   const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
   const [wizardSupervisionMode, setWizardSupervisionMode] =
     useState<SetupSupervisionMode>("INDEPENDENT");
@@ -3321,14 +3328,33 @@ export default function App() {
     () => buildRecoveryMilestoneRoadmap(sobrietyDateIso, clockTickMs),
     [sobrietyDateIso, clockTickMs],
   );
-  const physicalRecoveryView = useMemo(
+  const recoveryDashboardView = useMemo(
     () =>
-      buildPhysicalRecoveryViewModel({
+      buildRecoveryDashboardViewModel({
         sobrietyDateIso,
         nowMs: clockTickMs,
         substances: recoverySubstances,
       }),
     [sobrietyDateIso, clockTickMs, recoverySubstances],
+  );
+  const activeRecoveryInsight = useMemo(
+    () =>
+      activeRecoveryInsightKind
+        ? buildRecoveryInsightDetailViewModel({
+            kind: activeRecoveryInsightKind,
+            sobrietyDateIso,
+            nowMs: clockTickMs,
+            substances: recoverySubstances,
+            selectedSubstance: activeRecoveryInsightSubstance,
+          })
+        : null,
+    [
+      activeRecoveryInsightKind,
+      activeRecoveryInsightSubstance,
+      sobrietyDateIso,
+      clockTickMs,
+      recoverySubstances,
+    ],
   );
 
   const homeGroupUpcoming = useMemo(() => {
@@ -5646,6 +5672,19 @@ export default function App() {
     refreshMeetings,
     requestLocationPermission,
   ]);
+
+  const openRecoveryGauge = useCallback(
+    (kind: RecoveryInsightKind) => {
+      setActiveRecoveryInsightSubstance(recoveryDashboardView.gauges[kind].selectedSubstance);
+      setActiveRecoveryInsightKind(kind);
+    },
+    [recoveryDashboardView],
+  );
+
+  const closeRecoveryGauge = useCallback(() => {
+    setActiveRecoveryInsightKind(null);
+    setActiveRecoveryInsightSubstance(null);
+  }, []);
 
   const backFromAttendance = useCallback(() => {
     if (attendanceEntryPoint === "meetings") {
@@ -11487,8 +11526,8 @@ export default function App() {
                             Which substances are part of your recovery?
                           </Text>
                           <Text style={styles.sectionMeta}>
-                            Select all that apply so the Physical Recovery timeline can explain what
-                            healing may look like over time.
+                            Select all that apply so the Mental and Physical Recovery gauges can
+                            estimate healing trends over time.
                           </Text>
                           <View style={styles.chipRow}>
                             {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
@@ -12183,7 +12222,8 @@ export default function App() {
                     daysSober={daysSober}
                     sobrietyDateIso={sobrietyDateIso}
                     sobrietyDateLabel={formatIsoToUsDate(sobrietyDateIso)}
-                    physicalRecoverySummary={physicalRecoveryView.summary}
+                    mentalRecoverySummary={recoveryDashboardView.gauges.MENTAL}
+                    physicalRecoverySummary={recoveryDashboardView.gauges.PHYSICAL}
                     locationEnabled={locationPermission === "granted"}
                     nextMeetings={dashboardNextFiveMeetings}
                     showingOnlineMeetingsFallback={dashboardShowsOnlineFallback}
@@ -12548,7 +12588,7 @@ export default function App() {
                       void openOnlineMeetingsNow();
                     }}
                     onOpenRecoveryRoadmap={() => setShowRecoveryRoadmap(true)}
-                    onOpenPhysicalRecovery={() => setShowPhysicalRecoveryTimeline(true)}
+                    onOpenRecoveryGauge={openRecoveryGauge}
                     onOpenRecoverySettings={openSettingsHub}
                     onOpenPrivacyStatement={openPrivacyStatement}
                     supervisionPanel={
@@ -14048,8 +14088,8 @@ export default function App() {
                     </Text>
                     <Text style={styles.label}>Recovery profile</Text>
                     <Text style={styles.sectionMeta}>
-                      Select the substances in your recovery to personalize the Physical Recovery
-                      timeline.
+                      Select the substances in your recovery to personalize the Mental and Physical
+                      Recovery guides.
                     </Text>
                     <View style={styles.chipRow}>
                       {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
@@ -14080,7 +14120,7 @@ export default function App() {
                                   ?.label ?? value,
                             )
                             .join(", ")}.`
-                        : "Choose at least one substance to personalize the Physical Recovery tile."}
+                        : "Choose at least one substance to personalize the recovery gauges."}
                     </Text>
                     <Text style={styles.label}>90-day meeting goal</Text>
                     <TextInput
@@ -15348,10 +15388,10 @@ export default function App() {
         </Modal>
 
         <Modal
-          visible={showPhysicalRecoveryTimeline}
+          visible={activeRecoveryInsightKind !== null}
           animationType="slide"
           presentationStyle="pageSheet"
-          onRequestClose={() => setShowPhysicalRecoveryTimeline(false)}
+          onRequestClose={closeRecoveryGauge}
         >
           <LiquidBackground>
             <View style={styles.container}>
@@ -15361,29 +15401,80 @@ export default function App() {
               >
                 <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
                   <View style={styles.meetingsHeaderRow}>
-                    <Text style={styles.sectionTitle}>Physical Recovery</Text>
-                    <AppButton
-                      title="Done"
-                      variant="secondary"
-                      onPress={() => setShowPhysicalRecoveryTimeline(false)}
-                    />
+                    <Text style={styles.sectionTitle}>
+                      {activeRecoveryInsight?.label ?? "Recovery Guide"}
+                    </Text>
+                    <AppButton title="Back" variant="secondary" onPress={closeRecoveryGauge} />
                   </View>
-                  <Text style={styles.sectionMeta}>{physicalRecoveryView.summary.snapshot}</Text>
-                  <Text style={styles.sectionMeta}>{physicalRecoveryView.disclaimer}</Text>
+                  <Text style={styles.sectionMeta}>
+                    Educational week-by-week guidance based on sobriety duration and the selected
+                    recovery substance.
+                  </Text>
                 </GlassCard>
 
-                {!physicalRecoveryView.hasProfile ? (
+                <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                  <Text style={styles.label}>Substance</Text>
+                  <View style={styles.chipRow}>
+                    {(activeRecoveryInsight?.substanceOptions ?? RECOVERY_SUBSTANCE_OPTIONS).map(
+                      (option) => {
+                        const selected = activeRecoveryInsight?.selectedSubstance === option.value;
+                        return (
+                          <Pressable
+                            key={`recovery-insight-${option.value}`}
+                            style={[styles.chip, selected ? styles.chipSelected : null]}
+                            onPress={() => setActiveRecoveryInsightSubstance(option.value)}
+                          >
+                            <Text
+                              style={[styles.chipText, selected ? styles.chipTextSelected : null]}
+                            >
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      },
+                    )}
+                  </View>
+                </GlassCard>
+
+                <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                  <Text style={styles.recoveryInsightHeroLabel}>
+                    {activeRecoveryInsight?.selectedSubstanceLabel ?? "Recovery profile needed"}
+                  </Text>
+                  <Text style={styles.recoveryInsightHeroPercent}>
+                    {typeof activeRecoveryInsight?.percent === "number"
+                      ? `${Math.round(activeRecoveryInsight.percent)}%`
+                      : "--"}
+                  </Text>
+                  <Text style={styles.recoveryInsightHeroPercentLabel}>
+                    {activeRecoveryInsight?.percentLabel ?? "Estimated recovery"}
+                  </Text>
+                  <Text style={styles.recoveryInsightHeroWeek}>
+                    Week {activeRecoveryInsight?.weekNumber ?? 0}
+                  </Text>
+                  <Text style={styles.sectionMeta}>
+                    {activeRecoveryInsight?.snapshot ??
+                      "Save your sobriety date and recovery profile to unlock this guide."}
+                  </Text>
+                  <Text style={styles.recoveryInsightTrend}>
+                    {activeRecoveryInsight?.trendLine ??
+                      "Trend guidance appears once your profile is complete."}
+                  </Text>
+                </GlassCard>
+
+                {!activeRecoveryInsight?.hasProfile ? (
                   <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
-                    <Text style={styles.label}>Personalize this feed</Text>
+                    <Text style={styles.label}>
+                      {activeRecoveryInsight?.emptyStateTitle ?? "Add your recovery profile"}
+                    </Text>
                     <Text style={styles.sectionMeta}>
-                      Select alcohol, opioids, or meth/stimulants in your recovery profile to get a
-                      stage-based guide for what healing may still be working through.
+                      {activeRecoveryInsight?.emptyStateBody ??
+                        "Choose at least one recovery substance and save your sobriety date to unlock this guide."}
                     </Text>
                     <View style={styles.buttonRow}>
                       <AppButton
                         title="Open Recovery Settings"
                         onPress={() => {
-                          setShowPhysicalRecoveryTimeline(false);
+                          closeRecoveryGauge();
                           openSettingsHub();
                         }}
                       />
@@ -15391,92 +15482,40 @@ export default function App() {
                   </GlassCard>
                 ) : (
                   <>
-                    {physicalRecoveryView.currentFocus ? (
-                      <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
-                        <Text style={styles.label}>{physicalRecoveryView.currentFocus.title}</Text>
-                        <Text style={styles.sectionMeta}>
-                          {physicalRecoveryView.currentFocus.stageTimeWindow}
+                    <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                      <Text style={styles.physicalRecoverySectionTitle}>What may be improving</Text>
+                      {activeRecoveryInsight.whatMayBeImproving.map((entry) => (
+                        <Text key={`improving-${entry}`} style={styles.sectionMeta}>
+                          • {entry}
                         </Text>
-                        <Text style={styles.sectionMeta}>
-                          {physicalRecoveryView.currentFocus.summary}
+                      ))}
+                    </GlassCard>
+
+                    <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                      <Text style={styles.physicalRecoverySectionTitle}>What may still occur</Text>
+                      {activeRecoveryInsight.whatMayStillOccur.map((entry) => (
+                        <Text key={`still-${entry}`} style={styles.sectionMeta}>
+                          • {entry}
                         </Text>
-                      </GlassCard>
-                    ) : null}
+                      ))}
+                    </GlassCard>
 
-                    {physicalRecoveryView.substanceTracks.length > 0 ? (
-                      <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
-                        <Text style={styles.label}>Timeline snapshot</Text>
-                        <View style={styles.physicalRecoveryTrackList}>
-                          {physicalRecoveryView.substanceTracks.map((track) => (
-                            <View key={track.substance} style={styles.physicalRecoveryTrackRow}>
-                              <View style={styles.physicalRecoveryTrackDot} />
-                              <View style={styles.physicalRecoveryTrackCopy}>
-                                <Text style={styles.physicalRecoveryTrackLabel}>
-                                  {track.substanceLabel}
-                                </Text>
-                                <Text style={styles.sectionMeta}>
-                                  Now: {track.currentStageLabel} ({track.currentWindowLabel})
-                                </Text>
-                                <Text style={styles.sectionMeta}>
-                                  {track.nextStageLabel
-                                    ? `Next: ${track.nextStageLabel}`
-                                    : "Next: Long-term healing can continue over time"}
-                                </Text>
-                              </View>
-                            </View>
-                          ))}
-                        </View>
-                      </GlassCard>
-                    ) : null}
-
-                    {physicalRecoveryView.detailItems.map((item) => (
-                      <GlassCard
-                        key={item.id}
-                        strong
-                        blurIntensity={14}
-                        darken
-                        gradientDark
-                        style={styles.card}
-                      >
-                        <Text style={styles.label}>{item.title}</Text>
-                        <Text style={styles.sectionMeta}>{item.stageTimeWindow}</Text>
-                        <Text style={styles.sectionMeta}>{item.summary}</Text>
-
-                        <Text style={styles.physicalRecoverySectionTitle}>
-                          What may be happening
+                    <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                      <Text style={styles.physicalRecoverySectionTitle}>What to expect</Text>
+                      {activeRecoveryInsight.whatToExpect.map((entry) => (
+                        <Text key={`expect-${entry}`} style={styles.sectionMeta}>
+                          • {entry}
                         </Text>
-                        {item.whatMayBeHappening.map((entry) => (
-                          <Text key={`${item.id}-happening-${entry}`} style={styles.sectionMeta}>
-                            • {entry}
-                          </Text>
-                        ))}
+                      ))}
+                    </GlassCard>
 
-                        <Text style={styles.physicalRecoverySectionTitle}>
-                          What may feel normal
-                        </Text>
-                        {item.whatMayFeelNormal.map((entry) => (
-                          <Text key={`${item.id}-normal-${entry}`} style={styles.sectionMeta}>
-                            • {entry}
-                          </Text>
-                        ))}
-
-                        <Text style={styles.physicalRecoverySectionTitle}>
-                          What often improves next
-                        </Text>
-                        {item.whatOftenImprovesNext.map((entry) => (
-                          <Text key={`${item.id}-next-${entry}`} style={styles.sectionMeta}>
-                            • {entry}
-                          </Text>
-                        ))}
-
-                        {item.encouragement ? (
-                          <>
-                            <Text style={styles.physicalRecoverySectionTitle}>Encouragement</Text>
-                            <Text style={styles.sectionMeta}>{item.encouragement}</Text>
-                          </>
-                        ) : null}
-                      </GlassCard>
-                    ))}
+                    <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
+                      <Text style={styles.physicalRecoverySectionTitle}>Encouragement</Text>
+                      <Text style={styles.sectionMeta}>{activeRecoveryInsight.encouragement}</Text>
+                      <Text style={styles.recoveryInsightFootnote}>
+                        {activeRecoveryInsight.educationalNote}
+                      </Text>
+                    </GlassCard>
                   </>
                 )}
               </ScrollView>
@@ -15780,6 +15819,45 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
     textTransform: "uppercase",
     color: "rgba(157,250,255,0.92)",
+  },
+  recoveryInsightHeroLabel: {
+    fontSize: 13,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+    color: "rgba(216,228,255,0.7)",
+  },
+  recoveryInsightHeroPercent: {
+    marginTop: 4,
+    fontSize: 44,
+    lineHeight: 48,
+    fontWeight: "900",
+    color: colors.textPrimary,
+  },
+  recoveryInsightHeroPercentLabel: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "rgba(249,168,212,0.95)",
+  },
+  recoveryInsightHeroWeek: {
+    marginTop: 4,
+    marginBottom: 6,
+    fontSize: 16,
+    fontWeight: "800",
+    color: "rgba(125,211,252,0.96)",
+  },
+  recoveryInsightTrend: {
+    marginTop: 10,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "700",
+    color: "rgba(255,244,186,0.95)",
+  },
+  recoveryInsightFootnote: {
+    marginTop: 10,
+    fontSize: 12,
+    lineHeight: 17,
+    color: "rgba(216,228,255,0.68)",
   },
   meta: {
     color: colors.textSecondary,

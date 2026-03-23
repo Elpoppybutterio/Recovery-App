@@ -10,12 +10,13 @@ describe("physical recovery timeline", () => {
     });
 
     expect(view.hasProfile).toBe(false);
-    expect(view.summary.headline).toBe("Add recovery profile details");
+    expect(view.summary.headline).toBe("Physical Recovery");
+    expect(view.summary.stageLabel).toBe("Personalize this guide");
     expect(view.summary.ctaLabel).toBe("Open Recovery Settings");
     expect(view.detailItems).toHaveLength(0);
   });
 
-  it("matches alcohol-only users to the current stage and next stage", () => {
+  it("adapts alcohol-only users into the week-based physical recovery guide", () => {
     const view = buildPhysicalRecoveryViewModel({
       sobrietyDateIso: "2026-03-01",
       nowMs: new Date("2026-03-18T18:00:00.000Z").getTime(),
@@ -23,52 +24,48 @@ describe("physical recovery timeline", () => {
     });
 
     expect(view.hasProfile).toBe(true);
-    expect(view.summary.stageLabel).toBe("Alcohol • First weeks");
-    expect(view.summary.nextLabel).toBe("Next: First 90 days");
+    expect(view.summary.headline).toBe("Physical Recovery");
+    expect(view.summary.stageLabel).toBe("Alcohol • Week 3");
+    expect(view.summary.ctaLabel).toBe("View guide");
+    expect(view.summary.snapshot).toContain("Weeks 2-4");
+    expect(view.summary.nextLabel).toContain("baseline is often stronger");
     expect(view.currentFocus?.title).toBe("Alcohol recovery right now");
-    expect(view.detailItems.map((item) => item.title)).toEqual([
-      "Alcohol timeline",
-      "Alcohol up next",
-    ]);
+    expect(view.currentFocus?.stageTimeWindow).toBe("Week 3");
+    expect(view.detailItems.map((item) => item.title)).toEqual(["Alcohol recovery right now"]);
   });
 
-  it("blends alcohol and opioid content without duplicating the current-focus card", () => {
+  it("uses the slowest-recovering selected substance to drive the physical gauge summary", () => {
     const view = buildPhysicalRecoveryViewModel({
       sobrietyDateIso: "2026-03-01",
       nowMs: new Date("2026-03-18T18:00:00.000Z").getTime(),
       substances: ["ALCOHOL", "OPIOIDS"],
     });
 
-    expect(view.summary.stageLabel).toBe("First weeks");
-    expect(view.summary.snapshot).toContain("Alcohol + Opioids");
-    expect(view.currentFocus?.title).toBe("Current priorities in recovery");
-    expect(view.detailItems.some((item) => item.title === "Current priorities in recovery")).toBe(
-      false,
-    );
-    expect(view.detailItems.map((item) => item.title)).toEqual([
-      "Alcohol timeline",
-      "Alcohol up next",
-      "Opioids timeline",
-      "Opioids up next",
-    ]);
+    expect(view.summary.stageLabel).toBe("Opioids • Week 3");
+    expect(view.summary.snapshot).toContain("Weeks 2-4");
+    expect(view.summary.nextLabel).toContain("setting the pace right now");
+    expect(view.currentFocus?.title).toBe("Opioids recovery right now");
+    expect(view.detailItems.map((item) => item.title)).toEqual(["Opioids recovery right now"]);
+    expect(view.substanceTracks.map((track) => track.substance)).toEqual(["ALCOHOL", "OPIOIDS"]);
   });
 
-  it("supports alcohol and meth/stimulants together with a blended upcoming summary", () => {
+  it("supports week-based summaries for multi-substance stimulant recovery", () => {
     const view = buildPhysicalRecoveryViewModel({
       sobrietyDateIso: "2026-01-01",
       nowMs: new Date("2026-05-30T18:00:00.000Z").getTime(),
       substances: ["ALCOHOL", "METH_STIMULANTS"],
     });
 
-    expect(view.summary.stageLabel).toBe("3-6 months");
-    expect(view.summary.nextLabel).toContain("6-12 months");
+    expect(view.summary.stageLabel).toBe("Meth / stimulants • Week 22");
+    expect(view.summary.nextLabel).toContain("setting the pace right now");
+    expect(view.currentFocus?.stageTimeWindow).toBe("Week 22");
     expect(view.substanceTracks.map((track) => track.substance)).toEqual([
       "ALCOHOL",
       "METH_STIMULANTS",
     ]);
   });
 
-  it("advances the current stage as sobriety time increases", () => {
+  it("advances the week-based stage as sobriety time increases", () => {
     const firstMonth = buildPhysicalRecoveryViewModel({
       sobrietyDateIso: "2026-01-01",
       nowMs: new Date("2026-01-20T18:00:00.000Z").getTime(),
@@ -80,8 +77,25 @@ describe("physical recovery timeline", () => {
       substances: ["OPIOIDS"],
     });
 
-    expect(firstMonth.summary.stageLabel).toBe("Opioids • First weeks");
-    expect(laterMonths.summary.stageLabel).toBe("Opioids • 3-6 months");
-    expect(laterMonths.currentFocus?.stageTimeWindow).toBe("3-6 months");
+    expect(firstMonth.summary.stageLabel).toBe("Opioids • Week 3");
+    expect(laterMonths.summary.stageLabel).toMatch(/^Opioids • Week \d+$/);
+    expect(laterMonths.currentFocus?.stageTimeWindow).toMatch(/^Week \d+$/);
+
+    const firstWeek = Number(firstMonth.summary.stageLabel.split("Week ")[1]);
+    const laterWeek = Number(laterMonths.summary.stageLabel.split("Week ")[1]);
+    expect(laterWeek).toBeGreaterThan(firstWeek);
+  });
+
+  it("supports marijuana and kratom in the physical recovery model", () => {
+    const view = buildPhysicalRecoveryViewModel({
+      sobrietyDateIso: "2026-03-01",
+      nowMs: new Date("2026-04-20T18:00:00.000Z").getTime(),
+      substances: ["MARIJUANA", "KRATOM"],
+    });
+
+    expect(view.hasProfile).toBe(true);
+    expect(view.substanceTracks.map((track) => track.substance)).toEqual(["MARIJUANA", "KRATOM"]);
+    expect(view.summary.stageLabel).toMatch(/^(Marijuana|Kratom) • Week \d+$/);
+    expect(view.currentFocus?.title).toMatch(/^(Marijuana|Kratom) recovery right now$/);
   });
 });
