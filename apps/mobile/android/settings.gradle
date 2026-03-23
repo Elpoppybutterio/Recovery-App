@@ -31,7 +31,7 @@ extensions.configure(com.facebook.react.ReactSettingsExtension) { ex ->
 }
 expoAutolinking.useExpoModules()
 
-rootProject.name = 'Sober AI'
+rootProject.name = 'Sober² Dev'
 
 expoAutolinking.useExpoVersionCatalog()
 
