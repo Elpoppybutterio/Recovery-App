@@ -2,7 +2,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useEffect, useState, type ReactNode } from "react";
 import Svg, { Circle, Line, Polyline } from "react-native-svg";
 import type { CommunicationNotificationSummary } from "../communication/summary";
-import type { PhysicalRecoveryTileSummary } from "../physicalRecovery";
+import type { RecoveryGaugeTileSummary, RecoveryInsightKind } from "../recoveryInsights";
 import type { RecoveryMilestoneTileSummary } from "../recoveryMilestones";
 import { GlassCard } from "../ui/GlassCard";
 import { MilestoneCoin } from "../ui/MilestoneCoin";
@@ -38,7 +38,8 @@ type DashboardProps = {
   daysSober: number;
   sobrietyDateIso: string | null;
   sobrietyDateLabel: string;
-  physicalRecoverySummary: PhysicalRecoveryTileSummary;
+  mentalRecoverySummary: RecoveryGaugeTileSummary;
+  physicalRecoverySummary: RecoveryGaugeTileSummary;
   locationEnabled: boolean;
   nextMeetings: DashboardMeeting[];
   showingOnlineMeetingsFallback: boolean;
@@ -133,7 +134,7 @@ type DashboardProps = {
   onOpenMeetings: () => void;
   onOpenOnlineMeetingsNow: () => void;
   onOpenRecoveryRoadmap: () => void;
-  onOpenPhysicalRecovery: () => void;
+  onOpenRecoveryGauge: (kind: RecoveryInsightKind) => void;
   supervisionPanel?: ReactNode;
   upcomingMeetingsPanel?: ReactNode;
   onOpenAttendance: () => void;
@@ -180,6 +181,17 @@ function meetingFormatLabel(meeting: DashboardMeeting): string {
     return "In-Person / Online";
   }
   return "In-Person";
+}
+
+function formatRecoveryPercent(percent: number | null): string {
+  if (typeof percent !== "number" || !Number.isFinite(percent)) {
+    return "--";
+  }
+  return `${Math.round(percent)}%`;
+}
+
+function recoveryGaugeColor(kind: RecoveryInsightKind): string {
+  return kind === "MENTAL" ? "#7dd3fc" : "#f9a8d4";
 }
 
 function clampPercent(value: number): number {
@@ -279,10 +291,99 @@ function formatSobrietyTicker(startMs: number | null, nowMs: number, fallbackDay
 const SPONSOR_WISDOM_TEXT =
   "Getting A Sponsor Is Simply A Suggestion, But So Is Pulling A Ripcord On A Parachute.";
 
+function RecoveryGaugeCard(props: {
+  summary: RecoveryGaugeTileSummary;
+  kind: RecoveryInsightKind;
+  hovered: boolean;
+  onHoverIn: () => void;
+  onHoverOut: () => void;
+  onPress: () => void;
+}) {
+  const stroke = recoveryGaugeColor(props.kind);
+  const percent = Math.max(0, Math.min(100, props.summary.percent ?? 0));
+  const radius = 28;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference - (percent / 100) * circumference;
+
+  return (
+    <Pressable
+      onPress={props.onPress}
+      onHoverIn={props.onHoverIn}
+      onHoverOut={props.onHoverOut}
+      accessible={false}
+    >
+      <GlassCard
+        strong
+        blurIntensity={12}
+        style={[
+          styles.recoveryCard,
+          styles.liquidGlassTile,
+          styles.recoveryGaugeCard,
+          props.hovered ? styles.liquidGlassTileHover : null,
+        ]}
+      >
+        <View style={styles.upcomingHeader}>
+          <Text style={styles.recoveryTitle}>{props.summary.label}</Text>
+          <View style={styles.dotRow}>
+            <View style={styles.dot} />
+            <View style={styles.dot} />
+            <View style={styles.dot} />
+          </View>
+        </View>
+
+        <View style={styles.recoveryGaugeRow}>
+          <View style={styles.recoveryGaugeDialWrap}>
+            <Svg width={74} height={74} viewBox="0 0 74 74">
+              <Circle
+                cx="37"
+                cy="37"
+                r={radius}
+                stroke="rgba(255,255,255,0.12)"
+                strokeWidth="8"
+                fill="none"
+              />
+              <Circle
+                cx="37"
+                cy="37"
+                r={radius}
+                stroke={stroke}
+                strokeWidth="8"
+                strokeLinecap="round"
+                strokeDasharray={`${circumference} ${circumference}`}
+                strokeDashoffset={dashOffset}
+                fill="none"
+                transform="rotate(-90 37 37)"
+              />
+            </Svg>
+            <View style={styles.recoveryGaugeDialValueWrap}>
+              <Text style={styles.recoveryGaugeDialValue}>
+                {formatRecoveryPercent(props.summary.percent)}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.recoveryGaugeCopy}>
+            <Text style={styles.recoveryGaugeMeta}>
+              {props.summary.selectedSubstanceLabel
+                ? `${props.summary.selectedSubstanceLabel} • Week ${props.summary.weekNumber}`
+                : "Add recovery profile"}
+            </Text>
+            <Text style={styles.recoveryText}>{props.summary.supportiveLine}</Text>
+            <Text style={styles.recoveryGaugeSummary}>{props.summary.summaryLine}</Text>
+          </View>
+        </View>
+
+        <Text style={styles.physicalRecoveryDisclaimer}>{props.summary.educationalNote}</Text>
+      </GlassCard>
+    </Pressable>
+  );
+}
+
 export function Dashboard({
   daysSober,
   sobrietyDateIso,
   sobrietyDateLabel,
+  mentalRecoverySummary,
   physicalRecoverySummary,
   locationEnabled,
   nextMeetings,
@@ -321,7 +422,7 @@ export function Dashboard({
   onOpenMeetings,
   onOpenOnlineMeetingsNow,
   onOpenRecoveryRoadmap,
-  onOpenPhysicalRecovery,
+  onOpenRecoveryGauge,
   supervisionPanel,
   upcomingMeetingsPanel,
   onOpenAttendance,
@@ -1306,37 +1407,24 @@ export function Dashboard({
           </GlassCard>
         ) : null}
 
-        <Pressable
-          onPress={onOpenPhysicalRecovery}
-          onHoverIn={() => setTileHover("physical-recovery", true)}
-          onHoverOut={() => setTileHover("physical-recovery", false)}
-          accessible={false}
-        >
-          <GlassCard
-            strong
-            blurIntensity={12}
-            style={[
-              styles.recoveryCard,
-              styles.liquidGlassTile,
-              hoveredTileId === "physical-recovery" ? styles.liquidGlassTileHover : null,
-            ]}
-          >
-            <View style={styles.upcomingHeader}>
-              <Text style={styles.recoveryTitle}>Physical Recovery</Text>
-              <View style={styles.dotRow}>
-                <View style={styles.dot} />
-                <View style={styles.dot} />
-                <View style={styles.dot} />
-              </View>
-            </View>
-            <Text style={styles.physicalRecoveryStage}>{physicalRecoverySummary.stageLabel}</Text>
-            <Text style={styles.recoveryText}>{physicalRecoverySummary.snapshot}</Text>
-            <Text style={styles.physicalRecoveryNext}>{physicalRecoverySummary.nextLabel}</Text>
-            <Text style={styles.physicalRecoveryDisclaimer}>
-              {physicalRecoverySummary.disclaimer}
-            </Text>
-          </GlassCard>
-        </Pressable>
+        <View style={styles.recoveryGaugeGrid}>
+          <RecoveryGaugeCard
+            summary={mentalRecoverySummary}
+            kind="MENTAL"
+            hovered={hoveredTileId === "mental-recovery"}
+            onHoverIn={() => setTileHover("mental-recovery", true)}
+            onHoverOut={() => setTileHover("mental-recovery", false)}
+            onPress={() => onOpenRecoveryGauge("MENTAL")}
+          />
+          <RecoveryGaugeCard
+            summary={physicalRecoverySummary}
+            kind="PHYSICAL"
+            hovered={hoveredTileId === "physical-recovery"}
+            onHoverIn={() => setTileHover("physical-recovery", true)}
+            onHoverOut={() => setTileHover("physical-recovery", false)}
+            onPress={() => onOpenRecoveryGauge("PHYSICAL")}
+          />
+        </View>
       </ScrollView>
     </View>
   );
@@ -2285,15 +2373,59 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 8,
   },
+  recoveryGaugeGrid: {
+    gap: 12,
+  },
+  recoveryGaugeCard: {
+    paddingVertical: 14,
+  },
   recoveryTitle: {
     color: Design.color.textPrimary,
     fontSize: 17,
     fontWeight: "800",
   },
+  recoveryGaugeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+  },
+  recoveryGaugeDialWrap: {
+    width: 74,
+    height: 74,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recoveryGaugeDialValueWrap: {
+    position: "absolute",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recoveryGaugeDialValue: {
+    color: Design.color.textPrimary,
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  recoveryGaugeCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  recoveryGaugeMeta: {
+    color: "rgba(216,228,255,0.7)",
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  recoveryGaugeSummary: {
+    color: "rgba(242, 213, 140, 0.92)",
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "700",
+  },
   recoveryText: {
     color: Design.color.textPrimary,
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 14,
+    lineHeight: 20,
     fontWeight: "600",
   },
   physicalRecoveryStage: {
