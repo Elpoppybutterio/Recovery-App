@@ -131,6 +131,7 @@ type DashboardProps = {
   onOpenRecoverySettings: () => void;
   onOpenPrivacyStatement: () => void;
   onOpenMeetings: () => void;
+  onOpenOnlineMeetingsNow: () => void;
   onOpenRecoveryRoadmap: () => void;
   onOpenPhysicalRecovery: () => void;
   supervisionPanel?: ReactNode;
@@ -318,6 +319,7 @@ export function Dashboard({
   onOpenRecoverySettings,
   onOpenPrivacyStatement,
   onOpenMeetings,
+  onOpenOnlineMeetingsNow,
   onOpenRecoveryRoadmap,
   onOpenPhysicalRecovery,
   supervisionPanel,
@@ -1156,6 +1158,14 @@ export function Dashboard({
                 accessibilityLabel="Open meetings attendance log page"
               >
                 <Text style={styles.meetingsAttendanceLogPillText}>Meetings Attendance Log</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.meetingsAttendanceLogPill, styles.onlineMeetingsNowPill]}
+                onPress={onOpenOnlineMeetingsNow}
+                accessibilityRole="button"
+                accessibilityLabel="Open online meetings happening now"
+              >
+                <Text style={styles.meetingsAttendanceLogPillText}>Online Meetings Now</Text>
               </Pressable>
 
               {upcoming.map((meeting, index) => (
@@ -2161,6 +2171,10 @@ const styles = StyleSheet.create({
     color: Design.color.textPrimary,
     fontSize: 13,
     fontWeight: "700",
+  },
+  onlineMeetingsNowPill: {
+    borderColor: "rgba(125,211,252,0.52)",
+    backgroundColor: "rgba(14,165,233,0.18)",
   },
   dot: {
     width: 7,

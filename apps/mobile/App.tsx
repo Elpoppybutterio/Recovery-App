@@ -28,6 +28,7 @@ import {
   View,
 } from "react-native";
 import appJson from "./app.json";
+import { buildHomeGroupWeekOptions, type HomeGroupWeekOption } from "./lib/meetings/discovery";
 import {
   createMeetingsSource,
   MeetingRecord,
@@ -917,16 +918,45 @@ function formatHhmmForDisplay(value: string | null | undefined): string {
   return `${hour12}:${String(minute).padStart(2, "0")} ${meridiem}`;
 }
 
+function padDateKeyPart(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
 function dateKeyForDate(value: Date): string {
-  return value.toISOString().slice(0, 10);
+  return [
+    value.getFullYear(),
+    padDateKeyPart(value.getMonth() + 1),
+    padDateKeyPart(value.getDate()),
+  ].join("-");
 }
 
 function resolveDeviceTimeZone(): string {
-  return "local";
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof timeZone === "string" && timeZone.trim().length > 0 ? timeZone : "UTC";
+  } catch {
+    return "UTC";
+  }
 }
 
 function dateKeyForTimeZone(value: Date, timeZone: string): string {
-  void timeZone;
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const parts = formatter.formatToParts(value);
+    const year = parts.find((part) => part.type === "year")?.value;
+    const month = parts.find((part) => part.type === "month")?.value;
+    const day = parts.find((part) => part.type === "day")?.value;
+    if (year && month && day) {
+      return `${year}-${month}-${day}`;
+    }
+  } catch {
+    // fall back to device-local calendar math
+  }
   return dateKeyForDate(value);
 }
 
@@ -953,9 +983,9 @@ function parseDailyWisdomPayload(value: unknown): DailyWisdomPayload | null {
   };
 }
 
-function createDayOptions(): DayOption[] {
+function createDayOptions(baseDate: Date): DayOption[] {
   const result: DayOption[] = [];
-  const today = new Date();
+  const today = new Date(baseDate);
 
   for (let offset = 0; offset < 7; offset += 1) {
     const next = new Date(today);
@@ -1953,9 +1983,28 @@ export default function App() {
   };
   const iosForcedSafeBoot =
     Platform.OS === "ios" && process.env.EXPO_PUBLIC_IOS_SAFE_BOOT?.trim() === "1";
-  const extra = (appJson.expo.extra ?? {}) as Record<string, unknown>;
+  const runtimeExpoConfig =
+    (Constants.expoConfig as
+      | {
+          extra?: Record<string, unknown>;
+          version?: string;
+          ios?: { buildNumber?: string | number };
+          android?: { versionCode?: string | number };
+        }
+      | null
+      | undefined) ?? appJson.expo;
+  const manifestExtra =
+    (Constants as { manifest2?: { extra?: unknown }; manifest?: { extra?: unknown } }).manifest2
+      ?.extra ??
+    (Constants as { manifest2?: { extra?: unknown }; manifest?: { extra?: unknown } }).manifest
+      ?.extra;
+  const extra = ((manifestExtra &&
+    typeof manifestExtra === "object" &&
+    !Array.isArray(manifestExtra) &&
+    manifestExtra) ||
+    (runtimeExpoConfig.extra ?? appJson.expo.extra ?? {})) as Record<string, unknown>;
   const appEnvFromProcess = typeof process.env.APP_ENV === "string" ? process.env.APP_ENV : "";
-  const appEnvFromConfig = typeof extra.appEnv === "string" ? extra.appEnv : "";
+  const appEnvFromConfig = typeof extra.appEnv === "string" ? extra.appEnv.trim() : "";
   const resolvedAppEnv = appEnvFromProcess || appEnvFromConfig || "development";
   const isDiagnosticsEnabled = resolvedAppEnv !== "production";
   const iosStartupCompatibilityGuardEnabled =
@@ -1969,10 +2018,14 @@ export default function App() {
     () => resolveApiBaseUrl(apiUrlFromEnv, apiUrlFromConfig),
     [apiUrlFromConfig, apiUrlFromEnv],
   );
-  const appVersion = typeof appJson.expo.version === "string" ? appJson.expo.version : "unknown";
+  const appVersion =
+    typeof runtimeExpoConfig.version === "string"
+      ? runtimeExpoConfig.version
+      : appJson.expo.version;
   const buildNumber = useMemo(() => {
-    const iosBuild = appJson.expo.ios?.buildNumber;
-    const androidBuild = appJson.expo.android?.versionCode;
+    const iosBuild = runtimeExpoConfig.ios?.buildNumber ?? appJson.expo.ios?.buildNumber;
+    const androidBuild =
+      runtimeExpoConfig.android?.versionCode ?? appJson.expo.android?.versionCode;
     if (iosBuild !== undefined && iosBuild !== null) {
       return String(iosBuild);
     }
@@ -1981,10 +2034,13 @@ export default function App() {
     }
     return "unknown";
   }, []);
-  const devAuthUserId =
-    typeof extra.devAuthUserId === "string" ? extra.devAuthUserId : "enduser-a1";
+  const configuredDevAuthUserId =
+    typeof extra.devAuthUserId === "string" ? extra.devAuthUserId.trim() : "";
+  const devAuthUserId = configuredDevAuthUserId || "enduser-a1";
   const devUserDisplayName =
-    typeof extra.devUserDisplayName === "string" ? extra.devUserDisplayName : devAuthUserId;
+    typeof extra.devUserDisplayName === "string" && extra.devUserDisplayName.trim().length > 0
+      ? extra.devUserDisplayName.trim()
+      : devAuthUserId;
   const meetingFeedUrl =
     typeof extra.meetingFeedUrl === "string" && extra.meetingFeedUrl.trim().length > 0
       ? extra.meetingFeedUrl
@@ -1996,7 +2052,20 @@ export default function App() {
       ? extra.meetingRadiusMiles
       : 50;
 
-  const authHeader = useMemo(() => `Bearer DEV_${devAuthUserId}`, [devAuthUserId]);
+  const authHeader = useMemo(() => {
+    if (configuredDevAuthUserId.length > 0) {
+      return `Bearer DEV_${configuredDevAuthUserId}`;
+    }
+    if (resolvedAppEnv === "development") {
+      return "Bearer DEV_enduser-a1";
+    }
+    return null;
+  }, [configuredDevAuthUserId, resolvedAppEnv]);
+  const authHeaders = useMemo(
+    () => (authHeader ? ({ Authorization: authHeader } as Record<string, string>) : undefined),
+    [authHeader],
+  );
+  const [clockTickMs, setClockTickMs] = useState(Date.now());
   const [meetingRadiusMiles, setMeetingRadiusMiles] = useState(defaultMeetingRadiusMiles);
   const source = useMemo(
     () =>
@@ -2015,7 +2084,12 @@ export default function App() {
   const travelTimeProvider = useMemo(() => createTravelTimeProvider(25), []);
   const chatEnabled = featureFlags.chatEnabled;
 
-  const dayOptions = useMemo(() => createDayOptions(), []);
+  const deviceTimeZone = useMemo(() => resolveDeviceTimeZone(), []);
+  const deviceDayKey = useMemo(
+    () => dateKeyForTimeZone(new Date(clockTickMs), deviceTimeZone),
+    [clockTickMs, deviceTimeZone],
+  );
+  const dayOptions = useMemo(() => createDayOptions(new Date(clockTickMs)), [deviceDayKey]);
   const attendanceStorage = useMemo(() => attendanceStorageKey(devAuthUserId), [devAuthUserId]);
   const attendanceSignatureMigrationStorage = useMemo(
     () => attendanceSignatureMigrationStorageKey(devAuthUserId),
@@ -2109,8 +2183,7 @@ export default function App() {
     useState<MeetingsFilterDropdown | null>(null);
   const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
   const [todayNearbyMeetings, setTodayNearbyMeetings] = useState<MeetingRecord[]>([]);
-  const [homeGroupFallbackMeetings, setHomeGroupFallbackMeetings] = useState<MeetingRecord[]>([]);
-  const [homeGroupFallbackDayOffset, setHomeGroupFallbackDayOffset] = useState(1);
+  const [homeGroupWeekMeetings, setHomeGroupWeekMeetings] = useState<MeetingRecord[]>([]);
   const [loadingMeetings, setLoadingMeetings] = useState(false);
   const [meetingsStatus, setMeetingsStatus] = useState("Meetings not loaded yet.");
   const [meetingsError, setMeetingsError] = useState<string | null>(null);
@@ -2125,7 +2198,6 @@ export default function App() {
   const [pendingGeofenceLogMeetingId, setPendingGeofenceLogMeetingId] = useState<string | null>(
     null,
   );
-  const [clockTickMs, setClockTickMs] = useState(Date.now());
 
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [attendanceViewFilter, setAttendanceViewFilter] = useState<AttendanceViewFilter>("ALL");
@@ -2669,14 +2741,17 @@ export default function App() {
         };
   const selectedMeetingIsHomeGroup =
     selectedMeeting !== null && selectedDayPlan.homeGroupMeetingId === selectedMeeting.id;
-  const todayDateKey = useMemo(() => dateKeyForDate(new Date(clockTickMs)), [clockTickMs]);
-  const dashboardWisdomTimeZone = useMemo(() => resolveDeviceTimeZone(), []);
+  const todayDateKey = useMemo(
+    () => dateKeyForTimeZone(new Date(clockTickMs), deviceTimeZone),
+    [clockTickMs, deviceTimeZone],
+  );
+  const dashboardWisdomTimeZone = deviceTimeZone;
   const dashboardWisdomDateKey = useMemo(
     () => dateKeyForTimeZone(new Date(clockTickMs), dashboardWisdomTimeZone),
     [clockTickMs, dashboardWisdomTimeZone],
   );
   const selectedDayIsToday = selectedDay.dateKey === todayDateKey;
-  const selectedDayIsPast = selectedDay.date.getTime() < new Date(todayDateKey).getTime();
+  const selectedDayIsPast = selectedDay.dateKey < todayDateKey;
 
   const meetingsForDay = useMemo<MeetingListItem[]>(() => {
     const nowLocal = new Date(clockTickMs);
@@ -2759,33 +2834,8 @@ export default function App() {
     );
   }, [meetingsTodayAll, clockTickMs]);
 
-  const homeGroupFallbackMeetingItems = useMemo<MeetingListItem[]>(() => {
-    const list = homeGroupFallbackMeetings.map((meeting) => {
-      return {
-        ...meeting,
-        distanceMeters: resolveMeetingDistanceMeters(meeting, currentLocation),
-      };
-    });
-
-    list.sort((left, right) => {
-      const byTime =
-        parseMinutesFromHhmm(left.startsAtLocal) - parseMinutesFromHhmm(right.startsAtLocal);
-      if (byTime !== 0) {
-        return byTime;
-      }
-      const leftDistance = left.distanceMeters ?? Number.POSITIVE_INFINITY;
-      const rightDistance = right.distanceMeters ?? Number.POSITIVE_INFINITY;
-      if (leftDistance !== rightDistance) {
-        return leftDistance - rightDistance;
-      }
-      return left.name.localeCompare(right.name);
-    });
-
-    return list;
-  }, [homeGroupFallbackMeetings, currentLocation]);
-
   const meetingsForMeetingsScreen = useMemo<MeetingListItem[]>(() => {
-    return meetingsForDay.filter((meeting) => {
+    const filtered = meetingsForDay.filter((meeting) => {
       const minutes = parseMinutesFromHhmm(meeting.startsAtLocal);
 
       const formatMatches =
@@ -2810,7 +2860,29 @@ export default function App() {
       }
       return minutes >= 17 * 60;
     });
-  }, [meetingsForDay, meetingsFormatFilter, meetingsTimeFilter]);
+
+    if (!selectedDayIsToday) {
+      return filtered;
+    }
+
+    const now = new Date(clockTickMs);
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    return [...filtered].sort((left, right) => {
+      const leftInProgress = isMeetingInProgress(left.startsAtLocal, nowMinutes);
+      const rightInProgress = isMeetingInProgress(right.startsAtLocal, nowMinutes);
+      if (leftInProgress !== rightInProgress) {
+        return leftInProgress ? -1 : 1;
+      }
+
+      const leftMinutes = parseMinutesFromHhmm(left.startsAtLocal);
+      const rightMinutes = parseMinutesFromHhmm(right.startsAtLocal);
+      if (leftMinutes !== rightMinutes) {
+        return leftMinutes - rightMinutes;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+  }, [clockTickMs, meetingsForDay, meetingsFormatFilter, meetingsTimeFilter, selectedDayIsToday]);
   const dashboardMeetingsForPanel = useMemo<MeetingListItem[]>(
     () => meetingsForMeetingsScreen.slice(0, 5),
     [meetingsForMeetingsScreen],
@@ -2847,13 +2919,13 @@ export default function App() {
         byId.set(meeting.id, meeting);
       }
     }
-    for (const meeting of homeGroupFallbackMeetings) {
+    for (const meeting of homeGroupWeekMeetings) {
       if (!byId.has(meeting.id)) {
         byId.set(meeting.id, meeting);
       }
     }
     return Array.from(byId.values());
-  }, [meetings, todayNearbyMeetings, homeGroupFallbackMeetings]);
+  }, [meetings, todayNearbyMeetings, homeGroupWeekMeetings]);
 
   const diagnosticsSelectedAttendanceRecords = useMemo(() => {
     const selected = new Set(selectedAttendanceIds);
@@ -3092,24 +3164,26 @@ export default function App() {
     () => dashboardUpcomingInPerson.length === 0 && dashboardUpcomingOnline.length > 0,
     [dashboardUpcomingInPerson, dashboardUpcomingOnline],
   );
-  const homeGroupUsesNextDayFallback = useMemo(
-    () => meetingsTodayUpcoming.length === 0 && homeGroupFallbackMeetingItems.length > 0,
-    [meetingsTodayUpcoming.length, homeGroupFallbackMeetingItems.length],
-  );
-  const homeGroupFallbackDayLabel = useMemo(
+  const homeGroupWeekOptions = useMemo<HomeGroupWeekOption[]>(
     () =>
-      dayOptions.find((option) => option.offset === homeGroupFallbackDayOffset)?.label ?? "Next",
-    [dayOptions, homeGroupFallbackDayOffset],
+      buildHomeGroupWeekOptions({
+        meetings: homeGroupWeekMeetings,
+        now: new Date(clockTickMs),
+        currentLocation,
+      }),
+    [clockTickMs, currentLocation, homeGroupWeekMeetings],
   );
-  const homeGroupCandidateMeetings = useMemo(() => {
-    if (meetingsTodayUpcoming.length > 0) {
-      return meetingsTodayUpcoming;
-    }
-    if (homeGroupFallbackMeetingItems.length > 0) {
-      return homeGroupFallbackMeetingItems;
-    }
-    return [];
-  }, [meetingsTodayUpcoming, homeGroupFallbackMeetingItems]);
+  const selectedHomeGroupOption = useMemo(
+    () =>
+      homeGroupWeekOptions.find((option) =>
+        option.meetings.every((meeting) => homeGroupMeetingIds.includes(meeting.id)),
+      ) ??
+      homeGroupWeekOptions.find((option) =>
+        option.meetings.some((meeting) => homeGroupMeetingIds.includes(meeting.id)),
+      ) ??
+      null,
+    [homeGroupMeetingIds, homeGroupWeekOptions],
+  );
 
   const mapMeetingsForDay = useMemo(
     () =>
@@ -4103,9 +4177,7 @@ export default function App() {
           const apiResponse = await fetch(
             `${apiUrl}/v1/geo/geocode?address=${encodeURIComponent(candidate)}`,
             {
-              headers: {
-                Authorization: authHeader,
-              },
+              headers: authHeaders,
             },
           );
           if (apiResponse.ok) {
@@ -4444,7 +4516,7 @@ export default function App() {
 
       return next;
     },
-    [apiUrl, authHeader, currentLocation],
+    [apiUrl, authHeaders, currentLocation],
   );
 
   const persistAttendanceRecords = useCallback(
@@ -5260,129 +5332,109 @@ export default function App() {
         setLoadingMeetings(true);
         setMeetingsError(null);
 
-        const todayDayOfWeek = new Date().getDay();
+        const nowLocal = new Date(clockTickMs);
+        const todayDayOfWeek = nowLocal.getDay();
         const requestParams = {
           lat: location?.lat,
           lng: location?.lng,
           radiusMiles: effectiveRadiusMiles,
         };
 
-        const selectedDayScopedResult = await source.listMeetings({
-          dayOfWeek: selectedDay.dayOfWeek,
-          ...requestParams,
-        });
-        const selectedDayScopedMeetings = sanitizeMeetingRecords(
-          Array.isArray(selectedDayScopedResult.meetings) ? selectedDayScopedResult.meetings : [],
-        );
-        const selectedDayUnscopedResult = await source.listMeetings({
-          dayOfWeek: selectedDay.dayOfWeek,
-        });
-        const selectedDayUnscopedMeetings = sanitizeMeetingRecords(
-          Array.isArray(selectedDayUnscopedResult.meetings)
-            ? selectedDayUnscopedResult.meetings
-            : [],
-        );
-        const selectedDayById = new Map<string, MeetingRecord>();
-        for (const meeting of selectedDayUnscopedMeetings) {
-          selectedDayById.set(meeting.id, meeting);
-        }
-        for (const meeting of selectedDayScopedMeetings) {
-          selectedDayById.set(meeting.id, meeting);
-        }
-        const selectedDayMeetings = Array.from(selectedDayById.values());
-
-        const todayScopedResult =
-          selectedDay.dayOfWeek === todayDayOfWeek
-            ? selectedDayScopedResult
-            : await source.listMeetings({
-                dayOfWeek: todayDayOfWeek,
-                ...requestParams,
-              });
-        const todayScopedMeetings = sanitizeMeetingRecords(
-          Array.isArray(todayScopedResult.meetings) ? todayScopedResult.meetings : [],
-        );
-
-        // Always merge in an unscoped "today" fetch so setup can offer all meetings for today's
-        // home-group selection, not only meetings inside the nearby radius.
-        const todayUnscopedResult =
-          selectedDay.dayOfWeek === todayDayOfWeek
-            ? selectedDayUnscopedResult
-            : await source.listMeetings({
-                dayOfWeek: todayDayOfWeek,
-              });
-        const todayUnscopedMeetings = sanitizeMeetingRecords(
-          Array.isArray(todayUnscopedResult.meetings) ? todayUnscopedResult.meetings : [],
-        );
-        const todayById = new Map<string, MeetingRecord>();
-        for (const meeting of todayUnscopedMeetings) {
-          todayById.set(meeting.id, meeting);
-        }
-        for (const meeting of todayScopedMeetings) {
-          todayById.set(meeting.id, meeting);
-        }
-        const todayResultMeetings = Array.from(todayById.values());
-
-        const nowLocal = new Date();
-        const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
-        const todayHasUpcomingMeetings = todayResultMeetings.some(
-          (meeting) => parseMinutesFromHhmm(meeting.startsAtLocal) >= nowMinutes,
-        );
-
-        let nextDayOffset = 1;
-        let nextDayMeetings: MeetingRecord[] = [];
-
-        if (!todayHasUpcomingMeetings) {
-          for (let dayOffset = 1; dayOffset <= 6; dayOffset += 1) {
-            const dayOfWeek = (todayDayOfWeek + dayOffset) % 7;
-            const scopedResult = await source.listMeetings({
-              dayOfWeek,
-              ...requestParams,
-            });
-            const scopedMeetings = sanitizeMeetingRecords(
-              Array.isArray(scopedResult.meetings) ? scopedResult.meetings : [],
-            );
-            const unscopedResult = await source.listMeetings({ dayOfWeek });
-            const unscopedMeetings = sanitizeMeetingRecords(
-              Array.isArray(unscopedResult.meetings) ? unscopedResult.meetings : [],
-            );
-            const byId = new Map<string, MeetingRecord>();
-            for (const meeting of unscopedMeetings) {
-              byId.set(meeting.id, meeting);
-            }
-            for (const meeting of scopedMeetings) {
-              byId.set(meeting.id, meeting);
-            }
-            const merged = Array.from(byId.values());
-            if (merged.length > 0) {
-              nextDayOffset = dayOffset;
-              nextDayMeetings = merged;
-              break;
-            }
+        const fetchedByDay = new Map<number, { meetings: MeetingRecord[]; warning?: string }>();
+        const fetchMergedMeetingsForDay = async (
+          dayOfWeek: number,
+        ): Promise<{ meetings: MeetingRecord[]; warning?: string }> => {
+          const cached = fetchedByDay.get(dayOfWeek);
+          if (cached) {
+            return cached;
           }
+
+          const scopedResult = await source.listMeetings({
+            dayOfWeek,
+            ...requestParams,
+          });
+          const scopedMeetings = sanitizeMeetingRecords(
+            Array.isArray(scopedResult.meetings) ? scopedResult.meetings : [],
+          );
+          const unscopedResult = await source.listMeetings({ dayOfWeek });
+          const unscopedMeetings = sanitizeMeetingRecords(
+            Array.isArray(unscopedResult.meetings) ? unscopedResult.meetings : [],
+          );
+
+          const byId = new Map<string, MeetingRecord>();
+          for (const meeting of unscopedMeetings) {
+            byId.set(meeting.id, meeting);
+          }
+          for (const meeting of scopedMeetings) {
+            byId.set(meeting.id, meeting);
+          }
+
+          const merged = {
+            meetings: Array.from(byId.values()),
+            warning: scopedResult.warning ?? unscopedResult.warning,
+          };
+          fetchedByDay.set(dayOfWeek, merged);
+          return merged;
+        };
+
+        const selectedDayResult = await fetchMergedMeetingsForDay(selectedDay.dayOfWeek);
+        const todayResult =
+          selectedDay.dayOfWeek === todayDayOfWeek
+            ? selectedDayResult
+            : await fetchMergedMeetingsForDay(todayDayOfWeek);
+
+        const orderedWeekDays = dayOptions.map((option) => option.dayOfWeek);
+        const weekResults: Array<{ meetings: MeetingRecord[]; warning?: string }> = [];
+        for (const dayOfWeek of orderedWeekDays) {
+          weekResults.push(await fetchMergedMeetingsForDay(dayOfWeek));
         }
 
-        const selectedDayMeetingsWithGeo =
-          await geocodeMeetingsMissingCoordinates(selectedDayMeetings);
-        const todayResultMeetingsWithGeo =
-          await geocodeMeetingsMissingCoordinates(todayResultMeetings);
-        const nextDayMeetingsWithGeo = await geocodeMeetingsMissingCoordinates(nextDayMeetings);
+        const weekMeetings = weekResults.flatMap((result) => result.meetings);
+        const uniqueMeetingsById = new Map<string, MeetingRecord>();
+        for (const meeting of [
+          ...selectedDayResult.meetings,
+          ...todayResult.meetings,
+          ...weekMeetings,
+        ]) {
+          uniqueMeetingsById.set(meeting.id, meeting);
+        }
+        const geocodedMeetings = await geocodeMeetingsMissingCoordinates(
+          Array.from(uniqueMeetingsById.values()),
+        );
+        const geocodedById = new Map<string, MeetingRecord>();
+        for (const meeting of geocodedMeetings) {
+          geocodedById.set(meeting.id, meeting);
+        }
+        const withGeocodedRecords = (records: MeetingRecord[]) =>
+          records.map((meeting) => geocodedById.get(meeting.id) ?? meeting);
+
+        const selectedDayMeetingsWithGeo = withGeocodedRecords(selectedDayResult.meetings);
+        const todayResultMeetingsWithGeo = withGeocodedRecords(todayResult.meetings);
+        const homeGroupWeekMeetingsWithGeo = withGeocodedRecords(weekMeetings);
 
         setMeetings(selectedDayMeetingsWithGeo);
         setTodayNearbyMeetings(todayResultMeetingsWithGeo);
-        setHomeGroupFallbackDayOffset(nextDayOffset);
-        setHomeGroupFallbackMeetings(nextDayMeetingsWithGeo);
+        setHomeGroupWeekMeetings(homeGroupWeekMeetingsWithGeo);
 
         if (!meetingsShapeLoggedRef.current && selectedDayMeetingsWithGeo.length > 0) {
           meetingsShapeLoggedRef.current = true;
           console.log("[meetings] normalized sample", selectedDayMeetingsWithGeo[0]);
         }
 
-        const selectedDayWarning =
-          selectedDayScopedResult.warning ?? selectedDayUnscopedResult.warning;
+        const selectedDayWarning = selectedDayResult.warning;
         const warningSuffix = selectedDayWarning ? ` (${selectedDayWarning})` : "";
         setMeetingsStatus(`Meetings updated${warningSuffix}.`);
       } catch (error) {
-        setMeetingsError(formatApiErrorWithHint(formatError(error)));
+        const rawMessage = formatError(error);
+        const authUnavailable =
+          rawMessage.includes("auth unavailable") ||
+          rawMessage.includes("401") ||
+          rawMessage.includes("503");
+        setMeetingsError(
+          authUnavailable
+            ? "Meetings are unavailable until a valid session is ready for this environment. Retry after the app restores auth."
+            : formatApiErrorWithHint(rawMessage),
+        );
         setMeetingsStatus("Unable to load meetings.");
       } finally {
         meetingsRequestInFlightRef.current = false;
@@ -5397,12 +5449,42 @@ export default function App() {
       meetingRadiusMiles,
       formatApiErrorWithHint,
       geocodeMeetingsMissingCoordinates,
+      clockTickMs,
+      dayOptions,
     ],
   );
 
   useEffect(() => {
     refreshMeetingsRef.current = refreshMeetings;
   }, [refreshMeetings]);
+
+  useEffect(() => {
+    if (!__DEV__ || !lastMeetingsApiEvent) {
+      return;
+    }
+    if (lastMeetingsApiEvent.statusCode !== 401 && lastMeetingsApiEvent.statusCode !== 503) {
+      return;
+    }
+
+    console.warn("[meetings] auth diagnostic", {
+      appEnv: resolvedAppEnv,
+      apiUrl,
+      timeZone: deviceTimeZone,
+      hasConfiguredDevAuthUserId: configuredDevAuthUserId.length > 0,
+      hasAuthHeader: Boolean(authHeader),
+      endpointPath: lastMeetingsApiEvent.endpointPath,
+      statusCode: lastMeetingsApiEvent.statusCode,
+      errorMessage: lastMeetingsApiEvent.errorMessage,
+      errorBodySnippet: lastMeetingsApiEvent.errorBodySnippet?.slice(0, 160) ?? null,
+    });
+  }, [
+    apiUrl,
+    authHeader,
+    configuredDevAuthUserId,
+    deviceTimeZone,
+    lastMeetingsApiEvent,
+    resolvedAppEnv,
+  ]);
 
   useEffect(() => {
     currentLocationRef.current = currentLocation;
@@ -5540,6 +5622,30 @@ export default function App() {
     setSelectedMeeting(null);
     setSelectedDayOffset(0);
   }, [activeAttendance]);
+
+  const openOnlineMeetingsNow = useCallback(async () => {
+    setHomeScreen("MEETINGS");
+    setToolsScreen("HOME");
+    setScreen(activeAttendance && !activeAttendance.endAt ? "SESSION" : "LIST");
+    setSelectedMeeting(null);
+    setSelectedDayOffset(0);
+    setMeetingsFormatFilter("ONLINE");
+    setMeetingsTimeFilter("ANY");
+
+    const location = currentLocation ?? (await requestLocationPermission());
+    if (location) {
+      await refreshMeetings({ location, radiusMiles: meetingRadiusMiles });
+      return;
+    }
+
+    await refreshMeetings({ radiusMiles: meetingRadiusMiles });
+  }, [
+    activeAttendance,
+    currentLocation,
+    meetingRadiusMiles,
+    refreshMeetings,
+    requestLocationPermission,
+  ]);
 
   const backFromAttendance = useCallback(() => {
     if (attendanceEntryPoint === "meetings") {
@@ -5987,9 +6093,7 @@ export default function App() {
       }
 
       const response = await fetch(`${apiUrl}/v1/me/sponsor`, {
-        headers: {
-          Authorization: authHeader,
-        },
+        headers: authHeaders,
       });
       if (!response.ok) {
         setSponsorStatus(formatApiErrorWithHint(`Sponsor config load failed: ${response.status}`));
@@ -6033,7 +6137,7 @@ export default function App() {
     } catch {
       setSponsorStatus(formatApiErrorWithHint("Sponsor config load failed: network."));
     }
-  }, [apiUrl, authHeader, enableSponsorApiSync, formatApiErrorWithHint]);
+  }, [apiUrl, authHeaders, enableSponsorApiSync, formatApiErrorWithHint]);
 
   const sanitizeStoredCalendarStateOnLaunch = useCallback(async () => {
     console.log("[startup] calendar state audit begin");
@@ -6682,7 +6786,7 @@ export default function App() {
           const response = await fetch(`${apiUrl}/v1/me/sponsor`, {
             method: "PUT",
             headers: {
-              Authorization: authHeader,
+              ...(authHeaders ?? {}),
               "Content-Type": "application/json",
             },
             body: JSON.stringify(payload),
@@ -6773,7 +6877,7 @@ export default function App() {
       sponsorRepeatDaysSorted,
       sponsorCallTimeLocalHhmm,
       apiUrl,
-      authHeader,
+      authHeaders,
       enableSponsorApiSync,
       formatApiErrorWithHint,
       sponsorCalendarEventStorage,
@@ -8404,8 +8508,19 @@ export default function App() {
       apiUrl,
       appVersion,
       buildNumber,
+      timeZone: deviceTimeZone,
+      devAuthUserId: configuredDevAuthUserId,
+      hasAuthHeader: Boolean(authHeader),
     }),
-    [apiUrl, appVersion, buildNumber, resolvedAppEnv],
+    [
+      apiUrl,
+      appVersion,
+      authHeader,
+      buildNumber,
+      configuredDevAuthUserId,
+      deviceTimeZone,
+      resolvedAppEnv,
+    ],
   );
 
   const diagnosticsMeetingsApiHealth = useMemo<DiagnosticsMeetingsApiHealth>(
@@ -10486,9 +10601,7 @@ export default function App() {
           tz: dashboardWisdomTimeZone,
         });
         const response = await fetch(`${apiUrl}/api/wisdom/daily?${query.toString()}`, {
-          headers: {
-            Authorization: authHeader,
-          },
+          headers: authHeaders,
         });
         if (!response.ok) {
           throw new Error(`wisdom fetch failed: ${response.status}`);
@@ -10538,7 +10651,7 @@ export default function App() {
     dashboardWisdomDateKey,
     dashboardWisdomTimeZone,
     apiUrl,
-    authHeader,
+    authHeaders,
   ]);
 
   useEffect(() => {
@@ -11735,13 +11848,11 @@ export default function App() {
                       {wizardHasHomeGroup ? (
                         <>
                           <Text style={styles.sectionMeta}>
-                            {homeGroupUsesNextDayFallback
-                              ? `No more meetings are available today. Showing ${homeGroupFallbackDayLabel} meetings.`
-                              : "Select a home group from today's remaining meetings."}
+                            Choose one group from meetings in your area over the next 7 days.
                           </Text>
-                          {homeGroupCandidateMeetings.length === 0 ? (
+                          {homeGroupWeekOptions.length === 0 ? (
                             <Text style={styles.sectionMeta}>
-                              No meetings loaded for today or upcoming days yet.
+                              No meetings are available in your area for the next week yet.
                             </Text>
                           ) : (
                             <ScrollView
@@ -11751,27 +11862,47 @@ export default function App() {
                               showsVerticalScrollIndicator
                               keyboardShouldPersistTaps="handled"
                             >
-                              {homeGroupCandidateMeetings.map((meeting) => {
-                                const selected = homeGroupMeetingIds.includes(meeting.id);
+                              {homeGroupWeekOptions.map((option) => {
+                                const selected = selectedHomeGroupOption?.key === option.key;
+                                const nextMeeting = option.nextMeeting;
+                                const nextMeetingDayLabel =
+                                  nextMeeting === null
+                                    ? "Later this week"
+                                    : nextMeeting.dayOfWeek === new Date(clockTickMs).getDay()
+                                      ? "Today"
+                                      : (WEEKDAY_SHORT_LABELS[nextMeeting.dayOfWeek] ?? "Next");
                                 return (
                                   <Pressable
-                                    key={meeting.id}
+                                    key={option.key}
                                     style={[
                                       styles.meetingCard,
                                       selected ? styles.homeGroupSelectedCard : null,
                                     ]}
                                     onPress={() =>
-                                      setHomeGroupMeetingIds((current) =>
-                                        current.includes(meeting.id) ? [] : [meeting.id],
+                                      setHomeGroupMeetingIds(
+                                        selected
+                                          ? []
+                                          : option.meetings.map((meeting) => meeting.id),
                                       )
                                     }
                                   >
-                                    <Text style={styles.meetingName}>{meeting.name}</Text>
+                                    <Text style={styles.meetingName}>{option.name}</Text>
                                     <Text style={styles.sectionMeta}>
-                                      {formatHhmmForDisplay(meeting.startsAtLocal)} •{" "}
+                                      {option.occurrenceCount} meeting
+                                      {option.occurrenceCount === 1 ? "" : "s"} this week •{" "}
+                                      {option.formatSummary}
+                                    </Text>
+                                    <Text style={styles.sectionMeta}>
+                                      Next: {nextMeetingDayLabel}
+                                      {nextMeeting
+                                        ? ` ${formatHhmmForDisplay(nextMeeting.startsAtLocal)}`
+                                        : ""}{" "}
+                                      • {option.areaSummary}
+                                    </Text>
+                                    <Text style={styles.sectionMeta}>
                                       {meetingDistanceLabel(
-                                        meeting,
-                                        meeting.distanceMeters,
+                                        nextMeeting ?? option.meetings[0],
+                                        option.distanceMeters,
                                         locationPermission,
                                         locationIssue,
                                       )}
@@ -11998,9 +12129,10 @@ export default function App() {
                           <Text style={styles.sectionMeta}>
                             Home group:{" "}
                             {homeGroupMeetingIds.length > 0
-                              ? (allMeetings.find(
-                                  (meeting) => meeting.id === homeGroupMeetingIds[0],
-                                )?.name ?? "Selected")
+                              ? (selectedHomeGroupOption?.name ??
+                                allMeetings.find((meeting) => meeting.id === homeGroupMeetingIds[0])
+                                  ?.name ??
+                                "Selected")
                               : "Not selected"}
                           </Text>
                           <Text style={styles.sectionMeta}>
@@ -12412,6 +12544,9 @@ export default function App() {
                       void callHouseManagerFromDashboard();
                     }}
                     onOpenMeetings={openMeetingsHub}
+                    onOpenOnlineMeetingsNow={() => {
+                      void openOnlineMeetingsNow();
+                    }}
                     onOpenRecoveryRoadmap={() => setShowRecoveryRoadmap(true)}
                     onOpenPhysicalRecovery={() => setShowPhysicalRecoveryTimeline(true)}
                     onOpenRecoverySettings={openSettingsHub}

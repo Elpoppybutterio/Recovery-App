@@ -26,6 +26,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Meetings refresh now re-checks permission and current location on app focus/return, restoring distance rendering after Settings changes without reinstall.
 - Location-state UX now differentiates denied permission vs. disabled Location Services vs. missing meeting coordinates, preventing false generic `Location unavailable` states.
 - Sponsor time picker crash hardening: keep Android on the native dialog, replace iOS with a sheet-based selector, and add a defensive fallback if the native Android picker cannot open.
+- Meetings auth + discovery hardening: mobile now reads runtime Expo config for the live API/auth path, avoids malformed simulator headers, uses device-local timezone keys for meetings/day windows, builds a deduped 7-day home-group selector from area meetings, and adds an `Online Meetings Now` CTA from the dashboard tile.
 
 ## Slice A (DONE)
 
