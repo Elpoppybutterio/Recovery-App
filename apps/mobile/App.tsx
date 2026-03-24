@@ -3248,10 +3248,10 @@ export default function App() {
 
   const mapMeetingsForDay = useMemo(
     () =>
-      meetingsForDay.filter(
+      meetingsForMeetingsScreen.filter(
         (meeting) => meeting.format !== "ONLINE" && meeting.lat !== null && meeting.lng !== null,
       ),
-    [meetingsForDay],
+    [meetingsForMeetingsScreen],
   );
 
   const mapRenderRegion = useMemo<Region>(() => {
@@ -3307,6 +3307,37 @@ export default function App() {
       ),
     }));
   }, [mapMeetingsForDay]);
+
+  const mapHiddenMeetingCount = useMemo(
+    () => Math.max(0, meetingsForMeetingsScreen.length - mapMeetingsForDay.length),
+    [mapMeetingsForDay.length, meetingsForMeetingsScreen.length],
+  );
+  const mapMeetingsSummary = useMemo(() => {
+    if (meetingsForMeetingsScreen.length === 0) {
+      return "No meetings match the current filters.";
+    }
+
+    if (mapMeetingsForDay.length === 0) {
+      if (mapHiddenMeetingCount > 0) {
+        return `${mapHiddenMeetingCount} meeting${mapHiddenMeetingCount === 1 ? "" : "s"} match the current filters, but none can be shown on the map because they are online or missing usable coordinates.`;
+      }
+      return "No in-person meetings with usable coordinates match the current filters.";
+    }
+
+    const meetingLabel = `${mapMeetingsForDay.length} in-person meeting${mapMeetingsForDay.length === 1 ? "" : "s"}`;
+    const locationLabel = `${meetingLocationGroups.length} map location${meetingLocationGroups.length === 1 ? "" : "s"}`;
+
+    if (mapHiddenMeetingCount > 0) {
+      return `Showing ${meetingLabel} across ${locationLabel}. ${mapHiddenMeetingCount} additional meeting${mapHiddenMeetingCount === 1 ? "" : "s"} match the current filters but cannot be placed on the map.`;
+    }
+
+    return `Showing ${meetingLabel} across ${locationLabel}.`;
+  }, [
+    mapHiddenMeetingCount,
+    mapMeetingsForDay.length,
+    meetingLocationGroups.length,
+    meetingsForMeetingsScreen.length,
+  ]);
 
   const selectedLocationGroup = useMemo(
     () => meetingLocationGroups.find((group) => group.key === selectedLocationKey) ?? null,
@@ -13918,10 +13949,7 @@ export default function App() {
 
                     {screen === "LIST" && meetingsViewMode === "MAP" ? (
                       <>
-                        <Text style={styles.sectionMeta}>
-                          Map view shows in-person meetings with location coordinates for the
-                          selected day.
-                        </Text>
+                        <Text style={styles.sectionMeta}>{mapMeetingsSummary}</Text>
                         {!mapsRuntimeAvailable ? (
                           <Text style={styles.sectionMeta}>
                             Map module unavailable in this build. Reinstall the latest app build.
@@ -14011,7 +14039,7 @@ export default function App() {
 
                         {!loadingMeetings && meetingLocationGroups.length === 0 ? (
                           <Text style={styles.sectionMeta}>
-                            No in-person meetings with coordinates for this day.
+                            No in-person meetings with usable coordinates match the current filters.
                           </Text>
                         ) : null}
                       </>
