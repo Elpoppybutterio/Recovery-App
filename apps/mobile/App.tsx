@@ -1,8 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import DateTimePicker, {
-  DateTimePickerAndroid,
-  type DateTimePickerEvent,
-} from "@react-native-community/datetimepicker";
+import { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import * as Calendar from "expo-calendar";
 import Constants from "expo-constants";
 import { geocodeAsync } from "expo-location";
@@ -2435,15 +2432,6 @@ export default function App() {
     minute: sponsorMinute,
     meridiem: sponsorMeridiem,
   };
-  const sponsorTimeDraftDate = useMemo(
-    () =>
-      sponsorTimePartsToDate(
-        sponsorTimeDraftValue.hour12,
-        sponsorTimeDraftValue.minute,
-        sponsorTimeDraftValue.meridiem,
-      ),
-    [sponsorTimeDraftValue.hour12, sponsorTimeDraftValue.minute, sponsorTimeDraftValue.meridiem],
-  );
   const sponsorRepeatUnit = useMemo<RepeatUnit>(
     () => (sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY"),
     [sponsorRepeatPreset],
@@ -12088,11 +12076,6 @@ export default function App() {
   }
 
   function openSponsorTimePicker() {
-    if (Platform.OS === "ios") {
-      openSponsorTimePickerFallback();
-      return;
-    }
-
     if (Platform.OS === "android") {
       try {
         DateTimePickerAndroid.open({
@@ -12116,14 +12099,6 @@ export default function App() {
     }
 
     openSponsorTimePickerFallback();
-  }
-
-  function handleSponsorTimePickerChange(_event: DateTimePickerEvent, selectedDate?: Date) {
-    if (!selectedDate) {
-      return;
-    }
-
-    setSponsorTimeDraft(sponsorTimeDateToParts(selectedDate));
   }
 
   function confirmSponsorTimePicker() {
@@ -16197,137 +16172,119 @@ export default function App() {
                   <Text style={styles.timePickerSheetAction}>Done</Text>
                 </Pressable>
               </View>
-              <Text style={styles.timePickerSheetMeta}>
-                {Platform.OS === "ios"
-                  ? "Spin the wheel to set a sponsor call time."
-                  : "Select a sponsor call time."}
-              </Text>
-              {Platform.OS === "ios" ? (
-                <View style={styles.timePickerWheelWrap}>
-                  <DateTimePicker
-                    value={sponsorTimeDraftDate}
-                    mode="time"
-                    display="spinner"
-                    minuteInterval={1}
-                    textColor="#ffffff"
-                    onChange={handleSponsorTimePickerChange}
-                    style={styles.timePickerWheel}
-                  />
-                </View>
-              ) : (
-                <View style={styles.timePickerSheetColumns}>
-                  <View style={styles.timePickerSheetColumn}>
-                    <Text style={styles.timePickerSheetColumnLabel}>Hour</Text>
-                    <ScrollView
-                      style={styles.timePickerSheetOptions}
-                      contentContainerStyle={styles.timePickerSheetOptionsContent}
-                      showsVerticalScrollIndicator={false}
-                    >
-                      {SPONSOR_TIME_HOUR_OPTIONS.map((hour) => (
-                        <Pressable
-                          key={`sponsor-hour-${hour}`}
+              <Text style={styles.timePickerSheetMeta}>Select a sponsor call time.</Text>
+              <View style={styles.timePickerSheetColumns}>
+                <View style={styles.timePickerSheetColumn}>
+                  <Text style={styles.timePickerSheetColumnLabel}>Hour</Text>
+                  <ScrollView
+                    style={styles.timePickerSheetOptions}
+                    contentContainerStyle={styles.timePickerSheetOptionsContent}
+                    showsVerticalScrollIndicator={false}
+                  >
+                    {SPONSOR_TIME_HOUR_OPTIONS.map((hour) => (
+                      <Pressable
+                        key={`sponsor-hour-${hour}`}
+                        style={[
+                          styles.timePickerSheetOption,
+                          sponsorTimeDraftValue.hour12 === hour
+                            ? styles.timePickerSheetOptionSelected
+                            : null,
+                        ]}
+                        onPress={() =>
+                          setSponsorTimeDraft((current) => ({
+                            hour12: hour,
+                            minute: current?.minute ?? sponsorMinute,
+                            meridiem: current?.meridiem ?? sponsorMeridiem,
+                          }))
+                        }
+                      >
+                        <Text
                           style={[
-                            styles.timePickerSheetOption,
+                            styles.timePickerSheetOptionText,
                             sponsorTimeDraftValue.hour12 === hour
-                              ? styles.timePickerSheetOptionSelected
+                              ? styles.timePickerSheetOptionTextSelected
                               : null,
                           ]}
-                          onPress={() =>
-                            setSponsorTimeDraft((current) => ({
-                              hour12: hour,
-                              minute: current?.minute ?? sponsorMinute,
-                              meridiem: current?.meridiem ?? sponsorMeridiem,
-                            }))
-                          }
                         >
-                          <Text
-                            style={[
-                              styles.timePickerSheetOptionText,
-                              sponsorTimeDraftValue.hour12 === hour
-                                ? styles.timePickerSheetOptionTextSelected
-                                : null,
-                            ]}
-                          >
-                            {hour}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </ScrollView>
-                  </View>
-                  <View style={styles.timePickerSheetColumn}>
-                    <Text style={styles.timePickerSheetColumnLabel}>Minute</Text>
-                    <ScrollView
-                      style={styles.timePickerSheetOptions}
-                      contentContainerStyle={styles.timePickerSheetOptionsContent}
-                      showsVerticalScrollIndicator={false}
-                    >
-                      {SPONSOR_TIME_MINUTE_OPTIONS.map((minute) => (
-                        <Pressable
-                          key={`sponsor-minute-${minute}`}
+                          {hour}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+                <View style={styles.timePickerSheetColumn}>
+                  <Text style={styles.timePickerSheetColumnLabel}>Minute</Text>
+                  <ScrollView
+                    style={styles.timePickerSheetOptions}
+                    contentContainerStyle={styles.timePickerSheetOptionsContent}
+                    showsVerticalScrollIndicator={false}
+                  >
+                    {SPONSOR_TIME_MINUTE_OPTIONS.map((minute) => (
+                      <Pressable
+                        key={`sponsor-minute-${minute}`}
+                        style={[
+                          styles.timePickerSheetOption,
+                          sponsorTimeDraftValue.minute === minute
+                            ? styles.timePickerSheetOptionSelected
+                            : null,
+                        ]}
+                        onPress={() =>
+                          setSponsorTimeDraft((current) => ({
+                            hour12: current?.hour12 ?? sponsorHour12,
+                            minute,
+                            meridiem: current?.meridiem ?? sponsorMeridiem,
+                          }))
+                        }
+                      >
+                        <Text
                           style={[
-                            styles.timePickerSheetOption,
+                            styles.timePickerSheetOptionText,
                             sponsorTimeDraftValue.minute === minute
-                              ? styles.timePickerSheetOptionSelected
+                              ? styles.timePickerSheetOptionTextSelected
                               : null,
                           ]}
-                          onPress={() =>
-                            setSponsorTimeDraft((current) => ({
-                              hour12: current?.hour12 ?? sponsorHour12,
-                              minute,
-                              meridiem: current?.meridiem ?? sponsorMeridiem,
-                            }))
-                          }
                         >
-                          <Text
-                            style={[
-                              styles.timePickerSheetOptionText,
-                              sponsorTimeDraftValue.minute === minute
-                                ? styles.timePickerSheetOptionTextSelected
-                                : null,
-                            ]}
-                          >
-                            {String(minute).padStart(2, "0")}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </ScrollView>
-                  </View>
-                  <View style={styles.timePickerSheetMeridiemColumn}>
-                    <Text style={styles.timePickerSheetColumnLabel}>AM/PM</Text>
-                    <View style={styles.timePickerSheetMeridiemOptions}>
-                      {SPONSOR_TIME_MERIDIEM_OPTIONS.map((meridiem) => (
-                        <Pressable
-                          key={`sponsor-meridiem-${meridiem}`}
+                          {String(minute).padStart(2, "0")}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+                <View style={styles.timePickerSheetMeridiemColumn}>
+                  <Text style={styles.timePickerSheetColumnLabel}>AM/PM</Text>
+                  <View style={styles.timePickerSheetMeridiemOptions}>
+                    {SPONSOR_TIME_MERIDIEM_OPTIONS.map((meridiem) => (
+                      <Pressable
+                        key={`sponsor-meridiem-${meridiem}`}
+                        style={[
+                          styles.timePickerSheetOption,
+                          sponsorTimeDraftValue.meridiem === meridiem
+                            ? styles.timePickerSheetOptionSelected
+                            : null,
+                        ]}
+                        onPress={() =>
+                          setSponsorTimeDraft((current) => ({
+                            hour12: current?.hour12 ?? sponsorHour12,
+                            minute: current?.minute ?? sponsorMinute,
+                            meridiem,
+                          }))
+                        }
+                      >
+                        <Text
                           style={[
-                            styles.timePickerSheetOption,
+                            styles.timePickerSheetOptionText,
                             sponsorTimeDraftValue.meridiem === meridiem
-                              ? styles.timePickerSheetOptionSelected
+                              ? styles.timePickerSheetOptionTextSelected
                               : null,
                           ]}
-                          onPress={() =>
-                            setSponsorTimeDraft((current) => ({
-                              hour12: current?.hour12 ?? sponsorHour12,
-                              minute: current?.minute ?? sponsorMinute,
-                              meridiem,
-                            }))
-                          }
                         >
-                          <Text
-                            style={[
-                              styles.timePickerSheetOptionText,
-                              sponsorTimeDraftValue.meridiem === meridiem
-                                ? styles.timePickerSheetOptionTextSelected
-                                : null,
-                            ]}
-                          >
-                            {meridiem}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
+                          {meridiem}
+                        </Text>
+                      </Pressable>
+                    ))}
                   </View>
                 </View>
-              )}
+              </View>
             </View>
           </View>
         </Modal>
@@ -17142,17 +17099,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 13,
     marginBottom: 12,
-  },
-  timePickerWheelWrap: {
-    borderRadius: 18,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-  },
-  timePickerWheel: {
-    alignSelf: "stretch",
   },
   timePickerSheetAction: {
     color: colors.neonLavender,
