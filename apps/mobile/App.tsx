@@ -1,5 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
+import DateTimePicker, {
+  DateTimePickerAndroid,
+  type DateTimePickerEvent,
+} from "@react-native-community/datetimepicker";
+import * as Calendar from "expo-calendar";
 import Constants from "expo-constants";
 import { geocodeAsync } from "expo-location";
 import type * as NotificationsTypes from "expo-notifications";
@@ -231,6 +235,19 @@ type RepeatPreset = "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 type LocationPermissionState = "unknown" | "granted" | "denied" | "unavailable";
 type SponsorLeadMinutes = 0 | 5 | 10 | 30;
 type SponsorTimeDraft = { hour12: number; minute: number; meridiem: "AM" | "PM" };
+type AttendanceAutomationState =
+  | "planned"
+  | "eligible_to_start"
+  | "started"
+  | "awaiting_signature"
+  | "completed"
+  | "incomplete_or_invalid";
+type AttendanceAutomationPlan = {
+  meetingId: string;
+  dateKey: string;
+  status: Extract<AttendanceAutomationState, "planned" | "eligible_to_start">;
+  plannedAtIso: string;
+};
 
 type SponsorConfigPayload = {
   sponsorName: string;
@@ -311,6 +328,9 @@ type AttendanceRecord = {
   calendarEventId?: string | null;
   leaveNotificationId?: string | null;
   leaveNotificationAtIso?: string | null;
+  requiresSignature?: boolean;
+  attendanceAutomationState?: AttendanceAutomationState | null;
+  autoStartedAtIso?: string | null;
   signatureRef?: SignatureRef | null;
   // Legacy field kept for one-way migration from historical local storage.
   signaturePngBase64?: string | null;
@@ -480,6 +500,7 @@ type MeetingAttendanceLog = {
 
 const ARRIVAL_RADIUS_METERS = 61;
 const MAX_GPS_ACCURACY_TOLERANCE_METERS = 160;
+const ATTENDANCE_AUTO_START_WINDOW_MINUTES = 30;
 const MIN_VALID_MEETING_MINUTES = 50;
 const DEFAULT_MEETING_DURATION_MINUTES = 60;
 const SIGNATURE_WINDOW_MINUTES = 90;
@@ -683,6 +704,18 @@ function isMeetingInProgress(startsAtLocal: string, nowMinutes: number): boolean
   const startMinutes = parseMinutesFromHhmm(startsAtLocal);
   const endMinutes = startMinutes + DEFAULT_MEETING_DURATION_MINUTES;
   return nowMinutes >= startMinutes && nowMinutes < endMinutes;
+}
+
+function isMeetingWithinAutoStartWindow(
+  meeting: Pick<MeetingRecord, "dayOfWeek" | "startsAtLocal">,
+  now = new Date(),
+): boolean {
+  const scheduledStart = combineDateWithHhmm(
+    resolveNextMeetingDateForDayOfWeek(meeting.dayOfWeek, now),
+    meeting.startsAtLocal,
+  );
+  const deltaMinutes = Math.abs((now.getTime() - scheduledStart.getTime()) / 60_000);
+  return deltaMinutes <= ATTENDANCE_AUTO_START_WINDOW_MINUTES;
 }
 
 function isMeetingActionableToday(startsAtLocal: string, nowMinutes: number): boolean {
@@ -1417,160 +1450,93 @@ function radiusMilesFromMeetingsLocationFilter(
   return currentRadiusMiles > 0 && currentRadiusMiles < 50 ? currentRadiusMiles : 50;
 }
 
-function toCalendarDayOfWeek(code: WeekdayCode): number {
+function toCalendarDayOfWeek(code: WeekdayCode): Calendar.DayOfTheWeek {
   switch (code) {
     case "MON":
-      return 1;
+      return Calendar.DayOfTheWeek.Monday;
     case "TUE":
-      return 2;
+      return Calendar.DayOfTheWeek.Tuesday;
     case "WED":
-      return 3;
+      return Calendar.DayOfTheWeek.Wednesday;
     case "THU":
-      return 4;
+      return Calendar.DayOfTheWeek.Thursday;
     case "FRI":
-      return 5;
+      return Calendar.DayOfTheWeek.Friday;
     case "SAT":
-      return 6;
+      return Calendar.DayOfTheWeek.Saturday;
     case "SUN":
     default:
-      return 7;
+      return Calendar.DayOfTheWeek.Sunday;
   }
 }
 
-function toIcsWeekday(dayOfWeek: number): string {
-  switch (dayOfWeek) {
-    case 1:
-      return "MO";
-    case 2:
-      return "TU";
-    case 3:
-      return "WE";
-    case 4:
-      return "TH";
-    case 5:
-      return "FR";
-    case 6:
-      return "SA";
-    case 7:
-    default:
-      return "SU";
-  }
-}
-
-function formatIcsDateUtc(date: Date): string {
-  const year = date.getUTCFullYear().toString().padStart(4, "0");
-  const month = (date.getUTCMonth() + 1).toString().padStart(2, "0");
-  const day = date.getUTCDate().toString().padStart(2, "0");
-  const hours = date.getUTCHours().toString().padStart(2, "0");
-  const minutes = date.getUTCMinutes().toString().padStart(2, "0");
-  const seconds = date.getUTCSeconds().toString().padStart(2, "0");
-  return `${year}${month}${day}T${hours}${minutes}${seconds}Z`;
-}
-
-function escapeIcsText(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/\r?\n/g, "\\n")
-    .replace(/;/g, "\\;")
-    .replace(/,/g, "\\,");
-}
-
-function buildIcsAlarmTrigger(relativeOffsetMinutes: number): string {
-  const absoluteMinutes = Math.max(0, Math.trunc(Math.abs(relativeOffsetMinutes)));
-  return `${relativeOffsetMinutes > 0 ? "" : "-"}PT${absoluteMinutes}M`;
-}
-
-function buildIcsRecurrenceRule(
+function buildNativeCalendarRecurrenceRule(
   recurrenceRule: CalendarEventInputCompat["recurrenceRule"],
-): string | null {
+): Calendar.RecurrenceRule | undefined {
   if (!recurrenceRule) {
-    return null;
+    return undefined;
   }
 
-  const frequency =
-    recurrenceRule.frequency === "monthly"
-      ? "FREQ=MONTHLY"
-      : recurrenceRule.frequency === "weekly"
-        ? "FREQ=WEEKLY"
-        : null;
-  if (!frequency) {
-    return null;
-  }
-
-  const parts = [frequency];
-  if (
-    typeof recurrenceRule.interval === "number" &&
-    Number.isFinite(recurrenceRule.interval) &&
-    recurrenceRule.interval > 1
-  ) {
-    parts.push(`INTERVAL=${Math.trunc(recurrenceRule.interval)}`);
-  }
-  if (recurrenceRule.frequency === "weekly" && recurrenceRule.daysOfTheWeek?.length) {
-    parts.push(
-      `BYDAY=${recurrenceRule.daysOfTheWeek.map((entry) => toIcsWeekday(entry.dayOfTheWeek)).join(",")}`,
-    );
-  }
-  return parts.join(";");
+  return {
+    frequency:
+      recurrenceRule.frequency === "monthly"
+        ? Calendar.Frequency.MONTHLY
+        : Calendar.Frequency.WEEKLY,
+    interval:
+      typeof recurrenceRule.interval === "number" && Number.isFinite(recurrenceRule.interval)
+        ? Math.max(1, Math.trunc(recurrenceRule.interval))
+        : 1,
+    daysOfTheWeek:
+      recurrenceRule.frequency === "weekly"
+        ? recurrenceRule.daysOfTheWeek?.map((entry) => ({
+            dayOfTheWeek: entry.dayOfTheWeek,
+          }))
+        : undefined,
+  };
 }
 
-function sanitizeCalendarFilenameSegment(value: string): string {
-  const sanitized = value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return sanitized.length > 0 ? sanitized.slice(0, 48) : "event";
-}
-
-function buildCalendarFileContents(eventDetails: CalendarEventInputCompat, uid: string): string {
+function buildNativeCalendarEventInput(
+  eventDetails: CalendarEventInputCompat,
+): Omit<Partial<Calendar.Event>, "id" | "organizer"> {
   const now = new Date();
   const startDate = eventDetails.startDate ?? now;
   const endDate =
     eventDetails.endDate && eventDetails.endDate > startDate
       ? eventDetails.endDate
       : new Date(startDate.getTime() + 60 * 60 * 1000);
-  const lines = [
-    "BEGIN:VCALENDAR",
-    "VERSION:2.0",
-    "PRODID:-//Sober AI//Recovery Calendar//EN",
-    "CALSCALE:GREGORIAN",
-    "METHOD:PUBLISH",
-    "BEGIN:VEVENT",
-    `UID:${uid}`,
-    `DTSTAMP:${formatIcsDateUtc(now)}`,
-    `DTSTART:${formatIcsDateUtc(startDate)}`,
-    `DTEND:${formatIcsDateUtc(endDate)}`,
-    `SUMMARY:${escapeIcsText(eventDetails.title?.trim() || "Sober AI Event")}`,
-  ];
 
-  if (eventDetails.location?.trim()) {
-    lines.push(`LOCATION:${escapeIcsText(eventDetails.location.trim())}`);
-  }
-  if (eventDetails.notes?.trim()) {
-    lines.push(`DESCRIPTION:${escapeIcsText(eventDetails.notes.trim())}`);
-  }
+  return {
+    title: eventDetails.title?.trim() || "Sober AI Event",
+    notes: eventDetails.notes?.trim() || undefined,
+    startDate,
+    endDate,
+    location: eventDetails.location?.trim() || undefined,
+    alarms: (eventDetails.alarms ?? [])
+      .filter(
+        (alarm) =>
+          typeof alarm?.relativeOffset === "number" &&
+          Number.isFinite(alarm.relativeOffset) &&
+          Math.abs(alarm.relativeOffset) <= 7 * 24 * 60,
+      )
+      .map((alarm) => ({
+        relativeOffset: Math.trunc(alarm.relativeOffset),
+      })),
+    recurrenceRule: buildNativeCalendarRecurrenceRule(eventDetails.recurrenceRule),
+  };
+}
 
-  const recurrenceRule = buildIcsRecurrenceRule(eventDetails.recurrenceRule);
-  if (recurrenceRule) {
-    lines.push(`RRULE:${recurrenceRule}`);
-  }
-
-  for (const alarm of eventDetails.alarms ?? []) {
-    if (
-      typeof alarm?.relativeOffset !== "number" ||
-      !Number.isFinite(alarm.relativeOffset) ||
-      Math.abs(alarm.relativeOffset) > 7 * 24 * 60
-    ) {
-      continue;
-    }
-    lines.push("BEGIN:VALARM");
-    lines.push(`TRIGGER:${buildIcsAlarmTrigger(alarm.relativeOffset)}`);
-    lines.push("ACTION:DISPLAY");
-    lines.push(`DESCRIPTION:${escapeIcsText(eventDetails.title?.trim() || "Sober AI Event")}`);
-    lines.push("END:VALARM");
-  }
-
-  lines.push("END:VEVENT", "END:VCALENDAR");
-  return lines.join("\r\n");
+function isCalendarPermissionGranted(
+  response:
+    | {
+        granted?: boolean;
+        status?: string | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  return (
+    response?.granted === true || response?.status === "granted" || response?.status === "limited"
+  );
 }
 
 function formatError(error: unknown): string {
@@ -2234,9 +2200,6 @@ export default function App() {
   const [diagnosticsMeetingIdInput, setDiagnosticsMeetingIdInput] = useState("");
   const [diagnosticsLocationSnapshot, setDiagnosticsLocationSnapshot] =
     useState<DiagnosticsLocationSnapshot | null>(null);
-  const [pendingGeofenceLogMeetingId, setPendingGeofenceLogMeetingId] = useState<string | null>(
-    null,
-  );
 
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [attendanceViewFilter, setAttendanceViewFilter] = useState<AttendanceViewFilter>("ALL");
@@ -2266,6 +2229,8 @@ export default function App() {
   const [signatureCaptureMeeting, setSignatureCaptureMeeting] = useState<MeetingRecord | null>(
     null,
   );
+  const [attendanceAutomationPlan, setAttendanceAutomationPlan] =
+    useState<AttendanceAutomationPlan | null>(null);
 
   const [signaturePoints, setSignaturePoints] = useState<SignaturePoint[]>([]);
   const [signatureChairNameInput, setSignatureChairNameInput] = useState("");
@@ -2406,7 +2371,6 @@ export default function App() {
   const attendanceRecordsRef = useRef<AttendanceRecord[]>([]);
   const attendanceExportInFlightRef = useRef(false);
   const startAttendanceInFlightRef = useRef(false);
-  const arrivalPromptedMeetingRef = useRef<string | null>(null);
   const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
   const meetingsShapeLoggedRef = useRef(false);
   const [locationIssue, setLocationIssue] = useState<LocationIssue>(null);
@@ -2442,6 +2406,7 @@ export default function App() {
   const [homeGroupBirthdayResumeTick, setHomeGroupBirthdayResumeTick] = useState(0);
   const wizardHomeGroupLocationPromptedRef = useRef(false);
   const dashboardLocationPromptedRef = useRef(false);
+  const writableCalendarIdRef = useRef<string | null>(null);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
   const meetingsSearchOrigin = mapBoundaryCenter ?? currentLocation;
@@ -2470,6 +2435,15 @@ export default function App() {
     minute: sponsorMinute,
     meridiem: sponsorMeridiem,
   };
+  const sponsorTimeDraftDate = useMemo(
+    () =>
+      sponsorTimePartsToDate(
+        sponsorTimeDraftValue.hour12,
+        sponsorTimeDraftValue.minute,
+        sponsorTimeDraftValue.meridiem,
+      ),
+    [sponsorTimeDraftValue.hour12, sponsorTimeDraftValue.minute, sponsorTimeDraftValue.meridiem],
+  );
   const sponsorRepeatUnit = useMemo<RepeatUnit>(
     () => (sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY"),
     [sponsorRepeatPreset],
@@ -3915,7 +3889,7 @@ export default function App() {
     [isLocalhostApiUrl],
   );
   const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
-  const calendarRuntimeEnabled = Platform.OS === "ios";
+  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
     if (!notificationsRuntimeEnabled) {
@@ -3929,6 +3903,60 @@ export default function App() {
     const requested = await Notifications.requestPermissionsAsync();
     return requested.granted || requested.status === Notifications.PermissionStatus.GRANTED;
   }, [notificationsRuntimeEnabled]);
+
+  const ensureCalendarPermission = useCallback(
+    async (requestIfNeeded = true): Promise<boolean> => {
+      if (!calendarRuntimeEnabled) {
+        return false;
+      }
+
+      try {
+        const existing = await Calendar.getCalendarPermissionsAsync();
+        if (isCalendarPermissionGranted(existing)) {
+          return true;
+        }
+        if (!requestIfNeeded) {
+          return false;
+        }
+
+        const requested = await Calendar.requestCalendarPermissionsAsync();
+        return isCalendarPermissionGranted(requested);
+      } catch {
+        return false;
+      }
+    },
+    [calendarRuntimeEnabled],
+  );
+
+  const resolveWritableCalendarId = useCallback(async (): Promise<string | null> => {
+    if (!calendarRuntimeEnabled) {
+      return null;
+    }
+    if (writableCalendarIdRef.current) {
+      return writableCalendarIdRef.current;
+    }
+
+    try {
+      if (Platform.OS === "ios") {
+        const defaultCalendar = await Calendar.getDefaultCalendarAsync();
+        if (defaultCalendar?.id && defaultCalendar.allowsModifications) {
+          writableCalendarIdRef.current = defaultCalendar.id;
+          return defaultCalendar.id;
+        }
+      }
+
+      const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
+      const writableCalendar =
+        calendars.find((entry) => entry.isPrimary && entry.allowsModifications) ??
+        calendars.find((entry) => entry.allowsModifications) ??
+        null;
+
+      writableCalendarIdRef.current = writableCalendar?.id ?? null;
+      return writableCalendar?.id ?? null;
+    } catch {
+      return null;
+    }
+  }, [calendarRuntimeEnabled]);
 
   const openCalendarComposer = useCallback(
     async (
@@ -3948,89 +3976,30 @@ export default function App() {
         };
       }
 
-      type FileSystemWriteModule = {
-        cacheDirectory?: string | null;
-        writeAsStringAsync?: (uri: string, contents: string) => Promise<void>;
-      };
-      type SharingModule = {
-        isAvailableAsync?: () => Promise<boolean>;
-        shareAsync?: (
-          uri: string,
-          options?: {
-            UTI?: string;
-            mimeType?: string;
-            dialogTitle?: string;
-          },
-        ) => Promise<void>;
-      };
-
-      const fileSystemModule = loadOptionalModule<FileSystemWriteModule>("expo-file-system");
-      const sharingModule = loadOptionalModule<SharingModule>("expo-sharing");
-      if (
-        !fileSystemModule?.cacheDirectory ||
-        typeof fileSystemModule.writeAsStringAsync !== "function"
-      ) {
-        return {
-          saved: false,
-          action: null,
-          eventId: null,
-          errorCode: "unavailable",
-        };
-      }
-
       try {
-        const title = eventDetails.title?.trim() || "Sober AI Event";
-        const uid = `soberai-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-        const fileUri = `${fileSystemModule.cacheDirectory}${sanitizeCalendarFilenameSegment(title)}-${Date.now()}.ics`;
-        const contents = buildCalendarFileContents(eventDetails, uid);
-        console.log("[calendar] composer open", {
-          title,
-        });
-
-        await fileSystemModule.writeAsStringAsync(fileUri, contents);
-
-        const sharingAvailable =
-          typeof sharingModule?.isAvailableAsync === "function"
-            ? await sharingModule.isAvailableAsync()
-            : false;
-
-        if (sharingAvailable && typeof sharingModule?.shareAsync === "function") {
-          await sharingModule.shareAsync(fileUri, {
-            UTI: "com.apple.ical.ics",
-            mimeType: "text/calendar",
-            dialogTitle: title,
-          });
-        } else {
-          await Share.share({
-            title,
-            url: fileUri,
-            message: `Import "${title}" into Calendar.`,
-          });
+        const hasPermission = await ensureCalendarPermission(true);
+        if (!hasPermission) {
+          return {
+            saved: false,
+            action: null,
+            eventId: null,
+            errorCode: "permission",
+          };
         }
 
-        const result: CalendarDialogResultCompat = {
-          action: "shared",
-          id: `ics:${uid}`,
-        };
-        const action = result.action ?? null;
-        console.log("[calendar] composer result", {
-          title,
-          action,
-          saved: true,
-          hasEventId: true,
-        });
+        const result = (await Calendar.createEventInCalendarAsync(
+          buildNativeCalendarEventInput(eventDetails),
+        )) as CalendarDialogResultCompat | null;
+        const action = typeof result?.action === "string" ? result.action : "done";
+        const eventId = typeof result?.id === "string" ? result.id : null;
         return {
-          saved: true,
+          saved: action !== "canceled" && action !== "deleted",
           action,
-          eventId: result.id ?? null,
+          eventId,
           errorCode: "none",
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
-        console.log("[calendar] composer failed", {
-          title: eventDetails.title ?? "untitled",
-          message,
-        });
         return {
           saved: false,
           action: null,
@@ -4039,7 +4008,97 @@ export default function App() {
         };
       }
     },
-    [calendarRuntimeEnabled],
+    [calendarRuntimeEnabled, ensureCalendarPermission],
+  );
+
+  const upsertNativeCalendarEvent = useCallback(
+    async (
+      existingEventId: string | null,
+      eventDetails: CalendarEventInputCompat,
+    ): Promise<{
+      saved: boolean;
+      eventId: string | null;
+      errorCode: "none" | "permission" | "unavailable";
+    }> => {
+      if (!calendarRuntimeEnabled) {
+        return {
+          saved: false,
+          eventId: null,
+          errorCode: "unavailable",
+        };
+      }
+
+      const hasPermission = await ensureCalendarPermission(true);
+      if (!hasPermission) {
+        return {
+          saved: false,
+          eventId: null,
+          errorCode: "permission",
+        };
+      }
+
+      const calendarId = await resolveWritableCalendarId();
+      if (!calendarId) {
+        return {
+          saved: false,
+          eventId: null,
+          errorCode: "unavailable",
+        };
+      }
+
+      const nativeDetails = buildNativeCalendarEventInput(eventDetails);
+
+      try {
+        if (existingEventId) {
+          try {
+            const updatedId = await Calendar.updateEventAsync(existingEventId, nativeDetails);
+            return {
+              saved: true,
+              eventId: updatedId || existingEventId,
+              errorCode: "none",
+            };
+          } catch {
+            // Recreate below if the stored event id is stale.
+          }
+        }
+
+        const createdId = await Calendar.createEventAsync(calendarId, nativeDetails);
+        return {
+          saved: true,
+          eventId: createdId,
+          errorCode: "none",
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        return {
+          saved: false,
+          eventId: null,
+          errorCode: /permission/i.test(message) ? "permission" : "unavailable",
+        };
+      }
+    },
+    [calendarRuntimeEnabled, ensureCalendarPermission, resolveWritableCalendarId],
+  );
+
+  const removeNativeCalendarEvent = useCallback(
+    async (eventId: string | null): Promise<boolean> => {
+      if (!eventId || !calendarRuntimeEnabled) {
+        return false;
+      }
+
+      const hasPermission = await ensureCalendarPermission(false);
+      if (!hasPermission) {
+        return false;
+      }
+
+      try {
+        await Calendar.deleteEventAsync(eventId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [calendarRuntimeEnabled, ensureCalendarPermission],
   );
 
   const applyScheduleTime = useCallback(
@@ -6621,12 +6680,8 @@ export default function App() {
   const syncSponsorCalendarEvent = useCallback(
     async (reason: string): Promise<boolean> => {
       console.log("[calendar] sponsor sync requested", { reason });
-      if (Platform.OS !== "ios") {
-        setCalendarStatus("Calendar sync is iOS-only in this MVP.");
-        return false;
-      }
       if (!calendarRuntimeEnabled) {
-        setCalendarStatus("Calendar export is unavailable in this build.");
+        setCalendarStatus("Calendar sync is unavailable in this build.");
         return false;
       }
 
@@ -6678,14 +6733,16 @@ export default function App() {
         recurrenceRule,
       };
 
-      const result = await openCalendarComposer(eventDetails);
+      const storedEventIdRaw = await AsyncStorage.getItem(sponsorCalendarEventStorage);
+      const storedEventId = isPlausibleCalendarEventId(storedEventIdRaw) ? storedEventIdRaw : null;
+      const result = await upsertNativeCalendarEvent(storedEventId, eventDetails);
       if (!result.saved) {
-        if (result.action === "canceled") {
-          setCalendarStatus("Sponsor calendar export canceled.");
-        } else if (result.errorCode === "permission") {
-          setCalendarStatus("Calendar export requires an available share destination.");
+        if (result.errorCode === "permission") {
+          setCalendarStatus(
+            "Calendar permission is required before sponsor calls can be auto-added.",
+          );
         } else {
-          setCalendarStatus("Could not open the Calendar export sheet.");
+          setCalendarStatus("Could not sync the sponsor call to Calendar.");
         }
         return false;
       }
@@ -6701,30 +6758,26 @@ export default function App() {
         startAt: nextStart.toISOString(),
         recurrenceSummary,
       });
-      setCalendarStatus(`Sponsor calendar file opened (${formatDateTimeLabel(nextStart)}).`);
+      setCalendarStatus(`Sponsor call synced to Calendar (${formatDateTimeLabel(nextStart)}).`);
       return true;
     },
     [
       calendarRuntimeEnabled,
       normalizedSponsorName,
+      sponsorCalendarEventStorage,
       sponsorPhoneE164,
-      openCalendarComposer,
       sponsorCallTimeLocalHhmm,
       sponsorRepeatUnit,
       sponsorRepeatInterval,
       sponsorRepeatDaysSorted,
-      sponsorCalendarEventStorage,
+      upsertNativeCalendarEvent,
     ],
   );
 
   const addNextSobrietyMilestoneToCalendar = useCallback(
     async (reason: string) => {
-      if (Platform.OS !== "ios") {
-        setMilestoneCalendarStatus("Sobriety milestones are iOS-only in this MVP.");
-        return;
-      }
       if (!calendarRuntimeEnabled) {
-        setMilestoneCalendarStatus("Calendar export is unavailable in this build.");
+        setMilestoneCalendarStatus("Calendar add is unavailable in this build.");
         return;
       }
       if (!sobrietyDateIso) {
@@ -6752,11 +6805,11 @@ export default function App() {
 
       if (!result.saved) {
         if (result.action === "canceled") {
-          setMilestoneCalendarStatus("Sobriety milestone export canceled.");
+          setMilestoneCalendarStatus("Sobriety milestone add canceled.");
         } else if (result.errorCode === "permission") {
-          setMilestoneCalendarStatus("Calendar export requires an available share destination.");
+          setMilestoneCalendarStatus("Calendar permission is required to add milestones.");
         } else {
-          setMilestoneCalendarStatus("Could not open the Calendar export sheet.");
+          setMilestoneCalendarStatus("Could not open the native calendar add flow.");
         }
         return;
       }
@@ -6771,9 +6824,7 @@ export default function App() {
         eventId: result.eventId,
         title: nextMilestone.label,
       });
-      setMilestoneCalendarStatus(
-        `Sobriety milestone calendar file opened (${nextMilestone.label}).`,
-      );
+      setMilestoneCalendarStatus(`Opened Calendar for ${nextMilestone.label}.`);
     },
     [
       calendarRuntimeEnabled,
@@ -7197,6 +7248,7 @@ export default function App() {
         homeGroupBirthdayOptIn: boolean;
         homeGroupBirthdayFirstName: string;
         homeGroupBirthdayLastName: string;
+        attendanceAutomationPlan: AttendanceAutomationPlan | null;
         sponsorName: string;
         sponsorPhoneDigits: string;
         sponsorHour12: number;
@@ -7224,6 +7276,7 @@ export default function App() {
           overrides?.homeGroupBirthdayFirstName ?? homeGroupBirthdayFirstName,
         homeGroupBirthdayLastName:
           overrides?.homeGroupBirthdayLastName ?? homeGroupBirthdayLastName,
+        attendanceAutomationPlan: attendanceAutomationPlan,
         sponsorEnabledAtIso: resolvedSponsorEnabledAtIso,
         ninetyDayGoalTarget: overrides?.ninetyDayGoalTarget ?? ninetyDayGoalTarget,
         recoverySubstances: overrides?.recoverySubstances ?? recoverySubstances,
@@ -7278,6 +7331,7 @@ export default function App() {
       homeGroupBirthdayOptIn,
       homeGroupName,
       homeGroupSeriesKey,
+      attendanceAutomationPlan,
       meetingAutoAddToCalendar,
       meetingRadiusMiles,
       meetingSignatureRequired,
@@ -7643,7 +7697,7 @@ export default function App() {
           const saved = await saveSponsorConfig({
             sponsorEnabled: hasSponsor,
             sponsorActive: wantsReminders,
-            allowCalendarSync: false,
+            allowCalendarSync: true,
             allowNotificationReschedule: true,
           });
           if (!saved) {
@@ -7949,7 +8003,7 @@ export default function App() {
 
     if (sponsorEnabled) {
       const saved = await saveSponsorConfig({
-        allowCalendarSync: false,
+        allowCalendarSync: true,
         allowNotificationReschedule: true,
       });
       if (!saved) {
@@ -8079,7 +8133,7 @@ export default function App() {
   const attachCalendarEventToAttendance = useCallback(
     async (recordId: string): Promise<boolean> => {
       if (!calendarRuntimeEnabled) {
-        setAttendanceStatus("Calendar export is unavailable in this build.");
+        setAttendanceStatus("Calendar sync is unavailable in this build.");
         return false;
       }
 
@@ -8095,13 +8149,8 @@ export default function App() {
       }
 
       let existingEventId = sourceRecord.calendarEventId ?? null;
-      if (existingEventId && existingEventId.startsWith("dialog:")) {
-        setAttendanceStatus("Calendar event already requested for this attendance.");
-        return true;
-      }
-
       const window = getScheduledWindowForAttendance(sourceRecord);
-      const result = await openCalendarComposer({
+      const result = await upsertNativeCalendarEvent(existingEventId, {
         title: `AA/NA Meeting - ${sourceRecord.meetingName}`,
         startDate: window.startDate,
         endDate:
@@ -8112,35 +8161,39 @@ export default function App() {
           sourceRecord.meetingAddress && sourceRecord.meetingAddress.trim().length > 0
             ? sourceRecord.meetingAddress
             : undefined,
-        notes: "Signature required. Added by Sober AI.",
+        notes:
+          (sourceRecord.requiresSignature ?? meetingSignatureRequired)
+            ? "Signature required. Added by Sober AI."
+            : "Attendance added by Sober AI.",
         alarms: [{ relativeOffset: -10 }],
       });
       if (!result.saved) {
-        if (result.action === "canceled") {
-          setAttendanceStatus("Calendar export canceled.");
-        } else if (result.errorCode === "permission") {
-          setAttendanceStatus("Calendar export requires an available share destination.");
+        if (result.errorCode === "permission") {
+          setAttendanceStatus(
+            "Calendar permission is required before attended meetings can be auto-added.",
+          );
         } else {
-          setAttendanceStatus("Could not open the Calendar export sheet.");
+          setAttendanceStatus("Could not sync the attended meeting to Calendar.");
         }
         return false;
       }
 
       const next: AttendanceRecord = {
         ...sourceRecord,
-        calendarEventId: result.eventId ?? "dialog:created",
+        calendarEventId: result.eventId,
       };
       upsertAttendanceRecord(next);
       if (activeAttendanceRef.current?.id === next.id) {
         setActiveAttendance(next);
       }
-      setAttendanceStatus("Meeting calendar file opened.");
+      setAttendanceStatus("Attended meeting synced to Calendar.");
       return true;
     },
     [
       calendarRuntimeEnabled,
       getScheduledWindowForAttendance,
-      openCalendarComposer,
+      meetingSignatureRequired,
+      upsertNativeCalendarEvent,
       upsertAttendanceRecord,
     ],
   );
@@ -8148,7 +8201,9 @@ export default function App() {
   const syncAttendCalendarAndLeaveAlert = useCallback(
     async (recordId: string, meeting: MeetingRecord, originOverride?: LocationStamp | null) => {
       try {
-        const calendarAdded = await attachCalendarEventToAttendance(recordId);
+        const calendarAdded = meetingAutoAddToCalendar
+          ? await attachCalendarEventToAttendance(recordId)
+          : false;
 
         const sourceRecord =
           (activeAttendanceRef.current && activeAttendanceRef.current.id === recordId
@@ -8274,6 +8329,7 @@ export default function App() {
       attachCalendarEventToAttendance,
       readCurrentLocation,
       selectedDayPlan.plans,
+      meetingAutoAddToCalendar,
       ensureNotificationPermission,
       loadNotificationBuckets,
       applyScheduleTime,
@@ -8284,7 +8340,13 @@ export default function App() {
   );
 
   const startAttendance = useCallback(
-    async (meeting: MeetingRecord) => {
+    async (
+      meeting: MeetingRecord,
+      options?: {
+        automated?: boolean;
+        automationPlan?: AttendanceAutomationPlan | null;
+      },
+    ) => {
       if (startAttendanceInFlightRef.current) {
         return;
       }
@@ -8371,21 +8433,34 @@ export default function App() {
           calendarEventId: null,
           leaveNotificationId: null,
           leaveNotificationAtIso: null,
+          requiresSignature: meetingSignatureRequired,
+          attendanceAutomationState: "started",
+          autoStartedAtIso: options?.automated ? nowIso : null,
           signatureRef: null,
           pdfUri: null,
         };
 
         setActiveAttendance(next);
+        setAttendanceAutomationPlan(null);
         setSignatureCaptureMeeting(null);
         upsertAttendanceRecord(next);
-        setAttendanceStatus(`Attendance started at ${formatTimeLabel(new Date(nowIso))}.`);
+        setAttendanceStatus(
+          options?.automated
+            ? `${meeting.name} started automatically at ${formatTimeLabel(new Date(nowIso))}.`
+            : `Attendance started at ${formatTimeLabel(new Date(nowIso))}.`,
+        );
         setScreen("SESSION");
         void syncAttendCalendarAndLeaveAlert(next.id, meeting, location);
       } finally {
         startAttendanceInFlightRef.current = false;
       }
     },
-    [readCurrentLocation, upsertAttendanceRecord, syncAttendCalendarAndLeaveAlert],
+    [
+      meetingSignatureRequired,
+      readCurrentLocation,
+      syncAttendCalendarAndLeaveAlert,
+      upsertAttendanceRecord,
+    ],
   );
 
   const endAttendanceByRecordId = useCallback(
@@ -8404,15 +8479,17 @@ export default function App() {
       if (!baseRecord || baseRecord.endAt) {
         return;
       }
+      const signatureRequired = baseRecord.requiresSignature ?? meetingSignatureRequired;
       if (
-        meetingSignatureRequired &&
+        signatureRequired &&
         !hasAttendanceSignature(baseRecord) &&
         !options?.skipSignaturePrompt
       ) {
-        const promptedRecord = baseRecord.signaturePromptShown
+        const promptedRecord: AttendanceRecord = baseRecord.signaturePromptShown
           ? baseRecord
           : {
               ...baseRecord,
+              attendanceAutomationState: "awaiting_signature",
               signaturePromptShown: true,
             };
         if (!baseRecord.signaturePromptShown) {
@@ -8468,6 +8545,7 @@ export default function App() {
         endLat: location?.lat ?? null,
         endLng: location?.lng ?? null,
         endAccuracyM: location?.accuracyM ?? null,
+        requiresSignature: signatureRequired,
       };
 
       if (
@@ -8495,12 +8573,54 @@ export default function App() {
         return;
       }
 
-      setActiveAttendance(next);
-      upsertAttendanceRecord(next);
-      appendMeetingAttendanceLog({
-        meetingId: baseRecord.meetingId,
-        method: "verified",
-      });
+      let finalizedRecord: AttendanceRecord = {
+        ...next,
+        attendanceAutomationState: options?.skipSignaturePrompt
+          ? "incomplete_or_invalid"
+          : validateAttendanceRecord(next, signatureRequired).valid
+            ? "completed"
+            : "incomplete_or_invalid",
+      };
+
+      if (options?.skipSignaturePrompt && finalizedRecord.calendarEventId) {
+        await removeNativeCalendarEvent(finalizedRecord.calendarEventId);
+        finalizedRecord = {
+          ...finalizedRecord,
+          calendarEventId: null,
+        };
+      } else if (meetingAutoAddToCalendar && finalizedRecord.calendarEventId) {
+        const window = getScheduledWindowForAttendance(finalizedRecord);
+        const calendarResult = await upsertNativeCalendarEvent(finalizedRecord.calendarEventId, {
+          title: `AA/NA Meeting - ${finalizedRecord.meetingName}`,
+          startDate: window.startDate,
+          endDate: new Date(finalizedRecord.endAt ?? nowIso),
+          location:
+            finalizedRecord.meetingAddress && finalizedRecord.meetingAddress.trim().length > 0
+              ? finalizedRecord.meetingAddress
+              : undefined,
+          notes: signatureRequired
+            ? hasAttendanceSignature(finalizedRecord)
+              ? "Signature captured. Attendance completed by Sober AI."
+              : "Signature still required before this meeting can be treated as complete."
+            : "Attendance completed automatically by Sober AI.",
+          alarms: [{ relativeOffset: -10 }],
+        });
+        if (calendarResult.saved && calendarResult.eventId) {
+          finalizedRecord = {
+            ...finalizedRecord,
+            calendarEventId: calendarResult.eventId,
+          };
+        }
+      }
+
+      setActiveAttendance(finalizedRecord);
+      upsertAttendanceRecord(finalizedRecord);
+      if (!options?.skipSignaturePrompt) {
+        appendMeetingAttendanceLog({
+          meetingId: baseRecord.meetingId,
+          method: "verified",
+        });
+      }
       departurePromptedAttendanceRef.current = null;
 
       if (options?.skipSignaturePrompt) {
@@ -8511,15 +8631,19 @@ export default function App() {
         return;
       }
 
-      if (hasAttendanceSignature(next)) {
-        setAttendanceStatus("Attendance ended.");
+      if (hasAttendanceSignature(finalizedRecord)) {
+        setAttendanceStatus(
+          options?.skipEndConfirm ? "Meeting recorded automatically." : "Attendance ended.",
+        );
         if (homeScreen === "MEETINGS") {
           setScreen("LIST");
         }
         return;
       }
 
-      setAttendanceStatus("Attendance ended.");
+      setAttendanceStatus(
+        options?.skipEndConfirm ? "Waiting for chair signature." : "Attendance ended.",
+      );
       Alert.alert("Add signature?", "Do you want to capture a chairperson signature?", [
         {
           text: "No",
@@ -8545,8 +8669,12 @@ export default function App() {
       readCurrentLocation,
       upsertAttendanceRecord,
       appendMeetingAttendanceLog,
+      getScheduledWindowForAttendance,
       homeScreen,
+      meetingAutoAddToCalendar,
       meetingSignatureRequired,
+      removeNativeCalendarEvent,
+      upsertNativeCalendarEvent,
     ],
   );
 
@@ -8713,6 +8841,18 @@ export default function App() {
           schemaVersion: ATTENDANCE_SCHEMA_VERSION,
           signatureRef: signatureRefValue,
           signaturePngBase64: signatureInlineFallback,
+          attendanceAutomationState: targetActiveAttendance.endAt
+            ? validateAttendanceRecord(
+                {
+                  ...targetActiveAttendance,
+                  signatureRef: signatureRefValue,
+                  signaturePngBase64: signatureInlineFallback,
+                },
+                targetActiveAttendance.requiresSignature ?? meetingSignatureRequired,
+              ).valid
+              ? "completed"
+              : "incomplete_or_invalid"
+            : "started",
           signaturePromptShown: true,
           chairName:
             signatureChairNameInput.trim().length > 0 ? signatureChairNameInput.trim() : null,
@@ -8795,6 +8935,8 @@ export default function App() {
           signatureChairRoleInput.trim().length > 0 ? signatureChairRoleInput.trim() : null,
         signatureCapturedAtIso: nowIso,
         calendarEventId: null,
+        requiresSignature: true,
+        attendanceAutomationState: "incomplete_or_invalid",
         signatureRef: signatureRefValue,
         signaturePngBase64: signatureInlineFallback,
         pdfUri: null,
@@ -9968,8 +10110,8 @@ export default function App() {
     [meetingsTodayUpcoming, meetingsForDay, allMeetings],
   );
 
-  const logUpcomingMeetingFromDashboard = useCallback(
-    async (meetingId: string) => {
+  const queueMeetingAttendance = useCallback(
+    async (meeting: MeetingRecord) => {
       if (activeAttendance && !activeAttendance.endAt) {
         Alert.alert(
           "Attendance in progress",
@@ -9978,26 +10120,20 @@ export default function App() {
         return;
       }
 
-      const meeting = resolveMeetingForLogging(meetingId);
-      if (!meeting) {
-        Alert.alert("Meeting unavailable", "This meeting is no longer in the upcoming list.");
-        return;
-      }
-
       const nowLocal = new Date();
-      const nowMinutes = nowLocal.getHours() * 60 + nowLocal.getMinutes();
-      const meetingInProgress =
-        meeting.dayOfWeek === nowLocal.getDay() &&
-        isMeetingInProgress(meeting.startsAtLocal, nowMinutes);
-
-      if (meetingInProgress) {
-        setPendingGeofenceLogMeetingId(null);
-        setSelectedMeeting(meeting);
-        setHomeScreen("MEETINGS");
-        await startAttendance(meeting);
-        setAttendanceStatus(`Attendance started for in-progress meeting: ${meeting.name}.`);
-        return;
-      }
+      const scheduledStart = combineDateWithHhmm(
+        resolveNextMeetingDateForDayOfWeek(meeting.dayOfWeek, nowLocal),
+        meeting.startsAtLocal,
+      );
+      const nextPlan: AttendanceAutomationPlan = {
+        meetingId: meeting.id,
+        dateKey: dateKeyForDate(scheduledStart),
+        status: "planned",
+        plannedAtIso: nowLocal.toISOString(),
+      };
+      setAttendanceAutomationPlan(nextPlan);
+      setSelectedMeeting(meeting);
+      setHomeScreen("MEETINGS");
 
       const hasValidGeofence =
         meeting.format !== "ONLINE" &&
@@ -10006,36 +10142,61 @@ export default function App() {
         Number.isFinite(meeting.lat) &&
         Number.isFinite(meeting.lng);
 
+      if (!hasValidGeofence) {
+        await startAttendance(meeting, { automated: false });
+        setAttendanceStatus(
+          `Attendance started for ${meeting.name}. Meeting geofence automation is unavailable for this meeting.`,
+        );
+        return;
+      }
+
       const location = await readCurrentLocation(true);
-      if (location && hasValidGeofence) {
+      const withinStartWindow = isMeetingWithinAutoStartWindow(meeting, nowLocal);
+      if (location) {
         const meetingLat = meeting.lat as number;
         const meetingLng = meeting.lng as number;
         const distance = distanceMetersBetween(location.lat, location.lng, meetingLat, meetingLng);
-        if (distance <= ARRIVAL_RADIUS_METERS) {
-          setPendingGeofenceLogMeetingId(null);
-          setSelectedMeeting(meeting);
-          setHomeScreen("MEETINGS");
-          await startAttendance(meeting);
-          const startedAtLabel = formatTimeLabel(new Date());
-          Alert.alert(
-            "Meeting log started",
-            `${meeting.name} start time logged at ${startedAtLabel}.`,
-          );
+        if (distance <= ARRIVAL_RADIUS_METERS && withinStartWindow) {
+          setAttendanceAutomationPlan({
+            ...nextPlan,
+            status: "eligible_to_start",
+          });
+          await startAttendance(meeting, {
+            automated: true,
+            automationPlan: {
+              ...nextPlan,
+              status: "eligible_to_start",
+            },
+          });
+          setAttendanceStatus(`Meeting started automatically for ${meeting.name}.`);
           return;
         }
       }
 
-      setPendingGeofenceLogMeetingId(meeting.id);
-      setSelectedMeeting(meeting);
-      setAttendanceStatus(`Queued ${meeting.name}. Logging starts automatically when you arrive.`);
+      setAttendanceStatus(
+        withinStartWindow
+          ? `Queued ${meeting.name}. Attendance will start automatically when you enter the meeting geofence.`
+          : `Queued ${meeting.name}. Attendance will start automatically once you are in the geofence within 30 minutes of the meeting start.`,
+      );
       Alert.alert(
         "Meeting queued",
-        hasValidGeofence
-          ? `${meeting.name} will be logged once you are at the meeting location (~200 ft geofence).`
-          : `${meeting.name} is queued. Once a valid meeting location is available and you are within range, attendance will auto-log.`,
+        `${meeting.name} will auto-start when you are at the meeting location and within 30 minutes of the meeting start.`,
       );
     },
-    [activeAttendance, readCurrentLocation, resolveMeetingForLogging, startAttendance],
+    [activeAttendance, readCurrentLocation, startAttendance],
+  );
+
+  const logUpcomingMeetingFromDashboard = useCallback(
+    async (meetingId: string) => {
+      const meeting = resolveMeetingForLogging(meetingId);
+      if (!meeting) {
+        Alert.alert("Meeting unavailable", "This meeting is no longer in the upcoming list.");
+        return;
+      }
+
+      await queueMeetingAttendance(meeting);
+    },
+    [queueMeetingAttendance, resolveMeetingForLogging],
   );
 
   const handleDashboardMeetingPrimaryAction = useCallback(
@@ -10657,6 +10818,21 @@ export default function App() {
                       record.leaveNotificationAtIso.trim().length > 0
                         ? record.leaveNotificationAtIso
                         : null,
+                    requiresSignature: Boolean(record.requiresSignature),
+                    attendanceAutomationState:
+                      record.attendanceAutomationState === "planned" ||
+                      record.attendanceAutomationState === "eligible_to_start" ||
+                      record.attendanceAutomationState === "started" ||
+                      record.attendanceAutomationState === "awaiting_signature" ||
+                      record.attendanceAutomationState === "completed" ||
+                      record.attendanceAutomationState === "incomplete_or_invalid"
+                        ? record.attendanceAutomationState
+                        : null,
+                    autoStartedAtIso:
+                      typeof record.autoStartedAtIso === "string" &&
+                      record.autoStartedAtIso.trim().length > 0
+                        ? record.autoStartedAtIso
+                        : null,
                     signatureRef: normalizedSignature.ref ?? null,
                     signaturePngBase64: null,
                     pdfUri:
@@ -10751,6 +10927,7 @@ export default function App() {
             homeGroupBirthdayOptIn?: boolean;
             homeGroupBirthdayFirstName?: string;
             homeGroupBirthdayLastName?: string;
+            attendanceAutomationPlan?: AttendanceAutomationPlan | null;
             sponsorEnabledAtIso?: string | null;
             ninetyDayGoalTarget?: number;
             recoverySubstances?: RecoverySubstanceCategory[];
@@ -10800,6 +10977,30 @@ export default function App() {
           }
           if (typeof parsedProfile.homeGroupBirthdayLastName === "string") {
             setHomeGroupBirthdayLastName(parsedProfile.homeGroupBirthdayLastName);
+          }
+          if (
+            parsedProfile.attendanceAutomationPlan &&
+            typeof parsedProfile.attendanceAutomationPlan === "object"
+          ) {
+            const candidate = parsedProfile.attendanceAutomationPlan as Record<string, unknown>;
+            if (
+              typeof candidate.meetingId === "string" &&
+              candidate.meetingId.trim().length > 0 &&
+              typeof candidate.dateKey === "string" &&
+              candidate.dateKey.trim().length > 0 &&
+              (candidate.status === "planned" || candidate.status === "eligible_to_start") &&
+              typeof candidate.plannedAtIso === "string" &&
+              candidate.plannedAtIso.trim().length > 0
+            ) {
+              setAttendanceAutomationPlan({
+                meetingId: candidate.meetingId,
+                dateKey: candidate.dateKey,
+                status: candidate.status,
+                plannedAtIso: candidate.plannedAtIso,
+              });
+            }
+          } else if (parsedProfile.attendanceAutomationPlan === null) {
+            setAttendanceAutomationPlan(null);
           }
           if (
             typeof parsedProfile.sponsorEnabledAtIso === "string" ||
@@ -11186,6 +11387,7 @@ export default function App() {
         homeGroupBirthdayOptIn,
         homeGroupBirthdayFirstName,
         homeGroupBirthdayLastName,
+        attendanceAutomationPlan,
         sponsorEnabledAtIso,
         ninetyDayGoalTarget,
         recoverySubstances,
@@ -11212,6 +11414,7 @@ export default function App() {
     homeGroupBirthdayOptIn,
     homeGroupName,
     homeGroupSeriesKey,
+    attendanceAutomationPlan,
     sponsorEnabledAtIso,
     ninetyDayGoalTarget,
     recoverySubstances,
@@ -11510,8 +11713,95 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (!bootstrapped || !sponsorEnabled || !sponsorActive) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const reconcileSponsorCalendar = async () => {
+      const hasPermission = await ensureCalendarPermission(false);
+      if (!hasPermission || cancelled) {
+        return;
+      }
+
+      const [storedEventFingerprintRaw, storedEventIdRaw] = await Promise.all([
+        AsyncStorage.getItem(sponsorCalendarEventFingerprintStorage),
+        AsyncStorage.getItem(sponsorCalendarEventStorage),
+      ]);
+      if (cancelled) {
+        return;
+      }
+
+      const storedEventFingerprint = isPlausibleCalendarFingerprint(storedEventFingerprintRaw)
+        ? storedEventFingerprintRaw
+        : null;
+      const storedEventId = isPlausibleCalendarEventId(storedEventIdRaw) ? storedEventIdRaw : null;
+      const needsSync =
+        storedEventFingerprint !== sponsorEventFingerprint ||
+        (storedEventFingerprint === sponsorEventFingerprint && !storedEventId);
+
+      if (!needsSync) {
+        return;
+      }
+
+      const synced = await syncSponsorCalendarEvent("reconcile:boot-or-permission");
+      if (!synced || cancelled) {
+        return;
+      }
+
+      await AsyncStorage.setItem(sponsorCalendarEventFingerprintStorage, sponsorEventFingerprint);
+    };
+
+    void reconcileSponsorCalendar();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    bootstrapped,
+    ensureCalendarPermission,
+    sponsorCalendarEventFingerprintStorage,
+    sponsorCalendarEventStorage,
+    sponsorEnabled,
+    sponsorActive,
+    sponsorEventFingerprint,
+    syncSponsorCalendarEvent,
+  ]);
+
+  useEffect(() => {
     void rescheduleDriveNotifications("plan-or-debug-change");
   }, [rescheduleDriveNotifications, debugTimeCompressionEnabled]);
+
+  useEffect(() => {
+    if (!activeAttendance || activeAttendance.endAt || !meetingAutoAddToCalendar) {
+      return;
+    }
+    if (activeAttendance.calendarEventId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const reconcileAttendanceCalendar = async () => {
+      const hasPermission = await ensureCalendarPermission(false);
+      if (!hasPermission || cancelled) {
+        return;
+      }
+      await attachCalendarEventToAttendance(activeAttendance.id);
+    };
+
+    void reconcileAttendanceCalendar();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeAttendance,
+    attachCalendarEventToAttendance,
+    ensureCalendarPermission,
+    meetingAutoAddToCalendar,
+  ]);
 
   useEffect(() => {
     if (!activeAttendance || activeAttendance.endAt) {
@@ -11531,6 +11821,9 @@ export default function App() {
     if (!activeAttendance || activeAttendance.endAt) {
       return;
     }
+    if (!(activeAttendance.requiresSignature ?? meetingSignatureRequired)) {
+      return;
+    }
     if (hasAttendanceSignature(activeAttendance) || activeAttendance.signaturePromptShown) {
       return;
     }
@@ -11545,6 +11838,7 @@ export default function App() {
 
     const prompted: AttendanceRecord = {
       ...activeAttendance,
+      attendanceAutomationState: "awaiting_signature",
       signaturePromptShown: true,
     };
     setActiveAttendance(prompted);
@@ -11559,7 +11853,7 @@ export default function App() {
         },
       },
     ]);
-  }, [activeAttendance, sessionNowMs, upsertAttendanceRecord]);
+  }, [activeAttendance, meetingSignatureRequired, sessionNowMs, upsertAttendanceRecord]);
 
   useEffect(() => {
     departurePromptedAttendanceRef.current = null;
@@ -11599,20 +11893,53 @@ export default function App() {
       if (distance <= ARRIVAL_RADIUS_METERS) {
         return;
       }
+
+      const signatureRequired = activeAttendance.requiresSignature ?? meetingSignatureRequired;
+      if (!signatureRequired) {
+        void endAttendanceByRecordId(activeAttendance.id, {
+          skipDurationGuard: true,
+          skipEndConfirm: true,
+        });
+        return;
+      }
+
+      if (hasAttendanceSignature(activeAttendance)) {
+        void endAttendanceByRecordId(activeAttendance.id, {
+          skipDurationGuard: true,
+          skipEndConfirm: true,
+        });
+        return;
+      }
+
       if (departurePromptedAttendanceRef.current === activeAttendance.id) {
         return;
       }
 
       departurePromptedAttendanceRef.current = activeAttendance.id;
-      Alert.alert("Left meeting geofence", "You left the meeting area. End this meeting now?", [
-        { text: "Keep in progress", style: "cancel" },
-        {
-          text: "End meeting",
-          onPress: () => {
-            void endAttendanceByRecordId(activeAttendance.id, { skipEndConfirm: true });
+      const promptedRecord: AttendanceRecord = {
+        ...activeAttendance,
+        attendanceAutomationState: "awaiting_signature",
+        signaturePromptShown: true,
+      };
+      setActiveAttendance(promptedRecord);
+      upsertAttendanceRecord(promptedRecord);
+      setAttendanceStatus(
+        "Left the geofence. Capture the chair signature to complete this meeting.",
+      );
+      Alert.alert(
+        "Signature still required",
+        "You left the meeting geofence. Capture the chair signature before this meeting can be completed.",
+        [
+          { text: "Later", style: "cancel" },
+          {
+            text: "Get signature",
+            onPress: () => {
+              setHomeScreen("MEETINGS");
+              setScreen("SIGNATURE");
+            },
           },
-        },
-      ]);
+        ],
+      );
     };
 
     void checkDeparture();
@@ -11627,78 +11954,8 @@ export default function App() {
       }
     };
   }, [activeAttendance, readCurrentLocation, endAttendanceByRecordId]);
-
   useEffect(() => {
-    arrivalPromptedMeetingRef.current = null;
-  }, [selectedMeeting?.id]);
-
-  useEffect(() => {
-    if (
-      Platform.OS !== "ios" ||
-      !selectedMeeting ||
-      selectedMeeting.format === "ONLINE" ||
-      selectedMeeting.lat === null ||
-      selectedMeeting.lng === null
-    ) {
-      return;
-    }
-
-    if (activeAttendance && !activeAttendance.endAt) {
-      return;
-    }
-
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    const checkArrival = async () => {
-      if (cancelled) {
-        return;
-      }
-
-      const location = await readCurrentLocation(false);
-      if (!location || cancelled) {
-        return;
-      }
-
-      const distance = distanceMetersBetween(
-        location.lat,
-        location.lng,
-        selectedMeeting.lat as number,
-        selectedMeeting.lng as number,
-      );
-
-      if (
-        distance <= ARRIVAL_RADIUS_METERS &&
-        arrivalPromptedMeetingRef.current !== selectedMeeting.id
-      ) {
-        arrivalPromptedMeetingRef.current = selectedMeeting.id;
-        Alert.alert("Arriving?", `You're arriving at ${selectedMeeting.name}. Start attendance?`, [
-          { text: "Not now", style: "cancel" },
-          {
-            text: "Start",
-            onPress: () => {
-              void startAttendance(selectedMeeting);
-            },
-          },
-        ]);
-      }
-    };
-
-    void checkArrival();
-    timer = setInterval(() => {
-      void checkArrival();
-    }, 15_000);
-
-    return () => {
-      cancelled = true;
-      if (timer) {
-        clearInterval(timer);
-      }
-    };
-  }, [selectedMeeting, activeAttendance, readCurrentLocation, startAttendance]);
-
-  useEffect(() => {
-    if (!pendingGeofenceLogMeetingId) {
+    if (!attendanceAutomationPlan) {
       return;
     }
     if (activeAttendance && !activeAttendance.endAt) {
@@ -11713,9 +11970,31 @@ export default function App() {
         return;
       }
 
-      const meeting = resolveMeetingForLogging(pendingGeofenceLogMeetingId);
+      const meeting = resolveMeetingForLogging(attendanceAutomationPlan.meetingId);
       if (!meeting) {
-        setPendingGeofenceLogMeetingId(null);
+        setAttendanceAutomationPlan(null);
+        return;
+      }
+
+      if (!isMeetingWithinAutoStartWindow(meeting, new Date())) {
+        if (attendanceAutomationPlan.status !== "planned") {
+          setAttendanceAutomationPlan((current) =>
+            current && current.meetingId === meeting.id
+              ? {
+                  ...current,
+                  status: "planned",
+                }
+              : current,
+          );
+        }
+        const scheduledStart = combineDateWithHhmm(
+          resolveNextMeetingDateForDayOfWeek(meeting.dayOfWeek, new Date()),
+          meeting.startsAtLocal,
+        );
+        if (Date.now() > scheduledStart.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000) {
+          setAttendanceAutomationPlan(null);
+          setAttendanceStatus(`Attendance queue expired for ${meeting.name}.`);
+        }
         return;
       }
 
@@ -11726,7 +12005,6 @@ export default function App() {
         !Number.isFinite(meeting.lat) ||
         !Number.isFinite(meeting.lng)
       ) {
-        // Keep pending queue alive; geofence coordinates may appear after refresh.
         return;
       }
 
@@ -11740,16 +12018,23 @@ export default function App() {
         return;
       }
 
-      setPendingGeofenceLogMeetingId(null);
-      setSelectedMeeting(meeting);
-      setHomeScreen("MEETINGS");
-      await startAttendance(meeting);
+      setAttendanceAutomationPlan((current) =>
+        current && current.meetingId === meeting.id
+          ? {
+              ...current,
+              status: "eligible_to_start",
+            }
+          : current,
+      );
+      await startAttendance(meeting, {
+        automated: true,
+        automationPlan: {
+          ...attendanceAutomationPlan,
+          status: "eligible_to_start",
+        },
+      });
       if (!cancelled) {
-        const startedAtLabel = formatTimeLabel(new Date());
-        Alert.alert(
-          "Meeting log started",
-          `${meeting.name} start time logged at ${startedAtLabel}.`,
-        );
+        setAttendanceStatus(`Meeting started automatically for ${meeting.name}.`);
       }
     };
 
@@ -11765,8 +12050,8 @@ export default function App() {
       }
     };
   }, [
-    pendingGeofenceLogMeetingId,
     activeAttendance,
+    attendanceAutomationPlan,
     resolveMeetingForLogging,
     readCurrentLocation,
     startAttendance,
@@ -11803,6 +12088,11 @@ export default function App() {
   }
 
   function openSponsorTimePicker() {
+    if (Platform.OS === "ios") {
+      openSponsorTimePickerFallback();
+      return;
+    }
+
     if (Platform.OS === "android") {
       try {
         DateTimePickerAndroid.open({
@@ -11828,6 +12118,14 @@ export default function App() {
     openSponsorTimePickerFallback();
   }
 
+  function handleSponsorTimePickerChange(_event: DateTimePickerEvent, selectedDate?: Date) {
+    if (!selectedDate) {
+      return;
+    }
+
+    setSponsorTimeDraft(sponsorTimeDateToParts(selectedDate));
+  }
+
   function confirmSponsorTimePicker() {
     if (sponsorTimeDraft) {
       setSponsorHour12(sponsorTimeDraft.hour12);
@@ -11837,12 +12135,9 @@ export default function App() {
     closeSponsorTimePicker();
   }
 
-  function renderSponsorTimeField(options?: { showLiveMarker?: boolean; helperText?: string }) {
+  function renderSponsorTimeField(options?: { helperText?: string }) {
     return (
       <>
-        {options?.showLiveMarker ? (
-          <Text style={styles.liveStepDebugLabel}>LIVE_SOBERAI_STEP5</Text>
-        ) : null}
         <Text style={styles.label}>Sponsor call time</Text>
         <Pressable style={styles.timeFieldButton} onPress={openSponsorTimePicker}>
           <Text style={styles.timeFieldValue}>{sponsorTimeLabel}</Text>
@@ -12459,7 +12754,6 @@ export default function App() {
                       {wizardHasSponsor ? (
                         <>
                           {renderSponsorTimeField({
-                            showLiveMarker: true,
                             helperText:
                               "Next step configures calendar notifications and alerts for this call time.",
                           })}
@@ -15446,7 +15740,7 @@ export default function App() {
                         <View style={styles.buttonRow}>
                           <AppButton
                             title="Attend"
-                            onPress={() => void startAttendance(selectedMeeting)}
+                            onPress={() => void queueMeetingAttendance(selectedMeeting)}
                           />
                           <View style={styles.buttonSpacer} />
                           <AppButton
@@ -15903,119 +16197,137 @@ export default function App() {
                   <Text style={styles.timePickerSheetAction}>Done</Text>
                 </Pressable>
               </View>
-              <Text style={styles.timePickerSheetMeta}>Select a sponsor call time.</Text>
-              <View style={styles.timePickerSheetColumns}>
-                <View style={styles.timePickerSheetColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>Hour</Text>
-                  <ScrollView
-                    style={styles.timePickerSheetOptions}
-                    contentContainerStyle={styles.timePickerSheetOptionsContent}
-                    showsVerticalScrollIndicator={false}
-                  >
-                    {SPONSOR_TIME_HOUR_OPTIONS.map((hour) => (
-                      <Pressable
-                        key={`sponsor-hour-${hour}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.hour12 === hour
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: hour,
-                            minute: current?.minute ?? sponsorMinute,
-                            meridiem: current?.meridiem ?? sponsorMeridiem,
-                          }))
-                        }
-                      >
-                        <Text
+              <Text style={styles.timePickerSheetMeta}>
+                {Platform.OS === "ios"
+                  ? "Spin the wheel to set a sponsor call time."
+                  : "Select a sponsor call time."}
+              </Text>
+              {Platform.OS === "ios" ? (
+                <View style={styles.timePickerWheelWrap}>
+                  <DateTimePicker
+                    value={sponsorTimeDraftDate}
+                    mode="time"
+                    display="spinner"
+                    minuteInterval={1}
+                    textColor="#ffffff"
+                    onChange={handleSponsorTimePickerChange}
+                    style={styles.timePickerWheel}
+                  />
+                </View>
+              ) : (
+                <View style={styles.timePickerSheetColumns}>
+                  <View style={styles.timePickerSheetColumn}>
+                    <Text style={styles.timePickerSheetColumnLabel}>Hour</Text>
+                    <ScrollView
+                      style={styles.timePickerSheetOptions}
+                      contentContainerStyle={styles.timePickerSheetOptionsContent}
+                      showsVerticalScrollIndicator={false}
+                    >
+                      {SPONSOR_TIME_HOUR_OPTIONS.map((hour) => (
+                        <Pressable
+                          key={`sponsor-hour-${hour}`}
                           style={[
-                            styles.timePickerSheetOptionText,
+                            styles.timePickerSheetOption,
                             sponsorTimeDraftValue.hour12 === hour
-                              ? styles.timePickerSheetOptionTextSelected
+                              ? styles.timePickerSheetOptionSelected
                               : null,
                           ]}
+                          onPress={() =>
+                            setSponsorTimeDraft((current) => ({
+                              hour12: hour,
+                              minute: current?.minute ?? sponsorMinute,
+                              meridiem: current?.meridiem ?? sponsorMeridiem,
+                            }))
+                          }
                         >
-                          {hour}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                </View>
-                <View style={styles.timePickerSheetColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>Minute</Text>
-                  <ScrollView
-                    style={styles.timePickerSheetOptions}
-                    contentContainerStyle={styles.timePickerSheetOptionsContent}
-                    showsVerticalScrollIndicator={false}
-                  >
-                    {SPONSOR_TIME_MINUTE_OPTIONS.map((minute) => (
-                      <Pressable
-                        key={`sponsor-minute-${minute}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.minute === minute
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: current?.hour12 ?? sponsorHour12,
-                            minute,
-                            meridiem: current?.meridiem ?? sponsorMeridiem,
-                          }))
-                        }
-                      >
-                        <Text
+                          <Text
+                            style={[
+                              styles.timePickerSheetOptionText,
+                              sponsorTimeDraftValue.hour12 === hour
+                                ? styles.timePickerSheetOptionTextSelected
+                                : null,
+                            ]}
+                          >
+                            {hour}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  </View>
+                  <View style={styles.timePickerSheetColumn}>
+                    <Text style={styles.timePickerSheetColumnLabel}>Minute</Text>
+                    <ScrollView
+                      style={styles.timePickerSheetOptions}
+                      contentContainerStyle={styles.timePickerSheetOptionsContent}
+                      showsVerticalScrollIndicator={false}
+                    >
+                      {SPONSOR_TIME_MINUTE_OPTIONS.map((minute) => (
+                        <Pressable
+                          key={`sponsor-minute-${minute}`}
                           style={[
-                            styles.timePickerSheetOptionText,
+                            styles.timePickerSheetOption,
                             sponsorTimeDraftValue.minute === minute
-                              ? styles.timePickerSheetOptionTextSelected
+                              ? styles.timePickerSheetOptionSelected
                               : null,
                           ]}
+                          onPress={() =>
+                            setSponsorTimeDraft((current) => ({
+                              hour12: current?.hour12 ?? sponsorHour12,
+                              minute,
+                              meridiem: current?.meridiem ?? sponsorMeridiem,
+                            }))
+                          }
                         >
-                          {String(minute).padStart(2, "0")}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                </View>
-                <View style={styles.timePickerSheetMeridiemColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>AM/PM</Text>
-                  <View style={styles.timePickerSheetMeridiemOptions}>
-                    {SPONSOR_TIME_MERIDIEM_OPTIONS.map((meridiem) => (
-                      <Pressable
-                        key={`sponsor-meridiem-${meridiem}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.meridiem === meridiem
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: current?.hour12 ?? sponsorHour12,
-                            minute: current?.minute ?? sponsorMinute,
-                            meridiem,
-                          }))
-                        }
-                      >
-                        <Text
+                          <Text
+                            style={[
+                              styles.timePickerSheetOptionText,
+                              sponsorTimeDraftValue.minute === minute
+                                ? styles.timePickerSheetOptionTextSelected
+                                : null,
+                            ]}
+                          >
+                            {String(minute).padStart(2, "0")}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  </View>
+                  <View style={styles.timePickerSheetMeridiemColumn}>
+                    <Text style={styles.timePickerSheetColumnLabel}>AM/PM</Text>
+                    <View style={styles.timePickerSheetMeridiemOptions}>
+                      {SPONSOR_TIME_MERIDIEM_OPTIONS.map((meridiem) => (
+                        <Pressable
+                          key={`sponsor-meridiem-${meridiem}`}
                           style={[
-                            styles.timePickerSheetOptionText,
+                            styles.timePickerSheetOption,
                             sponsorTimeDraftValue.meridiem === meridiem
-                              ? styles.timePickerSheetOptionTextSelected
+                              ? styles.timePickerSheetOptionSelected
                               : null,
                           ]}
+                          onPress={() =>
+                            setSponsorTimeDraft((current) => ({
+                              hour12: current?.hour12 ?? sponsorHour12,
+                              minute: current?.minute ?? sponsorMinute,
+                              meridiem,
+                            }))
+                          }
                         >
-                          {meridiem}
-                        </Text>
-                      </Pressable>
-                    ))}
+                          <Text
+                            style={[
+                              styles.timePickerSheetOptionText,
+                              sponsorTimeDraftValue.meridiem === meridiem
+                                ? styles.timePickerSheetOptionTextSelected
+                                : null,
+                            ]}
+                          >
+                            {meridiem}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
                   </View>
                 </View>
-              </View>
+              )}
             </View>
           </View>
         </Modal>
@@ -16778,12 +17090,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontWeight: "600",
   },
-  liveStepDebugLabel: {
-    color: "#fda4af",
-    fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 0.8,
-  },
   timeFieldButton: {
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.22)",
@@ -16836,6 +17142,17 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 13,
     marginBottom: 12,
+  },
+  timePickerWheelWrap: {
+    borderRadius: 18,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  timePickerWheel: {
+    alignSelf: "stretch",
   },
   timePickerSheetAction: {
     color: colors.neonLavender,

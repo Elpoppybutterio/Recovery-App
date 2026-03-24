@@ -11,6 +11,7 @@
       "bundleIdentifier": "com.rabbithole.soberai",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Use Face ID or your device passcode to unlock sober-house records.",
+        "NSCalendarsUsageDescription": "Sober AI adds sponsor calls, milestones, and attended meetings to your calendar when you choose to sync them.",
         "NSLocationWhenInUseUsageDescription": "Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.",
         "UIBackgroundModes": ["fetch", "remote-notification"],
         "ITSAppUsesNonExemptEncryption": false
@@ -26,7 +27,9 @@
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION"
+        "ACCESS_BACKGROUND_LOCATION",
+        "READ_CALENDAR",
+        "WRITE_CALENDAR"
       ],
       "versionCode": 57
     },

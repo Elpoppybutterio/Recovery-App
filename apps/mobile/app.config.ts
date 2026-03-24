@@ -132,6 +132,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         ITSAppUsesNonExemptEncryption: false,
         NSFaceIDUsageDescription:
           "Use Face ID or your device passcode to unlock sober-house records.",
+        NSCalendarsUsageDescription:
+          "Sober AI adds sponsor calls, milestones, and attended meetings to your calendar when you choose to sync them.",
         NSLocationWhenInUseUsageDescription:
           "Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.",
         UIBackgroundModes: ["fetch", "remote-notification"],
@@ -145,7 +147,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         foregroundImage: "./assets/icon-foreground.png",
         backgroundImage: "./assets/icon-background.png",
       },
-      permissions: ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "ACCESS_BACKGROUND_LOCATION"],
+      permissions: [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "READ_CALENDAR",
+        "WRITE_CALENDAR",
+      ],
     },
     assetBundlePatterns: ["**/*"],
     updates: updatesConfig,
