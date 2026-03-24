@@ -1536,6 +1536,16 @@ function isCalendarPermissionGranted(
   );
 }
 
+function getIosMajorSystemVersion(version: string | number): number | null {
+  const raw = typeof version === "string" ? version.trim() : String(version);
+  const match = raw.match(/^(\d+)/);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function formatError(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -2011,6 +2021,11 @@ export default function App() {
   const isDiagnosticsEnabled = resolvedAppEnv !== "production";
   const iosStartupCompatibilityGuardEnabled =
     Platform.OS === "ios" && (iosForcedSafeBoot || !__DEV__);
+  const iosMajorSystemVersion =
+    Platform.OS === "ios" ? getIosMajorSystemVersion(Platform.Version) : null;
+  // expo-calendar 15.x still routes iOS 17+ event permissions through the full-access bridge.
+  const iosWriteOnlyCalendarModeEnabled =
+    Platform.OS === "ios" && (iosMajorSystemVersion ?? 0) >= 17;
   const apiUrlFromEnv =
     typeof process.env.EXPO_PUBLIC_API_URL === "string"
       ? process.env.EXPO_PUBLIC_API_URL.trim()
@@ -3939,6 +3954,9 @@ export default function App() {
       if (!calendarRuntimeEnabled) {
         return false;
       }
+      if (iosWriteOnlyCalendarModeEnabled) {
+        return false;
+      }
 
       try {
         const existing = await Calendar.getCalendarPermissionsAsync();
@@ -3955,11 +3973,11 @@ export default function App() {
         return false;
       }
     },
-    [calendarRuntimeEnabled],
+    [calendarRuntimeEnabled, iosWriteOnlyCalendarModeEnabled],
   );
 
   const resolveWritableCalendarId = useCallback(async (): Promise<string | null> => {
-    if (!calendarRuntimeEnabled) {
+    if (!calendarRuntimeEnabled || iosWriteOnlyCalendarModeEnabled) {
       return null;
     }
     if (writableCalendarIdRef.current) {
@@ -3986,7 +4004,7 @@ export default function App() {
     } catch {
       return null;
     }
-  }, [calendarRuntimeEnabled]);
+  }, [calendarRuntimeEnabled, iosWriteOnlyCalendarModeEnabled]);
 
   const openCalendarComposer = useCallback(
     async (
@@ -4007,6 +4025,20 @@ export default function App() {
       }
 
       try {
+        if (iosWriteOnlyCalendarModeEnabled) {
+          const result = (await Calendar.createEventInCalendarAsync(
+            buildNativeCalendarEventInput(eventDetails),
+          )) as CalendarDialogResultCompat | null;
+          const action = typeof result?.action === "string" ? result.action : "done";
+          const eventId = typeof result?.id === "string" ? result.id : null;
+          return {
+            saved: action !== "canceled" && action !== "deleted",
+            action,
+            eventId,
+            errorCode: "none",
+          };
+        }
+
         const hasPermission = await ensureCalendarPermission(true);
         if (!hasPermission) {
           return {
@@ -4038,7 +4070,7 @@ export default function App() {
         };
       }
     },
-    [calendarRuntimeEnabled, ensureCalendarPermission],
+    [calendarRuntimeEnabled, ensureCalendarPermission, iosWriteOnlyCalendarModeEnabled],
   );
 
   const upsertNativeCalendarEvent = useCallback(
@@ -4051,6 +4083,13 @@ export default function App() {
       errorCode: "none" | "permission" | "unavailable";
     }> => {
       if (!calendarRuntimeEnabled) {
+        return {
+          saved: false,
+          eventId: null,
+          errorCode: "unavailable",
+        };
+      }
+      if (iosWriteOnlyCalendarModeEnabled) {
         return {
           saved: false,
           eventId: null,
@@ -4107,12 +4146,17 @@ export default function App() {
         };
       }
     },
-    [calendarRuntimeEnabled, ensureCalendarPermission, resolveWritableCalendarId],
+    [
+      calendarRuntimeEnabled,
+      ensureCalendarPermission,
+      iosWriteOnlyCalendarModeEnabled,
+      resolveWritableCalendarId,
+    ],
   );
 
   const removeNativeCalendarEvent = useCallback(
     async (eventId: string | null): Promise<boolean> => {
-      if (!eventId || !calendarRuntimeEnabled) {
+      if (!eventId || !calendarRuntimeEnabled || iosWriteOnlyCalendarModeEnabled) {
         return false;
       }
 
@@ -4128,7 +4172,7 @@ export default function App() {
         return false;
       }
     },
-    [calendarRuntimeEnabled, ensureCalendarPermission],
+    [calendarRuntimeEnabled, ensureCalendarPermission, iosWriteOnlyCalendarModeEnabled],
   );
 
   const applyScheduleTime = useCallback(
@@ -6714,6 +6758,10 @@ export default function App() {
         setCalendarStatus("Calendar sync is unavailable in this build.");
         return false;
       }
+      if (iosWriteOnlyCalendarModeEnabled) {
+        setCalendarStatus("Automatic sponsor calendar sync is unavailable on iPhone.");
+        return false;
+      }
 
       if (!normalizedSponsorName || sponsorPhoneE164 === null) {
         setCalendarStatus("Calendar sync skipped: sponsor name/phone incomplete.");
@@ -6797,6 +6845,7 @@ export default function App() {
       sponsorCalendarEventStorage,
       sponsorPhoneE164,
       sponsorCallTimeLocalHhmm,
+      iosWriteOnlyCalendarModeEnabled,
       sponsorRepeatUnit,
       sponsorRepeatInterval,
       sponsorRepeatDaysSorted,
@@ -8166,6 +8215,10 @@ export default function App() {
         setAttendanceStatus("Calendar sync is unavailable in this build.");
         return false;
       }
+      if (iosWriteOnlyCalendarModeEnabled) {
+        setAttendanceStatus("Automatic meeting calendar sync is unavailable on iPhone.");
+        return false;
+      }
 
       const sourceRecord =
         (activeAttendanceRef.current && activeAttendanceRef.current.id === recordId
@@ -8222,6 +8275,7 @@ export default function App() {
     [
       calendarRuntimeEnabled,
       getScheduledWindowForAttendance,
+      iosWriteOnlyCalendarModeEnabled,
       meetingSignatureRequired,
       upsertNativeCalendarEvent,
       upsertAttendanceRecord,
@@ -11769,7 +11823,7 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!bootstrapped || !sponsorEnabled || !sponsorActive) {
+    if (!bootstrapped || !sponsorEnabled || !sponsorActive || iosWriteOnlyCalendarModeEnabled) {
       return;
     }
 
@@ -11821,6 +11875,7 @@ export default function App() {
     sponsorCalendarEventStorage,
     sponsorEnabled,
     sponsorActive,
+    iosWriteOnlyCalendarModeEnabled,
     sponsorEventFingerprint,
     syncSponsorCalendarEvent,
   ]);
@@ -11830,7 +11885,12 @@ export default function App() {
   }, [rescheduleDriveNotifications, debugTimeCompressionEnabled]);
 
   useEffect(() => {
-    if (!activeAttendance || activeAttendance.endAt || !meetingAutoAddToCalendar) {
+    if (
+      !activeAttendance ||
+      activeAttendance.endAt ||
+      !meetingAutoAddToCalendar ||
+      iosWriteOnlyCalendarModeEnabled
+    ) {
       return;
     }
     if (activeAttendance.calendarEventId) {
@@ -11856,6 +11916,7 @@ export default function App() {
     activeAttendance,
     attachCalendarEventToAttendance,
     ensureCalendarPermission,
+    iosWriteOnlyCalendarModeEnabled,
     meetingAutoAddToCalendar,
   ]);
 
