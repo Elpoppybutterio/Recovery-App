@@ -9306,6 +9306,36 @@ export default function App() {
     });
   }, []);
 
+  const reportAttendancePdfSavedLocally = useCallback(
+    (
+      uris: string[],
+      options?: {
+        contextLabel?: string;
+        safeMode?: boolean;
+      },
+    ) => {
+      const fileCount = uris.length;
+      const contextLabel = options?.contextLabel ?? "Export";
+      const savedMessage =
+        fileCount > 1
+          ? `${contextLabel} complete. ${fileCount} PDF files were saved locally.`
+          : `${contextLabel} complete. Your PDF was saved locally.`;
+      const detailParts = [
+        fileCount > 1
+          ? `${fileCount} PDF files were generated successfully.`
+          : "Your PDF was generated successfully.",
+        "The native share sheet could not be opened on this device, so the export was saved locally instead.",
+      ];
+      if (options?.safeMode) {
+        detailParts.push("A lighter export mode was used to keep the PDF stable.");
+      }
+
+      setAttendanceStatus(savedMessage);
+      Alert.alert("PDF exported", detailParts.join(" "));
+    },
+    [],
+  );
+
   const exportAttendance = useCallback(async () => {
     if (!activeAttendance || !activeAttendance.endAt || activeAttendance.durationSeconds === null) {
       setAttendanceStatus("Complete attendance session before exporting.");
@@ -9328,23 +9358,17 @@ export default function App() {
         { fileName },
       );
       await settleBeforePdfShare();
-      if (Platform.OS === "ios" && diagnostics.safeMode) {
-        console.log("[attendance-export] share skipped (safe mode)", diagnostics);
-        setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
-      } else {
-        try {
-          await attendanceSlipPdf.shareAttendanceSlipPdf(uri, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
-          setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
-        } catch (shareError) {
-          logSafeExportFailure("EXPORT_SHARE", shareError);
-          setAttendanceStatus("PDF generated, but share sheet is unavailable on this device.");
-          Alert.alert(
-            "PDF generated",
-            "Your PDF was generated, but the share sheet is unavailable on this device (common on Simulator).",
-          );
-          recordLastExportAttempt(true);
-          return;
-        }
+      try {
+        await attendanceSlipPdf.shareAttendanceSlipPdf(uri, ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX);
+        setAttendanceStatus("Export complete. Share sheet opened for your PDF.");
+      } catch (shareError) {
+        logSafeExportFailure("EXPORT_SHARE", shareError);
+        reportAttendancePdfSavedLocally([uri], {
+          contextLabel: "Export",
+          safeMode: diagnostics.safeMode,
+        });
+        recordLastExportAttempt(true);
+        return;
       }
       recordLastExportAttempt(true);
     } catch (error) {
@@ -9362,6 +9386,7 @@ export default function App() {
     devUserDisplayName,
     logSafeExportFailure,
     recordLastExportAttempt,
+    reportAttendancePdfSavedLocally,
     settleBeforePdfShare,
     toAttendanceSlipRecord,
   ]);
@@ -9442,30 +9467,24 @@ export default function App() {
         },
       );
       await settleBeforePdfShare();
-      if (Platform.OS === "ios" && diagnostics.safeMode) {
-        console.log("[attendance-export] share skipped (safe mode)", diagnostics);
-        setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
-      } else {
-        try {
-          await attendanceSlipPdf.shareAttendanceSlipPdf(
-            uris.length > 1 ? uris : uri,
-            `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
-          );
-          setAttendanceStatus(
-            uris.length > 1
-              ? `Export complete for ${selectedRecords.length} meeting record(s) across ${uris.length} PDFs.`
-              : `Export complete for ${selectedRecords.length} meeting record(s).`,
-          );
-        } catch (shareError) {
-          logSafeExportFailure("EXPORT_SHARE", shareError);
-          setAttendanceStatus("PDF generated, but share sheet is unavailable on this device.");
-          Alert.alert(
-            "PDF generated",
-            "Your PDF was generated, but the share sheet is unavailable on this device (common on Simulator).",
-          );
-          recordLastExportAttempt(true);
-          return;
-        }
+      try {
+        await attendanceSlipPdf.shareAttendanceSlipPdf(
+          uris.length > 1 ? uris : uri,
+          `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected`,
+        );
+        setAttendanceStatus(
+          uris.length > 1
+            ? `Export complete for ${selectedRecords.length} meeting record(s) across ${uris.length} PDFs.`
+            : `Export complete for ${selectedRecords.length} meeting record(s).`,
+        );
+      } catch (shareError) {
+        logSafeExportFailure("EXPORT_SHARE", shareError);
+        reportAttendancePdfSavedLocally(uris.length > 0 ? uris : [uri], {
+          contextLabel: "Selected export",
+          safeMode: diagnostics.safeMode,
+        });
+        recordLastExportAttempt(true);
+        return;
       }
       recordLastExportAttempt(true);
     } catch (error) {
@@ -9486,6 +9505,7 @@ export default function App() {
     setAttendanceExportProgressLabel,
     devUserDisplayName,
     recordLastExportAttempt,
+    reportAttendancePdfSavedLocally,
     settleBeforePdfShare,
     toAttendanceSlipRecord,
   ]);
@@ -9539,30 +9559,24 @@ export default function App() {
           },
         );
         await settleBeforePdfShare();
-        if (Platform.OS === "ios" && diagnostics.safeMode) {
-          console.log("[attendance-export] share skipped (safe mode)", diagnostics);
-          setAttendanceStatus("PDF saved (safe mode). Open Files to share.");
-        } else {
-          try {
-            await attendanceSlipPdf.shareAttendanceSlipPdf(
-              uris.length > 1 ? uris : uri,
-              `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
-            );
-            setAttendanceStatus(
-              uris.length > 1
-                ? `Export complete for ${selectedRecords.length} attendance slip(s) for ${label} across ${uris.length} PDFs.`
-                : `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
-            );
-          } catch (shareError) {
-            logSafeExportFailure("EXPORT_SHARE", shareError);
-            setAttendanceStatus("PDF generated, but share sheet is unavailable on this device.");
-            Alert.alert(
-              "PDF generated",
-              "Your PDF was generated, but the share sheet is unavailable on this device (common on Simulator).",
-            );
-            recordLastExportAttempt(true);
-            return;
-          }
+        try {
+          await attendanceSlipPdf.shareAttendanceSlipPdf(
+            uris.length > 1 ? uris : uri,
+            `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}`,
+          );
+          setAttendanceStatus(
+            uris.length > 1
+              ? `Export complete for ${selectedRecords.length} attendance slip(s) for ${label} across ${uris.length} PDFs.`
+              : `Export complete for ${selectedRecords.length} attendance slip(s) for ${label}.`,
+          );
+        } catch (shareError) {
+          logSafeExportFailure("EXPORT_SHARE", shareError);
+          reportAttendancePdfSavedLocally(uris.length > 0 ? uris : [uri], {
+            contextLabel: `${label} export`,
+            safeMode: diagnostics.safeMode,
+          });
+          recordLastExportAttempt(true);
+          return;
         }
         recordLastExportAttempt(true);
       } catch (error) {
@@ -9582,6 +9596,7 @@ export default function App() {
       devUserDisplayName,
       logSafeExportFailure,
       recordLastExportAttempt,
+      reportAttendancePdfSavedLocally,
       setAttendanceExportProgressLabel,
       settleBeforePdfShare,
       toAttendanceSlipRecord,
@@ -9621,22 +9636,33 @@ export default function App() {
     await exportAttendanceRange(startDate, endDate, `${startText} to ${endText}`);
   }, [attendanceExportEndDateInput, attendanceExportStartDateInput, exportAttendanceRange]);
 
-  const shareSelectedAttendanceText = useCallback(async () => {
+  const shareSelectedAttendanceSummary = useCallback(async () => {
     const selectedRecords = attendanceRecordsForView.filter((record) =>
       selectedAttendanceIds.includes(record.id),
     );
     if (selectedRecords.length === 0) {
-      setAttendanceStatus("Select at least one attendance record to text.");
+      setAttendanceStatus("Select at least one attendance record to share.");
       return;
     }
 
     const message = buildAttendanceShareMessage(selectedRecords);
 
     try {
-      await Share.share({ message });
-      setAttendanceStatus(`Prepared text summary for ${selectedRecords.length} meeting record(s).`);
+      const result = await Share.share({
+        message,
+        title: `Attendance summary (${selectedRecords.length})`,
+      });
+      if (result.action === Share.dismissedAction) {
+        setAttendanceStatus("Attendance summary share canceled.");
+        return;
+      }
+      setAttendanceStatus(
+        `Opened share sheet for ${selectedRecords.length} meeting record(s) summary.`,
+      );
     } catch (error) {
-      setAttendanceStatus(`Failed to share selected attendance text: ${formatError(error)}`);
+      const messageText = formatError(error);
+      setAttendanceStatus(`Failed to share attendance summary: ${messageText}`);
+      Alert.alert("Share failed", messageText);
     }
   }, [attendanceRecordsForView, selectedAttendanceIds, buildAttendanceShareMessage]);
 
@@ -14356,8 +14382,8 @@ export default function App() {
                     />
                     <View style={styles.buttonSpacer} />
                     <AppButton
-                      title={`Text selected (${selectedAttendanceVisibleCount})`}
-                      onPress={() => void shareSelectedAttendanceText()}
+                      title={`Share summary (${selectedAttendanceVisibleCount})`}
+                      onPress={() => void shareSelectedAttendanceSummary()}
                       variant="secondary"
                     />
                   </View>
