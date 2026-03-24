@@ -1980,6 +1980,8 @@ export default function App() {
       fallbackLabel?: string;
       disableDeviceFallback?: boolean;
     }) => Promise<{ success: boolean; error?: string }>;
+    hasHardwareAsync?: () => Promise<boolean>;
+    isEnrolledAsync?: () => Promise<boolean>;
   };
   const iosForcedSafeBoot =
     Platform.OS === "ios" && process.env.EXPO_PUBLIC_IOS_SAFE_BOOT?.trim() === "1";
@@ -2590,34 +2592,27 @@ export default function App() {
     soberHouseRequiresDeviceUnlock &&
     !soberHouseUnlocked;
   const isIosSimulator = Platform.OS === "ios" && Constants.isDevice === false;
-  const hasNativeLocalAuthentication =
-    NativeModules != null &&
-    typeof NativeModules === "object" &&
-    "ExpoLocalAuthentication" in NativeModules &&
-    NativeModules.ExpoLocalAuthentication != null;
-  const canUseSimulatorSoberHouseUnlock =
-    (isIosSimulator || (__DEV__ && Platform.OS === "ios")) && !hasNativeLocalAuthentication;
+  const canUseSimulatorSoberHouseUnlock = isIosSimulator;
   const loadLocalAuthenticationModule =
     useCallback(async (): Promise<LocalAuthenticationModule | null> => {
       if (localAuthenticationModuleRef.current !== undefined) {
         return localAuthenticationModuleRef.current;
       }
 
-      if (!hasNativeLocalAuthentication) {
-        localAuthenticationModuleRef.current = null;
-        return null;
-      }
-
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const module = require("expo-local-authentication") as LocalAuthenticationModule;
+        if (!module || typeof module.authenticateAsync !== "function") {
+          localAuthenticationModuleRef.current = null;
+          return null;
+        }
         localAuthenticationModuleRef.current = module;
         return module;
       } catch {
         localAuthenticationModuleRef.current = null;
         return null;
       }
-    }, [hasNativeLocalAuthentication]);
+    }, []);
   const unlockSoberHouseAccess = useCallback(async () => {
     if (!soberHouseRequiresDeviceUnlock || soberHouseUnlocking) {
       return;
@@ -2636,6 +2631,22 @@ export default function App() {
       if (!localAuthentication) {
         setSoberHouseUnlockStatus(
           "This build does not include device authentication. Rebuild the app with Face ID / passcode support to open sober-house records.",
+        );
+        return;
+      }
+
+      const [hasHardware, isEnrolled] = await Promise.all([
+        typeof localAuthentication.hasHardwareAsync === "function"
+          ? localAuthentication.hasHardwareAsync().catch(() => false)
+          : Promise.resolve(true),
+        typeof localAuthentication.isEnrolledAsync === "function"
+          ? localAuthentication.isEnrolledAsync().catch(() => false)
+          : Promise.resolve(true),
+      ]);
+
+      if (!hasHardware || !isEnrolled) {
+        setSoberHouseUnlockStatus(
+          "Device authentication is unavailable. Enable Face ID, Touch ID, or an iPhone passcode to open sober-house records.",
         );
         return;
       }
