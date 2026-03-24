@@ -133,7 +133,9 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         NSFaceIDUsageDescription:
           "Use Face ID or your device passcode to unlock sober-house records.",
         NSCalendarsUsageDescription:
-          "Sober AI adds sponsor calls, milestones, and attended meetings to your calendar when you choose to sync them.",
+          "SoberAI uses your calendar to add recovery meetings, sober house obligations, and accountability appointments you choose to save.",
+        NSCalendarsWriteOnlyAccessUsageDescription:
+          "SoberAI uses calendar access to create recovery meetings, sober house obligations, and accountability appointments at your request.",
         NSLocationWhenInUseUsageDescription:
           "Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.",
         UIBackgroundModes: ["fetch", "remote-notification"],

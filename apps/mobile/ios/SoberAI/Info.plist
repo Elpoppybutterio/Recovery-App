@@ -46,6 +46,10 @@
 	</dict>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>SoberAI uses your calendar to add recovery meetings, sober house obligations, and accountability appointments you choose to save.</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>SoberAI uses calendar access to create recovery meetings, sober house obligations, and accountability appointments at your request.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Allow Sober² to access your microphone</string>
 	<key>RCTNewArchEnabled</key>
