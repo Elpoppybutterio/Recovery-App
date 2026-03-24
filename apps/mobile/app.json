@@ -3,7 +3,7 @@
     "name": "Sober²",
     "slug": "sober-ai",
     "icon": "./assets/icon.png",
-    "version": "0.1.3",
+    "version": "0.1.31",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
@@ -15,7 +15,7 @@
         "UIBackgroundModes": ["fetch", "remote-notification"],
         "ITSAppUsesNonExemptEncryption": false
       },
-      "buildNumber": "56"
+      "buildNumber": "57"
     },
     "android": {
       "adaptiveIcon": {
@@ -28,7 +28,7 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION"
       ],
-      "versionCode": 56
+      "versionCode": 57
     },
     "assetBundlePatterns": ["**/*"],
     "extra": {

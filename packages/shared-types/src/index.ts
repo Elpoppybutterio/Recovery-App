@@ -218,6 +218,64 @@ export const sponsorConfigSchema = z
     }
   });
 
+export const homeGroupBirthdayConfigSchema = z
+  .object({
+    homeGroupActive: z.boolean(),
+    homeGroupKey: z.string().min(1).nullable(),
+    homeGroupName: z.string().min(1).nullable(),
+    birthdaysEnabled: z.boolean().default(false),
+    firstName: z.string().trim().max(80).nullable().optional(),
+    lastName: z.string().trim().max(80).nullable().optional(),
+    sobrietyDateIso: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .nullable()
+      .optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.homeGroupActive) {
+      if (!value.homeGroupKey) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "homeGroupKey is required when home group is enabled",
+          path: ["homeGroupKey"],
+        });
+      }
+      if (!value.homeGroupName) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "homeGroupName is required when home group is enabled",
+          path: ["homeGroupName"],
+        });
+      }
+    }
+
+    if (!value.homeGroupActive && value.birthdaysEnabled) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "birthdaysEnabled requires an active home group",
+        path: ["birthdaysEnabled"],
+      });
+    }
+
+    if (value.birthdaysEnabled) {
+      if (!value.firstName || value.firstName.trim().length === 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "firstName is required when birthdays are enabled",
+          path: ["firstName"],
+        });
+      }
+      if (!value.sobrietyDateIso) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "sobrietyDateIso is required when birthdays are enabled",
+          path: ["sobrietyDateIso"],
+        });
+      }
+    }
+  });
+
 export type AttendanceRecord = z.infer<typeof attendanceRecordSchema>;
 export type ExclusionZone = z.infer<typeof exclusionZoneSchema>;
 export type UserZoneRule = z.infer<typeof userZoneRuleSchema>;
@@ -227,3 +285,4 @@ export type LocationPing = z.infer<typeof locationPingSchema>;
 export type LastKnownLocation = z.infer<typeof lastKnownLocationSchema>;
 export type ComplianceEvent = z.infer<typeof complianceEventSchema>;
 export type SponsorConfig = z.infer<typeof sponsorConfigSchema>;
+export type HomeGroupBirthdayConfig = z.infer<typeof homeGroupBirthdayConfigSchema>;

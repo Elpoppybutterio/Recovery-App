@@ -1,5 +1,6 @@
 import { createLogger } from "@recovery/shared-utils";
 import {
+  homeGroupBirthdayConfigSchema,
   IncidentStatus,
   IncidentType,
   Permission,
@@ -82,6 +83,12 @@ const meetingsIngestStatusQuerySchema = z.object({
   lat: z.coerce.number().min(-90).max(90).default(45.7833),
   lng: z.coerce.number().min(-180).max(180).default(-108.5007),
   radiusMiles: z.coerce.number().positive().max(200).default(50),
+});
+const homeGroupBirthdayAnnouncementsQuerySchema = z.object({
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
 });
 const attendanceCheckInBodySchema = z.object({
   meetingId: z.string().min(1),
@@ -601,6 +608,175 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           updatedAt: config.updated_at,
           updatedByUserId: config.updated_by_user_id,
         },
+      };
+    },
+  );
+
+  app.get(
+    "/v1/me/home-group-birthday",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const config = await tenantRepositories.homeGroupBirthdays.get(actor);
+
+      await app.auditLogger.log({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "home_group_birthday_config.viewed",
+        subjectType: "home_group_birthday_config",
+        subjectId: actor.userId,
+        metadata: {
+          userId: actor.userId,
+          configured: Boolean(config?.home_group_active),
+          optedIn: Boolean(config?.birthday_opt_in),
+        },
+      });
+
+      if (!config) {
+        return { homeGroupBirthdayConfig: null };
+      }
+
+      return {
+        homeGroupBirthdayConfig: {
+          id: config.id,
+          userId: config.user_id,
+          homeGroupActive: config.home_group_active,
+          homeGroupKey: config.home_group_key,
+          homeGroupName: config.home_group_name,
+          birthdaysEnabled: config.birthday_opt_in,
+          firstName: config.first_name,
+          lastName: config.last_name,
+          sobrietyDateIso: config.sobriety_date,
+          createdAt: config.created_at,
+          updatedAt: config.updated_at,
+          updatedByUserId: config.updated_by_user_id,
+        },
+      };
+    },
+  );
+
+  app.put(
+    "/v1/me/home-group-birthday",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsed = homeGroupBirthdayConfigSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid home group birthday payload",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const config = await tenantRepositories.homeGroupBirthdays.upsert(actor, {
+        homeGroupActive: parsed.data.homeGroupActive,
+        homeGroupKey: parsed.data.homeGroupKey,
+        homeGroupName: parsed.data.homeGroupName,
+        birthdaysEnabled: parsed.data.birthdaysEnabled,
+        firstName: parsed.data.firstName?.trim() || null,
+        lastName: parsed.data.lastName?.trim() || null,
+        sobrietyDateIso: parsed.data.sobrietyDateIso ?? null,
+      });
+      if (!config) {
+        reply.code(404).send({ error: "not_found", message: "User not found" });
+        return;
+      }
+
+      await app.auditLogger.log({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "home_group_birthday_config.updated",
+        subjectType: "home_group_birthday_config",
+        subjectId: actor.userId,
+        metadata: {
+          userId: actor.userId,
+          homeGroupActive: config.home_group_active,
+          homeGroupKey: config.home_group_key,
+          birthdaysEnabled: config.birthday_opt_in,
+        },
+      });
+
+      return {
+        homeGroupBirthdayConfig: {
+          id: config.id,
+          userId: config.user_id,
+          homeGroupActive: config.home_group_active,
+          homeGroupKey: config.home_group_key,
+          homeGroupName: config.home_group_name,
+          birthdaysEnabled: config.birthday_opt_in,
+          firstName: config.first_name,
+          lastName: config.last_name,
+          sobrietyDateIso: config.sobriety_date,
+          createdAt: config.created_at,
+          updatedAt: config.updated_at,
+          updatedByUserId: config.updated_by_user_id,
+        },
+      };
+    },
+  );
+
+  app.get(
+    "/v1/me/home-group-birthday/announcements",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = homeGroupBirthdayAnnouncementsQuerySchema.safeParse(request.query);
+      if (!parsedQuery.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          message: "Invalid home group birthday announcement query",
+          details: parsedQuery.error.flatten(),
+        });
+        return;
+      }
+
+      const todayIso = parsedQuery.data.date ?? now().toISOString().slice(0, 10);
+      const announcements = await tenantRepositories.homeGroupBirthdays.listAnnouncements(
+        actor,
+        todayIso,
+      );
+
+      if (announcements.length > 0) {
+        await app.auditLogger.log({
+          tenantId: actor.tenantId,
+          actorUserId: actor.userId,
+          action: "home_group_birthday_announcements.viewed",
+          subjectType: "home_group_birthday_announcement",
+          subjectId: actor.userId,
+          metadata: {
+            userId: actor.userId,
+            homeGroupDate: todayIso,
+            announcementCount: announcements.length,
+          },
+        });
+      }
+
+      return {
+        todayIso,
+        announcements,
       };
     },
   );

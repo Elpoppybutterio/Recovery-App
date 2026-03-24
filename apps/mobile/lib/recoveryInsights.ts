@@ -1347,10 +1347,6 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
-function labelForSubstance(value: RecoverySubstanceCategory): string {
-  return RECOVERY_LIBRARY[value].label;
-}
-
 function labelForKind(kind: RecoveryInsightKind): string {
   return kind === "MENTAL" ? "Mental Recovery" : "Physical Recovery";
 }
@@ -1545,10 +1541,7 @@ export function buildRecoveryInsightDetailViewModel(input: {
     input.selectedSubstance && RECOVERY_LIBRARY[input.selectedSubstance]
       ? input.selectedSubstance
       : defaultSubstance;
-  const substanceOptions =
-    selectedSubstances.length > 0
-      ? selectedSubstances.map((value) => ({ value, label: labelForSubstance(value) }))
-      : RECOVERY_SUBSTANCE_OPTIONS;
+  const substanceOptions = RECOVERY_SUBSTANCE_OPTIONS;
 
   if (!hasProfile) {
     return {

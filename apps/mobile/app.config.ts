@@ -6,9 +6,9 @@ type JsEngine = "hermes" | "jsc";
 const DEFAULT_PROD_BUNDLE_ID = "com.rabbithole.soberai";
 const DEFAULT_RENDER_API_URL = "https://sober-ai-api.onrender.com";
 const APP_SCHEME = "soberai";
-const APP_VERSION = "0.1.3";
-const IOS_BUILD_NUMBER = "56";
-const ANDROID_VERSION_CODE = 56;
+const APP_VERSION = "0.1.31";
+const IOS_BUILD_NUMBER = "57";
+const ANDROID_VERSION_CODE = 57;
 
 function resolveProdBundleIdentifier(): string {
   const envValue = process.env.APP_BUNDLE_ID?.trim();

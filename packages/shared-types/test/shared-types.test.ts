@@ -9,6 +9,7 @@ import {
   complianceEventSchema,
   exclusionZoneSchema,
   incidentSchema,
+  homeGroupBirthdayConfigSchema,
   lastKnownLocationSchema,
   locationPingSchema,
   notificationEventSchema,
@@ -166,6 +167,35 @@ describe("sponsorConfigSchema", () => {
       repeatInterval: 1,
       repeatDays: [],
       active: true,
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("homeGroupBirthdayConfigSchema", () => {
+  it("accepts an enabled birthday participant with a true home-group identifier", () => {
+    const result = homeGroupBirthdayConfigSchema.safeParse({
+      homeGroupActive: true,
+      homeGroupKey: "group-key-1",
+      homeGroupName: "Recovery Group",
+      birthdaysEnabled: true,
+      firstName: "John",
+      lastName: "D",
+      sobrietyDateIso: "2020-03-23",
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects birthday participation without a first name", () => {
+    const result = homeGroupBirthdayConfigSchema.safeParse({
+      homeGroupActive: true,
+      homeGroupKey: "group-key-1",
+      homeGroupName: "Recovery Group",
+      birthdaysEnabled: true,
+      firstName: "",
+      sobrietyDateIso: "2020-03-23",
     });
 
     expect(result.success).toBe(false);

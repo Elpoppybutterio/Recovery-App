@@ -28,7 +28,11 @@ import {
   View,
 } from "react-native";
 import appJson from "./app.json";
-import { buildHomeGroupWeekOptions, type HomeGroupWeekOption } from "./lib/meetings/discovery";
+import {
+  buildHomeGroupSeriesKey,
+  buildHomeGroupWeekOptions,
+  type HomeGroupWeekOption,
+} from "./lib/meetings/discovery";
 import {
   createMeetingsSource,
   MeetingRecord,
@@ -87,6 +91,11 @@ import {
   buildRecoveryInsightDetailViewModel,
   type RecoveryInsightKind,
 } from "./lib/recoveryInsights";
+import {
+  buildHomeGroupBirthdayAnnouncementKey,
+  buildHomeGroupBirthdayAnnouncementMessage,
+  type HomeGroupBirthdayAnnouncement,
+} from "./lib/homeGroupBirthdays";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import {
   buildMeetingConsistencyTrend,
@@ -184,6 +193,7 @@ import {
 } from "./lib/wisdom/daily";
 const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
 const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
+const AA_ONLINE_MEETINGS_URL = "https://aa-intergroup.org/meetings/";
 const THIRD_STEP_PRAYER_READ_TEXT =
   "God, I offer myself to Thee—to build with me and to do with me as Thou wilt. Relieve me of the bondage of self, that I may better do Thy will. Take away my difficulties, that victory over them may bear witness to those I would help of Thy Power, Thy Love, and Thy Way of life. May I do Thy will always! Amen.";
 const BIG_BOOK_86_88_ITEM_ID = "bb-86-88";
@@ -233,6 +243,29 @@ type SponsorConfigPayload = {
 };
 
 type SponsorConfigResponse = SponsorConfigPayload;
+type HomeGroupBirthdayConfigPayload = {
+  homeGroupActive: boolean;
+  homeGroupKey: string | null;
+  homeGroupName: string | null;
+  birthdaysEnabled: boolean;
+  firstName: string | null;
+  lastName: string | null;
+  sobrietyDateIso: string | null;
+};
+type HomeGroupBirthdayConfigResponse = HomeGroupBirthdayConfigPayload & {
+  id: string;
+  userId: string;
+  createdAt: string;
+  updatedAt: string;
+  updatedByUserId: string;
+};
+type HomeGroupSelection = {
+  key: string;
+  name: string;
+  meetingIds: string[];
+  primaryMeetingId: string | null;
+};
+type HomeGroupBirthdayPromptSource = "wizard" | "meeting-detail";
 type SaveSponsorConfigOverrides = {
   sponsorEnabled?: boolean;
   sponsorActive?: boolean;
@@ -2057,18 +2090,20 @@ export default function App() {
       : 50;
 
   const authHeader = useMemo(() => {
-    if (configuredDevAuthUserId.length > 0) {
-      return `Bearer DEV_${configuredDevAuthUserId}`;
+    // Until the mobile app ships a real session provider, keep the meetings/home-group API
+    // on the existing DEV_<userId> contract across simulator and device builds.
+    const fallbackUserId =
+      configuredDevAuthUserId.length > 0 ? configuredDevAuthUserId : devAuthUserId;
+    if (!fallbackUserId) {
+      return null;
     }
-    if (resolvedAppEnv === "development") {
-      return "Bearer DEV_enduser-a1";
-    }
-    return null;
-  }, [configuredDevAuthUserId, resolvedAppEnv]);
+    return `Bearer DEV_${fallbackUserId}`;
+  }, [configuredDevAuthUserId, devAuthUserId]);
   const authHeaders = useMemo(
     () => (authHeader ? ({ Authorization: authHeader } as Record<string, string>) : undefined),
     [authHeader],
   );
+  const enableHomeGroupBirthdayApiSync = Boolean(apiUrl && authHeader);
   const [clockTickMs, setClockTickMs] = useState(Date.now());
   const [meetingRadiusMiles, setMeetingRadiusMiles] = useState(defaultMeetingRadiusMiles);
   const source = useMemo(
@@ -2285,6 +2320,9 @@ export default function App() {
   >({});
   const [activeRecoveryCelebration, setActiveRecoveryCelebration] =
     useState<RecoveryMilestoneTileSummary | null>(null);
+  const [activeHomeGroupBirthdayAnnouncements, setActiveHomeGroupBirthdayAnnouncements] = useState<
+    HomeGroupBirthdayAnnouncement[]
+  >([]);
   const [showRecoveryRoadmap, setShowRecoveryRoadmap] = useState(false);
   const [activeRecoveryInsightKind, setActiveRecoveryInsightKind] =
     useState<RecoveryInsightKind | null>(null);
@@ -2323,6 +2361,19 @@ export default function App() {
   const [meetingSignatureRequired, setMeetingSignatureRequired] = useState(false);
   const [sponsorKneesSuggested, setSponsorKneesSuggested] = useState<boolean | null>(null);
   const [homeGroupMeetingIds, setHomeGroupMeetingIds] = useState<string[]>([]);
+  const [homeGroupSeriesKey, setHomeGroupSeriesKey] = useState<string | null>(null);
+  const [homeGroupName, setHomeGroupName] = useState<string | null>(null);
+  const [homeGroupBirthdayOptIn, setHomeGroupBirthdayOptIn] = useState(false);
+  const [homeGroupBirthdayFirstName, setHomeGroupBirthdayFirstName] = useState("");
+  const [homeGroupBirthdayLastName, setHomeGroupBirthdayLastName] = useState("");
+  const [homeGroupBirthdayStatus, setHomeGroupBirthdayStatus] = useState<string | null>(null);
+  const [homeGroupBirthdaySaving, setHomeGroupBirthdaySaving] = useState(false);
+  const [showHomeGroupBirthdayPrompt, setShowHomeGroupBirthdayPrompt] = useState(false);
+  const [homeGroupBirthdayPromptSource, setHomeGroupBirthdayPromptSource] =
+    useState<HomeGroupBirthdayPromptSource | null>(null);
+  const [homeGroupBirthdayPromptOptIn, setHomeGroupBirthdayPromptOptIn] = useState(false);
+  const [homeGroupBirthdayPromptFirstName, setHomeGroupBirthdayPromptFirstName] = useState("");
+  const [homeGroupBirthdayPromptLastName, setHomeGroupBirthdayPromptLastName] = useState("");
   const [sponsorEnabledAtIso, setSponsorEnabledAtIso] = useState<string | null>(null);
   const [, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
   const [meetingAttendanceLogs, setMeetingAttendanceLogs] = useState<MeetingAttendanceLog[]>([]);
@@ -2387,6 +2438,10 @@ export default function App() {
   const departurePromptedAttendanceRef = useRef<string | null>(null);
   const playbackRef = useRef<any>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const homeGroupBirthdayResumeTickRef = useRef(0);
+  const [homeGroupBirthdayResumeTick, setHomeGroupBirthdayResumeTick] = useState(0);
+  const wizardHomeGroupLocationPromptedRef = useRef(false);
+  const dashboardLocationPromptedRef = useRef(false);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
   const meetingsSearchOrigin = mapBoundaryCenter ?? currentLocation;
@@ -2747,7 +2802,10 @@ export default function App() {
           serviceCommitmentMinutes: DEFAULT_SERVICE_COMMITMENT_MINUTES,
         };
   const selectedMeetingIsHomeGroup =
-    selectedMeeting !== null && selectedDayPlan.homeGroupMeetingId === selectedMeeting.id;
+    selectedMeeting !== null &&
+    ((homeGroupSeriesKey !== null &&
+      buildHomeGroupSeriesKey(selectedMeeting) === homeGroupSeriesKey) ||
+      selectedDayPlan.homeGroupMeetingId === selectedMeeting.id);
   const todayDateKey = useMemo(
     () => dateKeyForTimeZone(new Date(clockTickMs), deviceTimeZone),
     [clockTickMs, deviceTimeZone],
@@ -3178,6 +3236,9 @@ export default function App() {
   );
   const selectedHomeGroupOption = useMemo(
     () =>
+      (homeGroupSeriesKey
+        ? homeGroupWeekOptions.find((option) => option.key === homeGroupSeriesKey)
+        : null) ??
       homeGroupWeekOptions.find((option) =>
         option.meetings.every((meeting) => homeGroupMeetingIds.includes(meeting.id)),
       ) ??
@@ -3185,8 +3246,32 @@ export default function App() {
         option.meetings.some((meeting) => homeGroupMeetingIds.includes(meeting.id)),
       ) ??
       null,
-    [homeGroupMeetingIds, homeGroupWeekOptions],
+    [homeGroupMeetingIds, homeGroupSeriesKey, homeGroupWeekOptions],
   );
+  const currentHomeGroupSelection = useMemo<HomeGroupSelection | null>(() => {
+    if (selectedHomeGroupOption) {
+      return {
+        key: selectedHomeGroupOption.key,
+        name: selectedHomeGroupOption.name,
+        meetingIds: selectedHomeGroupOption.meetings.map((meeting) => meeting.id),
+        primaryMeetingId:
+          selectedHomeGroupOption.nextMeeting?.id ??
+          selectedHomeGroupOption.meetings[0]?.id ??
+          null,
+      };
+    }
+
+    if (!homeGroupSeriesKey || !homeGroupName) {
+      return null;
+    }
+
+    return {
+      key: homeGroupSeriesKey,
+      name: homeGroupName,
+      meetingIds: homeGroupMeetingIds,
+      primaryMeetingId: homeGroupMeetingIds[0] ?? null,
+    };
+  }, [homeGroupMeetingIds, homeGroupName, homeGroupSeriesKey, selectedHomeGroupOption]);
 
   const mapMeetingsForDay = useMemo(
     () =>
@@ -4109,6 +4194,24 @@ export default function App() {
     setMeetingsStatus("Location is unavailable on this device.");
     return null;
   }, [readCurrentLocation]);
+
+  const primeMeetingsLocation = useCallback(
+    async (reason: "wizard-home-group" | "dashboard-home"): Promise<LocationStamp | null> => {
+      const location =
+        locationPermission === "granted"
+          ? (currentLocationRef.current ?? (await readCurrentLocation(false)))
+          : await requestLocationPermission();
+
+      await refreshMeetingsRef.current?.({ location });
+
+      if (location && reason === "wizard-home-group") {
+        setMeetingsStatus("Location enabled for home group meeting search.");
+      }
+
+      return location;
+    },
+    [locationPermission, readCurrentLocation, requestLocationPermission],
+  );
 
   const refreshDeviceLocationOnFocus = useCallback(async (): Promise<LocationStamp | null> => {
     if (iosStartupCompatibilityGuardEnabled) {
@@ -5634,8 +5737,8 @@ export default function App() {
     setSelectedDayOffset(0);
     setScreen("LIST");
     setSelectedMeeting(null);
-    void refreshMeetings();
-  }, [refreshMeetings]);
+    void primeMeetingsLocation("dashboard-home");
+  }, [primeMeetingsLocation]);
 
   const openMeetingsHub = useCallback(() => {
     setHomeScreen("MEETINGS");
@@ -5646,6 +5749,15 @@ export default function App() {
   }, [activeAttendance]);
 
   const openOnlineMeetingsNow = useCallback(async () => {
+    try {
+      await Linking.openURL(AA_ONLINE_MEETINGS_URL);
+      return;
+    } catch {
+      setMeetingsStatus(
+        "Unable to open AA online meetings. Showing in-app online meetings instead.",
+      );
+    }
+
     setHomeScreen("MEETINGS");
     setToolsScreen("HOME");
     setScreen(activeAttendance && !activeAttendance.endAt ? "SESSION" : "LIST");
@@ -5667,6 +5779,7 @@ export default function App() {
     meetingRadiusMiles,
     refreshMeetings,
     requestLocationPermission,
+    setMeetingsStatus,
   ]);
 
   const openRecoveryGauge = useCallback(
@@ -6173,6 +6286,145 @@ export default function App() {
       setSponsorStatus(formatApiErrorWithHint("Sponsor config load failed: network."));
     }
   }, [apiUrl, authHeaders, enableSponsorApiSync, formatApiErrorWithHint]);
+
+  const fetchHomeGroupBirthdayConfig = useCallback(async () => {
+    if (!enableHomeGroupBirthdayApiSync || !authHeaders) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${apiUrl}/v1/me/home-group-birthday`, {
+        headers: authHeaders,
+      });
+      if (!response.ok) {
+        setHomeGroupBirthdayStatus(
+          formatApiErrorWithHint(`Home group birthday load failed: ${response.status}`),
+        );
+        return;
+      }
+
+      const payload = (await response.json()) as {
+        homeGroupBirthdayConfig?: HomeGroupBirthdayConfigResponse | null;
+      };
+      const config = payload.homeGroupBirthdayConfig;
+      if (!config) {
+        return;
+      }
+
+      setHomeGroupBirthdayOptIn(Boolean(config.birthdaysEnabled));
+      setHomeGroupBirthdayFirstName(config.firstName ?? "");
+      setHomeGroupBirthdayLastName(config.lastName ?? "");
+      if (!homeGroupSeriesKey && config.homeGroupActive && config.homeGroupKey) {
+        setHomeGroupSeriesKey(config.homeGroupKey);
+      }
+      if (!homeGroupName && config.homeGroupActive && config.homeGroupName) {
+        setHomeGroupName(config.homeGroupName);
+      }
+      setHomeGroupBirthdayStatus(null);
+    } catch {
+      setHomeGroupBirthdayStatus(
+        formatApiErrorWithHint("Home group birthday load failed: network."),
+      );
+    }
+  }, [
+    apiUrl,
+    authHeaders,
+    enableHomeGroupBirthdayApiSync,
+    formatApiErrorWithHint,
+    homeGroupName,
+    homeGroupSeriesKey,
+  ]);
+
+  const syncHomeGroupBirthdayConfig = useCallback(
+    async (
+      selection: HomeGroupSelection | null,
+      overrides?: {
+        birthdaysEnabled?: boolean;
+        firstName?: string | null;
+        lastName?: string | null;
+        sobrietyDateIso?: string | null;
+      },
+    ): Promise<boolean> => {
+      const nextBirthdaysEnabled = overrides?.birthdaysEnabled ?? homeGroupBirthdayOptIn;
+      const nextFirstName = (overrides?.firstName ?? homeGroupBirthdayFirstName).trim();
+      const nextLastName = (overrides?.lastName ?? homeGroupBirthdayLastName).trim();
+      const nextSobrietyDateIso = overrides?.sobrietyDateIso ?? sobrietyDateIso;
+
+      if (nextBirthdaysEnabled && nextFirstName.length === 0) {
+        setHomeGroupBirthdayStatus("First name is required for home group birthdays.");
+        return false;
+      }
+
+      if (nextBirthdaysEnabled && !nextSobrietyDateIso) {
+        setHomeGroupBirthdayStatus("Add your sobriety date before joining home group birthdays.");
+        return false;
+      }
+
+      if (!enableHomeGroupBirthdayApiSync || !authHeaders) {
+        setHomeGroupBirthdayStatus(
+          nextBirthdaysEnabled
+            ? "Home group birthday settings saved locally."
+            : "Home group saved locally without birthday participation.",
+        );
+        return true;
+      }
+
+      setHomeGroupBirthdaySaving(true);
+      try {
+        const payload: HomeGroupBirthdayConfigPayload = {
+          homeGroupActive: Boolean(selection),
+          homeGroupKey: selection?.key ?? null,
+          homeGroupName: selection?.name ?? null,
+          birthdaysEnabled: Boolean(selection) && nextBirthdaysEnabled,
+          firstName: nextFirstName.length > 0 ? nextFirstName : null,
+          lastName: nextLastName.length > 0 ? nextLastName : null,
+          sobrietyDateIso: nextSobrietyDateIso,
+        };
+
+        const response = await fetch(`${apiUrl}/v1/me/home-group-birthday`, {
+          method: "PUT",
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          setHomeGroupBirthdayStatus(
+            formatApiErrorWithHint(`Home group birthday save failed: ${response.status}`),
+          );
+          return false;
+        }
+
+        setHomeGroupBirthdayStatus(
+          payload.birthdaysEnabled
+            ? "Home group birthday participation saved."
+            : payload.homeGroupActive
+              ? "Home group saved without birthday participation."
+              : "Home group birthday participation cleared.",
+        );
+        return true;
+      } catch {
+        setHomeGroupBirthdayStatus(
+          formatApiErrorWithHint("Home group birthday save failed: network."),
+        );
+        return false;
+      } finally {
+        setHomeGroupBirthdaySaving(false);
+      }
+    },
+    [
+      apiUrl,
+      authHeaders,
+      enableHomeGroupBirthdayApiSync,
+      formatApiErrorWithHint,
+      homeGroupBirthdayFirstName,
+      homeGroupBirthdayLastName,
+      homeGroupBirthdayOptIn,
+      sobrietyDateIso,
+    ],
+  );
 
   const sanitizeStoredCalendarStateOnLaunch = useCallback(async () => {
     console.log("[startup] calendar state audit begin");
@@ -6940,6 +7192,11 @@ export default function App() {
         sponsorKneesSuggested: boolean | null;
         meetingAutoAddToCalendar: boolean;
         homeGroupMeetingIds: string[];
+        homeGroupSeriesKey: string | null;
+        homeGroupName: string | null;
+        homeGroupBirthdayOptIn: boolean;
+        homeGroupBirthdayFirstName: string;
+        homeGroupBirthdayLastName: string;
         sponsorName: string;
         sponsorPhoneDigits: string;
         sponsorHour12: number;
@@ -6960,6 +7217,13 @@ export default function App() {
       const resolvedProfile = {
         radiusMiles: meetingRadiusMiles,
         homeGroupMeetingIds: overrides?.homeGroupMeetingIds ?? homeGroupMeetingIds,
+        homeGroupSeriesKey: overrides?.homeGroupSeriesKey ?? homeGroupSeriesKey,
+        homeGroupName: overrides?.homeGroupName ?? homeGroupName,
+        homeGroupBirthdayOptIn: overrides?.homeGroupBirthdayOptIn ?? homeGroupBirthdayOptIn,
+        homeGroupBirthdayFirstName:
+          overrides?.homeGroupBirthdayFirstName ?? homeGroupBirthdayFirstName,
+        homeGroupBirthdayLastName:
+          overrides?.homeGroupBirthdayLastName ?? homeGroupBirthdayLastName,
         sponsorEnabledAtIso: resolvedSponsorEnabledAtIso,
         ninetyDayGoalTarget: overrides?.ninetyDayGoalTarget ?? ninetyDayGoalTarget,
         recoverySubstances: overrides?.recoverySubstances ?? recoverySubstances,
@@ -7009,6 +7273,11 @@ export default function App() {
     },
     [
       homeGroupMeetingIds,
+      homeGroupBirthdayFirstName,
+      homeGroupBirthdayLastName,
+      homeGroupBirthdayOptIn,
+      homeGroupName,
+      homeGroupSeriesKey,
       meetingAutoAddToCalendar,
       meetingRadiusMiles,
       meetingSignatureRequired,
@@ -7393,6 +7662,11 @@ export default function App() {
             sponsorKneesSuggested: hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null,
             meetingAutoAddToCalendar,
             homeGroupMeetingIds: wizardHasHomeGroup === true ? homeGroupMeetingIds : [],
+            homeGroupSeriesKey: wizardHasHomeGroup === true ? homeGroupSeriesKey : null,
+            homeGroupName: wizardHasHomeGroup === true ? homeGroupName : null,
+            homeGroupBirthdayOptIn: wizardHasHomeGroup === true ? homeGroupBirthdayOptIn : false,
+            homeGroupBirthdayFirstName: homeGroupBirthdayFirstName,
+            homeGroupBirthdayLastName: homeGroupBirthdayLastName,
             sponsorName: normalizedSponsorName,
             sponsorPhoneDigits,
             wizardSupervisionMode,
@@ -7413,6 +7687,11 @@ export default function App() {
             sponsorKneesSuggested: null,
             meetingAutoAddToCalendar,
             homeGroupMeetingIds: wizardHasHomeGroup === true ? homeGroupMeetingIds : [],
+            homeGroupSeriesKey: wizardHasHomeGroup === true ? homeGroupSeriesKey : null,
+            homeGroupName: wizardHasHomeGroup === true ? homeGroupName : null,
+            homeGroupBirthdayOptIn: wizardHasHomeGroup === true ? homeGroupBirthdayOptIn : false,
+            homeGroupBirthdayFirstName: homeGroupBirthdayFirstName,
+            homeGroupBirthdayLastName: homeGroupBirthdayLastName,
             sponsorName: "",
             sponsorPhoneDigits: "",
             wizardSupervisionMode,
@@ -7423,6 +7702,21 @@ export default function App() {
 
       if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && wizardHasHomeGroup !== true) {
         setHomeGroupMeetingIds([]);
+        setHomeGroupSeriesKey(null);
+        setHomeGroupName(null);
+        setHomeGroupBirthdayOptIn(false);
+      }
+
+      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER") {
+        await syncHomeGroupBirthdayConfig(
+          wizardHasHomeGroup === true ? currentHomeGroupSelection : null,
+          {
+            birthdaysEnabled: wizardHasHomeGroup === true ? homeGroupBirthdayOptIn : false,
+            firstName: homeGroupBirthdayFirstName,
+            lastName: homeGroupBirthdayLastName,
+            sobrietyDateIso: sobrietyDateIso ?? parsedDateIso ?? null,
+          },
+        );
       }
 
       let nextSoberHouseStore = soberHouseStore;
@@ -7569,6 +7863,11 @@ export default function App() {
         sponsorKneesSuggested: hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null,
         meetingAutoAddToCalendar,
         homeGroupMeetingIds: wizardHasHomeGroup === true ? homeGroupMeetingIds : [],
+        homeGroupSeriesKey: wizardHasHomeGroup === true ? homeGroupSeriesKey : null,
+        homeGroupName: wizardHasHomeGroup === true ? homeGroupName : null,
+        homeGroupBirthdayOptIn: wizardHasHomeGroup === true ? homeGroupBirthdayOptIn : false,
+        homeGroupBirthdayFirstName,
+        homeGroupBirthdayLastName,
         sponsorName: hasSponsor ? normalizedSponsorName : "",
         sponsorPhoneDigits: hasSponsor ? sponsorPhoneDigits : "",
         wizardSupervisionMode,
@@ -7586,8 +7885,14 @@ export default function App() {
     completeSetupIntoDashboard,
     devAuthUserId,
     devUserDisplayName,
+    currentHomeGroupSelection,
     homeGroupMeetingIds.length,
     homeGroupMeetingIds,
+    homeGroupBirthdayFirstName,
+    homeGroupBirthdayLastName,
+    homeGroupBirthdayOptIn,
+    homeGroupName,
+    homeGroupSeriesKey,
     meetingAutoAddToCalendar,
     meetingSignatureRequired,
     normalizedSponsorName,
@@ -7629,6 +7934,7 @@ export default function App() {
     sponsorEnabled,
     sponsorActive,
     sponsorKneesSuggested,
+    syncHomeGroupBirthdayConfig,
     recoverySubstances,
     ninetyDayGoalTarget,
   ]);
@@ -7651,6 +7957,17 @@ export default function App() {
       }
     }
 
+    if (currentHomeGroupSelection) {
+      const savedHomeGroupBirthdays = await syncHomeGroupBirthdayConfig(currentHomeGroupSelection, {
+        birthdaysEnabled: homeGroupBirthdayOptIn,
+        firstName: homeGroupBirthdayFirstName,
+        lastName: homeGroupBirthdayLastName,
+      });
+      if (!savedHomeGroupBirthdays) {
+        return;
+      }
+    }
+
     await persistRecoveryStateSnapshot({
       mode: "A",
       setupComplete: true,
@@ -7665,12 +7982,17 @@ export default function App() {
       location: currentLocationRef.current ?? (await readCurrentLocation(false)),
     });
   }, [
+    currentHomeGroupSelection,
+    homeGroupBirthdayFirstName,
+    homeGroupBirthdayLastName,
+    homeGroupBirthdayOptIn,
     persistRecoveryStateSnapshot,
     readCurrentLocation,
     refreshMeetings,
     sobrietyDateIso,
     sponsorEnabled,
     saveSponsorConfig,
+    syncHomeGroupBirthdayConfig,
   ]);
 
   const saveSobrietyDateFromSettings = useCallback(async () => {
@@ -7682,16 +8004,40 @@ export default function App() {
     setSobrietyDateIso(parsedDateIso);
     setSobrietyDateInput(formatIsoToUsDate(parsedDateIso));
     await persistRecoveryStateSnapshot({ sobrietyDateIso: parsedDateIso });
+    if (homeGroupBirthdayOptIn && currentHomeGroupSelection) {
+      await syncHomeGroupBirthdayConfig(currentHomeGroupSelection, {
+        birthdaysEnabled: true,
+        sobrietyDateIso: parsedDateIso,
+      });
+    }
     setSobrietyDateStatus("Sobriety date saved.");
-  }, [persistRecoveryStateSnapshot, sobrietyDateInput]);
+  }, [
+    currentHomeGroupSelection,
+    homeGroupBirthdayOptIn,
+    persistRecoveryStateSnapshot,
+    sobrietyDateInput,
+    syncHomeGroupBirthdayConfig,
+  ]);
 
   const clearSobrietyDateFromSettings = useCallback(async () => {
     setSobrietyDateIso(null);
     setSobrietyDateInput("");
     setSobrietyDateStatus("Sobriety date cleared.");
     setSetupComplete(false);
+    if (homeGroupBirthdayOptIn && currentHomeGroupSelection) {
+      setHomeGroupBirthdayOptIn(false);
+      await syncHomeGroupBirthdayConfig(currentHomeGroupSelection, {
+        birthdaysEnabled: false,
+        sobrietyDateIso: null,
+      });
+    }
     await persistRecoveryStateSnapshot({ setupComplete: false, sobrietyDateIso: null });
-  }, [persistRecoveryStateSnapshot]);
+  }, [
+    currentHomeGroupSelection,
+    homeGroupBirthdayOptIn,
+    persistRecoveryStateSnapshot,
+    syncHomeGroupBirthdayConfig,
+  ]);
 
   const saveNinetyDayGoalFromSettings = useCallback(async () => {
     const parsedGoal = parseGoalTargetInput(ninetyDayGoalInput);
@@ -9234,28 +9580,44 @@ export default function App() {
     [updateSelectedDayPlan],
   );
 
-  const toggleHomeGroupMeeting = useCallback(
-    (meetingId: string) => {
+  const applyHomeGroupSelection = useCallback(
+    (selection: HomeGroupSelection | null) => {
+      setHomeGroupMeetingIds(selection?.meetingIds ?? []);
+      setHomeGroupSeriesKey(selection?.key ?? null);
+      setHomeGroupName(selection?.name ?? null);
+      if (!selection) {
+        setHomeGroupBirthdayOptIn(false);
+      }
+
       updateSelectedDayPlan((current) => {
-        const nextHomeGroup = current.homeGroupMeetingId === meetingId ? null : meetingId;
-        const existing = current.plans[meetingId] ?? {
+        if (!selection) {
+          return {
+            ...current,
+            homeGroupMeetingId: null,
+          };
+        }
+
+        const primaryMeetingId = selection.primaryMeetingId ?? selection.meetingIds[0] ?? null;
+        if (!primaryMeetingId) {
+          return current;
+        }
+
+        const existing = current.plans[primaryMeetingId] ?? {
           going: true,
           earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
-          serviceCommitmentMinutes: null,
+          serviceCommitmentMinutes: DEFAULT_SERVICE_COMMITMENT_MINUTES,
         };
 
         return {
           ...current,
-          homeGroupMeetingId: nextHomeGroup,
+          homeGroupMeetingId: primaryMeetingId,
           plans: {
             ...current.plans,
-            [meetingId]: {
+            [primaryMeetingId]: {
               ...existing,
               going: true,
               serviceCommitmentMinutes:
-                nextHomeGroup === meetingId
-                  ? (existing.serviceCommitmentMinutes ?? DEFAULT_SERVICE_COMMITMENT_MINUTES)
-                  : existing.serviceCommitmentMinutes,
+                existing.serviceCommitmentMinutes ?? DEFAULT_SERVICE_COMMITMENT_MINUTES,
             },
           },
         };
@@ -9263,6 +9625,299 @@ export default function App() {
     },
     [updateSelectedDayPlan],
   );
+
+  const openHomeGroupBirthdayPrompt = useCallback(
+    (selection: HomeGroupSelection, source: HomeGroupBirthdayPromptSource) => {
+      applyHomeGroupSelection(selection);
+      setWizardHasHomeGroup(true);
+      setHomeGroupBirthdayPromptSource(source);
+      setHomeGroupBirthdayPromptOptIn(homeGroupBirthdayOptIn);
+      setHomeGroupBirthdayPromptFirstName(
+        homeGroupBirthdayFirstName || devUserDisplayName.trim().split(" ").slice(0, 1).join(" "),
+      );
+      setHomeGroupBirthdayPromptLastName(homeGroupBirthdayLastName);
+      setShowHomeGroupBirthdayPrompt(true);
+      setHomeGroupBirthdayStatus(null);
+    },
+    [
+      applyHomeGroupSelection,
+      devUserDisplayName,
+      homeGroupBirthdayFirstName,
+      homeGroupBirthdayLastName,
+      homeGroupBirthdayOptIn,
+    ],
+  );
+
+  const clearHomeGroupSelection = useCallback(async (): Promise<boolean> => {
+    applyHomeGroupSelection(null);
+    setWizardHasHomeGroup(false);
+    return syncHomeGroupBirthdayConfig(null, {
+      birthdaysEnabled: false,
+      firstName: homeGroupBirthdayFirstName,
+      lastName: homeGroupBirthdayLastName,
+    });
+  }, [
+    applyHomeGroupSelection,
+    homeGroupBirthdayFirstName,
+    homeGroupBirthdayLastName,
+    syncHomeGroupBirthdayConfig,
+  ]);
+
+  const toggleHomeGroupMeeting = useCallback(
+    async (meeting: MeetingRecord) => {
+      const nextKey = buildHomeGroupSeriesKey(meeting);
+      const selected =
+        (homeGroupSeriesKey !== null && homeGroupSeriesKey === nextKey) ||
+        homeGroupMeetingIds.includes(meeting.id);
+
+      if (selected) {
+        await clearHomeGroupSelection();
+        return;
+      }
+
+      const matchingOption =
+        homeGroupWeekOptions.find((option) => option.key === nextKey) ??
+        ({
+          key: nextKey,
+          name: meeting.name,
+          meetings: [meeting],
+          nextMeeting: meeting,
+        } as HomeGroupWeekOption);
+
+      openHomeGroupBirthdayPrompt(
+        {
+          key: matchingOption.key,
+          name: matchingOption.name,
+          meetingIds: matchingOption.meetings.map((entry) => entry.id),
+          primaryMeetingId: meeting.id,
+        },
+        "meeting-detail",
+      );
+    },
+    [
+      clearHomeGroupSelection,
+      homeGroupMeetingIds,
+      homeGroupSeriesKey,
+      homeGroupWeekOptions,
+      openHomeGroupBirthdayPrompt,
+    ],
+  );
+
+  const closeHomeGroupBirthdayPrompt = useCallback(() => {
+    setShowHomeGroupBirthdayPrompt(false);
+    setHomeGroupBirthdayPromptSource(null);
+  }, []);
+
+  const announceHomeGroupBirthdayPromptFallback = useCallback((message: string) => {
+    if (Platform.OS === "android") {
+      ToastAndroid.show(message, ToastAndroid.LONG);
+      return;
+    }
+
+    Alert.alert("Home Group Saved", message);
+  }, []);
+
+  const saveHomeGroupBirthdayPrompt = useCallback(async () => {
+    const selection = currentHomeGroupSelection;
+    if (!selection) {
+      closeHomeGroupBirthdayPrompt();
+      return;
+    }
+
+    const nextFirstName = homeGroupBirthdayPromptFirstName.trim();
+    const nextLastName = homeGroupBirthdayPromptLastName.trim();
+    if (homeGroupBirthdayPromptOptIn && nextFirstName.length === 0) {
+      setHomeGroupBirthdayStatus("First name is required to join home group birthdays.");
+      return;
+    }
+
+    if (homeGroupBirthdayPromptOptIn && !sobrietyDateIso) {
+      setHomeGroupBirthdayPromptOptIn(false);
+      setHomeGroupBirthdayOptIn(false);
+      setHomeGroupBirthdayFirstName(nextFirstName);
+      setHomeGroupBirthdayLastName(nextLastName);
+      await syncHomeGroupBirthdayConfig(selection, {
+        birthdaysEnabled: false,
+        firstName: nextFirstName,
+        lastName: nextLastName,
+      });
+      setHomeGroupBirthdayStatus(
+        "Home group saved. Add your sobriety date in Recovery Settings to turn on birthday recognition.",
+      );
+      closeHomeGroupBirthdayPrompt();
+      announceHomeGroupBirthdayPromptFallback(
+        "Home group saved. Add your sobriety date in Recovery Settings to turn on birthday recognition.",
+      );
+      return;
+    }
+
+    setHomeGroupBirthdayOptIn(homeGroupBirthdayPromptOptIn);
+    setHomeGroupBirthdayFirstName(nextFirstName);
+    setHomeGroupBirthdayLastName(nextLastName);
+
+    const saved = await syncHomeGroupBirthdayConfig(selection, {
+      birthdaysEnabled: homeGroupBirthdayPromptOptIn,
+      firstName: nextFirstName,
+      lastName: nextLastName,
+    });
+    if (!saved) {
+      setHomeGroupBirthdayOptIn(false);
+      setHomeGroupBirthdayFirstName(nextFirstName);
+      setHomeGroupBirthdayLastName(nextLastName);
+      setHomeGroupBirthdayStatus(
+        "Home group saved. Birthday recognition could not be synced yet. Update it later in Recovery Settings.",
+      );
+      closeHomeGroupBirthdayPrompt();
+      announceHomeGroupBirthdayPromptFallback(
+        "Home group saved. Birthday recognition could not be synced yet. Update it later in Recovery Settings.",
+      );
+      return;
+    }
+
+    closeHomeGroupBirthdayPrompt();
+  }, [
+    announceHomeGroupBirthdayPromptFallback,
+    closeHomeGroupBirthdayPrompt,
+    currentHomeGroupSelection,
+    homeGroupBirthdayPromptFirstName,
+    homeGroupBirthdayPromptLastName,
+    homeGroupBirthdayPromptOptIn,
+    sobrietyDateIso,
+    syncHomeGroupBirthdayConfig,
+  ]);
+
+  const skipHomeGroupBirthdayPrompt = useCallback(async () => {
+    const selection = currentHomeGroupSelection;
+    if (!selection) {
+      closeHomeGroupBirthdayPrompt();
+      return;
+    }
+
+    const nextFirstName = homeGroupBirthdayPromptFirstName.trim();
+    const nextLastName = homeGroupBirthdayPromptLastName.trim();
+    setHomeGroupBirthdayPromptOptIn(false);
+    setHomeGroupBirthdayOptIn(false);
+    setHomeGroupBirthdayFirstName(nextFirstName);
+    setHomeGroupBirthdayLastName(nextLastName);
+    const saved = await syncHomeGroupBirthdayConfig(selection, {
+      birthdaysEnabled: false,
+      firstName: nextFirstName,
+      lastName: nextLastName,
+    });
+    if (!saved) {
+      setHomeGroupBirthdayStatus(
+        "Home group saved. Birthday settings could not be synced yet. You can update them later in Recovery Settings.",
+      );
+      closeHomeGroupBirthdayPrompt();
+      announceHomeGroupBirthdayPromptFallback(
+        "Home group saved. Birthday settings could not be synced yet. You can update them later in Recovery Settings.",
+      );
+      return;
+    }
+
+    closeHomeGroupBirthdayPrompt();
+  }, [
+    announceHomeGroupBirthdayPromptFallback,
+    closeHomeGroupBirthdayPrompt,
+    currentHomeGroupSelection,
+    homeGroupBirthdayPromptFirstName,
+    homeGroupBirthdayPromptLastName,
+    syncHomeGroupBirthdayConfig,
+  ]);
+
+  const saveHomeGroupBirthdayFromSettings = useCallback(async () => {
+    if (!currentHomeGroupSelection) {
+      setHomeGroupBirthdayStatus("Choose a home group before saving birthday participation.");
+      return;
+    }
+
+    const nextFirstName = homeGroupBirthdayFirstName.trim();
+    const nextLastName = homeGroupBirthdayLastName.trim();
+    if (homeGroupBirthdayOptIn && nextFirstName.length === 0) {
+      setHomeGroupBirthdayStatus("First name is required when birthday participation is enabled.");
+      return;
+    }
+
+    const saved = await syncHomeGroupBirthdayConfig(currentHomeGroupSelection, {
+      birthdaysEnabled: homeGroupBirthdayOptIn,
+      firstName: nextFirstName,
+      lastName: nextLastName,
+    });
+    if (!saved) {
+      return;
+    }
+
+    setHomeGroupBirthdayFirstName(nextFirstName);
+    setHomeGroupBirthdayLastName(nextLastName);
+  }, [
+    currentHomeGroupSelection,
+    homeGroupBirthdayFirstName,
+    homeGroupBirthdayLastName,
+    homeGroupBirthdayOptIn,
+    syncHomeGroupBirthdayConfig,
+  ]);
+
+  const checkHomeGroupBirthdayAnnouncements = useCallback(async () => {
+    if (
+      !bootstrapped ||
+      !setupComplete ||
+      homeScreen !== "DASHBOARD" ||
+      mode !== "A" ||
+      !enableHomeGroupBirthdayApiSync ||
+      !authHeaders ||
+      !currentHomeGroupSelection?.key
+    ) {
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${apiUrl}/v1/me/home-group-birthday/announcements?date=${todayDateKey}`,
+        {
+          headers: authHeaders,
+        },
+      );
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = (await response.json()) as {
+        announcements?: HomeGroupBirthdayAnnouncement[];
+      };
+      const announcements = Array.isArray(payload.announcements) ? payload.announcements : [];
+      if (announcements.length === 0) {
+        return;
+      }
+
+      const announcementKey = buildHomeGroupBirthdayAnnouncementKey({
+        homeGroupKey: currentHomeGroupSelection.key,
+        todayIso: todayDateKey,
+        celebrantUserIds: announcements.map((announcement) => announcement.userId),
+      });
+      if (recoveryCelebrationShownByKey[announcementKey]) {
+        return;
+      }
+
+      setRecoveryCelebrationShownByKey((current) => ({
+        ...current,
+        [announcementKey]: new Date().toISOString(),
+      }));
+      setActiveHomeGroupBirthdayAnnouncements(announcements);
+    } catch {
+      // Keep this silent so the dashboard stays stable if the birthday API is unavailable.
+    }
+  }, [
+    apiUrl,
+    authHeaders,
+    bootstrapped,
+    currentHomeGroupSelection,
+    enableHomeGroupBirthdayApiSync,
+    homeScreen,
+    mode,
+    recoveryCelebrationShownByKey,
+    setupComplete,
+    todayDateKey,
+  ]);
 
   const setServiceCommitmentMinutes = useCallback(
     (meetingId: string, valueText: string) => {
@@ -9642,6 +10297,42 @@ export default function App() {
       subscription.remove();
     };
   }, [iosStartupCompatibilityGuardEnabled, refreshDeviceLocationOnFocus]);
+
+  useEffect(() => {
+    const shouldPromptForWizardHomeGroupLocation =
+      bootstrapped && homeScreen === "SETUP" && setupStep === 7 && wizardHasHomeGroup === true;
+
+    if (!shouldPromptForWizardHomeGroupLocation) {
+      wizardHomeGroupLocationPromptedRef.current = false;
+      return;
+    }
+
+    if (wizardHomeGroupLocationPromptedRef.current) {
+      return;
+    }
+
+    wizardHomeGroupLocationPromptedRef.current = true;
+    void primeMeetingsLocation("wizard-home-group");
+  }, [bootstrapped, homeScreen, primeMeetingsLocation, setupStep, wizardHasHomeGroup]);
+
+  useEffect(() => {
+    const shouldPromptFromDashboard =
+      bootstrapped && homeScreen === "DASHBOARD" && locationPermission !== "granted";
+
+    if (!shouldPromptFromDashboard) {
+      if (homeScreen !== "DASHBOARD") {
+        dashboardLocationPromptedRef.current = false;
+      }
+      return;
+    }
+
+    if (dashboardLocationPromptedRef.current) {
+      return;
+    }
+
+    dashboardLocationPromptedRef.current = true;
+    void primeMeetingsLocation("dashboard-home");
+  }, [bootstrapped, homeScreen, locationPermission, primeMeetingsLocation]);
 
   useEffect(() => {
     if (bootstrapStartedRef.current) {
@@ -10055,6 +10746,11 @@ export default function App() {
           const parsedProfile = JSON.parse(profileRaw) as {
             radiusMiles?: number;
             homeGroupMeetingIds?: string[];
+            homeGroupSeriesKey?: string | null;
+            homeGroupName?: string | null;
+            homeGroupBirthdayOptIn?: boolean;
+            homeGroupBirthdayFirstName?: string;
+            homeGroupBirthdayLastName?: string;
             sponsorEnabledAtIso?: string | null;
             ninetyDayGoalTarget?: number;
             recoverySubstances?: RecoverySubstanceCategory[];
@@ -10083,6 +10779,27 @@ export default function App() {
                 (entry): entry is string => typeof entry === "string" && entry.length > 0,
               ),
             );
+          }
+          if (
+            typeof parsedProfile.homeGroupSeriesKey === "string" ||
+            parsedProfile.homeGroupSeriesKey === null
+          ) {
+            setHomeGroupSeriesKey(parsedProfile.homeGroupSeriesKey ?? null);
+          }
+          if (
+            typeof parsedProfile.homeGroupName === "string" ||
+            parsedProfile.homeGroupName === null
+          ) {
+            setHomeGroupName(parsedProfile.homeGroupName ?? null);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayOptIn === "boolean") {
+            setHomeGroupBirthdayOptIn(parsedProfile.homeGroupBirthdayOptIn);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayFirstName === "string") {
+            setHomeGroupBirthdayFirstName(parsedProfile.homeGroupBirthdayFirstName);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayLastName === "string") {
+            setHomeGroupBirthdayLastName(parsedProfile.homeGroupBirthdayLastName);
           }
           if (
             typeof parsedProfile.sponsorEnabledAtIso === "string" ||
@@ -10383,6 +11100,25 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (!selectedHomeGroupOption) {
+      return;
+    }
+    if (homeGroupSeriesKey !== selectedHomeGroupOption.key) {
+      setHomeGroupSeriesKey(selectedHomeGroupOption.key);
+    }
+    if (homeGroupName !== selectedHomeGroupOption.name) {
+      setHomeGroupName(selectedHomeGroupOption.name);
+    }
+  }, [homeGroupName, homeGroupSeriesKey, selectedHomeGroupOption]);
+
+  useEffect(() => {
+    if (!bootstrapped) {
+      return;
+    }
+    void fetchHomeGroupBirthdayConfig();
+  }, [bootstrapped, fetchHomeGroupBirthdayConfig]);
+
+  useEffect(() => {
     if (!bootstrapped) {
       return;
     }
@@ -10445,6 +11181,11 @@ export default function App() {
       JSON.stringify({
         radiusMiles: meetingRadiusMiles,
         homeGroupMeetingIds,
+        homeGroupSeriesKey,
+        homeGroupName,
+        homeGroupBirthdayOptIn,
+        homeGroupBirthdayFirstName,
+        homeGroupBirthdayLastName,
         sponsorEnabledAtIso,
         ninetyDayGoalTarget,
         recoverySubstances,
@@ -10466,6 +11207,11 @@ export default function App() {
   }, [
     meetingRadiusMiles,
     homeGroupMeetingIds,
+    homeGroupBirthdayFirstName,
+    homeGroupBirthdayLastName,
+    homeGroupBirthdayOptIn,
+    homeGroupName,
+    homeGroupSeriesKey,
     sponsorEnabledAtIso,
     ninetyDayGoalTarget,
     recoverySubstances,
@@ -10516,6 +11262,28 @@ export default function App() {
     sobrietyDateIso,
     recoveryCelebrationShownByKey,
   ]);
+
+  useEffect(() => {
+    void checkHomeGroupBirthdayAnnouncements();
+  }, [checkHomeGroupBirthdayAnnouncements, homeGroupBirthdayResumeTick]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (
+        /inactive|background/.test(appStateRef.current) &&
+        nextState === "active" &&
+        homeScreen === "DASHBOARD"
+      ) {
+        homeGroupBirthdayResumeTickRef.current += 1;
+        setHomeGroupBirthdayResumeTick(homeGroupBirthdayResumeTickRef.current);
+      }
+      appStateRef.current = nextState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [homeScreen]);
 
   useEffect(() => {
     setMeetingsLocationFilter((current) => {
@@ -11913,13 +12681,25 @@ export default function App() {
                                       styles.meetingCard,
                                       selected ? styles.homeGroupSelectedCard : null,
                                     ]}
-                                    onPress={() =>
-                                      setHomeGroupMeetingIds(
-                                        selected
-                                          ? []
-                                          : option.meetings.map((meeting) => meeting.id),
-                                      )
-                                    }
+                                    onPress={() => {
+                                      if (selected) {
+                                        void clearHomeGroupSelection();
+                                        return;
+                                      }
+
+                                      openHomeGroupBirthdayPrompt(
+                                        {
+                                          key: option.key,
+                                          name: option.name,
+                                          meetingIds: option.meetings.map((meeting) => meeting.id),
+                                          primaryMeetingId:
+                                            option.nextMeeting?.id ??
+                                            option.meetings[0]?.id ??
+                                            null,
+                                        },
+                                        "wizard",
+                                      );
+                                    }}
                                   >
                                     <Text style={styles.meetingName}>{option.name}</Text>
                                     <Text style={styles.sectionMeta}>
@@ -12163,8 +12943,9 @@ export default function App() {
                           </Text>
                           <Text style={styles.sectionMeta}>
                             Home group:{" "}
-                            {homeGroupMeetingIds.length > 0
+                            {homeGroupMeetingIds.length > 0 || homeGroupSeriesKey
                               ? (selectedHomeGroupOption?.name ??
+                                homeGroupName ??
                                 allMeetings.find((meeting) => meeting.id === homeGroupMeetingIds[0])
                                   ?.name ??
                                 "Selected")
@@ -13063,7 +13844,7 @@ export default function App() {
 
                         <Pressable
                           style={styles.checkboxRow}
-                          onPress={() => toggleHomeGroupMeeting(selectedMeeting.id)}
+                          onPress={() => void toggleHomeGroupMeeting(selectedMeeting)}
                         >
                           <View
                             style={[
@@ -14095,6 +14876,89 @@ export default function App() {
                   </GlassCard>
 
                   <GlassCard style={styles.card} strong>
+                    <Text style={styles.sectionTitle}>Home Group Birthdays</Text>
+                    <Text style={styles.sectionMeta}>
+                      Celebrate sobriety birthdays with the people who selected the same home group.
+                      Names shown to others stay first-name only.
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      Home group:{" "}
+                      {currentHomeGroupSelection?.name ?? homeGroupName ?? "Not selected"}
+                    </Text>
+                    {!currentHomeGroupSelection ? (
+                      <>
+                        <Text style={styles.sectionMeta}>
+                          Choose a home group in the setup wizard or from a meeting detail card to
+                          turn this on.
+                        </Text>
+                        <View style={styles.buttonRow}>
+                          <AppButton
+                            title="Open meetings"
+                            variant="secondary"
+                            onPress={openMeetingsHub}
+                          />
+                          <View style={styles.buttonSpacer} />
+                          <AppButton title="Run setup wizard" onPress={restartSetup} />
+                        </View>
+                      </>
+                    ) : (
+                      <>
+                        <View style={styles.inlineRow}>
+                          <Text style={styles.label}>Join birthday recognition</Text>
+                          <Switch
+                            value={homeGroupBirthdayOptIn}
+                            onValueChange={setHomeGroupBirthdayOptIn}
+                          />
+                        </View>
+                        <TextInput
+                          style={styles.input}
+                          value={homeGroupBirthdayFirstName}
+                          onChangeText={setHomeGroupBirthdayFirstName}
+                          placeholder="First name"
+                          maxLength={80}
+                        />
+                        <TextInput
+                          style={styles.input}
+                          value={homeGroupBirthdayLastName}
+                          onChangeText={setHomeGroupBirthdayLastName}
+                          placeholder="Last name (optional)"
+                          maxLength={80}
+                        />
+                        <Text style={styles.sectionMeta}>
+                          {homeGroupBirthdayOptIn
+                            ? sobrietyDateIso
+                              ? `Your sobriety date for birthday recognition: ${formatIsoToUsDate(sobrietyDateIso)}`
+                              : "Add a sobriety date above before turning birthday recognition on."
+                            : "You can keep your home group without joining birthday announcements."}
+                        </Text>
+                        {homeGroupBirthdayStatus ? (
+                          <Text style={styles.sectionMeta}>{homeGroupBirthdayStatus}</Text>
+                        ) : null}
+                        <View style={styles.buttonRow}>
+                          <AppButton
+                            title={
+                              homeGroupBirthdaySaving
+                                ? "Saving..."
+                                : "Save Home Group Birthday Settings"
+                            }
+                            onPress={() => void saveHomeGroupBirthdayFromSettings()}
+                            disabled={homeGroupBirthdaySaving}
+                          />
+                        </View>
+                        <View style={styles.buttonRow}>
+                          <AppButton
+                            title="Remove Home Group"
+                            variant="secondary"
+                            onPress={() => {
+                              void clearHomeGroupSelection();
+                            }}
+                          />
+                        </View>
+                      </>
+                    )}
+                  </GlassCard>
+
+                  <GlassCard style={styles.card} strong>
                     <View style={styles.inlineRow}>
                       <Text style={styles.sectionTitle}>Meetings</Text>
                       <Pressable
@@ -14308,7 +15172,10 @@ export default function App() {
                             earlyMinutes: DEFAULT_MEETING_EARLY_MINUTES,
                             serviceCommitmentMinutes: null,
                           };
-                          const isHomeGroup = selectedDayPlan.homeGroupMeetingId === meeting.id;
+                          const isHomeGroup =
+                            (homeGroupSeriesKey !== null &&
+                              buildHomeGroupSeriesKey(meeting) === homeGroupSeriesKey) ||
+                            selectedDayPlan.homeGroupMeetingId === meeting.id;
                           const preview = buildDriveSchedulePreview(meeting, selectedDayPlan);
                           const leaveBy = leaveByLabel(
                             selectedDay.date,
@@ -14373,7 +15240,7 @@ export default function App() {
                                   <View style={styles.inlineRowGap}>
                                     <AppButton
                                       title={isHomeGroup ? "Unset home group" : "Set as home group"}
-                                      onPress={() => toggleHomeGroupMeeting(meeting.id)}
+                                      onPress={() => void toggleHomeGroupMeeting(meeting)}
                                       variant="secondary"
                                     />
                                   </View>
@@ -14504,7 +15371,7 @@ export default function App() {
 
                         <Pressable
                           style={styles.checkboxRow}
-                          onPress={() => toggleHomeGroupMeeting(selectedMeeting.id)}
+                          onPress={() => void toggleHomeGroupMeeting(selectedMeeting)}
                         >
                           <View
                             style={[
@@ -14870,6 +15737,115 @@ export default function App() {
         <StatusBar style="light" />
 
         <Modal
+          visible={showHomeGroupBirthdayPrompt}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {
+            void skipHomeGroupBirthdayPrompt();
+          }}
+        >
+          <View style={styles.recoveryCelebrationBackdrop}>
+            <GlassCard
+              strong
+              blurIntensity={18}
+              darken
+              gradientDark
+              style={styles.recoveryCelebrationCard}
+            >
+              <Text style={styles.recoveryCelebrationEyebrow}>Home Group Birthdays</Text>
+              <Text style={styles.recoveryCelebrationTitle}>
+                {homeGroupBirthdayPromptSource === "meeting-detail"
+                  ? "Join birthday recognition for this home group?"
+                  : "Want to join home group birthday recognition?"}
+              </Text>
+              <Text style={styles.recoveryCelebrationBody}>
+                When someone else in this same home group has a sobriety birthday, the app can let
+                you know when you open it. Names shown to others stay first-name only.
+              </Text>
+              <View style={styles.inlineRow}>
+                <Text style={styles.label}>Join birthday recognition</Text>
+                <Switch
+                  value={homeGroupBirthdayPromptOptIn}
+                  onValueChange={setHomeGroupBirthdayPromptOptIn}
+                />
+              </View>
+              <TextInput
+                style={styles.input}
+                value={homeGroupBirthdayPromptFirstName}
+                onChangeText={setHomeGroupBirthdayPromptFirstName}
+                placeholder="First name"
+                maxLength={80}
+              />
+              <TextInput
+                style={styles.input}
+                value={homeGroupBirthdayPromptLastName}
+                onChangeText={setHomeGroupBirthdayPromptLastName}
+                placeholder="Last name (optional)"
+                maxLength={80}
+              />
+              <Text style={styles.recoveryCelebrationSupportText}>
+                {homeGroupBirthdayPromptOptIn
+                  ? sobrietyDateIso
+                    ? `Using sobriety date ${formatIsoToUsDate(sobrietyDateIso)} for birthday recognition.`
+                    : "Add your sobriety date before turning this on."
+                  : "You can keep your home group without joining birthday announcements."}
+              </Text>
+              {homeGroupBirthdayStatus ? (
+                <Text style={styles.recoveryCelebrationSupportText}>{homeGroupBirthdayStatus}</Text>
+              ) : null}
+              <View style={styles.buttonRow}>
+                <AppButton
+                  title="Not now"
+                  variant="secondary"
+                  onPress={() => void skipHomeGroupBirthdayPrompt()}
+                />
+                <View style={styles.buttonSpacer} />
+                <AppButton
+                  title={homeGroupBirthdaySaving ? "Saving..." : "Save"}
+                  onPress={() => void saveHomeGroupBirthdayPrompt()}
+                  disabled={homeGroupBirthdaySaving}
+                />
+              </View>
+            </GlassCard>
+          </View>
+        </Modal>
+
+        <Modal
+          visible={activeHomeGroupBirthdayAnnouncements.length > 0}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setActiveHomeGroupBirthdayAnnouncements([])}
+        >
+          <View style={styles.recoveryCelebrationBackdrop}>
+            <GlassCard
+              strong
+              blurIntensity={18}
+              darken
+              gradientDark
+              style={styles.recoveryCelebrationCard}
+            >
+              <Text style={styles.recoveryCelebrationEyebrow}>Home Group Update</Text>
+              <Text style={styles.recoveryCelebrationTitle}>
+                {activeHomeGroupBirthdayAnnouncements.length === 1
+                  ? "A sobriety birthday is happening today"
+                  : "Sobriety birthdays are happening today"}
+              </Text>
+              <Text style={styles.recoveryCelebrationBody}>
+                {buildHomeGroupBirthdayAnnouncementMessage(activeHomeGroupBirthdayAnnouncements)}
+              </Text>
+              <Text style={styles.recoveryCelebrationSupportText}>
+                Community matters. A quick hello, call, or handshake can mean a lot on a sober
+                birthday.
+              </Text>
+              <AppButton
+                title="Back to dashboard"
+                onPress={() => setActiveHomeGroupBirthdayAnnouncements([])}
+              />
+            </GlassCard>
+          </View>
+        </Modal>
+
+        <Modal
           visible={Boolean(activeRecoveryCelebration)}
           transparent
           animationType="fade"
@@ -15156,19 +16132,62 @@ export default function App() {
                 </GlassCard>
 
                 <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
-                  <Text style={styles.label}>Substance</Text>
-                  <View style={styles.chipRow}>
+                  <View style={styles.recoveryInsightControlsHeader}>
+                    <Text style={styles.label}>Guide controls</Text>
+                  </View>
+                  <View style={styles.recoveryInsightControlsRow}>
+                    <Pressable
+                      style={styles.recoveryInsightBackPill}
+                      onPress={closeRecoveryGauge}
+                      accessibilityRole="button"
+                      accessibilityLabel="Back to recovery gauges"
+                    >
+                      <Text style={styles.recoveryInsightBackPillText}>
+                        Back to Recovery Gauges
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.recoveryInsightBackPill}
+                      onPress={() => {
+                        closeRecoveryGauge();
+                        openSettingsHub();
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel="Edit selected recovery substances"
+                    >
+                      <Text style={styles.recoveryInsightBackPillText}>
+                        Edit Selected Substances
+                      </Text>
+                    </Pressable>
+                  </View>
+                  <Text style={styles.sectionMeta}>
+                    Switch the guide substance below, or edit your selected recovery substances in
+                    Recovery Settings.
+                  </Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.recoveryInsightPillRow}
+                  >
                     {(activeRecoveryInsight?.substanceOptions ?? RECOVERY_SUBSTANCE_OPTIONS).map(
                       (option) => {
                         const selected = activeRecoveryInsight?.selectedSubstance === option.value;
                         return (
                           <Pressable
                             key={`recovery-insight-${option.value}`}
-                            style={[styles.chip, selected ? styles.chipSelected : null]}
+                            style={[
+                              styles.recoveryInsightSubstancePill,
+                              selected ? styles.recoveryInsightSubstancePillSelected : null,
+                            ]}
                             onPress={() => setActiveRecoveryInsightSubstance(option.value)}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Show ${option.label} recovery guidance`}
                           >
                             <Text
-                              style={[styles.chipText, selected ? styles.chipTextSelected : null]}
+                              style={[
+                                styles.recoveryInsightSubstancePillText,
+                                selected ? styles.recoveryInsightSubstancePillTextSelected : null,
+                              ]}
                             >
                               {option.label}
                             </Text>
@@ -15176,7 +16195,7 @@ export default function App() {
                         );
                       },
                     )}
-                  </View>
+                  </ScrollView>
                 </GlassCard>
 
                 <GlassCard strong blurIntensity={14} darken gradientDark style={styles.card}>
@@ -15569,6 +16588,57 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     textTransform: "uppercase",
     color: "rgba(216,228,255,0.7)",
+  },
+  recoveryInsightControlsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  recoveryInsightControlsRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 8,
+    marginBottom: 10,
+  },
+  recoveryInsightBackPill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(125,211,252,0.42)",
+    backgroundColor: "rgba(125,211,252,0.12)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  recoveryInsightBackPillText: {
+    color: "rgba(224,247,255,0.98)",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  recoveryInsightPillRow: {
+    gap: 8,
+    paddingTop: 10,
+    paddingRight: 8,
+  },
+  recoveryInsightSubstancePill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.16)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  recoveryInsightSubstancePillSelected: {
+    borderColor: "rgba(196,181,253,0.62)",
+    backgroundColor: "rgba(196,181,253,0.22)",
+  },
+  recoveryInsightSubstancePillText: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  recoveryInsightSubstancePillTextSelected: {
+    color: colors.textPrimary,
   },
   recoveryInsightHeroPercent: {
     marginTop: 4,

@@ -195,6 +195,28 @@ export interface SponsorConfigRow {
   updated_by_user_id: string;
 }
 
+export interface HomeGroupBirthdayMembershipRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  home_group_active: boolean;
+  home_group_key: string | null;
+  home_group_name: string | null;
+  birthday_opt_in: boolean;
+  first_name: string | null;
+  last_name: string | null;
+  sobriety_date: string | null;
+  created_at: string;
+  updated_at: string;
+  updated_by_user_id: string;
+}
+
+export interface HomeGroupBirthdayAnnouncementRow {
+  user_id: string;
+  first_name: string;
+  sobriety_date: string;
+}
+
 export interface MeetingFeedRow {
   id: string;
   tenant_id: string;
@@ -238,6 +260,65 @@ export interface MeetingGuideMeetingRow {
   geo_updated_at: string | null;
   updated_at_source: string | null;
   last_ingested_at: string;
+}
+
+function parseIsoDateParts(value: string): { year: number; month: number; day: number } | null {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return null;
+  }
+
+  return { year, month, day };
+}
+
+function isLeapYear(year: number): boolean {
+  if (year % 400 === 0) {
+    return true;
+  }
+  if (year % 100 === 0) {
+    return false;
+  }
+  return year % 4 === 0;
+}
+
+function anniversaryMonthDay(parts: { month: number; day: number }, targetYear: number): string {
+  if (parts.month === 2 && parts.day === 29 && !isLeapYear(targetYear)) {
+    return "02-28";
+  }
+  return `${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function sobrietyBirthdayYearsForDate(sobrietyDateIso: string, todayIso: string): number | null {
+  const sobrietyParts = parseIsoDateParts(sobrietyDateIso);
+  const todayParts = parseIsoDateParts(todayIso);
+  if (!sobrietyParts || !todayParts) {
+    return null;
+  }
+
+  if (
+    anniversaryMonthDay(sobrietyParts, todayParts.year) !==
+    anniversaryMonthDay(todayParts, todayParts.year)
+  ) {
+    return null;
+  }
+
+  const years = todayParts.year - sobrietyParts.year;
+  return years >= 1 ? years : null;
 }
 
 export interface MeetingGuideNearbyFilters {
@@ -656,6 +737,192 @@ export function createRepositories(db: DbClient) {
       );
 
       return result.rows[0] ?? null;
+    },
+
+    async getHomeGroupBirthdayMembership(
+      tenantId: string,
+      userId: string,
+    ): Promise<HomeGroupBirthdayMembershipRow | null> {
+      const result = await db.query<HomeGroupBirthdayMembershipRow>(
+        `
+        SELECT
+          id,
+          tenant_id,
+          user_id,
+          home_group_active,
+          home_group_key,
+          home_group_name,
+          birthday_opt_in,
+          first_name,
+          last_name,
+          sobriety_date,
+          created_at,
+          updated_at,
+          updated_by_user_id
+        FROM home_group_birthday_memberships
+        WHERE tenant_id = $1
+          AND user_id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async upsertHomeGroupBirthdayMembership(
+      tenantId: string,
+      userId: string,
+      payload: {
+        homeGroupActive: boolean;
+        homeGroupKey: string | null;
+        homeGroupName: string | null;
+        birthdaysEnabled: boolean;
+        firstName: string | null;
+        lastName: string | null;
+        sobrietyDateIso: string | null;
+      },
+      updatedByUserId: string,
+    ): Promise<HomeGroupBirthdayMembershipRow | null> {
+      const user = await db.query<{ id: string }>(
+        `
+        SELECT id
+        FROM users
+        WHERE tenant_id = $1
+          AND id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+      if (!user.rows[0]) {
+        return null;
+      }
+
+      const result = await db.query<HomeGroupBirthdayMembershipRow>(
+        `
+        INSERT INTO home_group_birthday_memberships (
+          id,
+          tenant_id,
+          user_id,
+          home_group_active,
+          home_group_key,
+          home_group_name,
+          birthday_opt_in,
+          first_name,
+          last_name,
+          sobriety_date,
+          updated_by_user_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (tenant_id, user_id)
+        DO UPDATE SET
+          home_group_active = EXCLUDED.home_group_active,
+          home_group_key = EXCLUDED.home_group_key,
+          home_group_name = EXCLUDED.home_group_name,
+          birthday_opt_in = EXCLUDED.birthday_opt_in,
+          first_name = EXCLUDED.first_name,
+          last_name = EXCLUDED.last_name,
+          sobriety_date = EXCLUDED.sobriety_date,
+          updated_by_user_id = EXCLUDED.updated_by_user_id,
+          updated_at = NOW()
+        RETURNING
+          id,
+          tenant_id,
+          user_id,
+          home_group_active,
+          home_group_key,
+          home_group_name,
+          birthday_opt_in,
+          first_name,
+          last_name,
+          sobriety_date,
+          created_at,
+          updated_at,
+          updated_by_user_id
+      `,
+        [
+          randomUUID(),
+          tenantId,
+          userId,
+          payload.homeGroupActive,
+          payload.homeGroupActive ? payload.homeGroupKey : null,
+          payload.homeGroupActive ? payload.homeGroupName : null,
+          payload.homeGroupActive && payload.birthdaysEnabled,
+          payload.homeGroupActive ? payload.firstName : payload.firstName,
+          payload.homeGroupActive ? payload.lastName : payload.lastName,
+          payload.homeGroupActive ? payload.sobrietyDateIso : payload.sobrietyDateIso,
+          updatedByUserId,
+        ],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async listHomeGroupBirthdayAnnouncements(
+      tenantId: string,
+      userId: string,
+      todayIso: string,
+    ): Promise<
+      Array<{
+        userId: string;
+        firstName: string;
+        anniversaryYears: number;
+      }>
+    > {
+      const membership = await db.query<{
+        home_group_active: boolean;
+        home_group_key: string | null;
+      }>(
+        `
+        SELECT home_group_active, home_group_key
+        FROM home_group_birthday_memberships
+        WHERE tenant_id = $1
+          AND user_id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+      const viewer = membership.rows[0];
+      if (!viewer?.home_group_active || !viewer.home_group_key) {
+        return [];
+      }
+
+      const result = await db.query<HomeGroupBirthdayAnnouncementRow>(
+        `
+        SELECT user_id, first_name, sobriety_date
+        FROM home_group_birthday_memberships
+        WHERE tenant_id = $1
+          AND home_group_active = TRUE
+          AND birthday_opt_in = TRUE
+          AND home_group_key = $2
+          AND user_id <> $3
+          AND first_name IS NOT NULL
+          AND sobriety_date IS NOT NULL
+      `,
+        [tenantId, viewer.home_group_key, userId],
+      );
+
+      return result.rows
+        .map((row) => {
+          const anniversaryYears = sobrietyBirthdayYearsForDate(row.sobriety_date, todayIso);
+          if (!anniversaryYears) {
+            return null;
+          }
+          return {
+            userId: row.user_id,
+            firstName: row.first_name.trim(),
+            anniversaryYears,
+          };
+        })
+        .filter(
+          (
+            row,
+          ): row is {
+            userId: string;
+            firstName: string;
+            anniversaryYears: number;
+          } => row !== null,
+        );
     },
 
     async updateUserSupervision(

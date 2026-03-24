@@ -62,6 +62,37 @@ export function createTenantRepositories(repositories: Repositories) {
         );
       },
     },
+    homeGroupBirthdays: {
+      get(actor: ActorContext) {
+        return repositories.getHomeGroupBirthdayMembership(actor.tenantId, actor.userId);
+      },
+      upsert(
+        actor: ActorContext,
+        payload: {
+          homeGroupActive: boolean;
+          homeGroupKey: string | null;
+          homeGroupName: string | null;
+          birthdaysEnabled: boolean;
+          firstName: string | null;
+          lastName: string | null;
+          sobrietyDateIso: string | null;
+        },
+      ) {
+        return repositories.upsertHomeGroupBirthdayMembership(
+          actor.tenantId,
+          actor.userId,
+          payload,
+          actor.userId,
+        );
+      },
+      listAnnouncements(actor: ActorContext, todayIso: string) {
+        return repositories.listHomeGroupBirthdayAnnouncements(
+          actor.tenantId,
+          actor.userId,
+          todayIso,
+        );
+      },
+    },
     supervisor: {
       isAssigned(actor: ActorContext, targetUserId: string) {
         return repositories.isSupervisorAssignedToUser(actor.tenantId, actor.userId, targetUserId);

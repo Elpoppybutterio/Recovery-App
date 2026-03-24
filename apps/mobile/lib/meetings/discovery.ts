@@ -53,7 +53,7 @@ function normalizeOnlineHost(url: string | null): string {
   }
 }
 
-function buildHomeGroupSeriesKey(meeting: MeetingRecord): string {
+export function buildHomeGroupSeriesKey(meeting: MeetingRecord): string {
   const nameKey = normalizeText(meeting.name);
   const addressKey = normalizeAddress(meeting.address);
   const onlineHost = normalizeOnlineHost(meeting.onlineUrl);

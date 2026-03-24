@@ -29,6 +29,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Meetings auth + discovery hardening: mobile now reads runtime Expo config for the live API/auth path, avoids malformed simulator headers, uses device-local timezone keys for meetings/day windows, builds a deduped 7-day home-group selector from area meetings, and adds an `Online Meetings Now` CTA from the dashboard tile.
 - Recovery gauges enhancement: setup step 2 now supports Marijuana and Kratom, the dashboard now splits Mental and Physical recovery into separate educational gauges, and each gauge opens a substance-switchable week-by-week guide with supportive trend language.
 - Upcoming meetings tile refinement: the live dashboard now uses the shared compact meetings tile, defaults to the next two area meetings, exposes an expand/collapse control for the fuller list, and keeps the `Online Meetings Now` quick action visible beside the attendance log.
+- Home group birthdays: users can now attach a stable home-group identity to birthday participation, opt into first-name-only sobriety birthday recognition from setup or meeting detail, edit the setting later, and see a once-per-day in-app announcement when someone else in the same home group is celebrating.
 
 ## Slice A (DONE)
 
