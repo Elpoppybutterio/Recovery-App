@@ -138,6 +138,10 @@ module.exports = ({ config }: ConfigContext): ExpoConfig => {
           "SoberAI uses calendar access to create recovery meetings, sober house obligations, and accountability appointments at your request.",
         NSCalendarsFullAccessUsageDescription:
           "SoberAI uses calendar access to create and update recovery meetings, service commitments, sober house obligations, and accountability appointments you choose to save.",
+        NSRemindersUsageDescription:
+          "SoberAI uses reminders access only when needed to support recovery calendar items you choose to save.",
+        NSRemindersFullAccessUsageDescription:
+          "SoberAI uses reminders access only when needed to support recovery calendar items you choose to save.",
         NSLocationWhenInUseUsageDescription:
           "Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.",
         UIBackgroundModes: ["fetch", "remote-notification"],

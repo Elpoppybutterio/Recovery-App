@@ -50,6 +50,10 @@
 	<string>SoberAI uses your calendar to add recovery meetings, sober house obligations, and accountability appointments you choose to save.</string>
 	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
 	<string>SoberAI uses calendar access to create recovery meetings, sober house obligations, and accountability appointments at your request.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>SoberAI uses reminders access only when needed to support recovery calendar items you choose to save.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>SoberAI uses reminders access only when needed to support recovery calendar items you choose to save.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.</string>
 	<key>NSMicrophoneUsageDescription</key>

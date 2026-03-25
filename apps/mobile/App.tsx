@@ -1705,10 +1705,47 @@ function resolveUserRegionHintFromLocation(location: LocationStamp | null): stri
   return inMontanaBounds ? "MT" : null;
 }
 
+function getRuntimeIosInfoPlist(): Record<string, unknown> {
+  const runtimeExpoConfig =
+    (Constants.expoConfig as { ios?: { infoPlist?: Record<string, unknown> } } | null | undefined)
+      ?.ios?.infoPlist ?? null;
+  const bundledExpoConfig = appJson.expo.ios?.infoPlist ?? null;
+  return {
+    ...(bundledExpoConfig ?? {}),
+    ...(runtimeExpoConfig ?? {}),
+  };
+}
+
+function hasUsageDescription(infoPlist: Record<string, unknown>, key: string): boolean {
+  const value = infoPlist[key];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isExpoCalendarConfiguredForIos(): boolean {
+  if (Platform.OS !== "ios") {
+    return true;
+  }
+  const infoPlist = getRuntimeIosInfoPlist();
+  const hasCalendarUsageDescription =
+    hasUsageDescription(infoPlist, "NSCalendarsFullAccessUsageDescription") ||
+    hasUsageDescription(infoPlist, "NSCalendarsUsageDescription") ||
+    hasUsageDescription(infoPlist, "NSCalendarsWriteOnlyAccessUsageDescription");
+  const hasRemindersUsageDescription =
+    hasUsageDescription(infoPlist, "NSRemindersFullAccessUsageDescription") ||
+    hasUsageDescription(infoPlist, "NSRemindersUsageDescription");
+  return hasCalendarUsageDescription && hasRemindersUsageDescription;
+}
+
 function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     switch (moduleName) {
       case "expo-calendar": {
+        if (!isExpoCalendarConfiguredForIos()) {
+          console.warn(
+            "[calendar] expo-calendar unavailable: missing iOS usage descriptions for calendar/reminders",
+          );
+          return null;
+        }
         const nativeModules = NativeModules as Record<string, unknown>;
         const nativeCalendarModule =
           nativeModules.ExpoCalendar ?? nativeModules.EXCalendar ?? nativeModules.ExponentCalendar;
@@ -2054,7 +2091,9 @@ export default function App() {
   const iosStartupCompatibilityGuardEnabled =
     Platform.OS === "ios" && (iosForcedSafeBoot || !__DEV__);
   const calendarRuntimeEnabled =
-    (Platform.OS === "ios" || Platform.OS === "android") && hasCalendarNativeModule();
+    (Platform.OS === "ios" || Platform.OS === "android") &&
+    hasCalendarNativeModule() &&
+    isExpoCalendarConfiguredForIos();
   const calendarStartupPolicy = useMemo(
     () => ({
       blockNativeStartup: false,
