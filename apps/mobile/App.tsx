@@ -1760,12 +1760,6 @@ function loadOptionalModule<T>(moduleName: string): T | null {
           );
           return null;
         }
-        const nativeModules = NativeModules as Record<string, unknown>;
-        const nativeCalendarModule =
-          nativeModules.ExpoCalendar ?? nativeModules.EXCalendar ?? nativeModules.ExponentCalendar;
-        if (!nativeCalendarModule) {
-          return null;
-        }
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-calendar") as T;
       }
@@ -1801,10 +1795,7 @@ function loadOptionalModule<T>(moduleName: string): T | null {
 }
 
 function hasCalendarNativeModule(): boolean {
-  const nativeModules = NativeModules as Record<string, unknown>;
-  return Boolean(
-    nativeModules.ExpoCalendar ?? nativeModules.EXCalendar ?? nativeModules.ExponentCalendar,
-  );
+  return isExpoCalendarConfiguredForIos();
 }
 
 const mapsModule = loadOptionalModule<typeof import("react-native-maps")>("react-native-maps");
@@ -2105,9 +2096,7 @@ export default function App() {
   const iosStartupCompatibilityGuardEnabled =
     Platform.OS === "ios" && (iosForcedSafeBoot || !__DEV__);
   const calendarRuntimeEnabled =
-    (Platform.OS === "ios" || Platform.OS === "android") &&
-    hasCalendarNativeModule() &&
-    isExpoCalendarConfiguredForIos();
+    (Platform.OS === "ios" || Platform.OS === "android") && hasCalendarNativeModule();
   const calendarStartupPolicy = useMemo(
     () => ({
       blockNativeStartup: false,
@@ -4094,22 +4083,37 @@ export default function App() {
 
   const ensureCalendarPermission = useCallback(
     async (requestIfNeeded = true): Promise<boolean> => {
+      console.log("[calendar] permission flow start", {
+        requestIfNeeded,
+        runtimeEnabled: calendarRuntimeEnabled,
+        allowExplicitNativeActions: calendarStartupPolicy.allowExplicitNativeActions,
+      });
       if (!calendarRuntimeEnabled) {
         calendarPermissionBlockedRef.current = false;
+        console.log("[calendar] permission flow blocked", { reason: "runtime-disabled" });
         return false;
       }
       if (!calendarStartupPolicy.allowExplicitNativeActions) {
         calendarPermissionBlockedRef.current = false;
+        console.log("[calendar] permission flow blocked", {
+          reason: "explicit-actions-disabled",
+        });
         return false;
       }
       const calendarModule = getCalendarModule();
       if (!calendarModule) {
         calendarPermissionBlockedRef.current = false;
+        console.log("[calendar] permission flow blocked", { reason: "module-unavailable" });
         return false;
       }
 
       try {
         const existing = await calendarModule.getCalendarPermissionsAsync();
+        console.log("[calendar] permission existing", {
+          status: existing?.status ?? null,
+          granted: existing?.granted ?? null,
+          canAskAgain: existing?.canAskAgain ?? null,
+        });
         if (isCalendarPermissionGranted(existing)) {
           calendarPermissionBlockedRef.current = false;
           return true;
@@ -4129,6 +4133,11 @@ export default function App() {
         }
 
         const requested = await calendarModule.requestCalendarPermissionsAsync();
+        console.log("[calendar] permission requested", {
+          status: requested?.status ?? null,
+          granted: requested?.granted ?? null,
+          canAskAgain: requested?.canAskAgain ?? null,
+        });
         if (isCalendarPermissionGranted(requested)) {
           calendarPermissionBlockedRef.current = false;
           return true;
@@ -4142,8 +4151,11 @@ export default function App() {
           );
         }
         return false;
-      } catch {
+      } catch (error) {
         calendarPermissionBlockedRef.current = false;
+        console.log("[calendar] permission flow failed", {
+          message: formatError(error),
+        });
         return false;
       }
     },
@@ -4197,6 +4209,10 @@ export default function App() {
       eventId: string | null;
       errorCode: "none" | "permission" | "unavailable";
     }> => {
+      console.log("[calendar] composer flow entered", {
+        runtimeEnabled: calendarRuntimeEnabled,
+        allowExplicitNativeActions: calendarStartupPolicy.allowExplicitNativeActions,
+      });
       if (!calendarRuntimeEnabled) {
         return {
           saved: false,
@@ -4207,6 +4223,9 @@ export default function App() {
       }
       const calendarModule = getCalendarModule();
       if (!calendarModule || !calendarStartupPolicy.allowExplicitNativeActions) {
+        console.log("[calendar] composer flow blocked", {
+          reason: !calendarModule ? "module-unavailable" : "explicit-actions-disabled",
+        });
         return {
           saved: false,
           action: null,
@@ -4231,6 +4250,10 @@ export default function App() {
         )) as CalendarDialogResultCompat | null;
         const action = typeof result?.action === "string" ? result.action : "done";
         const eventId = typeof result?.id === "string" ? result.id : null;
+        console.log("[calendar] composer flow result", {
+          action,
+          eventId,
+        });
         return {
           saved: action !== "canceled" && action !== "deleted",
           action,
@@ -4239,6 +4262,9 @@ export default function App() {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
+        console.log("[calendar] composer flow failed", {
+          message: message || "unknown",
+        });
         return {
           saved: false,
           action: null,
@@ -4263,6 +4289,11 @@ export default function App() {
       eventId: string | null;
       errorCode: "none" | "permission" | "unavailable";
     }> => {
+      console.log("[calendar] upsert flow entered", {
+        existingEventId,
+        runtimeEnabled: calendarRuntimeEnabled,
+        allowExplicitNativeActions: calendarStartupPolicy.allowExplicitNativeActions,
+      });
       if (!calendarRuntimeEnabled) {
         return {
           saved: false,
@@ -4272,6 +4303,9 @@ export default function App() {
       }
       const calendarModule = getCalendarModule();
       if (!calendarModule) {
+        console.log("[calendar] upsert flow blocked", {
+          reason: "module-unavailable",
+        });
         return {
           saved: false,
           eventId: null,
@@ -4279,6 +4313,9 @@ export default function App() {
         };
       }
       if (!calendarStartupPolicy.allowExplicitNativeActions) {
+        console.log("[calendar] upsert flow blocked", {
+          reason: "explicit-actions-disabled",
+        });
         return {
           saved: false,
           eventId: null,
@@ -4297,6 +4334,9 @@ export default function App() {
 
       const calendarId = await resolveWritableCalendarId();
       if (!calendarId) {
+        console.log("[calendar] upsert flow blocked", {
+          reason: "calendar-id-unavailable",
+        });
         return {
           saved: false,
           eventId: null,
@@ -4310,6 +4350,10 @@ export default function App() {
         if (existingEventId) {
           try {
             const updatedId = await calendarModule.updateEventAsync(existingEventId, nativeDetails);
+            console.log("[calendar] upsert flow updated", {
+              existingEventId,
+              updatedId: updatedId || existingEventId,
+            });
             return {
               saved: true,
               eventId: updatedId || existingEventId,
@@ -4321,6 +4365,10 @@ export default function App() {
         }
 
         const createdId = await calendarModule.createEventAsync(calendarId, nativeDetails);
+        console.log("[calendar] upsert flow created", {
+          calendarId,
+          createdId,
+        });
         return {
           saved: true,
           eventId: createdId,
@@ -4328,6 +4376,9 @@ export default function App() {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
+        console.log("[calendar] upsert flow failed", {
+          message: message || "unknown",
+        });
         return {
           saved: false,
           eventId: null,
@@ -4385,6 +4436,11 @@ export default function App() {
       commitment: RecurringServiceCommitment;
       errorCode: "none" | "permission" | "unavailable";
     }> => {
+      console.log("[calendar] recurring commitment flow entered", {
+        commitmentId: commitment.id,
+        reason: options?.reason ?? "unspecified",
+        allowPermissionPrompt: options?.allowPermissionPrompt ?? true,
+      });
       if (!calendarRuntimeEnabled || !calendarStartupPolicy.allowAutomaticSync) {
         return {
           saved: false,
@@ -8661,6 +8717,9 @@ export default function App() {
 
   const attachCalendarEventToAttendance = useCallback(
     async (recordId: string): Promise<boolean> => {
+      console.log("[calendar] attendance flow entered", {
+        recordId,
+      });
       if (!calendarRuntimeEnabled) {
         setAttendanceStatus("Calendar sync is unavailable in this build.");
         return false;
