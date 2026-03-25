@@ -7,7 +7,7 @@ import {
   SponsorRepeatRule,
   SponsorRepeatUnit,
 } from "@recovery/shared-types";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ActorContext } from "../domain/actor";
 import type { DbClient } from "./client";
 import {
@@ -212,8 +212,9 @@ export interface HomeGroupBirthdayMembershipRow {
 }
 
 export interface HomeGroupBirthdayAnnouncementRow {
-  user_id: string;
+  id: string;
   first_name: string;
+  last_name: string | null;
   sobriety_date: string;
 }
 
@@ -864,8 +865,8 @@ export function createRepositories(db: DbClient) {
       todayIso: string,
     ): Promise<
       Array<{
-        userId: string;
-        firstName: string;
+        dedupeToken: string;
+        displayName: string;
         anniversaryYears: number;
       }>
     > {
@@ -889,7 +890,7 @@ export function createRepositories(db: DbClient) {
 
       const result = await db.query<HomeGroupBirthdayAnnouncementRow>(
         `
-        SELECT user_id, first_name, sobriety_date
+        SELECT id, first_name, last_name, sobriety_date
         FROM home_group_birthday_memberships
         WHERE tenant_id = $1
           AND home_group_active = TRUE
@@ -908,9 +909,18 @@ export function createRepositories(db: DbClient) {
           if (!anniversaryYears) {
             return null;
           }
+          const displayName = [row.first_name.trim(), row.last_name?.trim() ?? ""]
+            .filter((part) => part.length > 0)
+            .join(" ");
+          if (!displayName) {
+            return null;
+          }
           return {
-            userId: row.user_id,
-            firstName: row.first_name.trim(),
+            dedupeToken: createHash("sha256")
+              .update(`${tenantId}|${userId}|${todayIso}|${row.id}`)
+              .digest("hex")
+              .slice(0, 16),
+            displayName,
             anniversaryYears,
           };
         })
@@ -918,8 +928,8 @@ export function createRepositories(db: DbClient) {
           (
             row,
           ): row is {
-            userId: string;
-            firstName: string;
+            dedupeToken: string;
+            displayName: string;
             anniversaryYears: number;
           } => row !== null,
         );

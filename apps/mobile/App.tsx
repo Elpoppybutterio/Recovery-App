@@ -294,20 +294,12 @@ type HomeGroupBirthdayConfigPayload = {
   lastName: string | null;
   sobrietyDateIso: string | null;
 };
-type HomeGroupBirthdayConfigResponse = HomeGroupBirthdayConfigPayload & {
-  id: string;
-  userId: string;
-  createdAt: string;
-  updatedAt: string;
-  updatedByUserId: string;
-};
 type HomeGroupSelection = {
   key: string;
   name: string;
   meetingIds: string[];
   primaryMeetingId: string | null;
 };
-type HomeGroupBirthdayPromptSource = "wizard" | "meeting-detail";
 type SaveSponsorConfigOverrides = {
   sponsorEnabled?: boolean;
   sponsorActive?: boolean;
@@ -2403,8 +2395,6 @@ export default function App() {
   const [homeGroupBirthdayStatus, setHomeGroupBirthdayStatus] = useState<string | null>(null);
   const [homeGroupBirthdaySaving, setHomeGroupBirthdaySaving] = useState(false);
   const [showHomeGroupBirthdayPrompt, setShowHomeGroupBirthdayPrompt] = useState(false);
-  const [homeGroupBirthdayPromptSource, setHomeGroupBirthdayPromptSource] =
-    useState<HomeGroupBirthdayPromptSource | null>(null);
   const [homeGroupBirthdayPromptOptIn, setHomeGroupBirthdayPromptOptIn] = useState(false);
   const [homeGroupBirthdayPromptFirstName, setHomeGroupBirthdayPromptFirstName] = useState("");
   const [homeGroupBirthdayPromptLastName, setHomeGroupBirthdayPromptLastName] = useState("");
@@ -6770,54 +6760,6 @@ export default function App() {
     }
   }, [apiUrl, authHeaders, enableSponsorApiSync, formatApiErrorWithHint]);
 
-  const fetchHomeGroupBirthdayConfig = useCallback(async () => {
-    if (!enableHomeGroupBirthdayApiSync || !authHeaders) {
-      return;
-    }
-
-    try {
-      const response = await fetch(`${apiUrl}/v1/me/home-group-birthday`, {
-        headers: authHeaders,
-      });
-      if (!response.ok) {
-        setHomeGroupBirthdayStatus(
-          formatApiErrorWithHint(`Home group birthday load failed: ${response.status}`),
-        );
-        return;
-      }
-
-      const payload = (await response.json()) as {
-        homeGroupBirthdayConfig?: HomeGroupBirthdayConfigResponse | null;
-      };
-      const config = payload.homeGroupBirthdayConfig;
-      if (!config) {
-        return;
-      }
-
-      setHomeGroupBirthdayOptIn(Boolean(config.birthdaysEnabled));
-      setHomeGroupBirthdayFirstName(config.firstName ?? "");
-      setHomeGroupBirthdayLastName(config.lastName ?? "");
-      if (!homeGroupSeriesKey && config.homeGroupActive && config.homeGroupKey) {
-        setHomeGroupSeriesKey(config.homeGroupKey);
-      }
-      if (!homeGroupName && config.homeGroupActive && config.homeGroupName) {
-        setHomeGroupName(config.homeGroupName);
-      }
-      setHomeGroupBirthdayStatus(null);
-    } catch {
-      setHomeGroupBirthdayStatus(
-        formatApiErrorWithHint("Home group birthday load failed: network."),
-      );
-    }
-  }, [
-    apiUrl,
-    authHeaders,
-    enableHomeGroupBirthdayApiSync,
-    formatApiErrorWithHint,
-    homeGroupName,
-    homeGroupSeriesKey,
-  ]);
-
   const syncHomeGroupBirthdayConfig = useCallback(
     async (
       selection: HomeGroupSelection | null,
@@ -6834,20 +6776,22 @@ export default function App() {
       const nextSobrietyDateIso = overrides?.sobrietyDateIso ?? sobrietyDateIso;
 
       if (nextBirthdaysEnabled && nextFirstName.length === 0) {
-        setHomeGroupBirthdayStatus("First name is required for home group birthdays.");
+        setHomeGroupBirthdayStatus("First name is required.");
         return false;
       }
 
       if (nextBirthdaysEnabled && !nextSobrietyDateIso) {
-        setHomeGroupBirthdayStatus("Add your sobriety date before joining home group birthdays.");
+        setHomeGroupBirthdayStatus(
+          "Add your sobriety date in Recovery Settings before turning on birthday recognition.",
+        );
         return false;
       }
 
       if (!enableHomeGroupBirthdayApiSync || !authHeaders) {
         setHomeGroupBirthdayStatus(
           nextBirthdaysEnabled
-            ? "Home group birthday settings saved locally."
-            : "Home group saved locally without birthday participation.",
+            ? "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings."
+            : "Your home group was saved without birthday recognition.",
         );
         return true;
       }
@@ -6874,24 +6818,27 @@ export default function App() {
         });
 
         if (!response.ok) {
+          console.log("[home-group-birthday] save failed", {
+            status: response.status,
+            homeGroupKey: payload.homeGroupKey,
+          });
           setHomeGroupBirthdayStatus(
-            formatApiErrorWithHint(`Home group birthday save failed: ${response.status}`),
+            "Couldn't save home group birthday settings. Please try again.",
           );
           return false;
         }
 
         setHomeGroupBirthdayStatus(
           payload.birthdaysEnabled
-            ? "Home group birthday participation saved."
+            ? "Your home group and birthday recognition settings were saved."
             : payload.homeGroupActive
-              ? "Home group saved without birthday participation."
-              : "Home group birthday participation cleared.",
+              ? "Your home group was saved without birthday recognition."
+              : "Home group birthday recognition was turned off.",
         );
         return true;
-      } catch {
-        setHomeGroupBirthdayStatus(
-          formatApiErrorWithHint("Home group birthday save failed: network."),
-        );
+      } catch (error) {
+        console.log("[home-group-birthday] save failed", error);
+        setHomeGroupBirthdayStatus("Couldn't save home group birthday settings. Please try again.");
         return false;
       } finally {
         setHomeGroupBirthdaySaving(false);
@@ -6901,7 +6848,6 @@ export default function App() {
       apiUrl,
       authHeaders,
       enableHomeGroupBirthdayApiSync,
-      formatApiErrorWithHint,
       homeGroupBirthdayFirstName,
       homeGroupBirthdayLastName,
       homeGroupBirthdayOptIn,
@@ -10251,10 +10197,9 @@ export default function App() {
   );
 
   const openHomeGroupBirthdayPrompt = useCallback(
-    (selection: HomeGroupSelection, source: HomeGroupBirthdayPromptSource) => {
+    (selection: HomeGroupSelection) => {
       applyHomeGroupSelection(selection);
       setWizardHasHomeGroup(true);
-      setHomeGroupBirthdayPromptSource(source);
       setHomeGroupBirthdayPromptOptIn(homeGroupBirthdayOptIn);
       setHomeGroupBirthdayPromptFirstName(
         homeGroupBirthdayFirstName || devUserDisplayName.trim().split(" ").slice(0, 1).join(" "),
@@ -10308,15 +10253,12 @@ export default function App() {
           nextMeeting: meeting,
         } as HomeGroupWeekOption);
 
-      openHomeGroupBirthdayPrompt(
-        {
-          key: matchingOption.key,
-          name: matchingOption.name,
-          meetingIds: matchingOption.meetings.map((entry) => entry.id),
-          primaryMeetingId: meeting.id,
-        },
-        "meeting-detail",
-      );
+      openHomeGroupBirthdayPrompt({
+        key: matchingOption.key,
+        name: matchingOption.name,
+        meetingIds: matchingOption.meetings.map((entry) => entry.id),
+        primaryMeetingId: meeting.id,
+      });
     },
     [
       clearHomeGroupSelection,
@@ -10329,16 +10271,15 @@ export default function App() {
 
   const closeHomeGroupBirthdayPrompt = useCallback(() => {
     setShowHomeGroupBirthdayPrompt(false);
-    setHomeGroupBirthdayPromptSource(null);
   }, []);
 
-  const announceHomeGroupBirthdayPromptFallback = useCallback((message: string) => {
+  const announceHomeGroupBirthdayPromptFallback = useCallback((title: string, message: string) => {
     if (Platform.OS === "android") {
       ToastAndroid.show(message, ToastAndroid.LONG);
       return;
     }
 
-    Alert.alert("Home Group Saved", message);
+    Alert.alert(title, message);
   }, []);
 
   const saveHomeGroupBirthdayPrompt = useCallback(async () => {
@@ -10351,7 +10292,7 @@ export default function App() {
     const nextFirstName = homeGroupBirthdayPromptFirstName.trim();
     const nextLastName = homeGroupBirthdayPromptLastName.trim();
     if (homeGroupBirthdayPromptOptIn && nextFirstName.length === 0) {
-      setHomeGroupBirthdayStatus("First name is required to join home group birthdays.");
+      setHomeGroupBirthdayStatus("First name is required.");
       return;
     }
 
@@ -10370,6 +10311,7 @@ export default function App() {
       );
       closeHomeGroupBirthdayPrompt();
       announceHomeGroupBirthdayPromptFallback(
+        "Home Group Saved",
         "Home group saved. Add your sobriety date in Recovery Settings to turn on birthday recognition.",
       );
       return;
@@ -10389,16 +10331,23 @@ export default function App() {
       setHomeGroupBirthdayFirstName(nextFirstName);
       setHomeGroupBirthdayLastName(nextLastName);
       setHomeGroupBirthdayStatus(
-        "Home group saved. Birthday recognition could not be synced yet. Update it later in Recovery Settings.",
+        "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings.",
       );
       closeHomeGroupBirthdayPrompt();
       announceHomeGroupBirthdayPromptFallback(
-        "Home group saved. Birthday recognition could not be synced yet. Update it later in Recovery Settings.",
+        "Home Group Saved",
+        "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings.",
       );
       return;
     }
 
     closeHomeGroupBirthdayPrompt();
+    announceHomeGroupBirthdayPromptFallback(
+      "Home Group Saved",
+      homeGroupBirthdayPromptOptIn
+        ? "Your home group and birthday recognition settings were saved."
+        : "Your home group was saved without birthday recognition.",
+    );
   }, [
     announceHomeGroupBirthdayPromptFallback,
     closeHomeGroupBirthdayPrompt,
@@ -10430,16 +10379,21 @@ export default function App() {
     });
     if (!saved) {
       setHomeGroupBirthdayStatus(
-        "Home group saved. Birthday settings could not be synced yet. You can update them later in Recovery Settings.",
+        "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings.",
       );
       closeHomeGroupBirthdayPrompt();
       announceHomeGroupBirthdayPromptFallback(
-        "Home group saved. Birthday settings could not be synced yet. You can update them later in Recovery Settings.",
+        "Home Group Saved",
+        "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings.",
       );
       return;
     }
 
     closeHomeGroupBirthdayPrompt();
+    announceHomeGroupBirthdayPromptFallback(
+      "Home Group Saved",
+      "Your home group was saved without birthday recognition.",
+    );
   }, [
     announceHomeGroupBirthdayPromptFallback,
     closeHomeGroupBirthdayPrompt,
@@ -10451,14 +10405,14 @@ export default function App() {
 
   const saveHomeGroupBirthdayFromSettings = useCallback(async () => {
     if (!currentHomeGroupSelection) {
-      setHomeGroupBirthdayStatus("Choose a home group before saving birthday participation.");
+      setHomeGroupBirthdayStatus("Choose a home group before saving birthday recognition.");
       return;
     }
 
     const nextFirstName = homeGroupBirthdayFirstName.trim();
     const nextLastName = homeGroupBirthdayLastName.trim();
     if (homeGroupBirthdayOptIn && nextFirstName.length === 0) {
-      setHomeGroupBirthdayStatus("First name is required when birthday participation is enabled.");
+      setHomeGroupBirthdayStatus("First name is required.");
       return;
     }
 
@@ -10516,7 +10470,7 @@ export default function App() {
       const announcementKey = buildHomeGroupBirthdayAnnouncementKey({
         homeGroupKey: currentHomeGroupSelection.key,
         todayIso: todayDateKey,
-        celebrantUserIds: announcements.map((announcement) => announcement.userId),
+        celebrantTokens: announcements.map((announcement) => announcement.dedupeToken),
       });
       if (recoveryCelebrationShownByKey[announcementKey]) {
         return;
@@ -11799,13 +11753,6 @@ export default function App() {
       setHomeGroupName(selectedHomeGroupOption.name);
     }
   }, [homeGroupName, homeGroupSeriesKey, selectedHomeGroupOption]);
-
-  useEffect(() => {
-    if (!bootstrapped) {
-      return;
-    }
-    void fetchHomeGroupBirthdayConfig();
-  }, [bootstrapped, fetchHomeGroupBirthdayConfig]);
 
   useEffect(() => {
     if (!bootstrapped) {
@@ -14031,18 +13978,13 @@ export default function App() {
                                         return;
                                       }
 
-                                      openHomeGroupBirthdayPrompt(
-                                        {
-                                          key: option.key,
-                                          name: option.name,
-                                          meetingIds: option.meetings.map((meeting) => meeting.id),
-                                          primaryMeetingId:
-                                            option.nextMeeting?.id ??
-                                            option.meetings[0]?.id ??
-                                            null,
-                                        },
-                                        "wizard",
-                                      );
+                                      openHomeGroupBirthdayPrompt({
+                                        key: option.key,
+                                        name: option.name,
+                                        meetingIds: option.meetings.map((meeting) => meeting.id),
+                                        primaryMeetingId:
+                                          option.nextMeeting?.id ?? option.meetings[0]?.id ?? null,
+                                      });
                                     }}
                                   >
                                     <Text style={styles.meetingName}>{option.name}</Text>
@@ -16225,8 +16167,12 @@ export default function App() {
                   <GlassCard style={styles.card} strong>
                     <Text style={styles.sectionTitle}>Home Group Birthdays</Text>
                     <Text style={styles.sectionMeta}>
-                      Celebrate sobriety birthdays with the people who selected the same home group.
-                      Names shown to others stay first-name only.
+                      Get notified when someone in your home group is celebrating a sobriety
+                      birthday. Only users who selected this same home group can receive these
+                      announcements.
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      Your name will appear to others exactly as you enter it here.
                     </Text>
                     <Text style={styles.sectionMeta}>
                       Home group:{" "}
@@ -16257,26 +16203,28 @@ export default function App() {
                             onValueChange={setHomeGroupBirthdayOptIn}
                           />
                         </View>
+                        <Text style={styles.label}>First name</Text>
                         <TextInput
                           style={styles.input}
                           value={homeGroupBirthdayFirstName}
                           onChangeText={setHomeGroupBirthdayFirstName}
-                          placeholder="First name"
+                          placeholder="Jason"
                           maxLength={80}
                         />
+                        <Text style={styles.label}>Last initial or last name (optional)</Text>
                         <TextInput
                           style={styles.input}
                           value={homeGroupBirthdayLastName}
                           onChangeText={setHomeGroupBirthdayLastName}
-                          placeholder="Last name (optional)"
+                          placeholder="L or Lehman"
                           maxLength={80}
                         />
                         <Text style={styles.sectionMeta}>
                           {homeGroupBirthdayOptIn
                             ? sobrietyDateIso
-                              ? `Your sobriety date for birthday recognition: ${formatIsoToUsDate(sobrietyDateIso)}`
-                              : "Add a sobriety date above before turning birthday recognition on."
-                            : "You can keep your home group without joining birthday announcements."}
+                              ? `Using sobriety date ${formatIsoToUsDate(sobrietyDateIso)} for birthday recognition.`
+                              : "Add your sobriety date above before turning on birthday recognition."
+                            : "You can keep your home group without joining birthday recognition."}
                         </Text>
                         {homeGroupBirthdayStatus ? (
                           <Text style={styles.sectionMeta}>{homeGroupBirthdayStatus}</Text>
@@ -17101,13 +17049,14 @@ export default function App() {
             >
               <Text style={styles.recoveryCelebrationEyebrow}>Home Group Birthdays</Text>
               <Text style={styles.recoveryCelebrationTitle}>
-                {homeGroupBirthdayPromptSource === "meeting-detail"
-                  ? "Join birthday recognition for this home group?"
-                  : "Want to join home group birthday recognition?"}
+                Join home group birthday recognition?
               </Text>
               <Text style={styles.recoveryCelebrationBody}>
-                When someone else in this same home group has a sobriety birthday, the app can let
-                you know when you open it. Names shown to others stay first-name only.
+                Get notified when someone in your home group is celebrating a sobriety birthday.
+                Only users who selected this same home group can receive these announcements.
+              </Text>
+              <Text style={styles.recoveryCelebrationSupportText}>
+                Your name will appear to others exactly as you enter it here.
               </Text>
               <View style={styles.inlineRow}>
                 <Text style={styles.label}>Join birthday recognition</Text>
@@ -17116,26 +17065,28 @@ export default function App() {
                   onValueChange={setHomeGroupBirthdayPromptOptIn}
                 />
               </View>
+              <Text style={styles.label}>First name</Text>
               <TextInput
                 style={styles.input}
                 value={homeGroupBirthdayPromptFirstName}
                 onChangeText={setHomeGroupBirthdayPromptFirstName}
-                placeholder="First name"
+                placeholder="Jason"
                 maxLength={80}
               />
+              <Text style={styles.label}>Last initial or last name (optional)</Text>
               <TextInput
                 style={styles.input}
                 value={homeGroupBirthdayPromptLastName}
                 onChangeText={setHomeGroupBirthdayPromptLastName}
-                placeholder="Last name (optional)"
+                placeholder="L or Lehman"
                 maxLength={80}
               />
               <Text style={styles.recoveryCelebrationSupportText}>
                 {homeGroupBirthdayPromptOptIn
                   ? sobrietyDateIso
                     ? `Using sobriety date ${formatIsoToUsDate(sobrietyDateIso)} for birthday recognition.`
-                    : "Add your sobriety date before turning this on."
-                  : "You can keep your home group without joining birthday announcements."}
+                    : "Add your sobriety date above before turning on birthday recognition."
+                  : "You can keep your home group without joining birthday recognition."}
               </Text>
               {homeGroupBirthdayStatus ? (
                 <Text style={styles.recoveryCelebrationSupportText}>{homeGroupBirthdayStatus}</Text>

@@ -9,10 +9,22 @@ export type HomeGroupBirthdayConfig = {
 };
 
 export type HomeGroupBirthdayAnnouncement = {
-  userId: string;
-  firstName: string;
+  dedupeToken: string;
+  displayName: string;
   anniversaryYears: number;
 };
+
+export function buildHomeGroupBirthdayDisplayName(input: {
+  firstName: string | null;
+  lastName: string | null;
+}): string {
+  const firstName = input.firstName?.trim() ?? "";
+  const lastName = input.lastName?.trim() ?? "";
+  if (!firstName) {
+    return "";
+  }
+  return lastName ? `${firstName} ${lastName}` : firstName;
+}
 
 function parseIsoDateParts(value: string): { year: number; month: number; day: number } | null {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -92,13 +104,13 @@ export function getSobrietyBirthdayYears(
 export function buildHomeGroupBirthdayAnnouncementKey(input: {
   homeGroupKey: string;
   todayIso: string;
-  celebrantUserIds: string[];
+  celebrantTokens: string[];
 }): string {
   return [
     "home-group-birthday",
     input.homeGroupKey,
     input.todayIso,
-    [...input.celebrantUserIds].sort().join(","),
+    [...input.celebrantTokens].sort().join(","),
   ].join(":");
 }
 
@@ -115,10 +127,10 @@ export function buildHomeGroupBirthdayAnnouncementMessage(
       celebrant.anniversaryYears === 1
         ? "1 year sober"
         : `${celebrant.anniversaryYears} years sober`;
-    return `${celebrant.firstName} in your home group is celebrating ${yearLabel} today.`;
+    return `${celebrant.displayName} in your home group is celebrating ${yearLabel} today.`;
   }
 
-  const names = announcements.map((announcement) => announcement.firstName);
+  const names = announcements.map((announcement) => announcement.displayName);
   const lead =
     names.length === 2
       ? `${names[0]} and ${names[1]}`
