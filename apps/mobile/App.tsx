@@ -192,6 +192,13 @@ import {
   getWisdomCacheKey,
   type DailyWisdomPayload,
 } from "./lib/wisdom/daily";
+import {
+  buildMeetingCalendarEventInput,
+  buildSponsorCalendarEventInput,
+  mapCalendarWriteErrorToUserMessage,
+  resolveMeetingCalendarReminderPlan,
+  shouldAttemptCalendarWrite,
+} from "./lib/calendarWrite";
 const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
 const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
 const AA_ONLINE_MEETINGS_URL = "https://aa-intergroup.org/meetings/";
@@ -1536,16 +1543,6 @@ function isCalendarPermissionGranted(
   );
 }
 
-function getIosMajorSystemVersion(version: string | number): number | null {
-  const raw = typeof version === "string" ? version.trim() : String(version);
-  const match = raw.match(/^(\d+)/);
-  if (!match) {
-    return null;
-  }
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function formatError(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -2028,18 +2025,14 @@ export default function App() {
   const isDiagnosticsEnabled = resolvedAppEnv !== "production";
   const iosStartupCompatibilityGuardEnabled =
     Platform.OS === "ios" && (iosForcedSafeBoot || !__DEV__);
-  const iosMajorSystemVersion =
-    Platform.OS === "ios" ? getIosMajorSystemVersion(Platform.Version) : null;
-  // expo-calendar 15.x still routes iOS 17+ event permissions through the full-access bridge.
-  const iosWriteOnlyCalendarModeEnabled =
-    Platform.OS === "ios" && (iosMajorSystemVersion ?? 0) >= 17;
+  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
   const calendarStartupPolicy = useMemo(
     () => ({
-      blockNativeStartup: iosWriteOnlyCalendarModeEnabled,
-      allowAutomaticSync: !iosWriteOnlyCalendarModeEnabled,
-      allowExplicitNativeActions: Platform.OS !== "ios" || !iosWriteOnlyCalendarModeEnabled,
+      blockNativeStartup: false,
+      allowAutomaticSync: calendarRuntimeEnabled,
+      allowExplicitNativeActions: calendarRuntimeEnabled,
     }),
-    [iosWriteOnlyCalendarModeEnabled],
+    [calendarRuntimeEnabled],
   );
   const apiUrlFromEnv =
     typeof process.env.EXPO_PUBLIC_API_URL === "string"
@@ -3949,8 +3942,6 @@ export default function App() {
     [isLocalhostApiUrl],
   );
   const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
-  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
-
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
     if (!notificationsRuntimeEnabled) {
       return false;
@@ -3988,7 +3979,11 @@ export default function App() {
 
         const requested = await calendarModule.requestCalendarPermissionsAsync();
         return isCalendarPermissionGranted(requested);
-      } catch {
+      } catch (error) {
+        console.log("[calendar] permission check failed", {
+          requestIfNeeded,
+          message: error instanceof Error ? error.message : String(error),
+        });
         return false;
       }
     },
@@ -6803,12 +6798,13 @@ export default function App() {
   const syncSponsorCalendarEvent = useCallback(
     async (reason: string): Promise<boolean> => {
       console.log("[calendar] sponsor sync requested", { reason });
-      if (!calendarRuntimeEnabled) {
+      if (
+        !shouldAttemptCalendarWrite({
+          runtimeEnabled: calendarRuntimeEnabled,
+          automaticSyncEnabled: calendarStartupPolicy.allowAutomaticSync,
+        })
+      ) {
         setCalendarStatus("Calendar sync is unavailable in this build.");
-        return false;
-      }
-      if (!calendarStartupPolicy.allowAutomaticSync) {
-        setCalendarStatus("Automatic sponsor calendar sync is unavailable on iPhone.");
         return false;
       }
 
@@ -6845,20 +6841,16 @@ export default function App() {
               })),
             };
 
-      const notes = [
-        `Sponsor: ${normalizedSponsorName}`,
-        `Phone: ${sponsorPhoneE164}`,
-        `Schedule: ${sponsorCallTimeLocalHhmm} ${recurrenceSummary}`,
-      ].join("\n");
-
-      const eventDetails: CalendarEventInputCompat = {
-        title: "Call Sponsor",
-        notes,
+      const eventDetails: CalendarEventInputCompat = buildSponsorCalendarEventInput({
+        sponsorName: normalizedSponsorName,
+        sponsorPhoneE164,
+        sponsorCallTimeLocalHhmm,
+        recurrenceSummary,
         startDate: nextStart,
         endDate,
-        alarms: [{ relativeOffset: 0 }],
+        leadMinutes: sponsorLeadMinutes,
         recurrenceRule,
-      };
+      });
 
       const storedEventIdRaw = await AsyncStorage.getItem(sponsorCalendarEventStorage);
       const storedEventId = isPlausibleCalendarEventId(storedEventIdRaw) ? storedEventIdRaw : null;
@@ -6866,10 +6858,15 @@ export default function App() {
       if (!result.saved) {
         if (result.errorCode === "permission") {
           setCalendarStatus(
-            "Calendar permission is required before sponsor calls can be auto-added.",
+            "Calendar access is unavailable right now. Your reminder was still saved in the app.",
           );
         } else {
-          setCalendarStatus("Could not sync the sponsor call to Calendar.");
+          setCalendarStatus(
+            mapCalendarWriteErrorToUserMessage({
+              errorCode: result.errorCode,
+              reminderSavedInApp: true,
+            }),
+          );
         }
         return false;
       }
@@ -6894,6 +6891,7 @@ export default function App() {
       sponsorCalendarEventStorage,
       sponsorPhoneE164,
       sponsorCallTimeLocalHhmm,
+      sponsorLeadMinutes,
       calendarStartupPolicy.allowAutomaticSync,
       sponsorRepeatUnit,
       sponsorRepeatInterval,
@@ -8259,13 +8257,14 @@ export default function App() {
   }, []);
 
   const attachCalendarEventToAttendance = useCallback(
-    async (recordId: string): Promise<boolean> => {
-      if (!calendarRuntimeEnabled) {
+    async (recordId: string, options?: { relativeOffsetMinutes?: number }): Promise<boolean> => {
+      if (
+        !shouldAttemptCalendarWrite({
+          runtimeEnabled: calendarRuntimeEnabled,
+          automaticSyncEnabled: calendarStartupPolicy.allowAutomaticSync,
+        })
+      ) {
         setAttendanceStatus("Calendar sync is unavailable in this build.");
-        return false;
-      }
-      if (!calendarStartupPolicy.allowAutomaticSync) {
-        setAttendanceStatus("Automatic meeting calendar sync is unavailable on iPhone.");
         return false;
       }
 
@@ -8282,30 +8281,32 @@ export default function App() {
 
       let existingEventId = sourceRecord.calendarEventId ?? null;
       const window = getScheduledWindowForAttendance(sourceRecord);
-      const result = await upsertNativeCalendarEvent(existingEventId, {
-        title: `AA/NA Meeting - ${sourceRecord.meetingName}`,
-        startDate: window.startDate,
-        endDate:
-          window.endDate > window.startDate
-            ? window.endDate
-            : new Date(window.startDate.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000),
-        location:
-          sourceRecord.meetingAddress && sourceRecord.meetingAddress.trim().length > 0
-            ? sourceRecord.meetingAddress
-            : undefined,
-        notes:
-          (sourceRecord.requiresSignature ?? meetingSignatureRequired)
-            ? "Signature required. Added by Sober AI."
-            : "Attendance added by Sober AI.",
-        alarms: [{ relativeOffset: -10 }],
-      });
+      const result = await upsertNativeCalendarEvent(
+        existingEventId,
+        buildMeetingCalendarEventInput({
+          meetingName: sourceRecord.meetingName,
+          meetingAddress: sourceRecord.meetingAddress,
+          requiresSignature: sourceRecord.requiresSignature ?? meetingSignatureRequired,
+          startDate: window.startDate,
+          endDate:
+            window.endDate > window.startDate
+              ? window.endDate
+              : new Date(window.startDate.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000),
+          relativeOffsetMinutes: options?.relativeOffsetMinutes ?? -15,
+        }),
+      );
       if (!result.saved) {
         if (result.errorCode === "permission") {
           setAttendanceStatus(
-            "Calendar permission is required before attended meetings can be auto-added.",
+            "Calendar access is unavailable right now. Your reminder was still saved in the app.",
           );
         } else {
-          setAttendanceStatus("Could not sync the attended meeting to Calendar.");
+          setAttendanceStatus(
+            mapCalendarWriteErrorToUserMessage({
+              errorCode: result.errorCode,
+              reminderSavedInApp: true,
+            }),
+          );
         }
         return false;
       }
@@ -8334,10 +8335,6 @@ export default function App() {
   const syncAttendCalendarAndLeaveAlert = useCallback(
     async (recordId: string, meeting: MeetingRecord, originOverride?: LocationStamp | null) => {
       try {
-        const calendarAdded = meetingAutoAddToCalendar
-          ? await attachCalendarEventToAttendance(recordId)
-          : false;
-
         const sourceRecord =
           (activeAttendanceRef.current && activeAttendanceRef.current.id === recordId
             ? activeAttendanceRef.current
@@ -8348,7 +8345,42 @@ export default function App() {
           return;
         }
 
+        const earlyMinutes =
+          selectedDayPlan.plans[meeting.id]?.earlyMinutes ?? DEFAULT_MEETING_EARLY_MINUTES;
+        const baseStartDate = new Date(sourceRecord.startAt);
+        const startDateSource = Number.isNaN(baseStartDate.getTime()) ? new Date() : baseStartDate;
+        const meetingDate = resolveNextMeetingDateForDayOfWeek(meeting.dayOfWeek, startDateSource);
+        const meetingStartAt = combineDateWithHhmm(meetingDate, meeting.startsAtLocal);
         const destination = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+        const origin =
+          originOverride ?? currentLocationRef.current ?? (await readCurrentLocation(false));
+        let travelDurationSeconds: number | null = null;
+        if (origin && destination) {
+          try {
+            const directions = await getDirectionsDuration({
+              origin: { lat: origin.lat, lng: origin.lng },
+              destination,
+              arrivalTime: meetingStartAt,
+            });
+            travelDurationSeconds = directions.durationSeconds;
+          } catch (error) {
+            console.log("[calendar] travel estimate fallback", {
+              meetingId: meeting.id,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        const reminderPlan = resolveMeetingCalendarReminderPlan({
+          travelDurationSeconds,
+          arrivalBufferMinutes: earlyMinutes,
+        });
+        const calendarAdded = meetingAutoAddToCalendar
+          ? await attachCalendarEventToAttendance(recordId, {
+              relativeOffsetMinutes: reminderPlan.relativeOffsetMinutes,
+            })
+          : false;
+
         if (!destination) {
           setAttendanceStatus(
             "Added to Calendar. Leave-time unavailable (missing meeting location).",
@@ -8356,30 +8388,24 @@ export default function App() {
           return;
         }
 
-        const origin =
-          originOverride ?? currentLocationRef.current ?? (await readCurrentLocation(false));
         if (!origin) {
           setAttendanceStatus(
             "Added to Calendar. Leave-time unavailable (current location unavailable).",
           );
           return;
         }
-
-        const earlyMinutes =
-          selectedDayPlan.plans[meeting.id]?.earlyMinutes ?? DEFAULT_MEETING_EARLY_MINUTES;
-        const baseStartDate = new Date(sourceRecord.startAt);
-        const startDateSource = Number.isNaN(baseStartDate.getTime()) ? new Date() : baseStartDate;
-        const meetingDate = resolveNextMeetingDateForDayOfWeek(meeting.dayOfWeek, startDateSource);
-        const meetingStartAt = combineDateWithHhmm(meetingDate, meeting.startsAtLocal);
-        const directions = await getDirectionsDuration({
-          origin: { lat: origin.lat, lng: origin.lng },
-          destination,
-          arrivalTime: meetingStartAt,
-        });
+        if (travelDurationSeconds === null) {
+          setAttendanceStatus(
+            calendarAdded
+              ? "Added to Calendar. Leave-time unavailable (travel estimate unavailable)."
+              : "Attendance started. Leave-time unavailable (travel estimate unavailable).",
+          );
+          return;
+        }
         const leavePlan = buildLeaveTimePlan({
           meetingStartAt,
           earlyMinutes,
-          travelDurationSeconds: directions.durationSeconds,
+          travelDurationSeconds,
         });
 
         const hasNotificationPermission = await ensureNotificationPermission();
@@ -8453,8 +8479,12 @@ export default function App() {
         );
         Alert.alert("Attend confirmed", `Added to Calendar\n${summary}`);
       } catch (error) {
+        console.log("[calendar] attend scheduling failed", {
+          meetingId: meeting.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
         setAttendanceStatus(
-          `Attendance started. Post-attend scheduling failed: ${formatError(error)}`,
+          "Attendance started. Calendar or leave-time scheduling is unavailable right now.",
         );
       }
     },

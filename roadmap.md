@@ -31,6 +31,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Recovery gauges enhancement: setup step 2 now supports Marijuana and Kratom, the dashboard now splits Mental and Physical recovery into separate educational gauges, and each gauge opens a substance-switchable week-by-week guide with supportive trend language.
 - Upcoming meetings tile refinement: the live dashboard now uses the shared compact meetings tile, defaults to the next two area meetings, exposes an expand/collapse control for the fuller list, and keeps the `Online Meetings Now` quick action visible beside the attendance log.
 - Home group birthdays: users can now attach a stable home-group identity to birthday participation, opt into first-name-only sobriety birthday recognition from setup or meeting detail, edit the setting later, and see a once-per-day in-app announcement when someone else in the same home group is celebrating.
+- iOS calendar write restore: sponsor-call and attended-meeting calendar writes now use a guarded iOS-safe path again, with travel-aware meeting reminder timing and plain-English fallback messaging when calendar access or routing is unavailable.
 
 ## Slice A (DONE)
 

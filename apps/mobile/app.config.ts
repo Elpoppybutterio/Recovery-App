@@ -134,6 +134,8 @@ module.exports = ({ config }: ConfigContext): ExpoConfig => {
           "Use Face ID or your device passcode to unlock sober-house records.",
         NSCalendarsUsageDescription:
           "SoberAI uses your calendar to add recovery meetings, sober house obligations, and accountability appointments you choose to save.",
+        NSCalendarsFullAccessUsageDescription:
+          "SoberAI uses calendar access to create and update recovery meetings, sponsor calls, sober house obligations, and accountability appointments at your request.",
         NSCalendarsWriteOnlyAccessUsageDescription:
           "SoberAI uses calendar access to create recovery meetings, sober house obligations, and accountability appointments at your request.",
         NSLocationWhenInUseUsageDescription:
