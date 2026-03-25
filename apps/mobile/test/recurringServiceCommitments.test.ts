@@ -146,6 +146,24 @@ describe("recurring service commitments", () => {
     expect(restored).toEqual(commitments);
   });
 
+  it("persists the attendance export inclusion flag across a simulated relaunch", () => {
+    const commitment = buildRecurringServiceCommitmentFromDraft({
+      id: "commitment-export",
+      draft: {
+        ...createDefaultRecurringServiceCommitmentDraft(),
+        name: "Bookstore chair",
+        startsAtLocal: "10:00",
+        includeInAttendanceExport: true,
+      },
+    });
+
+    const restored = normalizeRecurringServiceCommitments(
+      JSON.parse(JSON.stringify([commitment])) as unknown,
+    );
+
+    expect(restored[0]?.includeInAttendanceExport).toBe(true);
+  });
+
   it("allows skipping the step when there is no unsaved draft and handles invalid stored payloads safely", () => {
     expect(
       hasUnsavedRecurringServiceCommitmentDraftChanges(

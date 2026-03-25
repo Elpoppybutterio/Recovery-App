@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
+import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import Constants from "expo-constants";
 import { geocodeAsync } from "expo-location";
 import type * as NotificationsTypes from "expo-notifications";
@@ -199,7 +199,6 @@ import {
   createRecurringServiceCommitmentDraftFromItem,
   hasUnsavedRecurringServiceCommitmentDraftChanges,
   isValidHhmm,
-  normalizeHhmmInput,
   normalizeRecurringServiceCommitments,
   removeRecurringServiceCommitment as removeRecurringServiceCommitmentFromList,
   RECURRING_SERVICE_COMMITMENTS_STEP_COPY,
@@ -256,6 +255,11 @@ type RepeatPreset = "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 type LocationPermissionState = "unknown" | "granted" | "denied" | "unavailable";
 type SponsorLeadMinutes = 0 | 5 | 10 | 30;
 type SponsorTimeDraft = { hour12: number; minute: number; meridiem: "AM" | "PM" };
+type ServiceCommitmentTimeField = "startsAtLocal" | "endsAtLocal";
+type ServiceCommitmentTimePickerState = {
+  field: ServiceCommitmentTimeField;
+  value: Date;
+};
 type AttendanceAutomationState =
   | "planned"
   | "eligible_to_start"
@@ -1712,9 +1716,16 @@ function resolveUserRegionHintFromLocation(location: LocationStamp | null): stri
 function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     switch (moduleName) {
-      case "expo-calendar":
+      case "expo-calendar": {
+        const nativeModules = NativeModules as Record<string, unknown>;
+        const nativeCalendarModule =
+          nativeModules.ExpoCalendar ?? nativeModules.EXCalendar ?? nativeModules.ExponentCalendar;
+        if (!nativeCalendarModule) {
+          return null;
+        }
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-calendar") as T;
+      }
       case "react-native-maps":
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("react-native-maps") as T;
@@ -1744,6 +1755,13 @@ function loadOptionalModule<T>(moduleName: string): T | null {
   } catch {
     return null;
   }
+}
+
+function hasCalendarNativeModule(): boolean {
+  const nativeModules = NativeModules as Record<string, unknown>;
+  return Boolean(
+    nativeModules.ExpoCalendar ?? nativeModules.EXCalendar ?? nativeModules.ExponentCalendar,
+  );
 }
 
 const mapsModule = loadOptionalModule<typeof import("react-native-maps")>("react-native-maps");
@@ -2043,7 +2061,8 @@ export default function App() {
   const isDiagnosticsEnabled = resolvedAppEnv !== "production";
   const iosStartupCompatibilityGuardEnabled =
     Platform.OS === "ios" && (iosForcedSafeBoot || !__DEV__);
-  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
+  const calendarRuntimeEnabled =
+    (Platform.OS === "ios" || Platform.OS === "android") && hasCalendarNativeModule();
   const calendarStartupPolicy = useMemo(
     () => ({
       blockNativeStartup: false,
@@ -2295,6 +2314,8 @@ export default function App() {
   const [sponsorMeridiem, setSponsorMeridiem] = useState<"AM" | "PM">("PM");
   const [isSponsorTimePickerVisible, setIsSponsorTimePickerVisible] = useState(false);
   const [sponsorTimeDraft, setSponsorTimeDraft] = useState<SponsorTimeDraft | null>(null);
+  const [serviceCommitmentTimePicker, setServiceCommitmentTimePicker] =
+    useState<ServiceCommitmentTimePickerState | null>(null);
   const [sponsorRepeatPreset, setSponsorRepeatPreset] = useState<RepeatPreset>("WEEKLY");
   const [sponsorRepeatDays, setSponsorRepeatDays] = useState<WeekdayCode[]>([
     getCurrentWeekdayCode(new Date()),
@@ -6296,6 +6317,20 @@ export default function App() {
       ),
     [recurringServiceCommitments],
   );
+  const attendanceSlipServiceCommitmentsForExport = useMemo(
+    () =>
+      recurringServiceCommitments
+        .filter((commitment) => commitment.includeInAttendanceExport)
+        .map((commitment) => ({
+          name: commitment.name,
+          scheduleLabel: buildRecurringServiceCommitmentSummary(commitment),
+          location: commitment.location || null,
+          arriveEarlyMinutes:
+            commitment.arriveEarlyMinutes > 0 ? commitment.arriveEarlyMinutes : null,
+          stayAfterMinutes: commitment.stayAfterMinutes > 0 ? commitment.stayAfterMinutes : null,
+        })),
+    [recurringServiceCommitments],
+  );
 
   const openRecurringServiceCommitmentEditor = useCallback(
     (commitment?: RecurringServiceCommitment) => {
@@ -6333,6 +6368,14 @@ export default function App() {
     }
     if (draft.recurrenceKind === "WEEKLY" && draft.weeklyDays.length === 0) {
       setSetupError("Select at least one weekday for this commitment.");
+      return;
+    }
+    if (Number(draft.arriveEarlyMinutes || "0") > 180) {
+      setSetupError("Arrive early must be 180 minutes or less.");
+      return;
+    }
+    if (Number(draft.stayAfterMinutes || "0") > 180) {
+      setSetupError("Stay after must be 180 minutes or less.");
       return;
     }
 
@@ -9767,7 +9810,10 @@ export default function App() {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf`;
       const { uri, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
-        { participantName: devUserDisplayName },
+        {
+          participantName: devUserDisplayName,
+          serviceCommitments: attendanceSlipServiceCommitmentsForExport,
+        },
         { fileName },
       );
       await settleBeforePdfShare();
@@ -9796,6 +9842,7 @@ export default function App() {
     }
   }, [
     activeAttendance,
+    attendanceSlipServiceCommitmentsForExport,
     devUserDisplayName,
     logSafeExportFailure,
     recordLastExportAttempt,
@@ -9871,7 +9918,10 @@ export default function App() {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`;
       const { uri, uris, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
-        { participantName: devUserDisplayName },
+        {
+          participantName: devUserDisplayName,
+          serviceCommitments: attendanceSlipServiceCommitmentsForExport,
+        },
         {
           fileName,
           onProgress: ({ chunkIndex, chunkCount }) => {
@@ -9913,6 +9963,7 @@ export default function App() {
     }
   }, [
     attendanceRecordsForView,
+    attendanceSlipServiceCommitmentsForExport,
     selectedAttendanceIds,
     logSafeExportFailure,
     setAttendanceExportProgressLabel,
@@ -9963,7 +10014,10 @@ export default function App() {
         const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
         const { uri, uris, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
           payloadRecords,
-          { participantName: devUserDisplayName },
+          {
+            participantName: devUserDisplayName,
+            serviceCommitments: attendanceSlipServiceCommitmentsForExport,
+          },
           {
             fileName,
             onProgress: ({ chunkIndex, chunkCount }) => {
@@ -10006,6 +10060,7 @@ export default function App() {
     },
     [
       attendanceRecords,
+      attendanceSlipServiceCommitmentsForExport,
       devUserDisplayName,
       logSafeExportFailure,
       recordLastExportAttempt,
@@ -12644,6 +12699,102 @@ export default function App() {
     );
   }
 
+  function defaultServiceCommitmentTimeDate(field: ServiceCommitmentTimeField): Date {
+    const explicitValue = recurringServiceCommitmentDraft[field];
+    if (isValidHhmm(explicitValue.trim())) {
+      const parts = from24HourText(explicitValue.trim());
+      return sponsorTimePartsToDate(parts.hour12, parts.minute, parts.meridiem);
+    }
+
+    if (field === "endsAtLocal" && isValidHhmm(recurringServiceCommitmentDraft.startsAtLocal)) {
+      const parts = from24HourText(recurringServiceCommitmentDraft.startsAtLocal);
+      const date = sponsorTimePartsToDate(parts.hour12, parts.minute, parts.meridiem);
+      date.setHours(date.getHours() + 1);
+      return date;
+    }
+
+    return sponsorTimePartsToDate(field === "startsAtLocal" ? 9 : 10, 0, "AM");
+  }
+
+  function applyServiceCommitmentTimeToDraft(field: ServiceCommitmentTimeField, value: Date) {
+    const next = sponsorTimeDateToParts(value);
+    const nextHhmm = to24HourText(next.hour12, next.minute, next.meridiem);
+    setRecurringServiceCommitmentDraft((current) => ({
+      ...current,
+      [field]: nextHhmm,
+    }));
+  }
+
+  function closeServiceCommitmentTimePicker() {
+    setServiceCommitmentTimePicker(null);
+  }
+
+  function confirmServiceCommitmentTimePicker() {
+    if (!serviceCommitmentTimePicker) {
+      return;
+    }
+    applyServiceCommitmentTimeToDraft(
+      serviceCommitmentTimePicker.field,
+      serviceCommitmentTimePicker.value,
+    );
+    closeServiceCommitmentTimePicker();
+  }
+
+  function openServiceCommitmentTimePicker(field: ServiceCommitmentTimeField) {
+    const initialValue = defaultServiceCommitmentTimeDate(field);
+
+    if (Platform.OS === "android") {
+      try {
+        DateTimePickerAndroid.open({
+          mode: "time",
+          is24Hour: false,
+          value: initialValue,
+          onChange: (event, selectedDate) => {
+            if (event.type === "set" && selectedDate) {
+              applyServiceCommitmentTimeToDraft(field, selectedDate);
+            }
+          },
+        });
+      } catch {
+        Alert.alert(
+          "Time picker unavailable",
+          "Use the latest app build if the native time picker cannot open on this device.",
+        );
+      }
+      return;
+    }
+
+    setServiceCommitmentTimePicker({
+      field,
+      value: initialValue,
+    });
+  }
+
+  function renderServiceCommitmentTimeField(
+    field: ServiceCommitmentTimeField,
+    label: string,
+    options?: { helperText?: string },
+  ) {
+    const rawValue = recurringServiceCommitmentDraft[field];
+    const displayValue = isValidHhmm(rawValue.trim())
+      ? formatHhmmForDisplay(rawValue.trim())
+      : "--";
+
+    return (
+      <>
+        <Text style={styles.label}>{label}</Text>
+        <Pressable
+          style={styles.timeFieldButton}
+          onPress={() => openServiceCommitmentTimePicker(field)}
+        >
+          <Text style={styles.timeFieldValue}>{displayValue}</Text>
+          <Text style={styles.timeFieldHelper}>Tap to change</Text>
+        </Pressable>
+        {options?.helperText ? <Text style={styles.sectionMeta}>{options.helperText}</Text> : null}
+      </>
+    );
+  }
+
   function toggleRecoverySubstanceSelection(
     value: RecoverySubstanceCategory,
     mode: "wizard" | "settings",
@@ -13423,6 +13574,11 @@ export default function App() {
                               <Text style={styles.sectionMeta}>
                                 {buildRecurringServiceCommitmentSummary(commitment)}
                               </Text>
+                              {commitment.includeInAttendanceExport ? (
+                                <Text style={styles.sectionMeta}>
+                                  Included on AA/NA attendance sheet
+                                </Text>
+                              ) : null}
                               {commitment.notes ? (
                                 <Text style={styles.sectionMeta}>{commitment.notes}</Text>
                               ) : null}
@@ -13524,38 +13680,20 @@ export default function App() {
                             }
                             placeholder="Clubhouse or hall"
                           />
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.startsAt}
-                          </Text>
-                          <TextInput
-                            style={styles.input}
-                            value={recurringServiceCommitmentDraft.startsAtLocal}
-                            onChangeText={(value) =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                startsAtLocal: normalizeHhmmInput(value),
-                              }))
-                            }
-                            placeholder="18:30"
-                            keyboardType="numbers-and-punctuation"
-                            maxLength={5}
-                          />
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.endsAt}
-                          </Text>
-                          <TextInput
-                            style={styles.input}
-                            value={recurringServiceCommitmentDraft.endsAtLocal}
-                            onChangeText={(value) =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                endsAtLocal: normalizeHhmmInput(value),
-                              }))
-                            }
-                            placeholder="20:00"
-                            keyboardType="numbers-and-punctuation"
-                            maxLength={5}
-                          />
+                          {renderServiceCommitmentTimeField(
+                            "startsAtLocal",
+                            RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.startsAt,
+                            {
+                              helperText: "12-hour time. New commitments default to an AM time.",
+                            },
+                          )}
+                          {renderServiceCommitmentTimeField(
+                            "endsAtLocal",
+                            RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.endsAt,
+                            {
+                              helperText: "Optional. Uses the same native time picker.",
+                            },
+                          )}
                           <Text style={styles.label}>
                             {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.arriveEarlyBy}
                           </Text>
@@ -13586,7 +13724,7 @@ export default function App() {
                             placeholder="30"
                             keyboardType="number-pad"
                           />
-                          <Text style={styles.label}>Duration</Text>
+                          <Text style={styles.label}>Duration (minutes)</Text>
                           <TextInput
                             style={styles.input}
                             value={recurringServiceCommitmentDraft.durationMinutes}
@@ -13778,6 +13916,37 @@ export default function App() {
                             placeholder="Optional notes"
                             multiline
                           />
+                          <Pressable
+                            style={styles.checkboxRow}
+                            onPress={() =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                includeInAttendanceExport: !current.includeInAttendanceExport,
+                              }))
+                            }
+                          >
+                            <View
+                              style={[
+                                styles.checkbox,
+                                recurringServiceCommitmentDraft.includeInAttendanceExport
+                                  ? styles.checkboxChecked
+                                  : null,
+                              ]}
+                            >
+                              {recurringServiceCommitmentDraft.includeInAttendanceExport ? (
+                                <Text style={styles.checkboxTick}>✓</Text>
+                              ) : null}
+                            </View>
+                            <View style={styles.checkboxBody}>
+                              <Text style={styles.label}>
+                                {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.exportInclusion}
+                              </Text>
+                              <Text style={styles.sectionMeta}>
+                                Include this recurring service commitment in attendance slip export
+                                when you need proof of service or added attendance context.
+                              </Text>
+                            </View>
+                          </Pressable>
                           <View style={styles.buttonRow}>
                             <AppButton
                               title={
@@ -17077,6 +17246,50 @@ export default function App() {
         </Modal>
 
         <Modal
+          visible={Platform.OS === "ios" && serviceCommitmentTimePicker !== null}
+          transparent
+          animationType="slide"
+          onRequestClose={closeServiceCommitmentTimePicker}
+        >
+          <View style={styles.timePickerModalRoot}>
+            <Pressable
+              style={styles.timePickerBackdrop}
+              onPress={closeServiceCommitmentTimePicker}
+            />
+            <View style={styles.timePickerSheet}>
+              <View style={styles.timePickerSheetHeader}>
+                <Pressable onPress={closeServiceCommitmentTimePicker}>
+                  <Text style={styles.timePickerSheetAction}>Cancel</Text>
+                </Pressable>
+                <Text style={styles.timePickerSheetTitle}>
+                  {serviceCommitmentTimePicker?.field === "endsAtLocal" ? "Ends at" : "Starts at"}
+                </Text>
+                <Pressable onPress={confirmServiceCommitmentTimePicker}>
+                  <Text style={styles.timePickerSheetAction}>Done</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.timePickerSheetMeta}>Choose a 12-hour time.</Text>
+              {serviceCommitmentTimePicker ? (
+                <DateTimePicker
+                  value={serviceCommitmentTimePicker.value}
+                  mode="time"
+                  display="spinner"
+                  is24Hour={false}
+                  onChange={(_, selectedDate) => {
+                    if (!selectedDate) {
+                      return;
+                    }
+                    setServiceCommitmentTimePicker((current) =>
+                      current ? { ...current, value: selectedDate } : current,
+                    );
+                  }}
+                />
+              ) : null}
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
           visible={isSponsorTimePickerVisible}
           transparent
           animationType="slide"
@@ -18337,6 +18550,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     marginTop: 4,
+  },
+  checkboxBody: {
+    flex: 1,
   },
   checkbox: {
     width: 20,

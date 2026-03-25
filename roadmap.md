@@ -67,6 +67,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Meetings dashboard balance: the Meetings Attended tile now includes a secondary consistency KPI showing the current streak of calendar weeks with 3 or more meetings attended.
 - Physical Recovery feed: the dashboard tile now opens a personalized body-and-brain recovery timeline driven by sobriety date and selected substances, with blended current-stage guidance for alcohol, opioids, and meth/stimulants plus recovery-profile CTA fallback when the user has not personalized it yet.
 - Setup wizard service commitments: recurring recovery obligations now support weekly and monthly-ordinal local capture plus calendar series sync/reminder timing on the hardened iOS-safe calendar path.
+- Step 7 scheduling polish: recurring service commitments now use 12-hour mobile-native time entry, minute-based arrival/stay offsets, and an export-inclusion flag so selected commitments can appear on AA/NA attendance slip output.
 - Tools (Recovery mode): AM routine checklist, nightly inventory CRUD, local routines analytics, sponsor SMS share, and routine PDF exports.
 - Dashboard: evolve the existing direct-message foundation into broader recovery/service/probation chat flows after sober-house direct messaging proves out.
 - Dashboard: Wisdom tile uses server-driven daily rotation (`/api/wisdom/daily`) with one quote per day, pronoun normalization (`I/you -> we`), plus local cache and deterministic fallback.

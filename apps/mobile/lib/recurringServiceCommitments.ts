@@ -10,10 +10,11 @@ export const RECURRING_SERVICE_COMMITMENTS_STEP_COPY = {
     location: "Location",
     startsAt: "Starts at",
     endsAt: "Ends at",
-    arriveEarlyBy: "Arrive early by",
-    stayAfterBy: "Stay after by",
+    arriveEarlyBy: "Arrive early (minutes)",
+    stayAfterBy: "Stay after (minutes)",
     repeats: "Repeats",
     notes: "Notes",
+    exportInclusion: "Include on AA/NA attendance sheet",
   },
 } as const;
 
@@ -61,6 +62,7 @@ export type RecurringServiceCommitment = {
   stayAfterMinutes: number;
   notes: string;
   recurrence: RecurringServiceCommitmentRecurrence;
+  includeInAttendanceExport: boolean;
   calendarSeriesId: string | null;
   calendarEventId: string | null;
   calendarSyncFingerprint: string | null;
@@ -77,6 +79,7 @@ export type RecurringServiceCommitmentDraft = {
   arriveEarlyMinutes: string;
   stayAfterMinutes: string;
   notes: string;
+  includeInAttendanceExport: boolean;
   recurrenceKind: "WEEKLY" | "MONTHLY_ORDINAL";
   weeklyDays: RecurringServiceCommitmentWeekday[];
   monthlyOrdinal: RecurringServiceCommitmentOrdinal;
@@ -141,6 +144,7 @@ export function createDefaultRecurringServiceCommitmentDraft(): RecurringService
     arriveEarlyMinutes: "",
     stayAfterMinutes: "",
     notes: "",
+    includeInAttendanceExport: false,
     recurrenceKind: "WEEKLY",
     weeklyDays: ["MON"],
     monthlyOrdinal: 1,
@@ -242,6 +246,7 @@ export function buildRecurringServiceCommitmentFromDraft(input: {
     stayAfterMinutes: normalizeMinutesText(input.draft.stayAfterMinutes),
     notes: input.draft.notes.trim(),
     recurrence,
+    includeInAttendanceExport: input.draft.includeInAttendanceExport,
     calendarSeriesId: input.existing?.calendarSeriesId ?? null,
     calendarEventId: input.existing?.calendarEventId ?? null,
     calendarSyncFingerprint: input.existing?.calendarSyncFingerprint ?? null,
@@ -342,6 +347,7 @@ export function normalizeRecurringServiceCommitments(value: unknown): RecurringS
         stayAfterMinutes: normalizeRequiredNumber(raw.stayAfterMinutes),
         notes: typeof raw.notes === "string" ? raw.notes.trim() : "",
         recurrence,
+        includeInAttendanceExport: raw.includeInAttendanceExport === true,
         calendarSeriesId:
           typeof raw.calendarSeriesId === "string" && raw.calendarSeriesId.trim().length > 0
             ? raw.calendarSeriesId.trim()
@@ -392,6 +398,7 @@ export function createRecurringServiceCommitmentDraftFromItem(
     arriveEarlyMinutes: item.arriveEarlyMinutes > 0 ? String(item.arriveEarlyMinutes) : "",
     stayAfterMinutes: item.stayAfterMinutes > 0 ? String(item.stayAfterMinutes) : "",
     notes: item.notes,
+    includeInAttendanceExport: item.includeInAttendanceExport,
     recurrenceKind: item.recurrence.kind,
     weeklyDays: item.recurrence.kind === "WEEKLY" ? item.recurrence.days : ["MON"],
     monthlyOrdinal: item.recurrence.kind === "MONTHLY_ORDINAL" ? item.recurrence.ordinal : 1,
@@ -413,6 +420,18 @@ function ordinalLabel(value: RecurringServiceCommitmentOrdinal): string {
   );
 }
 
+function formatHhmmTo12Hour(value: string): string {
+  if (!isValidHhmm(value)) {
+    return value;
+  }
+  const [hoursText, minutesText] = value.split(":");
+  const hours = Number(hoursText);
+  const minutes = Number(minutesText);
+  const meridiem = hours >= 12 ? "PM" : "AM";
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${String(minutes).padStart(2, "0")} ${meridiem}`;
+}
+
 export function describeRecurringServiceCommitmentRecurrence(
   recurrence: RecurringServiceCommitmentRecurrence,
 ): string {
@@ -427,8 +446,11 @@ export function buildRecurringServiceCommitmentSummary(
 ): string {
   const pieces = [
     describeRecurringServiceCommitmentRecurrence(commitment.recurrence),
-    commitment.startsAtLocal,
+    formatHhmmTo12Hour(commitment.startsAtLocal),
   ];
+  if (commitment.endsAtLocal) {
+    pieces.push(`Ends ${formatHhmmTo12Hour(commitment.endsAtLocal)}`);
+  }
   if (commitment.location) {
     pieces.push(commitment.location);
   }
@@ -455,5 +477,6 @@ export function buildRecurringServiceCommitmentCalendarFingerprint(
     stayAfterMinutes: commitment.stayAfterMinutes,
     notes: commitment.notes,
     recurrence: commitment.recurrence,
+    includeInAttendanceExport: commitment.includeInAttendanceExport,
   });
 }
