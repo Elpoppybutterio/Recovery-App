@@ -1,11 +1,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
-import * as Calendar from "expo-calendar";
 import Constants from "expo-constants";
 import { geocodeAsync } from "expo-location";
 import type * as NotificationsTypes from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type * as CalendarModule from "expo-calendar";
 import type { Region } from "react-native-maps";
 import Svg, { Path } from "react-native-svg";
 import {
@@ -1447,29 +1447,29 @@ function radiusMilesFromMeetingsLocationFilter(
   return currentRadiusMiles > 0 && currentRadiusMiles < 50 ? currentRadiusMiles : 50;
 }
 
-function toCalendarDayOfWeek(code: WeekdayCode): Calendar.DayOfTheWeek {
+function toCalendarDayOfWeek(code: WeekdayCode): CalendarModule.DayOfTheWeek {
   switch (code) {
     case "MON":
-      return Calendar.DayOfTheWeek.Monday;
+      return 2;
     case "TUE":
-      return Calendar.DayOfTheWeek.Tuesday;
+      return 3;
     case "WED":
-      return Calendar.DayOfTheWeek.Wednesday;
+      return 4;
     case "THU":
-      return Calendar.DayOfTheWeek.Thursday;
+      return 5;
     case "FRI":
-      return Calendar.DayOfTheWeek.Friday;
+      return 6;
     case "SAT":
-      return Calendar.DayOfTheWeek.Saturday;
+      return 7;
     case "SUN":
     default:
-      return Calendar.DayOfTheWeek.Sunday;
+      return 1;
   }
 }
 
 function buildNativeCalendarRecurrenceRule(
   recurrenceRule: CalendarEventInputCompat["recurrenceRule"],
-): Calendar.RecurrenceRule | undefined {
+): CalendarModule.RecurrenceRule | undefined {
   if (!recurrenceRule) {
     return undefined;
   }
@@ -1477,8 +1477,8 @@ function buildNativeCalendarRecurrenceRule(
   return {
     frequency:
       recurrenceRule.frequency === "monthly"
-        ? Calendar.Frequency.MONTHLY
-        : Calendar.Frequency.WEEKLY,
+        ? ("monthly" as CalendarModule.Frequency)
+        : ("weekly" as CalendarModule.Frequency),
     interval:
       typeof recurrenceRule.interval === "number" && Number.isFinite(recurrenceRule.interval)
         ? Math.max(1, Math.trunc(recurrenceRule.interval))
@@ -1494,7 +1494,7 @@ function buildNativeCalendarRecurrenceRule(
 
 function buildNativeCalendarEventInput(
   eventDetails: CalendarEventInputCompat,
-): Omit<Partial<Calendar.Event>, "id" | "organizer"> {
+): Omit<Partial<CalendarModule.Event>, "id" | "organizer"> {
   const now = new Date();
   const startDate = eventDetails.startDate ?? now;
   const endDate =
@@ -1697,6 +1697,9 @@ function resolveUserRegionHintFromLocation(location: LocationStamp | null): stri
 function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     switch (moduleName) {
+      case "expo-calendar":
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        return require("expo-calendar") as T;
       case "react-native-maps":
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("react-native-maps") as T;
@@ -1728,10 +1731,12 @@ function loadOptionalModule<T>(moduleName: string): T | null {
   }
 }
 
+const calendarModule = loadOptionalModule<typeof import("expo-calendar")>("expo-calendar");
 const mapsModule = loadOptionalModule<typeof import("react-native-maps")>("react-native-maps");
 const MapViewCompat: any = mapsModule?.default ?? null;
 const MarkerCompat: any = mapsModule?.Marker ?? null;
 const mapsRuntimeAvailable = Boolean(MapViewCompat && MarkerCompat);
+const calendarModuleAvailable = Boolean(calendarModule);
 
 const notificationsModuleRaw =
   loadOptionalModule<typeof import("expo-notifications")>("expo-notifications");
@@ -3934,7 +3939,8 @@ export default function App() {
     [isLocalhostApiUrl],
   );
   const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
-  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
+  const calendarRuntimeEnabled =
+    calendarModuleAvailable && (Platform.OS === "ios" || Platform.OS === "android");
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
     if (!notificationsRuntimeEnabled) {
@@ -3959,7 +3965,7 @@ export default function App() {
       }
 
       try {
-        const existing = await Calendar.getCalendarPermissionsAsync();
+        const existing = await calendarModule!.getCalendarPermissionsAsync();
         if (isCalendarPermissionGranted(existing)) {
           return true;
         }
@@ -3967,7 +3973,7 @@ export default function App() {
           return false;
         }
 
-        const requested = await Calendar.requestCalendarPermissionsAsync();
+        const requested = await calendarModule!.requestCalendarPermissionsAsync();
         return isCalendarPermissionGranted(requested);
       } catch {
         return false;
@@ -3986,14 +3992,14 @@ export default function App() {
 
     try {
       if (Platform.OS === "ios") {
-        const defaultCalendar = await Calendar.getDefaultCalendarAsync();
+        const defaultCalendar = await calendarModule!.getDefaultCalendarAsync();
         if (defaultCalendar?.id && defaultCalendar.allowsModifications) {
           writableCalendarIdRef.current = defaultCalendar.id;
           return defaultCalendar.id;
         }
       }
 
-      const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
+      const calendars = await calendarModule!.getCalendarsAsync(calendarModule!.EntityTypes.EVENT);
       const writableCalendar =
         calendars.find((entry) => entry.isPrimary && entry.allowsModifications) ??
         calendars.find((entry) => entry.allowsModifications) ??
@@ -4026,7 +4032,7 @@ export default function App() {
 
       try {
         if (iosWriteOnlyCalendarModeEnabled) {
-          const result = (await Calendar.createEventInCalendarAsync(
+          const result = (await calendarModule!.createEventInCalendarAsync(
             buildNativeCalendarEventInput(eventDetails),
           )) as CalendarDialogResultCompat | null;
           const action = typeof result?.action === "string" ? result.action : "done";
@@ -4049,7 +4055,7 @@ export default function App() {
           };
         }
 
-        const result = (await Calendar.createEventInCalendarAsync(
+        const result = (await calendarModule!.createEventInCalendarAsync(
           buildNativeCalendarEventInput(eventDetails),
         )) as CalendarDialogResultCompat | null;
         const action = typeof result?.action === "string" ? result.action : "done";
@@ -4120,7 +4126,10 @@ export default function App() {
       try {
         if (existingEventId) {
           try {
-            const updatedId = await Calendar.updateEventAsync(existingEventId, nativeDetails);
+            const updatedId = await calendarModule!.updateEventAsync(
+              existingEventId,
+              nativeDetails,
+            );
             return {
               saved: true,
               eventId: updatedId || existingEventId,
@@ -4131,7 +4140,7 @@ export default function App() {
           }
         }
 
-        const createdId = await Calendar.createEventAsync(calendarId, nativeDetails);
+        const createdId = await calendarModule!.createEventAsync(calendarId, nativeDetails);
         return {
           saved: true,
           eventId: createdId,
@@ -4166,7 +4175,7 @@ export default function App() {
       }
 
       try {
-        await Calendar.deleteEventAsync(eventId);
+        await calendarModule!.deleteEventAsync(eventId);
         return true;
       } catch {
         return false;
