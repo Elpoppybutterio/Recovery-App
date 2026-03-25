@@ -1731,12 +1731,14 @@ function loadOptionalModule<T>(moduleName: string): T | null {
   }
 }
 
-const calendarModule = loadOptionalModule<typeof import("expo-calendar")>("expo-calendar");
 const mapsModule = loadOptionalModule<typeof import("react-native-maps")>("react-native-maps");
 const MapViewCompat: any = mapsModule?.default ?? null;
 const MarkerCompat: any = mapsModule?.Marker ?? null;
 const mapsRuntimeAvailable = Boolean(MapViewCompat && MarkerCompat);
-const calendarModuleAvailable = Boolean(calendarModule);
+
+function getCalendarModule(): typeof import("expo-calendar") | null {
+  return loadOptionalModule<typeof import("expo-calendar")>("expo-calendar");
+}
 
 const notificationsModuleRaw =
   loadOptionalModule<typeof import("expo-notifications")>("expo-notifications");
@@ -3939,8 +3941,7 @@ export default function App() {
     [isLocalhostApiUrl],
   );
   const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
-  const calendarRuntimeEnabled =
-    calendarModuleAvailable && (Platform.OS === "ios" || Platform.OS === "android");
+  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
     if (!notificationsRuntimeEnabled) {
@@ -3963,9 +3964,13 @@ export default function App() {
       if (iosWriteOnlyCalendarModeEnabled) {
         return false;
       }
+      const calendarModule = getCalendarModule();
+      if (!calendarModule) {
+        return false;
+      }
 
       try {
-        const existing = await calendarModule!.getCalendarPermissionsAsync();
+        const existing = await calendarModule.getCalendarPermissionsAsync();
         if (isCalendarPermissionGranted(existing)) {
           return true;
         }
@@ -3973,7 +3978,7 @@ export default function App() {
           return false;
         }
 
-        const requested = await calendarModule!.requestCalendarPermissionsAsync();
+        const requested = await calendarModule.requestCalendarPermissionsAsync();
         return isCalendarPermissionGranted(requested);
       } catch {
         return false;
@@ -3989,17 +3994,21 @@ export default function App() {
     if (writableCalendarIdRef.current) {
       return writableCalendarIdRef.current;
     }
+    const calendarModule = getCalendarModule();
+    if (!calendarModule) {
+      return null;
+    }
 
     try {
       if (Platform.OS === "ios") {
-        const defaultCalendar = await calendarModule!.getDefaultCalendarAsync();
+        const defaultCalendar = await calendarModule.getDefaultCalendarAsync();
         if (defaultCalendar?.id && defaultCalendar.allowsModifications) {
           writableCalendarIdRef.current = defaultCalendar.id;
           return defaultCalendar.id;
         }
       }
 
-      const calendars = await calendarModule!.getCalendarsAsync(calendarModule!.EntityTypes.EVENT);
+      const calendars = await calendarModule.getCalendarsAsync(calendarModule.EntityTypes.EVENT);
       const writableCalendar =
         calendars.find((entry) => entry.isPrimary && entry.allowsModifications) ??
         calendars.find((entry) => entry.allowsModifications) ??
@@ -4029,22 +4038,17 @@ export default function App() {
           errorCode: "unavailable",
         };
       }
+      const calendarModule = getCalendarModule();
+      if (!calendarModule || iosWriteOnlyCalendarModeEnabled) {
+        return {
+          saved: false,
+          action: null,
+          eventId: null,
+          errorCode: "unavailable",
+        };
+      }
 
       try {
-        if (iosWriteOnlyCalendarModeEnabled) {
-          const result = (await calendarModule!.createEventInCalendarAsync(
-            buildNativeCalendarEventInput(eventDetails),
-          )) as CalendarDialogResultCompat | null;
-          const action = typeof result?.action === "string" ? result.action : "done";
-          const eventId = typeof result?.id === "string" ? result.id : null;
-          return {
-            saved: action !== "canceled" && action !== "deleted",
-            action,
-            eventId,
-            errorCode: "none",
-          };
-        }
-
         const hasPermission = await ensureCalendarPermission(true);
         if (!hasPermission) {
           return {
@@ -4055,7 +4059,7 @@ export default function App() {
           };
         }
 
-        const result = (await calendarModule!.createEventInCalendarAsync(
+        const result = (await calendarModule.createEventInCalendarAsync(
           buildNativeCalendarEventInput(eventDetails),
         )) as CalendarDialogResultCompat | null;
         const action = typeof result?.action === "string" ? result.action : "done";
@@ -4095,6 +4099,14 @@ export default function App() {
           errorCode: "unavailable",
         };
       }
+      const calendarModule = getCalendarModule();
+      if (!calendarModule) {
+        return {
+          saved: false,
+          eventId: null,
+          errorCode: "unavailable",
+        };
+      }
       if (iosWriteOnlyCalendarModeEnabled) {
         return {
           saved: false,
@@ -4126,10 +4138,7 @@ export default function App() {
       try {
         if (existingEventId) {
           try {
-            const updatedId = await calendarModule!.updateEventAsync(
-              existingEventId,
-              nativeDetails,
-            );
+            const updatedId = await calendarModule.updateEventAsync(existingEventId, nativeDetails);
             return {
               saved: true,
               eventId: updatedId || existingEventId,
@@ -4140,7 +4149,7 @@ export default function App() {
           }
         }
 
-        const createdId = await calendarModule!.createEventAsync(calendarId, nativeDetails);
+        const createdId = await calendarModule.createEventAsync(calendarId, nativeDetails);
         return {
           saved: true,
           eventId: createdId,
@@ -4168,6 +4177,10 @@ export default function App() {
       if (!eventId || !calendarRuntimeEnabled || iosWriteOnlyCalendarModeEnabled) {
         return false;
       }
+      const calendarModule = getCalendarModule();
+      if (!calendarModule) {
+        return false;
+      }
 
       const hasPermission = await ensureCalendarPermission(false);
       if (!hasPermission) {
@@ -4175,7 +4188,7 @@ export default function App() {
       }
 
       try {
-        await calendarModule!.deleteEventAsync(eventId);
+        await calendarModule.deleteEventAsync(eventId);
         return true;
       } catch {
         return false;
