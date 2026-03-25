@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import Constants from "expo-constants";
+import { BlurView } from "expo-blur";
 import { geocodeAsync } from "expo-location";
 import type * as NotificationsTypes from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
@@ -11,7 +12,10 @@ import Svg, { Path } from "react-native-svg";
 import {
   AppState,
   type AppStateStatus,
+  AccessibilityInfo,
   Alert,
+  Animated,
+  Easing,
   GestureResponderEvent,
   KeyboardAvoidingView,
   Linking,
@@ -26,6 +30,7 @@ import {
   Text,
   TextInput,
   ToastAndroid,
+  useWindowDimensions,
   View,
 } from "react-native";
 import appJson from "./app.json";
@@ -254,7 +259,7 @@ type RepeatUnit = "WEEKLY" | "MONTHLY";
 type RepeatPreset = "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 type LocationPermissionState = "unknown" | "granted" | "denied" | "unavailable";
 type SponsorLeadMinutes = 0 | 5 | 10 | 30;
-type SponsorTimeDraft = { hour12: number; minute: number; meridiem: "AM" | "PM" };
+type SponsorTimeDraft = Date;
 type ServiceCommitmentTimeField = "startsAtLocal" | "endsAtLocal";
 type ServiceCommitmentTimePickerState = {
   field: ServiceCommitmentTimeField;
@@ -272,6 +277,8 @@ type AttendanceAutomationPlan = {
   dateKey: string;
   status: Extract<AttendanceAutomationState, "planned" | "eligible_to_start">;
   plannedAtIso: string;
+  scheduledStartAtIso?: string | null;
+  calendarEventId?: string | null;
 };
 
 type SponsorConfigPayload = {
@@ -378,7 +385,7 @@ type HomeScreen =
   | "SETTINGS"
   | "TOOLS"
   | "DIAGNOSTICS";
-type SetupStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+type SetupStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 type SetupSupervisionMode = "INDEPENDENT" | "SOBER_HOUSE_RESIDENT" | "SOBER_HOUSE_OWNER";
 type SetupJusticeTrack = "NONE" | "DRUG_COURT" | "PROBATION_PAROLE";
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
@@ -592,9 +599,6 @@ const SPONSOR_REPEAT_OPTIONS: Array<{ value: RepeatPreset; label: string }> = [
   { value: "BIWEEKLY", label: "Bi-weekly" },
   { value: "MONTHLY", label: "Monthly" },
 ];
-const SPONSOR_TIME_HOUR_OPTIONS = Array.from({ length: 12 }, (_, index) => index + 1);
-const SPONSOR_TIME_MINUTE_OPTIONS = Array.from({ length: 60 }, (_, index) => index);
-const SPONSOR_TIME_MERIDIEM_OPTIONS: Array<"AM" | "PM"> = ["AM", "PM"];
 const MEETINGS_FORMAT_OPTIONS: Array<{ value: MeetingsFormatFilter; label: string }> = [
   { value: "ALL", label: "All" },
   { value: "IN_PERSON", label: "In-person" },
@@ -1428,6 +1432,25 @@ function recoveryCelebrationShownStorageKey(userId: string): string {
   return `${RECOVERY_CELEBRATION_SHOWN_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+function mapHomeGroupBirthdayPromptStatus(status: string): {
+  primary: string;
+  secondary?: string;
+  technical?: string;
+} {
+  const normalized = status.trim();
+  const technicalCodeMatch = normalized.match(/\b(4\d{2}|5\d{2})\b/);
+
+  if (/load failed|unavailable right now|couldn'?t load/i.test(normalized)) {
+    return {
+      primary: "Couldn’t load birthday recognition details right now.",
+      secondary: "Please try again later.",
+      technical: technicalCodeMatch ? `Error ${technicalCodeMatch[1]}` : undefined,
+    };
+  }
+
+  return { primary: normalized };
+}
+
 function normalizeGoalInput(value: string): string {
   return value.replace(/\D/g, "").slice(0, 4);
 }
@@ -2057,6 +2080,7 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
 }
 
 export default function App() {
+  const { height: viewportHeight } = useWindowDimensions();
   type LocalAuthenticationModule = {
     authenticateAsync: (options: {
       promptMessage?: string;
@@ -2439,7 +2463,16 @@ export default function App() {
   const [showHomeGroupBirthdayPrompt, setShowHomeGroupBirthdayPrompt] = useState(false);
   const [homeGroupBirthdayPromptOptIn, setHomeGroupBirthdayPromptOptIn] = useState(false);
   const [homeGroupBirthdayPromptFirstName, setHomeGroupBirthdayPromptFirstName] = useState("");
-  const [homeGroupBirthdayPromptLastName, setHomeGroupBirthdayPromptLastName] = useState("");
+  const homeGroupBirthdayPromptBackdropOpacity = useRef(new Animated.Value(0)).current;
+  const homeGroupBirthdayPromptCardOpacity = useRef(new Animated.Value(0)).current;
+  const homeGroupBirthdayPromptCardScale = useRef(new Animated.Value(0.96)).current;
+  const shouldUseHomeGroupBirthdayPromptBlur = Platform.OS === "ios";
+  const homeGroupBirthdayPromptCardMaxHeight = Math.max(420, Math.min(viewportHeight - 40, 640));
+  const homeGroupBirthdayPromptStatusCopy = useMemo(
+    () =>
+      homeGroupBirthdayStatus ? mapHomeGroupBirthdayPromptStatus(homeGroupBirthdayStatus) : null,
+    [homeGroupBirthdayStatus],
+  );
   const [sponsorEnabledAtIso, setSponsorEnabledAtIso] = useState<string | null>(null);
   const [, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
   const [meetingAttendanceLogs, setMeetingAttendanceLogs] = useState<MeetingAttendanceLog[]>([]);
@@ -2533,11 +2566,6 @@ export default function App() {
     [sponsorHour12, sponsorMinute, sponsorMeridiem],
   );
   const sponsorTimeLabel = useMemo(() => formatTimeLabel(sponsorTimeDate), [sponsorTimeDate]);
-  const sponsorTimeDraftValue = sponsorTimeDraft ?? {
-    hour12: sponsorHour12,
-    minute: sponsorMinute,
-    meridiem: sponsorMeridiem,
-  };
   const sponsorRepeatUnit = useMemo<RepeatUnit>(
     () => (sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY"),
     [sponsorRepeatPreset],
@@ -6693,7 +6721,7 @@ export default function App() {
           setSetupError("Enter a valid primary email.");
           return;
         }
-        setSetupStep(9);
+        setSetupStep(10);
         return;
       }
       if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && wizardRequiresSponsorDetails) {
@@ -6800,11 +6828,16 @@ export default function App() {
         setSetupError("Select a home group meeting.");
         return;
       }
+      setSetupStep(9);
+      return;
+    }
+
+    if (setupStep === 9) {
       if (wizardMeetingSignatureRequired === null) {
         setSetupError("Choose whether signatures are required at meetings.");
         return;
       }
-      setSetupStep(9);
+      setSetupStep(10);
     }
   }, [
     setupStep,
@@ -8255,7 +8288,7 @@ export default function App() {
         wizardMeetingSignatureRequired === null
       ) {
         setSetupError("Choose whether signatures are required at meetings.");
-        setSetupStep(8);
+        setSetupStep(9);
         return;
       }
 
@@ -8715,6 +8748,114 @@ export default function App() {
     return { startDate, endDate };
   }, []);
 
+  const resolveMeetingAttendReminderOffsetMinutes = useCallback(
+    async (
+      meeting: Pick<MeetingRecord, "id" | "lat" | "lng">,
+      scheduledStartAt: Date,
+      originOverride?: LocationStamp | null,
+    ): Promise<number> => {
+      const earlyMinutes =
+        selectedDayPlan.plans[meeting.id]?.earlyMinutes ?? DEFAULT_MEETING_EARLY_MINUTES;
+      const fallbackOffsetMinutes =
+        earlyMinutes > 0 ? Math.max(1, earlyMinutes) : DEFAULT_MEETING_EARLY_MINUTES;
+      const destination = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+      if (!destination) {
+        return -fallbackOffsetMinutes;
+      }
+
+      const origin =
+        originOverride ?? currentLocationRef.current ?? (await readCurrentLocation(false));
+      if (!origin) {
+        return -fallbackOffsetMinutes;
+      }
+
+      try {
+        const directions = await getDirectionsDuration({
+          origin: { lat: origin.lat, lng: origin.lng },
+          destination,
+          arrivalTime: scheduledStartAt,
+        });
+        const leavePlan = buildLeaveTimePlan({
+          meetingStartAt: scheduledStartAt,
+          earlyMinutes,
+          travelDurationSeconds: directions.durationSeconds,
+        });
+        if (leavePlan.notifyImmediately) {
+          return 0;
+        }
+        const offsetMinutes = Math.round(
+          (scheduledStartAt.getTime() - leavePlan.leaveAt.getTime()) / 60_000,
+        );
+        if (!Number.isFinite(offsetMinutes) || offsetMinutes <= 0) {
+          return -fallbackOffsetMinutes;
+        }
+        return -Math.min(7 * 24 * 60, offsetMinutes);
+      } catch (error) {
+        console.log("[calendar] attend reminder fallback", {
+          meetingId: meeting.id,
+          message: formatError(error),
+        });
+        return -fallbackOffsetMinutes;
+      }
+    },
+    [readCurrentLocation, selectedDayPlan.plans],
+  );
+
+  const syncMeetingAttendCalendarEvent = useCallback(
+    async ({
+      meeting,
+      scheduledStartAt,
+      existingEventId,
+      originOverride,
+      endDate,
+      notePrefix,
+    }: {
+      meeting: Pick<
+        MeetingRecord,
+        "id" | "name" | "address" | "format" | "openness" | "lat" | "lng"
+      >;
+      scheduledStartAt: Date;
+      existingEventId: string | null;
+      originOverride?: LocationStamp | null;
+      endDate?: Date;
+      notePrefix: string;
+    }): Promise<{
+      saved: boolean;
+      eventId: string | null;
+      errorCode: "none" | "permission" | "unavailable";
+    }> => {
+      const reminderOffsetMinutes = await resolveMeetingAttendReminderOffsetMinutes(
+        meeting,
+        scheduledStartAt,
+        originOverride,
+      );
+      const meetingLocation =
+        meeting.address.trim().length > 0 ? meeting.address.trim() : meeting.name;
+      const notes = [
+        notePrefix,
+        meeting.format ? `Format: ${meeting.format.replace("_", " ")}` : null,
+        meeting.openness && meeting.openness !== "UNKNOWN" ? `Openness: ${meeting.openness}` : null,
+        meeting.address.trim().length > 0 ? `Address: ${meeting.address.trim()}` : null,
+        "Added by Sober² to help you get there on time.",
+      ]
+        .filter((entry): entry is string => Boolean(entry && entry.trim().length > 0))
+        .join("\n");
+
+      return upsertNativeCalendarEvent(existingEventId, {
+        title: `AA/NA Meeting: ${meeting.name}`,
+        startDate: scheduledStartAt,
+        endDate:
+          endDate && endDate > scheduledStartAt
+            ? endDate
+            : new Date(scheduledStartAt.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000),
+        location: meetingLocation,
+        notes,
+        alarms: [{ relativeOffset: reminderOffsetMinutes }],
+      });
+    },
+    [resolveMeetingAttendReminderOffsetMinutes, upsertNativeCalendarEvent],
+  );
+
   const attachCalendarEventToAttendance = useCallback(
     async (recordId: string): Promise<boolean> => {
       console.log("[calendar] attendance flow entered", {
@@ -8742,22 +8883,30 @@ export default function App() {
 
       let existingEventId = sourceRecord.calendarEventId ?? null;
       const window = getScheduledWindowForAttendance(sourceRecord);
-      const result = await upsertNativeCalendarEvent(existingEventId, {
-        title: `AA/NA Meeting - ${sourceRecord.meetingName}`,
-        startDate: window.startDate,
+      const resolvedMeeting = {
+        id: sourceRecord.meetingId,
+        name: sourceRecord.meetingName,
+        address: sourceRecord.meetingAddress,
+        format: sourceRecord.meetingFormat ?? "IN_PERSON",
+        openness: "UNKNOWN",
+        lat: sourceRecord.meetingLat ?? null,
+        lng: sourceRecord.meetingLng ?? null,
+      } satisfies Pick<
+        MeetingRecord,
+        "id" | "name" | "address" | "format" | "openness" | "lat" | "lng"
+      >;
+      const result = await syncMeetingAttendCalendarEvent({
+        meeting: resolvedMeeting,
+        scheduledStartAt: window.startDate,
+        existingEventId,
+        notePrefix:
+          (sourceRecord.requiresSignature ?? meetingSignatureRequired)
+            ? "Signature required. Planned attendance added by Sober²."
+            : "Planned attendance added by Sober².",
         endDate:
           window.endDate > window.startDate
             ? window.endDate
             : new Date(window.startDate.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000),
-        location:
-          sourceRecord.meetingAddress && sourceRecord.meetingAddress.trim().length > 0
-            ? sourceRecord.meetingAddress
-            : undefined,
-        notes:
-          (sourceRecord.requiresSignature ?? meetingSignatureRequired)
-            ? "Signature required. Added by Sober AI."
-            : "Attendance added by Sober AI.",
-        alarms: [{ relativeOffset: -10 }],
       });
       if (!result.saved) {
         if (result.errorCode === "permission") {
@@ -8788,7 +8937,7 @@ export default function App() {
       getScheduledWindowForAttendance,
       calendarStartupPolicy.allowAutomaticSync,
       meetingSignatureRequired,
-      upsertNativeCalendarEvent,
+      syncMeetingAttendCalendarEvent,
       upsertAttendanceRecord,
     ],
   );
@@ -9027,7 +9176,7 @@ export default function App() {
           chairName: null,
           chairRole: null,
           signatureCapturedAtIso: null,
-          calendarEventId: null,
+          calendarEventId: options?.automationPlan?.calendarEventId ?? null,
           leaveNotificationId: null,
           leaveNotificationAtIso: null,
           requiresSignature: meetingSignatureRequired,
@@ -10411,7 +10560,6 @@ export default function App() {
       setHomeGroupBirthdayPromptFirstName(
         homeGroupBirthdayFirstName || devUserDisplayName.trim().split(" ").slice(0, 1).join(" "),
       );
-      setHomeGroupBirthdayPromptLastName(homeGroupBirthdayLastName);
       setShowHomeGroupBirthdayPrompt(true);
       setHomeGroupBirthdayStatus(null);
     },
@@ -10419,7 +10567,6 @@ export default function App() {
       applyHomeGroupSelection,
       devUserDisplayName,
       homeGroupBirthdayFirstName,
-      homeGroupBirthdayLastName,
       homeGroupBirthdayOptIn,
     ],
   );
@@ -10497,7 +10644,7 @@ export default function App() {
     }
 
     const nextFirstName = homeGroupBirthdayPromptFirstName.trim();
-    const nextLastName = homeGroupBirthdayPromptLastName.trim();
+    const nextLastName = "";
     if (homeGroupBirthdayPromptOptIn && nextFirstName.length === 0) {
       setHomeGroupBirthdayStatus("First name is required.");
       return;
@@ -10560,7 +10707,6 @@ export default function App() {
     closeHomeGroupBirthdayPrompt,
     currentHomeGroupSelection,
     homeGroupBirthdayPromptFirstName,
-    homeGroupBirthdayPromptLastName,
     homeGroupBirthdayPromptOptIn,
     sobrietyDateIso,
     syncHomeGroupBirthdayConfig,
@@ -10574,7 +10720,7 @@ export default function App() {
     }
 
     const nextFirstName = homeGroupBirthdayPromptFirstName.trim();
-    const nextLastName = homeGroupBirthdayPromptLastName.trim();
+    const nextLastName = "";
     setHomeGroupBirthdayPromptOptIn(false);
     setHomeGroupBirthdayOptIn(false);
     setHomeGroupBirthdayFirstName(nextFirstName);
@@ -10606,8 +10752,46 @@ export default function App() {
     closeHomeGroupBirthdayPrompt,
     currentHomeGroupSelection,
     homeGroupBirthdayPromptFirstName,
-    homeGroupBirthdayPromptLastName,
     syncHomeGroupBirthdayConfig,
+  ]);
+
+  useEffect(() => {
+    if (!showHomeGroupBirthdayPrompt) {
+      homeGroupBirthdayPromptBackdropOpacity.setValue(0);
+      homeGroupBirthdayPromptCardOpacity.setValue(0);
+      homeGroupBirthdayPromptCardScale.setValue(0.96);
+      return;
+    }
+
+    void AccessibilityInfo.announceForAccessibility?.(
+      "Want to join home group birthday recognition?",
+    );
+
+    Animated.parallel([
+      Animated.timing(homeGroupBirthdayPromptBackdropOpacity, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.timing(homeGroupBirthdayPromptCardOpacity, {
+        toValue: 1,
+        duration: 210,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.timing(homeGroupBirthdayPromptCardScale, {
+        toValue: 1,
+        duration: 210,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [
+    homeGroupBirthdayPromptBackdropOpacity,
+    homeGroupBirthdayPromptCardOpacity,
+    homeGroupBirthdayPromptCardScale,
+    showHomeGroupBirthdayPrompt,
   ]);
 
   const saveHomeGroupBirthdayFromSettings = useCallback(async () => {
@@ -10768,11 +10952,18 @@ export default function App() {
         resolveNextMeetingDateForDayOfWeek(meeting.dayOfWeek, nowLocal),
         meeting.startsAtLocal,
       );
+      const existingPlannedEventId =
+        attendanceAutomationPlan?.meetingId === meeting.id &&
+        attendanceAutomationPlan.scheduledStartAtIso === scheduledStart.toISOString()
+          ? (attendanceAutomationPlan.calendarEventId ?? null)
+          : null;
       const nextPlan: AttendanceAutomationPlan = {
         meetingId: meeting.id,
         dateKey: dateKeyForDate(scheduledStart),
         status: "planned",
         plannedAtIso: nowLocal.toISOString(),
+        scheduledStartAtIso: scheduledStart.toISOString(),
+        calendarEventId: existingPlannedEventId,
       };
       setAttendanceAutomationPlan(nextPlan);
       setSelectedMeeting(meeting);
@@ -10816,6 +11007,33 @@ export default function App() {
         }
       }
 
+      if (meetingAutoAddToCalendar) {
+        const calendarResult = await syncMeetingAttendCalendarEvent({
+          meeting,
+          scheduledStartAt: scheduledStart,
+          existingEventId: existingPlannedEventId,
+          originOverride: location,
+          notePrefix: "Planned attendance added by Sober².",
+        });
+        if (calendarResult.saved) {
+          setAttendanceAutomationPlan((current) =>
+            current &&
+            current.meetingId === meeting.id &&
+            current.scheduledStartAtIso === scheduledStart.toISOString()
+              ? {
+                  ...current,
+                  calendarEventId: calendarResult.eventId ?? existingPlannedEventId,
+                }
+              : current,
+          );
+        } else {
+          console.log("[calendar] queued attend event skipped", {
+            meetingId: meeting.id,
+            errorCode: calendarResult.errorCode,
+          });
+        }
+      }
+
       setAttendanceStatus(
         withinStartWindow
           ? `Queued ${meeting.name}. Attendance will start automatically when you enter the meeting geofence.`
@@ -10826,7 +11044,14 @@ export default function App() {
         `${meeting.name} will auto-start when you are at the meeting location and within 30 minutes of the meeting start.`,
       );
     },
-    [activeAttendance, readCurrentLocation, startAttendance],
+    [
+      activeAttendance,
+      attendanceAutomationPlan,
+      meetingAutoAddToCalendar,
+      readCurrentLocation,
+      startAttendance,
+      syncMeetingAttendCalendarEvent,
+    ],
   );
 
   const logUpcomingMeetingFromDashboard = useCallback(
@@ -11646,6 +11871,17 @@ export default function App() {
                 dateKey: candidate.dateKey,
                 status: candidate.status,
                 plannedAtIso: candidate.plannedAtIso,
+                scheduledStartAtIso:
+                  typeof candidate.scheduledStartAtIso === "string" &&
+                  candidate.scheduledStartAtIso.trim().length > 0
+                    ? candidate.scheduledStartAtIso
+                    : null,
+                calendarEventId:
+                  typeof candidate.calendarEventId === "string" &&
+                  candidate.calendarEventId.trim().length > 0 &&
+                  candidate.calendarEventId.trim().length <= CALENDAR_EVENT_ID_MAX_LENGTH
+                    ? candidate.calendarEventId
+                    : null,
               });
             }
           } else if (parsedProfile.attendanceAutomationPlan === null) {
@@ -12797,11 +13033,7 @@ export default function App() {
   }
 
   function openSponsorTimePickerFallback() {
-    setSponsorTimeDraft({
-      hour12: sponsorHour12,
-      minute: sponsorMinute,
-      meridiem: sponsorMeridiem,
-    });
+    setSponsorTimeDraft(sponsorTimeDate);
     setIsSponsorTimePickerVisible(true);
   }
 
@@ -12833,9 +13065,7 @@ export default function App() {
 
   function confirmSponsorTimePicker() {
     if (sponsorTimeDraft) {
-      setSponsorHour12(sponsorTimeDraft.hour12);
-      setSponsorMinute(sponsorTimeDraft.minute);
-      setSponsorMeridiem(sponsorTimeDraft.meridiem);
+      applySponsorTimeFromDate(sponsorTimeDraft);
     }
     closeSponsorTimePicker();
   }
@@ -13125,7 +13355,7 @@ export default function App() {
               {homeScreen === "SETUP" ? (
                 <GlassCard style={styles.card} strong>
                   <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
-                  <Text style={styles.sectionMeta}>Step {setupStep} of 9</Text>
+                  <Text style={styles.sectionMeta}>Step {setupStep} of 10</Text>
                   {setupStep === 1 ? (
                     <>
                       <Text style={styles.label}>How are you using the app?</Text>
@@ -14227,9 +14457,18 @@ export default function App() {
                           )}
                         </>
                       ) : null}
+                    </>
+                  ) : null}
 
+                  {setupStep === 9 ? (
+                    <>
+                      <Text style={styles.sectionTitle}>Meeting Verification</Text>
                       <Text style={styles.label}>
                         Are you required to obtain a signature at meetings?
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        This enables signature capture during meeting attendance when required by
+                        your program, sponsor, court, or house rules.
                       </Text>
                       <View style={styles.chipRow}>
                         <Pressable
@@ -14284,7 +14523,7 @@ export default function App() {
                     </>
                   ) : null}
 
-                  {setupStep === 9 ? (
+                  {setupStep === 10 ? (
                     <>
                       {wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ? (
                         <>
@@ -14467,7 +14706,7 @@ export default function App() {
                         <View style={styles.buttonSpacer} />
                       </>
                     ) : null}
-                    {setupStep < 9 ? (
+                    {setupStep < 10 ? (
                       <AppButton title="Next" onPress={() => void nextSetupStep()} />
                     ) : (
                       <AppButton
@@ -17242,76 +17481,134 @@ export default function App() {
           visible={showHomeGroupBirthdayPrompt}
           transparent
           animationType="fade"
+          presentationStyle="overFullScreen"
+          statusBarTranslucent
           onRequestClose={() => {
             void skipHomeGroupBirthdayPrompt();
           }}
         >
-          <View style={styles.recoveryCelebrationBackdrop}>
-            <GlassCard
-              strong
-              blurIntensity={18}
-              darken
-              gradientDark
-              style={styles.recoveryCelebrationCard}
+          <View style={styles.homeGroupBirthdayPromptModalRoot}>
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.homeGroupBirthdayPromptBackdropLayer,
+                { opacity: homeGroupBirthdayPromptBackdropOpacity },
+              ]}
             >
-              <Text style={styles.recoveryCelebrationEyebrow}>Home Group Birthdays</Text>
-              <Text style={styles.recoveryCelebrationTitle}>
-                Join home group birthday recognition?
-              </Text>
-              <Text style={styles.recoveryCelebrationBody}>
-                Get notified when someone in your home group is celebrating a sobriety birthday.
-                Only users who selected this same home group can receive these announcements.
-              </Text>
-              <Text style={styles.recoveryCelebrationSupportText}>
-                Your name will appear to others exactly as you enter it here.
-              </Text>
-              <View style={styles.inlineRow}>
-                <Text style={styles.label}>Join birthday recognition</Text>
-                <Switch
-                  value={homeGroupBirthdayPromptOptIn}
-                  onValueChange={setHomeGroupBirthdayPromptOptIn}
-                />
-              </View>
-              <Text style={styles.label}>First name</Text>
-              <TextInput
-                style={styles.input}
-                value={homeGroupBirthdayPromptFirstName}
-                onChangeText={setHomeGroupBirthdayPromptFirstName}
-                placeholder="Jason"
-                maxLength={80}
+              <View
+                style={[
+                  styles.homeGroupBirthdayPromptScrim,
+                  shouldUseHomeGroupBirthdayPromptBlur
+                    ? styles.homeGroupBirthdayPromptScrimWithBlur
+                    : null,
+                ]}
               />
-              <Text style={styles.label}>Last initial or last name (optional)</Text>
-              <TextInput
-                style={styles.input}
-                value={homeGroupBirthdayPromptLastName}
-                onChangeText={setHomeGroupBirthdayPromptLastName}
-                placeholder="L or Lehman"
-                maxLength={80}
-              />
-              <Text style={styles.recoveryCelebrationSupportText}>
-                {homeGroupBirthdayPromptOptIn
-                  ? sobrietyDateIso
-                    ? `Using sobriety date ${formatIsoToUsDate(sobrietyDateIso)} for birthday recognition.`
-                    : "Add your sobriety date above before turning on birthday recognition."
-                  : "You can keep your home group without joining birthday recognition."}
-              </Text>
-              {homeGroupBirthdayStatus ? (
-                <Text style={styles.recoveryCelebrationSupportText}>{homeGroupBirthdayStatus}</Text>
+              {shouldUseHomeGroupBirthdayPromptBlur ? (
+                <BlurView intensity={54} tint="dark" style={styles.homeGroupBirthdayPromptBlur} />
               ) : null}
-              <View style={styles.buttonRow}>
-                <AppButton
-                  title="Not now"
-                  variant="secondary"
-                  onPress={() => void skipHomeGroupBirthdayPrompt()}
-                />
-                <View style={styles.buttonSpacer} />
-                <AppButton
-                  title={homeGroupBirthdaySaving ? "Saving..." : "Save"}
-                  onPress={() => void saveHomeGroupBirthdayPrompt()}
-                  disabled={homeGroupBirthdaySaving}
-                />
-              </View>
-            </GlassCard>
+            </Animated.View>
+            <KeyboardAvoidingView
+              behavior={Platform.OS === "ios" ? "padding" : undefined}
+              style={styles.homeGroupBirthdayPromptModalContainer}
+            >
+              <Animated.View
+                accessibilityViewIsModal
+                style={[
+                  styles.homeGroupBirthdayPromptCard,
+                  {
+                    maxHeight: homeGroupBirthdayPromptCardMaxHeight,
+                    opacity: homeGroupBirthdayPromptCardOpacity,
+                    transform: [{ scale: homeGroupBirthdayPromptCardScale }],
+                  },
+                ]}
+              >
+                <ScrollView
+                  style={styles.homeGroupBirthdayPromptScroll}
+                  contentContainerStyle={styles.homeGroupBirthdayPromptScrollContent}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                  bounces={false}
+                >
+                  <Text style={styles.homeGroupBirthdayPromptEyebrow}>HOME GROUP BIRTHDAYS</Text>
+                  <Text style={styles.homeGroupBirthdayPromptTitle}>
+                    Want to join home group birthday recognition?
+                  </Text>
+                  <Text style={styles.homeGroupBirthdayPromptBody}>
+                    When someone in your home group reaches a sobriety birthday, Sober² can let you
+                    know when you open the app. Others will only see your first name.
+                  </Text>
+                  <View style={styles.homeGroupBirthdayPromptToggleRow}>
+                    <View style={styles.homeGroupBirthdayPromptToggleLabelBlock}>
+                      <Text style={styles.homeGroupBirthdayPromptToggleTitle}>
+                        Join birthday recognition
+                      </Text>
+                    </View>
+                    <Switch
+                      accessibilityLabel="Join home group birthday recognition"
+                      value={homeGroupBirthdayPromptOptIn}
+                      onValueChange={setHomeGroupBirthdayPromptOptIn}
+                    />
+                  </View>
+                  {homeGroupBirthdayPromptOptIn ? (
+                    <View style={styles.homeGroupBirthdayPromptFieldBlock}>
+                      <Text style={styles.homeGroupBirthdayPromptFieldLabel}>Display name</Text>
+                      <TextInput
+                        accessibilityLabel="Display name for birthday recognition"
+                        style={styles.homeGroupBirthdayPromptInput}
+                        value={homeGroupBirthdayPromptFirstName}
+                        onChangeText={setHomeGroupBirthdayPromptFirstName}
+                        placeholder="First name and last initial or last name"
+                        placeholderTextColor="rgba(255,255,255,0.38)"
+                        selectionColor="rgba(179, 120, 255, 0.85)"
+                        maxLength={80}
+                      />
+                    </View>
+                  ) : null}
+                  <Text style={styles.homeGroupBirthdayPromptHelper}>
+                    You can stay in your home group without joining birthday announcements.
+                  </Text>
+                  {homeGroupBirthdayPromptStatusCopy ? (
+                    <View style={styles.homeGroupBirthdayPromptStatusBox}>
+                      <Text style={styles.homeGroupBirthdayPromptStatusTitle}>
+                        {homeGroupBirthdayPromptStatusCopy.primary}
+                      </Text>
+                      {homeGroupBirthdayPromptStatusCopy.secondary ? (
+                        <Text style={styles.homeGroupBirthdayPromptStatusBody}>
+                          {homeGroupBirthdayPromptStatusCopy.secondary}
+                        </Text>
+                      ) : null}
+                      {homeGroupBirthdayPromptStatusCopy.technical ? (
+                        <Text style={styles.homeGroupBirthdayPromptStatusTechnical}>
+                          {homeGroupBirthdayPromptStatusCopy.technical}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
+                </ScrollView>
+                <View style={styles.homeGroupBirthdayPromptFooterRow}>
+                  <Pressable
+                    accessibilityLabel="Not now"
+                    onPress={() => void skipHomeGroupBirthdayPrompt()}
+                    style={styles.homeGroupBirthdayPromptSecondaryButton}
+                  >
+                    <Text style={styles.homeGroupBirthdayPromptSecondaryButtonText}>Not now</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel="Save birthday recognition preference"
+                    onPress={() => void saveHomeGroupBirthdayPrompt()}
+                    disabled={homeGroupBirthdaySaving}
+                    style={[
+                      styles.homeGroupBirthdayPromptPrimaryButton,
+                      homeGroupBirthdaySaving ? styles.homeGroupBirthdayPromptButtonDisabled : null,
+                    ]}
+                  >
+                    <Text style={styles.homeGroupBirthdayPromptPrimaryButtonText}>
+                      {homeGroupBirthdaySaving ? "Saving..." : "Save"}
+                    </Text>
+                  </Pressable>
+                </View>
+              </Animated.View>
+            </KeyboardAvoidingView>
           </View>
         </Modal>
 
@@ -17420,6 +17717,8 @@ export default function App() {
                   mode="time"
                   display="spinner"
                   is24Hour={false}
+                  themeVariant="dark"
+                  textColor="#FFFFFF"
                   onChange={(_, selectedDate) => {
                     if (!selectedDate) {
                       return;
@@ -17452,119 +17751,23 @@ export default function App() {
                   <Text style={styles.timePickerSheetAction}>Done</Text>
                 </Pressable>
               </View>
-              <Text style={styles.timePickerSheetMeta}>Select a sponsor call time.</Text>
-              <View style={styles.timePickerSheetColumns}>
-                <View style={styles.timePickerSheetColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>Hour</Text>
-                  <ScrollView
-                    style={styles.timePickerSheetOptions}
-                    contentContainerStyle={styles.timePickerSheetOptionsContent}
-                    showsVerticalScrollIndicator={false}
-                  >
-                    {SPONSOR_TIME_HOUR_OPTIONS.map((hour) => (
-                      <Pressable
-                        key={`sponsor-hour-${hour}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.hour12 === hour
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: hour,
-                            minute: current?.minute ?? sponsorMinute,
-                            meridiem: current?.meridiem ?? sponsorMeridiem,
-                          }))
-                        }
-                      >
-                        <Text
-                          style={[
-                            styles.timePickerSheetOptionText,
-                            sponsorTimeDraftValue.hour12 === hour
-                              ? styles.timePickerSheetOptionTextSelected
-                              : null,
-                          ]}
-                        >
-                          {hour}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                </View>
-                <View style={styles.timePickerSheetColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>Minute</Text>
-                  <ScrollView
-                    style={styles.timePickerSheetOptions}
-                    contentContainerStyle={styles.timePickerSheetOptionsContent}
-                    showsVerticalScrollIndicator={false}
-                  >
-                    {SPONSOR_TIME_MINUTE_OPTIONS.map((minute) => (
-                      <Pressable
-                        key={`sponsor-minute-${minute}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.minute === minute
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: current?.hour12 ?? sponsorHour12,
-                            minute,
-                            meridiem: current?.meridiem ?? sponsorMeridiem,
-                          }))
-                        }
-                      >
-                        <Text
-                          style={[
-                            styles.timePickerSheetOptionText,
-                            sponsorTimeDraftValue.minute === minute
-                              ? styles.timePickerSheetOptionTextSelected
-                              : null,
-                          ]}
-                        >
-                          {String(minute).padStart(2, "0")}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                </View>
-                <View style={styles.timePickerSheetMeridiemColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>AM/PM</Text>
-                  <View style={styles.timePickerSheetMeridiemOptions}>
-                    {SPONSOR_TIME_MERIDIEM_OPTIONS.map((meridiem) => (
-                      <Pressable
-                        key={`sponsor-meridiem-${meridiem}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.meridiem === meridiem
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: current?.hour12 ?? sponsorHour12,
-                            minute: current?.minute ?? sponsorMinute,
-                            meridiem,
-                          }))
-                        }
-                      >
-                        <Text
-                          style={[
-                            styles.timePickerSheetOptionText,
-                            sponsorTimeDraftValue.meridiem === meridiem
-                              ? styles.timePickerSheetOptionTextSelected
-                              : null,
-                          ]}
-                        >
-                          {meridiem}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
-              </View>
+              <Text style={styles.timePickerSheetMeta}>Choose a 12-hour time.</Text>
+              {sponsorTimeDraft ? (
+                <DateTimePicker
+                  value={sponsorTimeDraft}
+                  mode="time"
+                  display="spinner"
+                  is24Hour={false}
+                  themeVariant="dark"
+                  textColor="#FFFFFF"
+                  onChange={(_, selectedDate) => {
+                    if (!selectedDate) {
+                      return;
+                    }
+                    setSponsorTimeDraft(selectedDate);
+                  }}
+                />
+              ) : null}
             </View>
           </View>
         </Modal>
@@ -18026,6 +18229,190 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     textAlign: "center",
     color: "rgba(218,230,255,0.9)",
+  },
+  homeGroupBirthdayPromptModalRoot: {
+    flex: 1,
+  },
+  homeGroupBirthdayPromptBackdropLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  homeGroupBirthdayPromptScrim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(10, 6, 18, 0.78)",
+  },
+  homeGroupBirthdayPromptScrimWithBlur: {
+    backgroundColor: "rgba(10, 6, 18, 0.64)",
+  },
+  homeGroupBirthdayPromptBlur: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  homeGroupBirthdayPromptModalContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 24,
+  },
+  homeGroupBirthdayPromptCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 24,
+    paddingTop: 20,
+    paddingHorizontal: 20,
+    paddingBottom: 18,
+    backgroundColor: "rgba(28, 18, 46, 0.94)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    shadowColor: "#000",
+    shadowOpacity: 0.35,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 16,
+  },
+  homeGroupBirthdayPromptScroll: {
+    flexGrow: 0,
+  },
+  homeGroupBirthdayPromptScrollContent: {
+    paddingBottom: 4,
+  },
+  homeGroupBirthdayPromptEyebrow: {
+    fontSize: 12,
+    lineHeight: 16,
+    letterSpacing: 1.2,
+    fontWeight: "700",
+    color: "rgba(165, 230, 255, 0.95)",
+    textTransform: "uppercase",
+    marginBottom: 8,
+  },
+  homeGroupBirthdayPromptTitle: {
+    maxWidth: "92%",
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: "800",
+    color: "#FFFFFF",
+    textAlign: "left",
+    marginBottom: 12,
+  },
+  homeGroupBirthdayPromptBody: {
+    fontSize: 17,
+    lineHeight: 25,
+    fontWeight: "500",
+    color: "rgba(255,255,255,0.86)",
+    marginBottom: 20,
+  },
+  homeGroupBirthdayPromptToggleRow: {
+    minHeight: 64,
+    borderRadius: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  homeGroupBirthdayPromptToggleLabelBlock: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  homeGroupBirthdayPromptToggleTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#FFFFFF",
+  },
+  homeGroupBirthdayPromptFieldBlock: {
+    marginTop: 14,
+  },
+  homeGroupBirthdayPromptFieldLabel: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: "rgba(255,255,255,0.70)",
+    marginBottom: 8,
+  },
+  homeGroupBirthdayPromptInput: {
+    height: 52,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    backgroundColor: "rgba(255,255,255,0.07)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    color: "#FFFFFF",
+    fontSize: 17,
+  },
+  homeGroupBirthdayPromptHelper: {
+    marginTop: 10,
+    fontSize: 14,
+    lineHeight: 20,
+    color: "rgba(255,255,255,0.66)",
+  },
+  homeGroupBirthdayPromptStatusBox: {
+    marginTop: 14,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: "rgba(255, 179, 71, 0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 179, 71, 0.24)",
+  },
+  homeGroupBirthdayPromptStatusTitle: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.90)",
+  },
+  homeGroupBirthdayPromptStatusBody: {
+    marginTop: 4,
+    fontSize: 13,
+    lineHeight: 18,
+    color: "rgba(255,255,255,0.62)",
+  },
+  homeGroupBirthdayPromptStatusTechnical: {
+    marginTop: 6,
+    fontSize: 12,
+    color: "rgba(255,255,255,0.42)",
+  },
+  homeGroupBirthdayPromptFooterRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginTop: 20,
+  },
+  homeGroupBirthdayPromptSecondaryButton: {
+    flex: 1,
+    minHeight: 52,
+    borderRadius: 18,
+    paddingHorizontal: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  homeGroupBirthdayPromptSecondaryButtonText: {
+    color: "rgba(255,255,255,0.88)",
+    fontSize: 17,
+    fontWeight: "700",
+  },
+  homeGroupBirthdayPromptPrimaryButton: {
+    flex: 1,
+    minHeight: 52,
+    borderRadius: 18,
+    paddingHorizontal: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#A855F7",
+    shadowColor: "#000",
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
+  },
+  homeGroupBirthdayPromptPrimaryButtonText: {
+    color: "#FFFFFF",
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  homeGroupBirthdayPromptButtonDisabled: {
+    opacity: 0.58,
   },
   recoveryRoadmapList: {
     marginTop: 14,
