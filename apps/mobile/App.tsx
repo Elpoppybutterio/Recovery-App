@@ -13724,19 +13724,6 @@ export default function App() {
                             placeholder="30"
                             keyboardType="number-pad"
                           />
-                          <Text style={styles.label}>Duration (minutes)</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={recurringServiceCommitmentDraft.durationMinutes}
-                            onChangeText={(value) =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                durationMinutes: value.replace(/\D/g, "").slice(0, 3),
-                              }))
-                            }
-                            placeholder="60"
-                            keyboardType="number-pad"
-                          />
                           <Text style={styles.label}>
                             {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.repeats}
                           </Text>
