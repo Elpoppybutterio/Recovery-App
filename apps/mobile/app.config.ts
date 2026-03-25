@@ -1,5 +1,5 @@
-import type { ConfigContext, ExpoConfig } from "expo/config";
-
+type ConfigContext = import("expo/config").ConfigContext;
+type ExpoConfig = import("expo/config").ExpoConfig;
 type AppEnv = "development" | "preview" | "production";
 type JsEngine = "hermes" | "jsc";
 
@@ -10,7 +10,7 @@ const APP_VERSION = "0.1.32";
 const IOS_BUILD_NUMBER = "57";
 const ANDROID_VERSION_CODE = 57;
 
-function resolveProdBundleIdentifier(): string {
+function resolveProdBundleIdentifier() {
   const envValue = process.env.APP_BUNDLE_ID?.trim();
   if (envValue) return envValue;
   return DEFAULT_PROD_BUNDLE_ID;
@@ -90,7 +90,7 @@ function resolveNewArchEnabled(): boolean {
   return raw === "1" || raw === "true" || raw === "yes";
 }
 
-export default ({ config }: ConfigContext): ExpoConfig => {
+module.exports = ({ config }: ConfigContext): ExpoConfig => {
   const appEnv = resolveAppEnv(process.env.APP_ENV);
   const bundleIdentifier = resolveBundleIdentifier(appEnv);
   const iosBuildNumber = resolveIosBuildNumber(appEnv);
