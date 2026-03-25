@@ -48,13 +48,6 @@
     "babel-preset-expo": "^54.0.10"
   },
   "expo": {
-    "autolinking": {
-      "ios": {
-        "exclude": [
-          "expo-calendar"
-        ]
-      }
-    },
     "doctor": {
       "appConfigFieldsNotSyncedCheck": {
         "enabled": false

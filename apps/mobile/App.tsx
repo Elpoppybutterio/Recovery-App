@@ -192,6 +192,30 @@ import {
   getWisdomCacheKey,
   type DailyWisdomPayload,
 } from "./lib/wisdom/daily";
+import {
+  buildRecurringServiceCommitmentFromDraft,
+  buildRecurringServiceCommitmentSummary,
+  createDefaultRecurringServiceCommitmentDraft,
+  createRecurringServiceCommitmentDraftFromItem,
+  hasUnsavedRecurringServiceCommitmentDraftChanges,
+  isValidHhmm,
+  normalizeHhmmInput,
+  normalizeRecurringServiceCommitments,
+  removeRecurringServiceCommitment as removeRecurringServiceCommitmentFromList,
+  RECURRING_SERVICE_COMMITMENTS_STEP_COPY,
+  RECURRING_SERVICE_COMMITMENT_ORDINAL_OPTIONS,
+  RECURRING_SERVICE_COMMITMENT_TYPE_OPTIONS,
+  upsertRecurringServiceCommitment as upsertRecurringServiceCommitmentInList,
+  type RecurringServiceCommitment,
+  type RecurringServiceCommitmentDraft,
+} from "./lib/recurringServiceCommitments";
+import {
+  buildRecurringServiceCommitmentCalendarEventInput,
+  getRecurringServiceCommitmentCalendarFingerprint,
+  mapRecurringServiceCommitmentCalendarErrorToUserMessage,
+  resolveRecurringServiceCommitmentReminderPlan,
+  withRecurringServiceCommitmentCalendarSync,
+} from "./lib/serviceCommitmentCalendar";
 const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
 const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
 const AA_ONLINE_MEETINGS_URL = "https://aa-intergroup.org/meetings/";
@@ -358,7 +382,7 @@ type HomeScreen =
   | "SETTINGS"
   | "TOOLS"
   | "DIAGNOSTICS";
-type SetupStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+type SetupStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 type SetupSupervisionMode = "INDEPENDENT" | "SOBER_HOUSE_RESIDENT" | "SOBER_HOUSE_OWNER";
 type SetupJusticeTrack = "NONE" | "DRUG_COURT" | "PROBATION_PAROLE";
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
@@ -432,7 +456,7 @@ type CalendarEventInputCompat = {
   recurrenceRule?: {
     frequency: CalendarRecurrenceFrequencyCompat;
     interval?: number;
-    daysOfTheWeek?: Array<{ dayOfTheWeek: number }>;
+    daysOfTheWeek?: Array<{ dayOfTheWeek: number; weekNumber?: number }>;
   };
 };
 type CalendarDialogResultCompat = {
@@ -1483,12 +1507,13 @@ function buildNativeCalendarRecurrenceRule(
       typeof recurrenceRule.interval === "number" && Number.isFinite(recurrenceRule.interval)
         ? Math.max(1, Math.trunc(recurrenceRule.interval))
         : 1,
-    daysOfTheWeek:
-      recurrenceRule.frequency === "weekly"
-        ? recurrenceRule.daysOfTheWeek?.map((entry) => ({
-            dayOfTheWeek: entry.dayOfTheWeek,
-          }))
-        : undefined,
+    daysOfTheWeek: recurrenceRule.daysOfTheWeek?.map((entry) => ({
+      dayOfTheWeek: entry.dayOfTheWeek,
+      weekNumber:
+        typeof entry.weekNumber === "number" && Number.isFinite(entry.weekNumber)
+          ? Math.trunc(entry.weekNumber)
+          : undefined,
+    })),
   };
 }
 
@@ -1534,16 +1559,6 @@ function isCalendarPermissionGranted(
   return (
     response?.granted === true || response?.status === "granted" || response?.status === "limited"
   );
-}
-
-function getIosMajorSystemVersion(version: string | number): number | null {
-  const raw = typeof version === "string" ? version.trim() : String(version);
-  const match = raw.match(/^(\d+)/);
-  if (!match) {
-    return null;
-  }
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatError(error: unknown): string {
@@ -2028,18 +2043,14 @@ export default function App() {
   const isDiagnosticsEnabled = resolvedAppEnv !== "production";
   const iosStartupCompatibilityGuardEnabled =
     Platform.OS === "ios" && (iosForcedSafeBoot || !__DEV__);
-  const iosMajorSystemVersion =
-    Platform.OS === "ios" ? getIosMajorSystemVersion(Platform.Version) : null;
-  // expo-calendar 15.x still routes iOS 17+ event permissions through the full-access bridge.
-  const iosWriteOnlyCalendarModeEnabled =
-    Platform.OS === "ios" && (iosMajorSystemVersion ?? 0) >= 17;
+  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
   const calendarStartupPolicy = useMemo(
     () => ({
-      blockNativeStartup: iosWriteOnlyCalendarModeEnabled,
-      allowAutomaticSync: !iosWriteOnlyCalendarModeEnabled,
-      allowExplicitNativeActions: Platform.OS !== "ios" || !iosWriteOnlyCalendarModeEnabled,
+      blockNativeStartup: false,
+      allowAutomaticSync: calendarRuntimeEnabled,
+      allowExplicitNativeActions: calendarRuntimeEnabled,
     }),
-    [iosWriteOnlyCalendarModeEnabled],
+    [calendarRuntimeEnabled],
   );
   const apiUrlFromEnv =
     typeof process.env.EXPO_PUBLIC_API_URL === "string"
@@ -2194,6 +2205,7 @@ export default function App() {
   const [setupStep, setSetupStep] = useState<SetupStep>(1);
   const [setupComplete, setSetupComplete] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const [serviceCommitmentStatus, setServiceCommitmentStatus] = useState<string | null>(null);
   const [screen, setScreen] = useState<AppScreen>("LIST");
   const [meetingsViewMode, setMeetingsViewMode] = useState<MeetingsViewMode>("LIST");
 
@@ -2352,6 +2364,13 @@ export default function App() {
   const [wizardMeetingSignatureRequired, setWizardMeetingSignatureRequired] = useState<
     boolean | null
   >(null);
+  const [recurringServiceCommitments, setRecurringServiceCommitments] = useState<
+    RecurringServiceCommitment[]
+  >([]);
+  const [recurringServiceCommitmentDraft, setRecurringServiceCommitmentDraft] =
+    useState<RecurringServiceCommitmentDraft>(createDefaultRecurringServiceCommitmentDraft);
+  const [recurringServiceCommitmentEditorVisible, setRecurringServiceCommitmentEditorVisible] =
+    useState(false);
   const [meetingSignatureRequired, setMeetingSignatureRequired] = useState(false);
   const [sponsorKneesSuggested, setSponsorKneesSuggested] = useState<boolean | null>(null);
   const [homeGroupMeetingIds, setHomeGroupMeetingIds] = useState<string[]>([]);
@@ -3949,7 +3968,6 @@ export default function App() {
     [isLocalhostApiUrl],
   );
   const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
-  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
     if (!notificationsRuntimeEnabled) {
@@ -4215,6 +4233,123 @@ export default function App() {
       ensureCalendarPermission,
       calendarStartupPolicy.allowExplicitNativeActions,
     ],
+  );
+
+  const syncRecurringServiceCommitmentCalendar = useCallback(
+    async (
+      commitment: RecurringServiceCommitment,
+      options?: { allowPermissionPrompt?: boolean; reason?: string },
+    ): Promise<{
+      saved: boolean;
+      commitment: RecurringServiceCommitment;
+      errorCode: "none" | "permission" | "unavailable";
+    }> => {
+      if (!calendarRuntimeEnabled || !calendarStartupPolicy.allowAutomaticSync) {
+        return {
+          saved: false,
+          commitment,
+          errorCode: "unavailable",
+        };
+      }
+
+      const allowPermissionPrompt = options?.allowPermissionPrompt ?? true;
+      const hasPermission = await ensureCalendarPermission(allowPermissionPrompt);
+      if (!hasPermission) {
+        return {
+          saved: false,
+          commitment,
+          errorCode: "permission",
+        };
+      }
+
+      let travelDurationSeconds: number | null = null;
+      const origin = currentLocationRef.current ?? (await readCurrentLocation(false));
+      if (origin && commitment.location.trim().length > 0) {
+        try {
+          const geocoded = await geocodeAsync(commitment.location.trim());
+          const destinationCandidate = geocoded[0];
+          if (
+            destinationCandidate &&
+            typeof destinationCandidate.latitude === "number" &&
+            typeof destinationCandidate.longitude === "number"
+          ) {
+            const directions = await getDirectionsDuration({
+              origin: { lat: origin.lat, lng: origin.lng },
+              destination: {
+                lat: destinationCandidate.latitude,
+                lng: destinationCandidate.longitude,
+              },
+            });
+            travelDurationSeconds = directions.durationSeconds;
+          }
+        } catch (error) {
+          console.log("[calendar] service commitment travel fallback", {
+            commitmentId: commitment.id,
+            reason: options?.reason ?? "unknown",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      const reminderPlan = resolveRecurringServiceCommitmentReminderPlan({
+        travelDurationSeconds,
+        arrivalBufferMinutes: commitment.arriveEarlyMinutes,
+      });
+      const nextFingerprint = getRecurringServiceCommitmentCalendarFingerprint(commitment);
+      let existingEventId = commitment.calendarEventId;
+
+      if (
+        existingEventId &&
+        commitment.calendarSyncFingerprint &&
+        commitment.calendarSyncFingerprint !== nextFingerprint
+      ) {
+        await removeNativeCalendarEvent(existingEventId);
+        existingEventId = null;
+      }
+
+      const result = await upsertNativeCalendarEvent(
+        existingEventId,
+        buildRecurringServiceCommitmentCalendarEventInput({
+          commitment,
+          relativeOffsetMinutes: reminderPlan.relativeOffsetMinutes,
+        }),
+      );
+      if (!result.saved) {
+        return {
+          saved: false,
+          commitment,
+          errorCode: result.errorCode,
+        };
+      }
+
+      return {
+        saved: true,
+        commitment: withRecurringServiceCommitmentCalendarSync(commitment, {
+          calendarEventId: result.eventId ?? existingEventId ?? null,
+          calendarSeriesId: result.eventId ?? existingEventId ?? null,
+          calendarSyncFingerprint: nextFingerprint,
+        }),
+        errorCode: "none",
+      };
+    },
+    [
+      calendarRuntimeEnabled,
+      calendarStartupPolicy.allowAutomaticSync,
+      ensureCalendarPermission,
+      readCurrentLocation,
+      removeNativeCalendarEvent,
+      upsertNativeCalendarEvent,
+    ],
+  );
+
+  const removeRecurringServiceCommitmentCalendarLink = useCallback(
+    async (commitment: RecurringServiceCommitment): Promise<boolean> => {
+      if (!commitment.calendarEventId) {
+        return true;
+      }
+      return removeNativeCalendarEvent(commitment.calendarEventId);
+    },
+    [removeNativeCalendarEvent],
   );
 
   const applyScheduleTime = useCallback(
@@ -6142,6 +6277,7 @@ export default function App() {
   }, [
     meetingSignatureRequired,
     refreshMeetings,
+    recurringServiceCommitments,
     soberHouseStore.residentHousingProfile,
     soberHouseStore.organization,
     soberHouseStore.userAccessProfile?.houseId,
@@ -6151,6 +6287,121 @@ export default function App() {
     recoverySubstances,
     wizardJusticeTrack,
   ]);
+
+  const recurringServiceCommitmentReviewLines = useMemo(
+    () =>
+      recurringServiceCommitments.map(
+        (commitment) =>
+          `${commitment.name} • ${buildRecurringServiceCommitmentSummary(commitment)}`,
+      ),
+    [recurringServiceCommitments],
+  );
+
+  const openRecurringServiceCommitmentEditor = useCallback(
+    (commitment?: RecurringServiceCommitment) => {
+      setSetupError(null);
+      setServiceCommitmentStatus(null);
+      setRecurringServiceCommitmentDraft(
+        commitment
+          ? createRecurringServiceCommitmentDraftFromItem(commitment)
+          : createDefaultRecurringServiceCommitmentDraft(),
+      );
+      setRecurringServiceCommitmentEditorVisible(true);
+    },
+    [],
+  );
+
+  const cancelRecurringServiceCommitmentEditor = useCallback(() => {
+    setServiceCommitmentStatus(null);
+    setRecurringServiceCommitmentDraft(createDefaultRecurringServiceCommitmentDraft());
+    setRecurringServiceCommitmentEditorVisible(false);
+  }, []);
+
+  const saveRecurringServiceCommitment = useCallback(async () => {
+    const draft = recurringServiceCommitmentDraft;
+    if (!draft.name.trim()) {
+      setSetupError("Enter a commitment name.");
+      return;
+    }
+    if (!isValidHhmm(draft.startsAtLocal.trim())) {
+      setSetupError("Enter a valid start time as HH:MM.");
+      return;
+    }
+    if (draft.endsAtLocal.trim().length > 0 && !isValidHhmm(draft.endsAtLocal.trim())) {
+      setSetupError("Enter a valid end time as HH:MM.");
+      return;
+    }
+    if (draft.recurrenceKind === "WEEKLY" && draft.weeklyDays.length === 0) {
+      setSetupError("Select at least one weekday for this commitment.");
+      return;
+    }
+
+    setServiceCommitmentStatus(null);
+    const existingCommitment =
+      (draft.id
+        ? (recurringServiceCommitments.find((entry) => entry.id === draft.id) ?? null)
+        : null) ?? null;
+    const nextCommitment = buildRecurringServiceCommitmentFromDraft({
+      id: draft.id ?? createId("service-commitment"),
+      draft,
+      existing: existingCommitment,
+    });
+    setRecurringServiceCommitments((current) =>
+      upsertRecurringServiceCommitmentInList(current, nextCommitment),
+    );
+    setSetupError(null);
+    setRecurringServiceCommitmentDraft(createDefaultRecurringServiceCommitmentDraft());
+    setRecurringServiceCommitmentEditorVisible(false);
+    const syncResult = await syncRecurringServiceCommitmentCalendar(nextCommitment, {
+      allowPermissionPrompt: true,
+      reason: existingCommitment ? "edit" : "create",
+    });
+    if (!syncResult.saved) {
+      setServiceCommitmentStatus(
+        mapRecurringServiceCommitmentCalendarErrorToUserMessage({
+          errorCode: syncResult.errorCode,
+        }),
+      );
+      return;
+    }
+    setRecurringServiceCommitments((current) =>
+      upsertRecurringServiceCommitmentInList(current, syncResult.commitment),
+    );
+    setServiceCommitmentStatus(`Calendar synced for ${nextCommitment.name}.`);
+  }, [
+    recurringServiceCommitmentDraft,
+    recurringServiceCommitments,
+    syncRecurringServiceCommitmentCalendar,
+  ]);
+
+  const deleteRecurringServiceCommitment = useCallback(
+    async (commitmentId: string) => {
+      const target =
+        recurringServiceCommitments.find((commitment) => commitment.id === commitmentId) ?? null;
+      setRecurringServiceCommitments((current) =>
+        removeRecurringServiceCommitmentFromList(current, commitmentId),
+      );
+      setSetupError(null);
+      if (recurringServiceCommitmentDraft.id === commitmentId) {
+        setRecurringServiceCommitmentDraft(createDefaultRecurringServiceCommitmentDraft());
+        setRecurringServiceCommitmentEditorVisible(false);
+      }
+      if (!target) {
+        return;
+      }
+      const removed = await removeRecurringServiceCommitmentCalendarLink(target);
+      setServiceCommitmentStatus(
+        removed
+          ? `${target.name} was removed from your recurring commitments.`
+          : `${target.name} was removed in the app. Calendar cleanup may need to be retried.`,
+      );
+    },
+    [
+      recurringServiceCommitmentDraft.id,
+      recurringServiceCommitments,
+      removeRecurringServiceCommitmentCalendarLink,
+    ],
+  );
 
   const nextSetupStep = useCallback(async () => {
     setSetupError(null);
@@ -6223,7 +6474,7 @@ export default function App() {
           setSetupError("Enter a valid primary email.");
           return;
         }
-        setSetupStep(8);
+        setSetupStep(9);
         return;
       }
       if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && wizardRequiresSponsorDetails) {
@@ -6310,6 +6561,18 @@ export default function App() {
     }
 
     if (setupStep === 7) {
+      if (
+        recurringServiceCommitmentEditorVisible &&
+        hasUnsavedRecurringServiceCommitmentDraftChanges(recurringServiceCommitmentDraft)
+      ) {
+        setSetupError("Save or cancel the service commitment you are editing.");
+        return;
+      }
+      setSetupStep(8);
+      return;
+    }
+
+    if (setupStep === 8) {
       if (wizardHasHomeGroup === null) {
         setSetupError("Choose whether you have a home group.");
         return;
@@ -6322,7 +6585,7 @@ export default function App() {
         setSetupError("Choose whether signatures are required at meetings.");
         return;
       }
-      setSetupStep(8);
+      setSetupStep(9);
     }
   }, [
     setupStep,
@@ -6349,6 +6612,8 @@ export default function App() {
     wizardWantsReminders,
     sponsorRepeatUnit,
     sponsorRepeatDaysSorted.length,
+    recurringServiceCommitmentDraft,
+    recurringServiceCommitmentEditorVisible,
     wizardHasHomeGroup,
     homeGroupMeetingIds.length,
     wizardMeetingSignatureRequired,
@@ -7376,6 +7641,7 @@ export default function App() {
         homeGroupBirthdayOptIn: boolean;
         homeGroupBirthdayFirstName: string;
         homeGroupBirthdayLastName: string;
+        recurringServiceCommitments: RecurringServiceCommitment[];
         attendanceAutomationPlan: AttendanceAutomationPlan | null;
         sponsorName: string;
         sponsorPhoneDigits: string;
@@ -7404,6 +7670,7 @@ export default function App() {
           overrides?.homeGroupBirthdayFirstName ?? homeGroupBirthdayFirstName,
         homeGroupBirthdayLastName:
           overrides?.homeGroupBirthdayLastName ?? homeGroupBirthdayLastName,
+        recurringServiceCommitments,
         attendanceAutomationPlan: attendanceAutomationPlan,
         sponsorEnabledAtIso: resolvedSponsorEnabledAtIso,
         ninetyDayGoalTarget: overrides?.ninetyDayGoalTarget ?? ninetyDayGoalTarget,
@@ -7459,6 +7726,7 @@ export default function App() {
       homeGroupBirthdayOptIn,
       homeGroupName,
       homeGroupSeriesKey,
+      recurringServiceCommitments,
       attendanceAutomationPlan,
       meetingAutoAddToCalendar,
       meetingRadiusMiles,
@@ -7790,7 +8058,7 @@ export default function App() {
         homeGroupMeetingIds.length === 0
       ) {
         setSetupError("Select a home group meeting.");
-        setSetupStep(7);
+        setSetupStep(8);
         return;
       }
       if (
@@ -7798,7 +8066,7 @@ export default function App() {
         wizardMeetingSignatureRequired === null
       ) {
         setSetupError("Choose whether signatures are required at meetings.");
-        setSetupStep(7);
+        setSetupStep(8);
         return;
       }
 
@@ -10620,7 +10888,7 @@ export default function App() {
 
   useEffect(() => {
     const shouldPromptForWizardHomeGroupLocation =
-      bootstrapped && homeScreen === "SETUP" && setupStep === 7 && wizardHasHomeGroup === true;
+      bootstrapped && homeScreen === "SETUP" && setupStep === 8 && wizardHasHomeGroup === true;
 
     if (!shouldPromptForWizardHomeGroupLocation) {
       wizardHomeGroupLocationPromptedRef.current = false;
@@ -11086,6 +11354,7 @@ export default function App() {
             homeGroupBirthdayOptIn?: boolean;
             homeGroupBirthdayFirstName?: string;
             homeGroupBirthdayLastName?: string;
+            recurringServiceCommitments?: RecurringServiceCommitment[];
             attendanceAutomationPlan?: AttendanceAutomationPlan | null;
             sponsorEnabledAtIso?: string | null;
             ninetyDayGoalTarget?: number;
@@ -11136,6 +11405,11 @@ export default function App() {
           }
           if (typeof parsedProfile.homeGroupBirthdayLastName === "string") {
             setHomeGroupBirthdayLastName(parsedProfile.homeGroupBirthdayLastName);
+          }
+          if (Array.isArray(parsedProfile.recurringServiceCommitments)) {
+            setRecurringServiceCommitments(
+              normalizeRecurringServiceCommitments(parsedProfile.recurringServiceCommitments),
+            );
           }
           if (
             parsedProfile.attendanceAutomationPlan &&
@@ -11546,6 +11820,7 @@ export default function App() {
         homeGroupBirthdayOptIn,
         homeGroupBirthdayFirstName,
         homeGroupBirthdayLastName,
+        recurringServiceCommitments,
         attendanceAutomationPlan,
         sponsorEnabledAtIso,
         ninetyDayGoalTarget,
@@ -11573,6 +11848,7 @@ export default function App() {
     homeGroupBirthdayOptIn,
     homeGroupName,
     homeGroupSeriesKey,
+    recurringServiceCommitments,
     attendanceAutomationPlan,
     sponsorEnabledAtIso,
     ninetyDayGoalTarget,
@@ -11626,6 +11902,68 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (
+      !bootstrapped ||
+      !calendarStartupPolicy.allowAutomaticSync ||
+      recurringServiceCommitments.length === 0
+    ) {
+      return;
+    }
+
+    const pending = recurringServiceCommitments.filter((commitment) => {
+      const nextFingerprint = getRecurringServiceCommitmentCalendarFingerprint(commitment);
+      return (
+        !commitment.calendarEventId ||
+        !commitment.calendarSyncFingerprint ||
+        commitment.calendarSyncFingerprint !== nextFingerprint
+      );
+    });
+
+    if (pending.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const syncedCommitments: RecurringServiceCommitment[] = [];
+      for (const commitment of pending) {
+        const result = await syncRecurringServiceCommitmentCalendar(commitment, {
+          allowPermissionPrompt: false,
+          reason: "reconcile",
+        });
+        if (cancelled || !result.saved) {
+          continue;
+        }
+        syncedCommitments.push(result.commitment);
+      }
+
+      if (cancelled || syncedCommitments.length === 0) {
+        return;
+      }
+
+      console.log("[calendar] recurring service commitments synced", {
+        count: syncedCommitments.length,
+        reason: "reconcile",
+      });
+      setRecurringServiceCommitments((current) =>
+        syncedCommitments.reduce(
+          (next, commitment) => upsertRecurringServiceCommitmentInList(next, commitment),
+          current,
+        ),
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    bootstrapped,
+    calendarStartupPolicy.allowAutomaticSync,
+    recurringServiceCommitments,
+    syncRecurringServiceCommitmentCalendar,
+  ]);
+
+  useEffect(() => {
     void checkHomeGroupBirthdayAnnouncements();
   }, [checkHomeGroupBirthdayAnnouncements, homeGroupBirthdayResumeTick]);
 
@@ -11655,7 +11993,7 @@ export default function App() {
   }, [meetingRadiusMiles]);
 
   useEffect(() => {
-    if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 6) {
+    if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 7) {
       setupStep4RefreshLocationKeyRef.current = null;
       return;
     }
@@ -12482,7 +12820,7 @@ export default function App() {
               {homeScreen === "SETUP" ? (
                 <GlassCard style={styles.card} strong>
                   <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
-                  <Text style={styles.sectionMeta}>Step {setupStep} of 8</Text>
+                  <Text style={styles.sectionMeta}>Step {setupStep} of 9</Text>
                   {setupStep === 1 ? (
                     <>
                       <Text style={styles.label}>How are you using the app?</Text>
@@ -13064,6 +13402,404 @@ export default function App() {
 
                   {setupStep === 7 ? (
                     <>
+                      <Text style={styles.label}>
+                        {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.title}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.description}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.helperText}
+                      </Text>
+                      {serviceCommitmentStatus ? (
+                        <Text style={styles.sectionMeta}>{serviceCommitmentStatus}</Text>
+                      ) : null}
+
+                      {recurringServiceCommitments.length > 0 ? (
+                        <View style={styles.setupRecurringCommitmentsList}>
+                          {recurringServiceCommitments.map((commitment) => (
+                            <View key={commitment.id} style={styles.setupRecurringCommitmentCard}>
+                              <Text style={styles.meetingName}>{commitment.name}</Text>
+                              <Text style={styles.sectionMeta}>
+                                {buildRecurringServiceCommitmentSummary(commitment)}
+                              </Text>
+                              {commitment.notes ? (
+                                <Text style={styles.sectionMeta}>{commitment.notes}</Text>
+                              ) : null}
+                              <View style={styles.buttonRow}>
+                                <AppButton
+                                  title="Edit"
+                                  onPress={() => openRecurringServiceCommitmentEditor(commitment)}
+                                />
+                                <View style={styles.buttonSpacer} />
+                                <AppButton
+                                  title="Delete"
+                                  onPress={() => deleteRecurringServiceCommitment(commitment.id)}
+                                />
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+                      ) : (
+                        <Text style={styles.sectionMeta}>
+                          No recurring commitments added yet. You can skip this step if you do not
+                          have any.
+                        </Text>
+                      )}
+
+                      {!recurringServiceCommitmentEditorVisible ? (
+                        <AppButton
+                          title={
+                            recurringServiceCommitments.length > 0
+                              ? "Add another commitment"
+                              : "Add commitment"
+                          }
+                          onPress={() => openRecurringServiceCommitmentEditor()}
+                        />
+                      ) : (
+                        <>
+                          <Text style={styles.label}>
+                            {recurringServiceCommitmentDraft.id
+                              ? "Edit recurring commitment"
+                              : "New recurring commitment"}
+                          </Text>
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.name}
+                          </Text>
+                          <TextInput
+                            style={styles.input}
+                            value={recurringServiceCommitmentDraft.name}
+                            onChangeText={(value) =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                name: value,
+                              }))
+                            }
+                            placeholder="Close Tuesday meeting"
+                          />
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.type}
+                          </Text>
+                          <View style={styles.chipRow}>
+                            {RECURRING_SERVICE_COMMITMENT_TYPE_OPTIONS.map((option) => (
+                              <Pressable
+                                key={option.value}
+                                style={[
+                                  styles.chip,
+                                  recurringServiceCommitmentDraft.type === option.value
+                                    ? styles.chipSelected
+                                    : null,
+                                ]}
+                                onPress={() =>
+                                  setRecurringServiceCommitmentDraft((current) => ({
+                                    ...current,
+                                    type: option.value,
+                                  }))
+                                }
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    recurringServiceCommitmentDraft.type === option.value
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  {option.label}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.location}
+                          </Text>
+                          <TextInput
+                            style={styles.input}
+                            value={recurringServiceCommitmentDraft.location}
+                            onChangeText={(value) =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                location: value,
+                              }))
+                            }
+                            placeholder="Clubhouse or hall"
+                          />
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.startsAt}
+                          </Text>
+                          <TextInput
+                            style={styles.input}
+                            value={recurringServiceCommitmentDraft.startsAtLocal}
+                            onChangeText={(value) =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                startsAtLocal: normalizeHhmmInput(value),
+                              }))
+                            }
+                            placeholder="18:30"
+                            keyboardType="numbers-and-punctuation"
+                            maxLength={5}
+                          />
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.endsAt}
+                          </Text>
+                          <TextInput
+                            style={styles.input}
+                            value={recurringServiceCommitmentDraft.endsAtLocal}
+                            onChangeText={(value) =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                endsAtLocal: normalizeHhmmInput(value),
+                              }))
+                            }
+                            placeholder="20:00"
+                            keyboardType="numbers-and-punctuation"
+                            maxLength={5}
+                          />
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.arriveEarlyBy}
+                          </Text>
+                          <TextInput
+                            style={styles.input}
+                            value={recurringServiceCommitmentDraft.arriveEarlyMinutes}
+                            onChangeText={(value) =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                arriveEarlyMinutes: value.replace(/\D/g, "").slice(0, 3),
+                              }))
+                            }
+                            placeholder="15"
+                            keyboardType="number-pad"
+                          />
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.stayAfterBy}
+                          </Text>
+                          <TextInput
+                            style={styles.input}
+                            value={recurringServiceCommitmentDraft.stayAfterMinutes}
+                            onChangeText={(value) =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                stayAfterMinutes: value.replace(/\D/g, "").slice(0, 3),
+                              }))
+                            }
+                            placeholder="30"
+                            keyboardType="number-pad"
+                          />
+                          <Text style={styles.label}>Duration</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={recurringServiceCommitmentDraft.durationMinutes}
+                            onChangeText={(value) =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                durationMinutes: value.replace(/\D/g, "").slice(0, 3),
+                              }))
+                            }
+                            placeholder="60"
+                            keyboardType="number-pad"
+                          />
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.repeats}
+                          </Text>
+                          <View style={styles.chipRow}>
+                            <Pressable
+                              style={[
+                                styles.chip,
+                                recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY"
+                                  ? styles.chipSelected
+                                  : null,
+                              ]}
+                              onPress={() =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  recurrenceKind: "WEEKLY",
+                                }))
+                              }
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY"
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                Weekly
+                              </Text>
+                            </Pressable>
+                            <Pressable
+                              style={[
+                                styles.chip,
+                                recurringServiceCommitmentDraft.recurrenceKind === "MONTHLY_ORDINAL"
+                                  ? styles.chipSelected
+                                  : null,
+                              ]}
+                              onPress={() =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  recurrenceKind: "MONTHLY_ORDINAL",
+                                }))
+                              }
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  recurringServiceCommitmentDraft.recurrenceKind ===
+                                  "MONTHLY_ORDINAL"
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                Monthly ordinal
+                              </Text>
+                            </Pressable>
+                          </View>
+
+                          {recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY" ? (
+                            <>
+                              <Text style={styles.label}>Weekly days</Text>
+                              <View style={styles.chipRow}>
+                                {WEEKDAY_OPTIONS.map((day) => {
+                                  const selected =
+                                    recurringServiceCommitmentDraft.weeklyDays.includes(day.code);
+                                  return (
+                                    <Pressable
+                                      key={`service-weekly-${day.code}`}
+                                      style={[styles.chip, selected ? styles.chipSelected : null]}
+                                      onPress={() =>
+                                        setRecurringServiceCommitmentDraft((current) => {
+                                          const nextDays = current.weeklyDays.includes(day.code)
+                                            ? current.weeklyDays.filter(
+                                                (entry) => entry !== day.code,
+                                              )
+                                            : [...current.weeklyDays, day.code];
+                                          return {
+                                            ...current,
+                                            weeklyDays: nextDays,
+                                          };
+                                        })
+                                      }
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          selected ? styles.chipTextSelected : null,
+                                        ]}
+                                      >
+                                        {day.label}
+                                      </Text>
+                                    </Pressable>
+                                  );
+                                })}
+                              </View>
+                            </>
+                          ) : (
+                            <>
+                              <Text style={styles.label}>Ordinal</Text>
+                              <View style={styles.chipRow}>
+                                {RECURRING_SERVICE_COMMITMENT_ORDINAL_OPTIONS.map((option) => (
+                                  <Pressable
+                                    key={`service-ordinal-${option.label}`}
+                                    style={[
+                                      styles.chip,
+                                      recurringServiceCommitmentDraft.monthlyOrdinal ===
+                                      option.value
+                                        ? styles.chipSelected
+                                        : null,
+                                    ]}
+                                    onPress={() =>
+                                      setRecurringServiceCommitmentDraft((current) => ({
+                                        ...current,
+                                        monthlyOrdinal: option.value,
+                                      }))
+                                    }
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.chipText,
+                                        recurringServiceCommitmentDraft.monthlyOrdinal ===
+                                        option.value
+                                          ? styles.chipTextSelected
+                                          : null,
+                                      ]}
+                                    >
+                                      {option.label}
+                                    </Text>
+                                  </Pressable>
+                                ))}
+                              </View>
+                              <Text style={styles.label}>Day</Text>
+                              <View style={styles.chipRow}>
+                                {WEEKDAY_OPTIONS.map((day) => (
+                                  <Pressable
+                                    key={`service-monthly-${day.code}`}
+                                    style={[
+                                      styles.chip,
+                                      recurringServiceCommitmentDraft.monthlyDay === day.code
+                                        ? styles.chipSelected
+                                        : null,
+                                    ]}
+                                    onPress={() =>
+                                      setRecurringServiceCommitmentDraft((current) => ({
+                                        ...current,
+                                        monthlyDay: day.code,
+                                      }))
+                                    }
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.chipText,
+                                        recurringServiceCommitmentDraft.monthlyDay === day.code
+                                          ? styles.chipTextSelected
+                                          : null,
+                                      ]}
+                                    >
+                                      {day.label}
+                                    </Text>
+                                  </Pressable>
+                                ))}
+                              </View>
+                            </>
+                          )}
+
+                          <Text style={styles.label}>
+                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.notes}
+                          </Text>
+                          <TextInput
+                            style={[styles.input, styles.multilineInput]}
+                            value={recurringServiceCommitmentDraft.notes}
+                            onChangeText={(value) =>
+                              setRecurringServiceCommitmentDraft((current) => ({
+                                ...current,
+                                notes: value,
+                              }))
+                            }
+                            placeholder="Optional notes"
+                            multiline
+                          />
+                          <View style={styles.buttonRow}>
+                            <AppButton
+                              title={
+                                recurringServiceCommitmentDraft.id
+                                  ? "Save changes"
+                                  : "Save commitment"
+                              }
+                              onPress={saveRecurringServiceCommitment}
+                            />
+                            <View style={styles.buttonSpacer} />
+                            <AppButton
+                              title="Cancel"
+                              onPress={cancelRecurringServiceCommitmentEditor}
+                            />
+                          </View>
+                        </>
+                      )}
+                    </>
+                  ) : null}
+
+                  {setupStep === 8 ? (
+                    <>
                       <Text style={styles.label}>Do you have a home group meeting?</Text>
                       <View style={styles.chipRow}>
                         <Pressable
@@ -13243,7 +13979,7 @@ export default function App() {
                     </>
                   ) : null}
 
-                  {setupStep === 8 ? (
+                  {setupStep === 9 ? (
                     <>
                       {wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ? (
                         <>
@@ -13394,6 +14130,12 @@ export default function App() {
                             {wizardWantsReminders ? "Enabled" : "Disabled"}
                           </Text>
                           <Text style={styles.sectionMeta}>
+                            Recurring service commitments:{" "}
+                            {recurringServiceCommitmentReviewLines.length > 0
+                              ? recurringServiceCommitmentReviewLines.join("; ")
+                              : "None added"}
+                          </Text>
+                          <Text style={styles.sectionMeta}>
                             Home group:{" "}
                             {homeGroupMeetingIds.length > 0 || homeGroupSeriesKey
                               ? (selectedHomeGroupOption?.name ??
@@ -13420,7 +14162,7 @@ export default function App() {
                         <View style={styles.buttonSpacer} />
                       </>
                     ) : null}
-                    {setupStep < 8 ? (
+                    {setupStep < 9 ? (
                       <AppButton title="Next" onPress={() => void nextSetupStep()} />
                     ) : (
                       <AppButton
@@ -17212,6 +17954,10 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     color: colors.textPrimary,
   },
+  multilineInput: {
+    minHeight: 96,
+    textAlignVertical: "top",
+  },
   smallInput: {
     minWidth: 64,
     borderWidth: 1,
@@ -17363,6 +18109,17 @@ const styles = StyleSheet.create({
   chipTextSelected: {
     color: colors.textPrimary,
     fontWeight: "700",
+  },
+  setupRecurringCommitmentsList: {
+    gap: 10,
+  },
+  setupRecurringCommitmentCard: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
   meetingsFiltersWrap: {
     gap: 8,
