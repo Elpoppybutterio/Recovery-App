@@ -2033,6 +2033,14 @@ export default function App() {
   // expo-calendar 15.x still routes iOS 17+ event permissions through the full-access bridge.
   const iosWriteOnlyCalendarModeEnabled =
     Platform.OS === "ios" && (iosMajorSystemVersion ?? 0) >= 17;
+  const calendarStartupPolicy = useMemo(
+    () => ({
+      blockNativeStartup: iosWriteOnlyCalendarModeEnabled,
+      allowAutomaticSync: !iosWriteOnlyCalendarModeEnabled,
+      allowExplicitNativeActions: Platform.OS !== "ios" || !iosWriteOnlyCalendarModeEnabled,
+    }),
+    [iosWriteOnlyCalendarModeEnabled],
+  );
   const apiUrlFromEnv =
     typeof process.env.EXPO_PUBLIC_API_URL === "string"
       ? process.env.EXPO_PUBLIC_API_URL.trim()
@@ -3961,7 +3969,7 @@ export default function App() {
       if (!calendarRuntimeEnabled) {
         return false;
       }
-      if (iosWriteOnlyCalendarModeEnabled) {
+      if (!calendarStartupPolicy.allowExplicitNativeActions) {
         return false;
       }
       const calendarModule = getCalendarModule();
@@ -3984,11 +3992,11 @@ export default function App() {
         return false;
       }
     },
-    [calendarRuntimeEnabled, iosWriteOnlyCalendarModeEnabled],
+    [calendarRuntimeEnabled, calendarStartupPolicy.allowExplicitNativeActions],
   );
 
   const resolveWritableCalendarId = useCallback(async (): Promise<string | null> => {
-    if (!calendarRuntimeEnabled || iosWriteOnlyCalendarModeEnabled) {
+    if (!calendarRuntimeEnabled || !calendarStartupPolicy.allowExplicitNativeActions) {
       return null;
     }
     if (writableCalendarIdRef.current) {
@@ -4019,7 +4027,7 @@ export default function App() {
     } catch {
       return null;
     }
-  }, [calendarRuntimeEnabled, iosWriteOnlyCalendarModeEnabled]);
+  }, [calendarRuntimeEnabled, calendarStartupPolicy.allowExplicitNativeActions]);
 
   const openCalendarComposer = useCallback(
     async (
@@ -4039,7 +4047,7 @@ export default function App() {
         };
       }
       const calendarModule = getCalendarModule();
-      if (!calendarModule || iosWriteOnlyCalendarModeEnabled) {
+      if (!calendarModule || !calendarStartupPolicy.allowExplicitNativeActions) {
         return {
           saved: false,
           action: null,
@@ -4080,7 +4088,11 @@ export default function App() {
         };
       }
     },
-    [calendarRuntimeEnabled, ensureCalendarPermission, iosWriteOnlyCalendarModeEnabled],
+    [
+      calendarRuntimeEnabled,
+      ensureCalendarPermission,
+      calendarStartupPolicy.allowExplicitNativeActions,
+    ],
   );
 
   const upsertNativeCalendarEvent = useCallback(
@@ -4107,7 +4119,7 @@ export default function App() {
           errorCode: "unavailable",
         };
       }
-      if (iosWriteOnlyCalendarModeEnabled) {
+      if (!calendarStartupPolicy.allowExplicitNativeActions) {
         return {
           saved: false,
           eventId: null,
@@ -4167,14 +4179,18 @@ export default function App() {
     [
       calendarRuntimeEnabled,
       ensureCalendarPermission,
-      iosWriteOnlyCalendarModeEnabled,
+      calendarStartupPolicy.allowExplicitNativeActions,
       resolveWritableCalendarId,
     ],
   );
 
   const removeNativeCalendarEvent = useCallback(
     async (eventId: string | null): Promise<boolean> => {
-      if (!eventId || !calendarRuntimeEnabled || iosWriteOnlyCalendarModeEnabled) {
+      if (
+        !eventId ||
+        !calendarRuntimeEnabled ||
+        !calendarStartupPolicy.allowExplicitNativeActions
+      ) {
         return false;
       }
       const calendarModule = getCalendarModule();
@@ -4194,7 +4210,11 @@ export default function App() {
         return false;
       }
     },
-    [calendarRuntimeEnabled, ensureCalendarPermission, iosWriteOnlyCalendarModeEnabled],
+    [
+      calendarRuntimeEnabled,
+      ensureCalendarPermission,
+      calendarStartupPolicy.allowExplicitNativeActions,
+    ],
   );
 
   const applyScheduleTime = useCallback(
@@ -6582,6 +6602,12 @@ export default function App() {
   );
 
   const sanitizeStoredCalendarStateOnLaunch = useCallback(async () => {
+    if (calendarStartupPolicy.blockNativeStartup) {
+      console.log("[startup] calendar native init skipped", {
+        policy: "ios-write-only",
+      });
+      return;
+    }
     console.log("[startup] calendar state audit begin");
 
     const clearedKeys: string[] = [];
@@ -6647,6 +6673,7 @@ export default function App() {
 
     console.log("[startup] calendar state audit ok");
   }, [
+    calendarStartupPolicy.blockNativeStartup,
     sobrietyMilestoneEventIdsStorage,
     sobrietyMilestoneSyncDateStorage,
     sponsorCalendarEventFingerprintStorage,
@@ -6780,7 +6807,7 @@ export default function App() {
         setCalendarStatus("Calendar sync is unavailable in this build.");
         return false;
       }
-      if (iosWriteOnlyCalendarModeEnabled) {
+      if (!calendarStartupPolicy.allowAutomaticSync) {
         setCalendarStatus("Automatic sponsor calendar sync is unavailable on iPhone.");
         return false;
       }
@@ -6867,7 +6894,7 @@ export default function App() {
       sponsorCalendarEventStorage,
       sponsorPhoneE164,
       sponsorCallTimeLocalHhmm,
-      iosWriteOnlyCalendarModeEnabled,
+      calendarStartupPolicy.allowAutomaticSync,
       sponsorRepeatUnit,
       sponsorRepeatInterval,
       sponsorRepeatDaysSorted,
@@ -8237,7 +8264,7 @@ export default function App() {
         setAttendanceStatus("Calendar sync is unavailable in this build.");
         return false;
       }
-      if (iosWriteOnlyCalendarModeEnabled) {
+      if (!calendarStartupPolicy.allowAutomaticSync) {
         setAttendanceStatus("Automatic meeting calendar sync is unavailable on iPhone.");
         return false;
       }
@@ -8297,7 +8324,7 @@ export default function App() {
     [
       calendarRuntimeEnabled,
       getScheduledWindowForAttendance,
-      iosWriteOnlyCalendarModeEnabled,
+      calendarStartupPolicy.allowAutomaticSync,
       meetingSignatureRequired,
       upsertNativeCalendarEvent,
       upsertAttendanceRecord,
@@ -11845,7 +11872,12 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!bootstrapped || !sponsorEnabled || !sponsorActive || iosWriteOnlyCalendarModeEnabled) {
+    if (
+      !bootstrapped ||
+      !sponsorEnabled ||
+      !sponsorActive ||
+      !calendarStartupPolicy.allowAutomaticSync
+    ) {
       return;
     }
 
@@ -11897,7 +11929,7 @@ export default function App() {
     sponsorCalendarEventStorage,
     sponsorEnabled,
     sponsorActive,
-    iosWriteOnlyCalendarModeEnabled,
+    calendarStartupPolicy.allowAutomaticSync,
     sponsorEventFingerprint,
     syncSponsorCalendarEvent,
   ]);
@@ -11911,7 +11943,7 @@ export default function App() {
       !activeAttendance ||
       activeAttendance.endAt ||
       !meetingAutoAddToCalendar ||
-      iosWriteOnlyCalendarModeEnabled
+      !calendarStartupPolicy.allowAutomaticSync
     ) {
       return;
     }
@@ -11938,7 +11970,7 @@ export default function App() {
     activeAttendance,
     attachCalendarEventToAttendance,
     ensureCalendarPermission,
-    iosWriteOnlyCalendarModeEnabled,
+    calendarStartupPolicy.allowAutomaticSync,
     meetingAutoAddToCalendar,
   ]);
 
