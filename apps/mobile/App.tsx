@@ -1548,6 +1548,7 @@ function isCalendarPermissionGranted(
     | {
         granted?: boolean;
         status?: string | null;
+        canAskAgain?: boolean | null;
       }
     | null
     | undefined,
@@ -1555,6 +1556,19 @@ function isCalendarPermissionGranted(
   return (
     response?.granted === true || response?.status === "granted" || response?.status === "limited"
   );
+}
+
+function isPermissionBlocked(
+  response:
+    | {
+        granted?: boolean;
+        status?: string | null;
+        canAskAgain?: boolean | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  return response?.granted !== true && response?.canAskAgain === false;
 }
 
 function formatError(error: unknown): string {
@@ -2505,6 +2519,8 @@ export default function App() {
   const wizardHomeGroupLocationPromptedRef = useRef(false);
   const dashboardLocationPromptedRef = useRef(false);
   const writableCalendarIdRef = useRef<string | null>(null);
+  const calendarPermissionBlockedRef = useRef(false);
+  const notificationPermissionBlockedRef = useRef(false);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
   const meetingsSearchOrigin = mapBoundaryCenter ?? currentLocation;
@@ -4017,50 +4033,125 @@ export default function App() {
     },
     [isLocalhostApiUrl],
   );
-  const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
+  const notificationsRuntimeEnabled = notificationsModuleAvailable;
 
-  const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
-    if (!notificationsRuntimeEnabled) {
+  const promptToOpenAppSettings = useCallback((title: string, message: string) => {
+    Alert.alert(title, message, [
+      { text: "Not now", style: "cancel" },
+      {
+        text: "Open Settings",
+        onPress: () => {
+          void Linking.openSettings().catch(() => {});
+        },
+      },
+    ]);
+  }, []);
+
+  const ensureNotificationPermission = useCallback(
+    async (requestIfNeeded = true): Promise<boolean> => {
+      if (!notificationsRuntimeEnabled) {
+        notificationPermissionBlockedRef.current = false;
+        return false;
+      }
+
+      const existing = await Notifications.getPermissionsAsync();
+      if (existing.granted || existing.status === Notifications.PermissionStatus.GRANTED) {
+        notificationPermissionBlockedRef.current = false;
+        return true;
+      }
+
+      if (!requestIfNeeded) {
+        notificationPermissionBlockedRef.current = isPermissionBlocked(existing);
+        return false;
+      }
+
+      if (isPermissionBlocked(existing)) {
+        notificationPermissionBlockedRef.current = true;
+        promptToOpenAppSettings(
+          "Notifications are off",
+          "Open Settings to enable Sober² notifications for sponsor reminders and meeting alerts.",
+        );
+        return false;
+      }
+
+      const requested = await Notifications.requestPermissionsAsync();
+      if (requested.granted || requested.status === Notifications.PermissionStatus.GRANTED) {
+        notificationPermissionBlockedRef.current = false;
+        return true;
+      }
+
+      notificationPermissionBlockedRef.current = isPermissionBlocked(requested);
+      if (notificationPermissionBlockedRef.current) {
+        promptToOpenAppSettings(
+          "Notifications are off",
+          "Open Settings to enable Sober² notifications for sponsor reminders and meeting alerts.",
+        );
+      }
       return false;
-    }
-    const existing = await Notifications.getPermissionsAsync();
-    if (existing.granted || existing.status === Notifications.PermissionStatus.GRANTED) {
-      return true;
-    }
-
-    const requested = await Notifications.requestPermissionsAsync();
-    return requested.granted || requested.status === Notifications.PermissionStatus.GRANTED;
-  }, [notificationsRuntimeEnabled]);
+    },
+    [notificationsRuntimeEnabled, promptToOpenAppSettings],
+  );
 
   const ensureCalendarPermission = useCallback(
     async (requestIfNeeded = true): Promise<boolean> => {
       if (!calendarRuntimeEnabled) {
+        calendarPermissionBlockedRef.current = false;
         return false;
       }
       if (!calendarStartupPolicy.allowExplicitNativeActions) {
+        calendarPermissionBlockedRef.current = false;
         return false;
       }
       const calendarModule = getCalendarModule();
       if (!calendarModule) {
+        calendarPermissionBlockedRef.current = false;
         return false;
       }
 
       try {
         const existing = await calendarModule.getCalendarPermissionsAsync();
         if (isCalendarPermissionGranted(existing)) {
+          calendarPermissionBlockedRef.current = false;
           return true;
         }
         if (!requestIfNeeded) {
+          calendarPermissionBlockedRef.current = isPermissionBlocked(existing);
+          return false;
+        }
+
+        if (isPermissionBlocked(existing)) {
+          calendarPermissionBlockedRef.current = true;
+          promptToOpenAppSettings(
+            "Calendar access is off",
+            "Open Settings to enable Sober² calendar access for sponsor calls, meetings, and service commitments.",
+          );
           return false;
         }
 
         const requested = await calendarModule.requestCalendarPermissionsAsync();
-        return isCalendarPermissionGranted(requested);
+        if (isCalendarPermissionGranted(requested)) {
+          calendarPermissionBlockedRef.current = false;
+          return true;
+        }
+
+        calendarPermissionBlockedRef.current = isPermissionBlocked(requested);
+        if (calendarPermissionBlockedRef.current) {
+          promptToOpenAppSettings(
+            "Calendar access is off",
+            "Open Settings to enable Sober² calendar access for sponsor calls, meetings, and service commitments.",
+          );
+        }
+        return false;
       } catch {
+        calendarPermissionBlockedRef.current = false;
         return false;
       }
     },
-    [calendarRuntimeEnabled, calendarStartupPolicy.allowExplicitNativeActions],
+    [
+      calendarRuntimeEnabled,
+      calendarStartupPolicy.allowExplicitNativeActions,
+      promptToOpenAppSettings,
+    ],
   );
 
   const resolveWritableCalendarId = useCallback(async (): Promise<string | null> => {
@@ -7159,7 +7250,9 @@ export default function App() {
       if (!result.saved) {
         if (result.errorCode === "permission") {
           setCalendarStatus(
-            "Calendar permission is required before sponsor calls can be auto-added.",
+            calendarPermissionBlockedRef.current
+              ? "Calendar access is off. Open Settings to enable sponsor calendar sync."
+              : "Calendar permission is required before sponsor calls can be auto-added.",
           );
         } else {
           setCalendarStatus("Could not sync the sponsor call to Calendar.");
@@ -7228,7 +7321,11 @@ export default function App() {
         if (result.action === "canceled") {
           setMilestoneCalendarStatus("Sobriety milestone add canceled.");
         } else if (result.errorCode === "permission") {
-          setMilestoneCalendarStatus("Calendar permission is required to add milestones.");
+          setMilestoneCalendarStatus(
+            calendarPermissionBlockedRef.current
+              ? "Calendar access is off. Open Settings to add sobriety milestones."
+              : "Calendar permission is required to add milestones.",
+          );
         } else {
           setMilestoneCalendarStatus("Could not open the native calendar add flow.");
         }
@@ -7287,7 +7384,11 @@ export default function App() {
 
       const hasPermission = await ensureNotificationPermission();
       if (!hasPermission) {
-        setNotificationStatus("Notification permission denied.");
+        setNotificationStatus(
+          notificationPermissionBlockedRef.current
+            ? "Notifications are off. Open Settings to enable sponsor alerts."
+            : "Notification permission denied.",
+        );
         return;
       }
 
@@ -7390,7 +7491,11 @@ export default function App() {
 
       const hasPermission = await ensureNotificationPermission();
       if (!hasPermission) {
-        setMeetingsStatus("Notification permission denied for drive alerts.");
+        setMeetingsStatus(
+          notificationPermissionBlockedRef.current
+            ? "Notifications are off. Open Settings to enable drive alerts."
+            : "Notification permission denied for drive alerts.",
+        );
         return;
       }
 
@@ -8598,7 +8703,9 @@ export default function App() {
       if (!result.saved) {
         if (result.errorCode === "permission") {
           setAttendanceStatus(
-            "Calendar permission is required before attended meetings can be auto-added.",
+            calendarPermissionBlockedRef.current
+              ? "Calendar access is off. Open Settings to enable attended-meeting calendar sync."
+              : "Calendar permission is required before attended meetings can be auto-added.",
           );
         } else {
           setAttendanceStatus("Could not sync the attended meeting to Calendar.");
@@ -8681,7 +8788,9 @@ export default function App() {
         const hasNotificationPermission = await ensureNotificationPermission();
         if (!hasNotificationPermission) {
           setAttendanceStatus(
-            "Added to Calendar. Notification permission denied for leave alerts.",
+            notificationPermissionBlockedRef.current
+              ? "Added to Calendar. Notifications are off. Open Settings to enable leave alerts."
+              : "Added to Calendar. Notification permission denied for leave alerts.",
           );
           return;
         }
