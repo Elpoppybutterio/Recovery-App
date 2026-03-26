@@ -110,7 +110,9 @@ import {
   canViewSoberHouseResidentExperience,
   courtEntryLabel,
   deriveAppAccessRole,
+  parseAccessContextResponse,
   soberHouseEntryLabel,
+  type AccessContext,
 } from "./lib/access";
 import {
   buildMeetingConsistencyTrend,
@@ -429,8 +431,6 @@ type SignaturePoint = {
   y: number;
   isStrokeStart: boolean;
 };
-type ServerActorRole = "END_USER" | "SPONSOR" | "MEETING_VERIFIER" | "SUPERVISOR" | "ADMIN";
-
 type MapBoundaryCenter = {
   lat: number;
   lng: number;
@@ -2216,7 +2216,7 @@ export default function App() {
     () => (authHeader ? ({ Authorization: authHeader } as Record<string, string>) : undefined),
     [authHeader],
   );
-  const [serverActorRoles, setServerActorRoles] = useState<ServerActorRole[]>([]);
+  const [serverAccessContext, setServerAccessContext] = useState<AccessContext | null>(null);
   const [serverRoleCheckStatus, setServerRoleCheckStatus] = useState<string | null>(null);
   const enableHomeGroupBirthdayApiSync = Boolean(apiUrl && authHeader);
   const [clockTickMs, setClockTickMs] = useState(Date.now());
@@ -2703,23 +2703,14 @@ export default function App() {
         : [],
     [soberHouseResidentChatViewer, soberHouseStore],
   );
-  const hasVerifiedPlatformAdminRole = serverActorRoles.includes("ADMIN");
-  const hasVerifiedCourtSupervisorRole =
-    hasVerifiedPlatformAdminRole || serverActorRoles.includes("SUPERVISOR");
   const appAccessRole = useMemo(
     () =>
       deriveAppAccessRole({
         onboardingPath: wizardOnboardingPath,
         soberHouseRole: soberHouseAccessProfile?.role,
-        isCourtSupervisor: hasVerifiedCourtSupervisorRole,
-        isPlatformAdmin: hasVerifiedPlatformAdminRole,
+        accessContext: serverAccessContext,
       }),
-    [
-      hasVerifiedCourtSupervisorRole,
-      hasVerifiedPlatformAdminRole,
-      soberHouseAccessProfile?.role,
-      wizardOnboardingPath,
-    ],
+    [serverAccessContext, soberHouseAccessProfile?.role, wizardOnboardingPath],
   );
   const canOpenSoberHouseEntry = canViewSoberHouseResidentExperience(appAccessRole);
   const canOpenCourtEntry = canViewCourtParticipantExperience(appAccessRole);
@@ -6241,7 +6232,7 @@ export default function App() {
     let active = true;
 
     if (!apiUrl || !authHeaders) {
-      setServerActorRoles([]);
+      setServerAccessContext(null);
       setServerRoleCheckStatus("Sign in to continue.");
       return () => {
         active = false;
@@ -6250,12 +6241,12 @@ export default function App() {
 
     void (async () => {
       try {
-        const response = await fetch(`${apiUrl}/v1/me`, { headers: authHeaders });
+        const response = await fetch(`${apiUrl}/v1/me/access-context`, { headers: authHeaders });
         if (!active) {
           return;
         }
         if (!response.ok) {
-          setServerActorRoles([]);
+          setServerAccessContext(null);
           setServerRoleCheckStatus(
             response.status === 401
               ? "Sign in to continue."
@@ -6264,26 +6255,22 @@ export default function App() {
           return;
         }
 
-        const payload = (await response.json()) as {
-          actor?: { roles?: unknown };
-        };
-        const nextRoles = Array.isArray(payload.actor?.roles)
-          ? payload.actor.roles.filter(
-              (role): role is ServerActorRole =>
-                role === "END_USER" ||
-                role === "SPONSOR" ||
-                role === "MEETING_VERIFIER" ||
-                role === "SUPERVISOR" ||
-                role === "ADMIN",
-            )
-          : [];
-        setServerActorRoles(nextRoles);
+        const payload = parseAccessContextResponse(await response.json());
+        if (!payload) {
+          setServerAccessContext(null);
+          setServerRoleCheckStatus(
+            "Organization and supervision setup is available only to authorized admins.",
+          );
+          return;
+        }
+
+        setServerAccessContext(payload);
         setServerRoleCheckStatus(null);
       } catch {
         if (!active) {
           return;
         }
-        setServerActorRoles([]);
+        setServerAccessContext(null);
         setServerRoleCheckStatus(
           "Organization and supervision setup is available only to authorized admins.",
         );

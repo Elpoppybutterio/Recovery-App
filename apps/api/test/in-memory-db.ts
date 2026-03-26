@@ -12,14 +12,37 @@ type User = {
   tenant_id: string;
   email: string;
   display_name: string;
+  created_at: string;
   supervision_enabled: boolean;
   supervision_end_date: string | null;
 };
 
 type UserRole = {
+  id?: number;
   tenant_id: string;
   user_id: string;
   role: string;
+  organization_id?: string | null;
+  court_program_id?: string | null;
+  is_active?: boolean;
+  granted_by_user_id?: string | null;
+  granted_at?: string;
+  revoked_at?: string | null;
+};
+
+type Organization = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  created_at: string;
+};
+
+type CourtProgram = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  jurisdiction: string | null;
+  created_at: string;
 };
 
 type SupervisorAssignment = {
@@ -217,6 +240,8 @@ export class InMemoryDb implements DbPool {
   private tenants: Tenant[] = [];
   private users: User[] = [];
   private userRoles: UserRole[] = [];
+  private organizations: Organization[] = [];
+  private courtPrograms: CourtProgram[] = [];
   private supervisorAssignments: SupervisorAssignment[] = [];
   private tenantConfigs: TenantConfig[] = [];
   private auditLogs: AuditLog[] = [];
@@ -233,6 +258,7 @@ export class InMemoryDb implements DbPool {
   private meetingFeeds: MeetingFeed[] = [];
   private meetingGuideMeetings: MeetingGuideMeeting[] = [];
   private supervisorAssignmentId = 1;
+  private userRoleId = 1;
   private tenantConfigId = 1;
   private auditId = 1;
 
@@ -241,12 +267,14 @@ export class InMemoryDb implements DbPool {
   }
 
   addUser(
-    record: Omit<User, "supervision_enabled" | "supervision_end_date"> & {
+    record: Omit<User, "created_at" | "supervision_enabled" | "supervision_end_date"> & {
+      created_at?: string;
       supervision_enabled?: boolean;
       supervision_end_date?: string | null;
     },
   ) {
     this.users.push({
+      created_at: record.created_at ?? new Date().toISOString(),
       supervision_enabled: record.supervision_enabled ?? false,
       supervision_end_date: record.supervision_end_date ?? null,
       ...record,
@@ -254,7 +282,30 @@ export class InMemoryDb implements DbPool {
   }
 
   addUserRole(record: UserRole) {
-    this.userRoles.push(record);
+    this.userRoles.push({
+      id: record.id ?? this.userRoleId++,
+      organization_id: record.organization_id ?? null,
+      court_program_id: record.court_program_id ?? null,
+      is_active: record.is_active ?? true,
+      granted_by_user_id: record.granted_by_user_id ?? null,
+      granted_at: record.granted_at ?? new Date().toISOString(),
+      revoked_at: record.revoked_at ?? null,
+      ...record,
+    });
+  }
+
+  addOrganization(record: Omit<Organization, "created_at"> & { created_at?: string }) {
+    this.organizations.push({
+      created_at: record.created_at ?? new Date().toISOString(),
+      ...record,
+    });
+  }
+
+  addCourtProgram(record: Omit<CourtProgram, "created_at"> & { created_at?: string }) {
+    this.courtPrograms.push({
+      created_at: record.created_at ?? new Date().toISOString(),
+      ...record,
+    });
   }
 
   addSupervisorAssignment(record: Omit<SupervisorAssignment, "id">) {
@@ -325,11 +376,94 @@ export class InMemoryDb implements DbPool {
       };
     }
 
-    if (normalized.includes("select role from user_roles where tenant_id = $1 and user_id = $2")) {
+    if (
+      normalized.includes("select id, tenant_id, email, display_name, created_at") &&
+      normalized.includes("from users") &&
+      normalized.includes("where id = $1")
+    ) {
+      const [userId] = params as [string];
+      const user = this.users.find((entry) => entry.id === userId);
+      return {
+        rowCount: user ? 1 : 0,
+        rows: user
+          ? ([
+              {
+                id: user.id,
+                tenant_id: user.tenant_id,
+                email: user.email,
+                display_name: user.display_name,
+                created_at: user.created_at,
+              },
+            ] as Row[])
+          : [],
+      };
+    }
+
+    if (normalized.includes("select role from user_roles")) {
       const [tenantId, userId] = params as [string, string];
       const rows = this.userRoles
-        .filter((entry) => entry.tenant_id === tenantId && entry.user_id === userId)
+        .filter(
+          (entry) =>
+            entry.tenant_id === tenantId &&
+            entry.user_id === userId &&
+            entry.is_active !== false &&
+            entry.revoked_at === null,
+        )
         .map((entry) => ({ role: entry.role })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("from user_roles ur") &&
+      normalized.includes("left join organizations org") &&
+      normalized.includes("left join court_programs cp")
+    ) {
+      const [tenantId, userId] = params as [string, string];
+      const rows = this.userRoles
+        .filter(
+          (entry) =>
+            entry.tenant_id === tenantId &&
+            entry.user_id === userId &&
+            entry.is_active !== false &&
+            entry.revoked_at === null,
+        )
+        .sort((left, right) => {
+          const grantedAtCompare = (right.granted_at ?? "").localeCompare(left.granted_at ?? "");
+          if (grantedAtCompare !== 0) {
+            return grantedAtCompare;
+          }
+          return (right.id ?? 0) - (left.id ?? 0);
+        })
+        .map((entry) => {
+          const organization =
+            entry.organization_id === null
+              ? null
+              : (this.organizations.find(
+                  (item) => item.id === entry.organization_id && item.tenant_id === entry.tenant_id,
+                ) ?? null);
+          const courtProgram =
+            entry.court_program_id === null
+              ? null
+              : (this.courtPrograms.find(
+                  (item) =>
+                    item.id === entry.court_program_id && item.tenant_id === entry.tenant_id,
+                ) ?? null);
+          return {
+            id: entry.id ?? 0,
+            role: entry.role,
+            organization_id: entry.organization_id ?? null,
+            organization_name: organization?.name ?? null,
+            court_program_id: entry.court_program_id ?? null,
+            court_program_name: courtProgram?.name ?? null,
+            court_program_jurisdiction: courtProgram?.jurisdiction ?? null,
+            granted_at: entry.granted_at ?? new Date().toISOString(),
+            revoked_at: entry.revoked_at ?? null,
+          };
+        }) as Row[];
+
       return {
         rowCount: rows.length,
         rows,
@@ -350,6 +484,7 @@ export class InMemoryDb implements DbPool {
             tenant_id: user.tenant_id,
             email: user.email,
             display_name: user.display_name,
+            created_at: user.created_at,
           } as Row,
         ],
       };

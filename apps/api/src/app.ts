@@ -481,6 +481,74 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
   );
 
   app.get(
+    "/v1/me/profile",
+    {
+      preHandler: [authenticateRequest],
+      config: {
+        audit: {
+          action: "auth.me_profile.read",
+          subjectType: "user",
+          subjectIdFrom: "actor",
+          sensitiveRead: true,
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const profile = await repositories.findUserProfileByUserId(actor.userId);
+      if (!profile) {
+        reply.code(404).send({ error: "not_found", message: "User profile not found" });
+        return;
+      }
+
+      return {
+        user: {
+          userId: profile.id,
+          tenantId: profile.tenant_id,
+          email: profile.email,
+          displayName: profile.display_name,
+          createdAt: profile.created_at,
+        },
+      };
+    },
+  );
+
+  app.get(
+    "/v1/me/access-context",
+    {
+      preHandler: [authenticateRequest],
+      config: {
+        audit: {
+          action: "auth.access_context.read",
+          subjectType: "user",
+          subjectIdFrom: "actor",
+          sensitiveRead: true,
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const accessContext = await repositories.findAccessContextByUserId(actor.userId);
+      if (!accessContext) {
+        reply.code(404).send({ error: "not_found", message: "Access context not found" });
+        return;
+      }
+
+      return accessContext;
+    },
+  );
+
+  app.get(
     "/v1/me",
     {
       preHandler: [authenticateRequest],

@@ -42,6 +42,18 @@ export async function seedCoreFixtures(db: InMemoryDb) {
     display_name: "Admin A",
   });
   db.addUser({
+    id: "manager-a",
+    tenant_id: "tenant-a",
+    email: "manager-a@example.com",
+    display_name: "Manager A",
+  });
+  db.addUser({
+    id: "officer-a",
+    tenant_id: "tenant-a",
+    email: "officer-a@example.com",
+    display_name: "Officer A",
+  });
+  db.addUser({
     id: "supervisor-a",
     tenant_id: "tenant-a",
     email: "supervisor-a@example.com",
@@ -84,10 +96,74 @@ export async function seedCoreFixtures(db: InMemoryDb) {
     display_name: "End User B1",
   });
 
+  db.addOrganization({
+    id: "org-alpine",
+    tenant_id: "tenant-a",
+    name: "Alpine Recovery Housing",
+  });
+  db.addOrganization({
+    id: "org-river",
+    tenant_id: "tenant-b",
+    name: "River Recovery Housing",
+  });
+  db.addCourtProgram({
+    id: "court-boulder",
+    tenant_id: "tenant-a",
+    name: "Boulder Recovery Court",
+    jurisdiction: "Boulder County",
+  });
+  db.addCourtProgram({
+    id: "court-denver",
+    tenant_id: "tenant-b",
+    name: "Denver Recovery Court",
+    jurisdiction: "Denver County",
+  });
+
   db.addUserRole({ tenant_id: "tenant-a", user_id: "admin-a", role: Role.ADMIN });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "admin-a",
+    role: "platform_owner",
+    granted_by_user_id: "admin-a",
+  });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "manager-a",
+    role: "org_admin",
+    organization_id: "org-alpine",
+    granted_by_user_id: "admin-a",
+  });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "officer-a",
+    role: "probation_officer",
+    court_program_id: "court-boulder",
+    granted_by_user_id: "admin-a",
+  });
   db.addUserRole({ tenant_id: "tenant-a", user_id: "supervisor-a", role: Role.SUPERVISOR });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "supervisor-a",
+    role: "court_supervisor",
+    court_program_id: "court-boulder",
+    granted_by_user_id: "admin-a",
+  });
   db.addUserRole({ tenant_id: "tenant-a", user_id: "enduser-a1", role: Role.END_USER });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "enduser-a1",
+    role: "resident_user",
+    organization_id: "org-alpine",
+    granted_by_user_id: "admin-a",
+  });
   db.addUserRole({ tenant_id: "tenant-a", user_id: "enduser-a2", role: Role.END_USER });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "enduser-a2",
+    role: "court_participant",
+    court_program_id: "court-boulder",
+    granted_by_user_id: "admin-a",
+  });
   db.addUserRole({ tenant_id: "tenant-a", user_id: "sponsor-a", role: Role.SPONSOR });
   db.addUserRole({
     tenant_id: "tenant-a",

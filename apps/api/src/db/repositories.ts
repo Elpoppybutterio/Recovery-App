@@ -1,4 +1,6 @@
 import {
+  accessGrantRoleSchema,
+  type AccessGrantRole,
   ComplianceEventType,
   IncidentStatus,
   IncidentType,
@@ -23,6 +25,14 @@ interface UserRow {
   tenant_id: string;
 }
 
+export interface UserProfileRow {
+  id: string;
+  tenant_id: string;
+  email: string;
+  display_name: string;
+  created_at: string;
+}
+
 export interface UserSupervisionRow {
   id: string;
   tenant_id: string;
@@ -39,6 +49,50 @@ export interface TenantUserRow {
 
 interface RoleRow {
   role: string;
+}
+
+interface AccessGrantRow {
+  id: number;
+  role: string;
+  organization_id: string | null;
+  organization_name: string | null;
+  court_program_id: string | null;
+  court_program_name: string | null;
+  court_program_jurisdiction: string | null;
+  granted_at: string;
+  revoked_at: string | null;
+}
+
+export interface UserAccessGrantRow {
+  id: string;
+  role: AccessGrantRole;
+  organizationId: string | null;
+  organizationName: string | null;
+  courtProgramId: string | null;
+  courtProgramName: string | null;
+  courtProgramJurisdiction: string | null;
+  grantedAt: string;
+  revokedAt: string | null;
+}
+
+export interface UserAccessCapabilities {
+  participantRoles: AccessGrantRole[];
+  protectedRoles: AccessGrantRole[];
+  canManageOrganizations: boolean;
+  canManageCourtPrograms: boolean;
+  isPlatformOwner: boolean;
+}
+
+export interface UserAccessContext {
+  user: {
+    userId: string;
+    tenantId: string;
+    email: string;
+    displayName: string;
+    createdAt: string;
+  };
+  grants: UserAccessGrantRow[];
+  capabilities: UserAccessCapabilities;
 }
 
 export type AttendanceStatus = "INCOMPLETE" | "PROVISIONAL" | "VERIFIED";
@@ -372,6 +426,34 @@ function toRole(role: string): Role | null {
   return Object.values(Role).includes(role as Role) ? (role as Role) : null;
 }
 
+function toAccessGrantRole(role: string): AccessGrantRole | null {
+  const parsed = accessGrantRoleSchema.safeParse(role);
+  return parsed.success ? parsed.data : null;
+}
+
+const organizationManagerRoles: AccessGrantRole[] = [
+  "org_admin",
+  "house_manager",
+  "platform_owner",
+];
+
+const courtManagerRoles: AccessGrantRole[] = [
+  "probation_officer",
+  "parole_officer",
+  "court_supervisor",
+  "platform_owner",
+];
+
+const participantAccessRoles: AccessGrantRole[] = [
+  "recovery_user",
+  "resident_user",
+  "court_participant",
+];
+
+function uniqueAccessRoles(roles: AccessGrantRole[]): AccessGrantRole[] {
+  return Array.from(new Set(roles));
+}
+
 function toJsonParam(value: unknown) {
   return JSON.stringify(value ?? {});
 }
@@ -534,7 +616,14 @@ export function createRepositories(db: DbClient) {
       }
 
       const rolesResult = await db.query<RoleRow>(
-        "SELECT role FROM user_roles WHERE tenant_id = $1 AND user_id = $2",
+        `
+        SELECT role
+        FROM user_roles
+        WHERE tenant_id = $1
+          AND user_id = $2
+          AND is_active = TRUE
+          AND revoked_at IS NULL
+      `,
         [user.tenant_id, user.id],
       );
       const roles = rolesResult.rows
@@ -545,6 +634,116 @@ export function createRepositories(db: DbClient) {
         userId: user.id,
         tenantId: user.tenant_id,
         roles,
+      };
+    },
+
+    async findUserProfileByUserId(userId: string): Promise<UserProfileRow | null> {
+      const result = await db.query<UserProfileRow>(
+        `
+        SELECT id, tenant_id, email, display_name, created_at
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+        [userId],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async findAccessContextByUserId(userId: string): Promise<UserAccessContext | null> {
+      const userResult = await db.query<UserProfileRow>(
+        `
+        SELECT id, tenant_id, email, display_name, created_at
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+        [userId],
+      );
+      const user = userResult.rows[0];
+      if (!user) {
+        return null;
+      }
+
+      const grantsResult = await db.query<AccessGrantRow>(
+        `
+        SELECT
+          ur.id,
+          ur.role,
+          ur.organization_id,
+          org.name AS organization_name,
+          ur.court_program_id,
+          cp.name AS court_program_name,
+          cp.jurisdiction AS court_program_jurisdiction,
+          ur.granted_at,
+          ur.revoked_at
+        FROM user_roles ur
+        LEFT JOIN organizations org
+          ON org.id = ur.organization_id
+         AND org.tenant_id = ur.tenant_id
+        LEFT JOIN court_programs cp
+          ON cp.id = ur.court_program_id
+         AND cp.tenant_id = ur.tenant_id
+        WHERE ur.tenant_id = $1
+          AND ur.user_id = $2
+          AND ur.is_active = TRUE
+          AND ur.revoked_at IS NULL
+        ORDER BY ur.granted_at DESC, ur.id DESC
+      `,
+        [user.tenant_id, user.id],
+      );
+
+      const grants = grantsResult.rows
+        .map((row): UserAccessGrantRow | null => {
+          const role = toAccessGrantRole(row.role);
+          if (!role) {
+            return null;
+          }
+
+          return {
+            id: String(row.id),
+            role,
+            organizationId: row.organization_id,
+            organizationName: row.organization_name,
+            courtProgramId: row.court_program_id,
+            courtProgramName: row.court_program_name,
+            courtProgramJurisdiction: row.court_program_jurisdiction,
+            grantedAt: row.granted_at,
+            revokedAt: row.revoked_at,
+          };
+        })
+        .filter((row): row is UserAccessGrantRow => row !== null);
+
+      const participantRoles = uniqueAccessRoles(
+        grants
+          .filter((grant) => participantAccessRoles.includes(grant.role))
+          .map((grant) => grant.role),
+      );
+      const protectedRoles = uniqueAccessRoles(
+        grants
+          .filter((grant) => !participantAccessRoles.includes(grant.role))
+          .map((grant) => grant.role),
+      );
+
+      return {
+        user: {
+          userId: user.id,
+          tenantId: user.tenant_id,
+          email: user.email,
+          displayName: user.display_name,
+          createdAt: user.created_at,
+        },
+        grants,
+        capabilities: {
+          participantRoles,
+          protectedRoles,
+          canManageOrganizations: grants.some((grant) =>
+            organizationManagerRoles.includes(grant.role),
+          ),
+          canManageCourtPrograms: grants.some((grant) => courtManagerRoles.includes(grant.role)),
+          isPlatformOwner: grants.some((grant) => grant.role === "platform_owner"),
+        },
       };
     },
 

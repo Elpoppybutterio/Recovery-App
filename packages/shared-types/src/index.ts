@@ -8,6 +8,20 @@ export enum Role {
   ADMIN = "ADMIN",
 }
 
+export const accessGrantRoleSchema = z.enum([
+  "recovery_user",
+  "resident_user",
+  "court_participant",
+  "org_admin",
+  "house_manager",
+  "probation_officer",
+  "parole_officer",
+  "court_supervisor",
+  "platform_owner",
+]);
+
+export type AccessGrantRole = z.infer<typeof accessGrantRoleSchema>;
+
 export enum Permission {
   RECORD_ATTENDANCE = "RECORD_ATTENDANCE",
   VERIFY_ATTENDANCE = "VERIFY_ATTENDANCE",
@@ -276,6 +290,40 @@ export const homeGroupBirthdayConfigSchema = z
     }
   });
 
+export const userProfileSchema = z.object({
+  userId: z.string().min(1),
+  tenantId: z.string().min(1),
+  email: z.string().email(),
+  displayName: z.string().min(1),
+  createdAt: z.string().datetime(),
+});
+
+export const accessGrantSchema = z.object({
+  id: z.string().min(1),
+  role: accessGrantRoleSchema,
+  organizationId: z.string().min(1).nullable(),
+  organizationName: z.string().min(1).nullable(),
+  courtProgramId: z.string().min(1).nullable(),
+  courtProgramName: z.string().min(1).nullable(),
+  courtProgramJurisdiction: z.string().min(1).nullable(),
+  grantedAt: z.string().datetime(),
+  revokedAt: z.string().datetime().nullable(),
+});
+
+export const accessCapabilitiesSchema = z.object({
+  participantRoles: z.array(accessGrantRoleSchema),
+  protectedRoles: z.array(accessGrantRoleSchema),
+  canManageOrganizations: z.boolean(),
+  canManageCourtPrograms: z.boolean(),
+  isPlatformOwner: z.boolean(),
+});
+
+export const accessContextResponseSchema = z.object({
+  user: userProfileSchema,
+  grants: z.array(accessGrantSchema),
+  capabilities: accessCapabilitiesSchema,
+});
+
 export type AttendanceRecord = z.infer<typeof attendanceRecordSchema>;
 export type ExclusionZone = z.infer<typeof exclusionZoneSchema>;
 export type UserZoneRule = z.infer<typeof userZoneRuleSchema>;
@@ -286,3 +334,7 @@ export type LastKnownLocation = z.infer<typeof lastKnownLocationSchema>;
 export type ComplianceEvent = z.infer<typeof complianceEventSchema>;
 export type SponsorConfig = z.infer<typeof sponsorConfigSchema>;
 export type HomeGroupBirthdayConfig = z.infer<typeof homeGroupBirthdayConfigSchema>;
+export type UserProfile = z.infer<typeof userProfileSchema>;
+export type AccessGrant = z.infer<typeof accessGrantSchema>;
+export type AccessCapabilities = z.infer<typeof accessCapabilitiesSchema>;
+export type AccessContextResponse = z.infer<typeof accessContextResponseSchema>;
