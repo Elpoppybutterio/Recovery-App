@@ -44,9 +44,9 @@ export function ChatTile({
   const resolvedDetail =
     detail ??
     (enabled
-      ? "Feature flag enabled: placeholder route is active."
-      : "Dormant for now. Tap to preview planned experience.");
-  const resolvedBadgeLabel = badgeLabel ?? (enabled ? "Preview" : "Coming Soon");
+      ? "Open sponsor, alert, and message tools from one place."
+      : "Open the messages hub for current communication status and alerts.");
+  const resolvedBadgeLabel = badgeLabel ?? (enabled ? "Available" : "Open");
   const showCompactPreview = compactPreview?.visible ?? false;
   return (
     <Pressable
