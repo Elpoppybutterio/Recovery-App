@@ -107,7 +107,6 @@ import {
   buildMeetingConsistencyTrend,
   computeMeetingConsistencyStreak,
 } from "./lib/dashboard/meetingStreak";
-import { featureFlags } from "./lib/config/featureFlags";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
 import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
 import {
@@ -140,7 +139,7 @@ import { ui } from "./lib/ui/ui";
 import { colors } from "./lib/theme/tokens";
 import { MorningRoutineScreen } from "./screens/MorningRoutineScreen";
 import { NightlyInventoryScreen } from "./screens/NightlyInventoryScreen";
-import { ChatComingSoonScreen } from "./screens/ChatComingSoonScreen";
+import { MessagesHubScreen } from "./screens/MessagesHubScreen";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
@@ -2217,7 +2216,6 @@ export default function App() {
     [apiUrl, authHeader, meetingFeedUrl, defaultMeetingRadiusMiles],
   );
   const travelTimeProvider = useMemo(() => createTravelTimeProvider(25), []);
-  const chatEnabled = featureFlags.chatEnabled;
 
   const deviceTimeZone = useMemo(() => resolveDeviceTimeZone(), []);
   const deviceDayKey = useMemo(
@@ -6278,7 +6276,7 @@ export default function App() {
     setToolsScreen("NIGHTLY");
   }, []);
 
-  const openChatComingSoon = useCallback(() => {
+  const openMessagesHub = useCallback(() => {
     setHomeScreen("CHAT");
     setToolsScreen("HOME");
     setScreen("LIST");
@@ -13447,7 +13445,7 @@ export default function App() {
                     {option.title}
                   </Text>
                   {!option.implemented ? (
-                    <Text style={styles.modeComingSoon}>Coming soon</Text>
+                    <Text style={styles.modeComingSoon}>Setup required</Text>
                   ) : null}
                 </Pressable>
               ))}
@@ -13464,7 +13462,7 @@ export default function App() {
                   RECOVERY_MODE_OPTIONS.find((item) => item.value === mode)?.title}
               </Text>
               <Text style={styles.sectionMeta}>
-                This mode is visible for planning and will be implemented in a future slice.
+                This mode is reserved for organization-managed workflows in this build.
               </Text>
             </GlassCard>
           ) : null}
@@ -14845,7 +14843,7 @@ export default function App() {
                     notificationSummary={communicationNotificationSummary}
                     onOpenNotifications={openNotificationsHub}
                     onOpenSettings={openSoberHousingSettings}
-                    onOpenChat={openChatComingSoon}
+                    onOpenChat={openMessagesHub}
                     onCompileReportsNow={(houseIds) => {
                       void compileOwnerScopeReportsNow(houseIds);
                     }}
@@ -15173,10 +15171,22 @@ export default function App() {
                     />
                   </>
                 ) : (
-                  <ChatComingSoonScreen
-                    enabled={chatEnabled}
+                  <MessagesHubScreen
                     mode={communicationMode}
+                    summary={communicationNotificationSummary}
+                    sponsorName={normalizedSponsorName || null}
+                    sponsorPhone={sponsorPhoneE164 ? formatUsPhoneDisplay(sponsorPhoneE164) : null}
+                    sponsorStatus={sponsorStatusLine}
+                    notificationStatus={notificationStatus}
+                    notificationsRuntimeEnabled={notificationsRuntimeEnabled}
                     onBack={openDashboard}
+                    onCallSponsor={
+                      sponsorCallAvailable
+                        ? () => void openPhoneCall(undefined, "button")
+                        : undefined
+                    }
+                    onOpenNotifications={openNotificationsHub}
+                    onOpenSettings={openSettingsHub}
                   />
                 )
               ) : null}
@@ -17550,7 +17560,7 @@ export default function App() {
                     styles.dashboardTabItem,
                     homeScreen === "CHAT" ? styles.dashboardTabItemActive : null,
                   ]}
-                  onPress={openChatComingSoon}
+                  onPress={openMessagesHub}
                 >
                   <Text style={styles.dashboardTabIcon}>💬</Text>
                   <Text
@@ -17561,7 +17571,7 @@ export default function App() {
                         : styles.dashboardTabText
                     }
                   >
-                    Chat
+                    Messages
                   </Text>
                 </Pressable>
                 <Pressable
