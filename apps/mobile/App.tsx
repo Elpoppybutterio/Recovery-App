@@ -115,6 +115,13 @@ import {
   type AccessContext,
 } from "./lib/access";
 import {
+  buildComplianceEventPayloads,
+  buildObligationSnapshotPayloads,
+  buildParticipantProfileSyncPayload,
+  parseBackendObligationsResponse,
+  parseBackendViolationsResponse,
+} from "./lib/participantCompliance";
+import {
   buildMeetingConsistencyTrend,
   computeMeetingConsistencyStreak,
 } from "./lib/dashboard/meetingStreak";
@@ -2510,8 +2517,29 @@ export default function App() {
     [homeGroupBirthdayStatus],
   );
   const [sponsorEnabledAtIso, setSponsorEnabledAtIso] = useState<string | null>(null);
-  const [, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
+  const [sponsorCallLogs, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
   const [meetingAttendanceLogs, setMeetingAttendanceLogs] = useState<MeetingAttendanceLog[]>([]);
+  const [backendParticipantObligations, setBackendParticipantObligations] = useState<
+    Array<{
+      id: string;
+      syncKey: string | null;
+      title: string;
+      obligationType: string;
+      status: string;
+      dueAt: string | null;
+      sourceTrack: string;
+    }>
+  >([]);
+  const [backendParticipantViolations, setBackendParticipantViolations] = useState<
+    Array<{
+      id: string;
+      violationType: string;
+      severity: string;
+      status: string;
+      detectedAt: string;
+    }>
+  >([]);
+  const [participantSyncStatus, setParticipantSyncStatus] = useState<string | null>(null);
   const [routinesStore, setRoutinesStore] = useState<RecoveryRoutinesStore>(
     createDefaultRoutinesStore,
   );
@@ -2541,6 +2569,7 @@ export default function App() {
   const attendanceRecordsRef = useRef<AttendanceRecord[]>([]);
   const attendanceExportInFlightRef = useRef(false);
   const startAttendanceInFlightRef = useRef(false);
+  const syncedComplianceEventIdsRef = useRef<Set<string>>(new Set());
   const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
   const meetingsShapeLoggedRef = useRef(false);
   const [locationIssue, setLocationIssue] = useState<LocationIssue>(null);
@@ -2716,6 +2745,96 @@ export default function App() {
   const canOpenCourtEntry = canViewCourtParticipantExperience(appAccessRole);
   const protectedOrgSetupAuthorized = canManageSoberHouseHierarchy(appAccessRole);
   const protectedCourtConfigAuthorized = canManageCourtHierarchy(appAccessRole);
+  const participantProfileSyncPayload = useMemo(
+    () =>
+      buildParticipantProfileSyncPayload({
+        onboardingPath: wizardOnboardingPath,
+        setupComplete,
+        appAccessRole,
+        accessContext: serverAccessContext,
+        soberHouseRole: soberHouseAccessProfile?.role,
+        houseId: soberHouseAccessProfile?.houseId ?? null,
+      }),
+    [
+      appAccessRole,
+      serverAccessContext,
+      setupComplete,
+      soberHouseAccessProfile?.houseId,
+      soberHouseAccessProfile?.role,
+      wizardOnboardingPath,
+    ],
+  );
+  const participantObligationSnapshotPayloads = useMemo(
+    () =>
+      buildObligationSnapshotPayloads({
+        onboardingPath: wizardOnboardingPath,
+        setupComplete,
+        appAccessRole,
+        accessContext: serverAccessContext,
+        soberHouseRole: soberHouseAccessProfile?.role,
+        houseId: soberHouseAccessProfile?.houseId ?? null,
+        sponsor: {
+          sponsorCallAvailable,
+          sponsorName: normalizedSponsorName,
+          sponsorPhoneE164,
+          sponsorCallTimeLocalHhmm,
+          sponsorRepeatDays: sponsorRepeatDaysSorted,
+          sponsorRepeatInterval,
+          sponsorRepeatUnit,
+        },
+        court: {
+          wizardJusticeTrack,
+          wizardCourtProgramName,
+          wizardCourtSupervisorName,
+          wizardCourtRequirementsSummary,
+          wizardCourtDeadlineSummary,
+        },
+        recurringServiceCommitments,
+        residentRules:
+          soberHouseAccessProfile?.role === "HOUSE_RESIDENT" && soberHouseEffectiveRules
+            ? {
+                meetingsRequired: soberHouseEffectiveRules.meetings.meetingsRequired,
+                meetingsPerWeek: soberHouseEffectiveRules.meetings.meetingsPerWeek,
+                meetingsProofMethod: soberHouseEffectiveRules.meetings.proofMethod,
+                sponsorContactEnabled: soberHouseEffectiveRules.sponsorContact.enabled,
+                sponsorContactsRequiredPerWeek:
+                  soberHouseEffectiveRules.sponsorContact.contactsRequiredPerWeek,
+                sponsorProofType: soberHouseEffectiveRules.sponsorContact.proofType,
+                curfewEnabled: soberHouseEffectiveRules.curfew.enabled,
+                weekdayCurfew: soberHouseEffectiveRules.curfew.weekdayCurfew,
+                fridayCurfew: soberHouseEffectiveRules.curfew.fridayCurfew,
+                saturdayCurfew: soberHouseEffectiveRules.curfew.saturdayCurfew,
+                sundayCurfew: soberHouseEffectiveRules.curfew.sundayCurfew,
+                choresEnabled: soberHouseEffectiveRules.chores.enabled,
+                choresFrequency: soberHouseEffectiveRules.chores.frequency,
+                choresDueTime: soberHouseEffectiveRules.chores.dueTime,
+                choresProofRequirement: soberHouseEffectiveRules.chores.proofRequirement,
+              }
+            : null,
+      }),
+    [
+      appAccessRole,
+      normalizedSponsorName,
+      recurringServiceCommitments,
+      serverAccessContext,
+      setupComplete,
+      soberHouseAccessProfile?.houseId,
+      soberHouseAccessProfile?.role,
+      soberHouseEffectiveRules,
+      sponsorCallAvailable,
+      sponsorCallTimeLocalHhmm,
+      sponsorPhoneE164,
+      sponsorRepeatDaysSorted,
+      sponsorRepeatInterval,
+      sponsorRepeatUnit,
+      wizardCourtDeadlineSummary,
+      wizardCourtProgramName,
+      wizardCourtRequirementsSummary,
+      wizardCourtSupervisorName,
+      wizardJusticeTrack,
+      wizardOnboardingPath,
+    ],
+  );
   const setupFlowSteps = useMemo(
     () => getSetupFlowSteps(wizardOnboardingPath),
     [wizardOnboardingPath],
@@ -6281,6 +6400,137 @@ export default function App() {
       active = false;
     };
   }, [apiUrl, authHeaders]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!apiUrl || !authHeaders || !participantProfileSyncPayload) {
+      setBackendParticipantObligations([]);
+      setBackendParticipantViolations([]);
+      setParticipantSyncStatus(null);
+      return () => {
+        active = false;
+      };
+    }
+
+    void (async () => {
+      try {
+        const profileResponse = await fetch(`${apiUrl}/v1/me/participant-profile`, {
+          method: "PUT",
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(participantProfileSyncPayload),
+        });
+        if (!active || !profileResponse.ok) {
+          return;
+        }
+
+        const obligationsResponse = await fetch(`${apiUrl}/v1/me/obligations/snapshot`, {
+          method: "PUT",
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            source: "mobile_sync",
+            obligations: participantObligationSnapshotPayloads,
+          }),
+        });
+        if (!active || !obligationsResponse.ok) {
+          setParticipantSyncStatus("Participant obligations could not be synced yet.");
+          return;
+        }
+
+        const obligationsPayload = parseBackendObligationsResponse(
+          await obligationsResponse.json(),
+        );
+        if (!active) {
+          return;
+        }
+        setBackendParticipantObligations(obligationsPayload);
+
+        const violationsResponse = await fetch(`${apiUrl}/v1/me/violations`, {
+          headers: authHeaders,
+        });
+        if (violationsResponse.ok) {
+          const violationsPayload = parseBackendViolationsResponse(await violationsResponse.json());
+          if (active) {
+            setBackendParticipantViolations(violationsPayload);
+          }
+        }
+
+        setParticipantSyncStatus(
+          obligationsPayload.length > 0
+            ? `${obligationsPayload.length} backend obligation${
+                obligationsPayload.length === 1 ? "" : "s"
+              } synced.`
+            : "Participant profile synced.",
+        );
+      } catch {
+        if (!active) {
+          return;
+        }
+        setParticipantSyncStatus("Participant obligations could not be synced yet.");
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [apiUrl, authHeaders, participantObligationSnapshotPayloads, participantProfileSyncPayload]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!apiUrl || !authHeaders || backendParticipantObligations.length === 0) {
+      return () => {
+        active = false;
+      };
+    }
+
+    const pendingEvents = buildComplianceEventPayloads({
+      sponsorCallLogs,
+      meetingAttendanceLogs,
+      obligations: backendParticipantObligations,
+    }).filter((event) => !syncedComplianceEventIdsRef.current.has(event.externalEventId));
+
+    if (pendingEvents.length === 0) {
+      return () => {
+        active = false;
+      };
+    }
+
+    void (async () => {
+      for (const event of pendingEvents) {
+        try {
+          const response = await fetch(`${apiUrl}/v1/me/compliance-events`, {
+            method: "POST",
+            headers: {
+              ...authHeaders,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(event),
+          });
+          if (!active) {
+            return;
+          }
+          if (response.ok) {
+            syncedComplianceEventIdsRef.current.add(event.externalEventId);
+          }
+        } catch {
+          if (!active) {
+            return;
+          }
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [apiUrl, authHeaders, backendParticipantObligations, meetingAttendanceLogs, sponsorCallLogs]);
 
   const handleModeSelect = useCallback(
     (nextMode: RecoveryMode) => {
@@ -15197,6 +15447,22 @@ export default function App() {
                                 : "Required and tracking job search"
                               : "Not required"}
                           </Text>
+                          <Text style={styles.sectionMeta}>
+                            Backend obligations: {backendParticipantObligations.length}
+                          </Text>
+                          <Text style={styles.sectionMeta}>
+                            Open backend violations:{" "}
+                            {
+                              backendParticipantViolations.filter(
+                                (violation) =>
+                                  violation.status === "OPEN" ||
+                                  violation.status === "UNDER_REVIEW",
+                              ).length
+                            }
+                          </Text>
+                          {participantSyncStatus ? (
+                            <Text style={styles.sectionMeta}>{participantSyncStatus}</Text>
+                          ) : null}
                           {soberHouseComplianceSummary?.evaluations.map((evaluation) => (
                             <Text
                               key={evaluation.ruleType}
@@ -17737,6 +18003,21 @@ export default function App() {
                       <Text style={styles.sectionMeta}>
                         Upcoming: {wizardCourtDeadlineSummary || "Not set"}
                       </Text>
+                      <Text style={styles.sectionMeta}>
+                        Backend obligations: {backendParticipantObligations.length}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Open backend violations:{" "}
+                        {
+                          backendParticipantViolations.filter(
+                            (violation) =>
+                              violation.status === "OPEN" || violation.status === "UNDER_REVIEW",
+                          ).length
+                        }
+                      </Text>
+                      {participantSyncStatus ? (
+                        <Text style={styles.sectionMeta}>{participantSyncStatus}</Text>
+                      ) : null}
                     </>
                   ) : null}
                   <View style={styles.buttonRow}>

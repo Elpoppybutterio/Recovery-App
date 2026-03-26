@@ -106,6 +106,18 @@ export async function seedCoreFixtures(db: InMemoryDb) {
     tenant_id: "tenant-b",
     name: "River Recovery Housing",
   });
+  db.addHouse({
+    id: "house-alpine-1",
+    tenant_id: "tenant-a",
+    organization_id: "org-alpine",
+    name: "Alpine House 1",
+  });
+  db.addHouse({
+    id: "house-river-1",
+    tenant_id: "tenant-b",
+    organization_id: "org-river",
+    name: "River House 1",
+  });
   db.addCourtProgram({
     id: "court-boulder",
     tenant_id: "tenant-a",

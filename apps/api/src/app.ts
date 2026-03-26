@@ -168,6 +168,186 @@ const supervisionUpdateBodySchema = z.object({
     .optional(),
 });
 
+const participantProfileBodySchema = z.object({
+  participantType: z.enum(["recovery_user", "resident_user", "court_participant"]),
+  organizationId: z.string().min(1).nullable().optional(),
+  houseId: z.string().min(1).nullable().optional(),
+  courtProgramId: z.string().min(1).nullable().optional(),
+  status: z.enum(["PENDING", "ACTIVE", "PAUSED", "INACTIVE"]),
+});
+
+const obligationSnapshotItemSchema = z.object({
+  syncKey: z.string().min(1),
+  obligationType: z.enum([
+    "meeting_attendance",
+    "sponsor_contact",
+    "treatment_session",
+    "court_appearance",
+    "drug_test",
+    "chore",
+    "curfew",
+    "service_commitment",
+    "proof_submission",
+    "other",
+  ]),
+  sourceTrack: z.enum([
+    "recovery",
+    "resident",
+    "court",
+    "service",
+    "treatment",
+    "sponsor",
+    "operations",
+    "other",
+  ]),
+  title: z.string().min(1),
+  description: z.string().nullable().optional(),
+  organizationId: z.string().min(1).nullable().optional(),
+  houseId: z.string().min(1).nullable().optional(),
+  courtProgramId: z.string().min(1).nullable().optional(),
+  dueAt: z.string().datetime().nullable().optional(),
+  recurrence: z.record(z.unknown()).nullable().optional(),
+  priority: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).nullable().optional(),
+  requiresProof: z.boolean().optional(),
+  requiresSignature: z.boolean().optional(),
+  status: z.enum(["ACTIVE", "COMPLETED", "MISSED", "CANCELED", "WAIVED"]),
+});
+
+const obligationSnapshotBodySchema = z.object({
+  source: z.string().min(1),
+  obligations: z.array(obligationSnapshotItemSchema),
+});
+
+const participantComplianceEventBodySchema = z.object({
+  obligationId: z.string().min(1).nullable().optional(),
+  eventType: z.enum([
+    "MEETING_ATTENDED",
+    "MEETING_MISSED",
+    "SPONSOR_CONTACT_COMPLETED",
+    "SPONSOR_CONTACT_MISSED",
+    "TREATMENT_SESSION_ATTENDED",
+    "TREATMENT_SESSION_MISSED",
+    "COURT_APPEARANCE_ATTENDED",
+    "COURT_APPEARANCE_MISSED",
+    "DRUG_TEST_COMPLETED",
+    "DRUG_TEST_MISSED",
+    "CHORE_COMPLETED",
+    "CHORE_MISSED",
+    "CURFEW_CHECK_PASSED",
+    "CURFEW_VIOLATION_DETECTED",
+    "SERVICE_COMMITMENT_COMPLETED",
+    "PROOF_UPLOADED",
+    "SIGNATURE_CAPTURED",
+    "GEOFENCE_ENTERED",
+    "GEOFENCE_EXITED",
+    "ADMIN_NOTE_ADDED",
+    "OBLIGATION_SYNCED",
+  ]),
+  eventStatus: z.enum([
+    "COMPLETED",
+    "MISSED",
+    "PASSED",
+    "FAILED",
+    "UPLOADED",
+    "CAPTURED",
+    "ENTERED",
+    "EXITED",
+    "NOTED",
+  ]),
+  occurredAt: z.string().datetime(),
+  metadata: z.record(z.unknown()).optional(),
+  proofUri: z.string().nullable().optional(),
+  signaturePresent: z.boolean().optional(),
+  createdByRole: z.string().nullable().optional(),
+  sourceTrack: z
+    .enum([
+      "recovery",
+      "resident",
+      "court",
+      "service",
+      "treatment",
+      "sponsor",
+      "operations",
+      "other",
+    ])
+    .nullable()
+    .optional(),
+  externalEventId: z.string().nullable().optional(),
+});
+
+const participantProfilesQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  participantType: z.enum(["recovery_user", "resident_user", "court_participant"]).optional(),
+  organizationId: z.string().min(1).optional(),
+  houseId: z.string().min(1).optional(),
+  courtProgramId: z.string().min(1).optional(),
+  status: z.enum(["PENDING", "ACTIVE", "PAUSED", "INACTIVE"]).optional(),
+});
+
+const participantObligationsQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  status: z.enum(["ACTIVE", "COMPLETED", "MISSED", "CANCELED", "WAIVED"]).optional(),
+  obligationType: z
+    .enum([
+      "meeting_attendance",
+      "sponsor_contact",
+      "treatment_session",
+      "court_appearance",
+      "drug_test",
+      "chore",
+      "curfew",
+      "service_commitment",
+      "proof_submission",
+      "other",
+    ])
+    .optional(),
+  organizationId: z.string().min(1).optional(),
+  houseId: z.string().min(1).optional(),
+  courtProgramId: z.string().min(1).optional(),
+  sourceTrack: z
+    .enum([
+      "recovery",
+      "resident",
+      "court",
+      "service",
+      "treatment",
+      "sponsor",
+      "operations",
+      "other",
+    ])
+    .optional(),
+  priority: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
+});
+
+const participantComplianceEventsQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  obligationId: z.string().min(1).optional(),
+  organizationId: z.string().min(1).optional(),
+  houseId: z.string().min(1).optional(),
+  courtProgramId: z.string().min(1).optional(),
+});
+
+const participantViolationsQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  status: z.enum(["OPEN", "UNDER_REVIEW", "RESOLVED", "DISMISSED"]).optional(),
+  violationType: z
+    .enum([
+      "missed_meeting",
+      "missed_treatment",
+      "missed_test",
+      "missed_sponsor_contact",
+      "missed_chore",
+      "missed_curfew",
+      "missing_signature",
+      "missing_proof",
+      "other",
+    ])
+    .optional(),
+  organizationId: z.string().min(1).optional(),
+  houseId: z.string().min(1).optional(),
+  courtProgramId: z.string().min(1).optional(),
+});
+
 const WARNING_DISTANCE_FEET = 200;
 const FEET_TO_METERS = 0.3048;
 const MILES_TO_METERS = 1609.344;
@@ -545,6 +725,341 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       }
 
       return accessContext;
+    },
+  );
+
+  app.put(
+    "/v1/me/participant-profile",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedBody = participantProfileBodySchema.safeParse(request.body);
+      if (!parsedBody.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedBody.error.flatten() });
+        return;
+      }
+
+      const profile = await tenantRepositories.participantProfiles.upsertSelf(
+        actor,
+        parsedBody.data,
+      );
+      return { participantProfile: profile };
+    },
+  );
+
+  app.get(
+    "/v1/me/participant-profile",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      return {
+        participantProfile: await tenantRepositories.participantProfiles.getSelf(actor),
+      };
+    },
+  );
+
+  app.put(
+    "/v1/me/obligations/snapshot",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedBody = obligationSnapshotBodySchema.safeParse(request.body);
+      if (!parsedBody.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedBody.error.flatten() });
+        return;
+      }
+
+      const obligations = await tenantRepositories.participantObligations.syncSelf(
+        actor,
+        parsedBody.data.source,
+        parsedBody.data.obligations,
+      );
+
+      return { obligations };
+    },
+  );
+
+  app.get(
+    "/v1/me/obligations",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = participantObligationsQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      return {
+        obligations: await tenantRepositories.participantObligations.listSelf(
+          actor,
+          parsedQuery.data,
+        ),
+      };
+    },
+  );
+
+  app.post(
+    "/v1/me/compliance-events",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedBody = participantComplianceEventBodySchema.safeParse(request.body);
+      if (!parsedBody.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedBody.error.flatten() });
+        return;
+      }
+
+      const result = await tenantRepositories.participantCompliance.recordSelf(actor, {
+        obligationId: parsedBody.data.obligationId ?? null,
+        eventType: parsedBody.data.eventType,
+        eventStatus: parsedBody.data.eventStatus,
+        occurredAt: new Date(parsedBody.data.occurredAt),
+        metadata: parsedBody.data.metadata,
+        proofUri: parsedBody.data.proofUri ?? null,
+        signaturePresent: parsedBody.data.signaturePresent ?? false,
+        createdByRole: parsedBody.data.createdByRole ?? null,
+        sourceTrack: parsedBody.data.sourceTrack ?? null,
+        externalEventId: parsedBody.data.externalEventId ?? null,
+      });
+
+      if (!result) {
+        reply
+          .code(404)
+          .send({ error: "not_found", message: "Participant profile or obligation not found" });
+        return;
+      }
+
+      reply.code(201).send(result);
+    },
+  );
+
+  app.get(
+    "/v1/me/compliance-events",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = participantComplianceEventsQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      return {
+        complianceEvents: await tenantRepositories.participantCompliance.listSelf(
+          actor,
+          parsedQuery.data,
+        ),
+      };
+    },
+  );
+
+  app.get(
+    "/v1/me/violations",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = participantViolationsQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      return {
+        violations: await tenantRepositories.participantViolations.listSelf(
+          actor,
+          parsedQuery.data,
+        ),
+      };
+    },
+  );
+
+  app.get(
+    "/v1/participants/profiles",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = participantProfilesQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      try {
+        return {
+          participantProfiles: await tenantRepositories.participantProfiles.listScoped(
+            actor,
+            parsedQuery.data,
+          ),
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get(
+    "/v1/participants/obligations",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = participantObligationsQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      try {
+        return {
+          obligations: await tenantRepositories.participantObligations.listScoped(
+            actor,
+            parsedQuery.data,
+          ),
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get(
+    "/v1/participants/compliance-events",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = participantComplianceEventsQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      try {
+        return {
+          complianceEvents: await tenantRepositories.participantCompliance.listScoped(
+            actor,
+            parsedQuery.data,
+          ),
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get(
+    "/v1/participants/violations",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = participantViolationsQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      try {
+        return {
+          violations: await tenantRepositories.participantViolations.listScoped(
+            actor,
+            parsedQuery.data,
+          ),
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
     },
   );
 

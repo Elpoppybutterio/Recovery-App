@@ -4,10 +4,32 @@ import {
   ComplianceEventType,
   IncidentStatus,
   IncidentType,
+  obligationPrioritySchema,
+  obligationSourceTrackSchema,
+  obligationStatusSchema,
+  obligationTypeSchema,
+  participantComplianceEventStatusSchema,
+  participantComplianceEventTypeSchema,
+  participantProfileStatusSchema,
+  participantTypeSchema,
   Role,
   SponsorRepeatDay,
   SponsorRepeatRule,
   SponsorRepeatUnit,
+  violationSeveritySchema,
+  violationStatusSchema,
+  violationTypeSchema,
+  type ObligationPriority,
+  type ObligationSourceTrack,
+  type ObligationStatus,
+  type ObligationType,
+  type ParticipantComplianceEventStatus,
+  type ParticipantComplianceEventType,
+  type ParticipantProfileStatus,
+  type ParticipantType,
+  type ViolationSeverity,
+  type ViolationStatus,
+  type ViolationType,
 } from "@recovery/shared-types";
 import { createHash, randomUUID } from "node:crypto";
 import type { ActorContext } from "../domain/actor";
@@ -227,9 +249,119 @@ export interface ComplianceEventRow {
   id: string;
   tenant_id: string;
   user_id: string;
-  event_type: ComplianceEventType;
+  obligation_id: string | null;
+  organization_id: string | null;
+  house_id: string | null;
+  court_program_id: string | null;
+  event_type: ComplianceEventType | ParticipantComplianceEventType;
+  event_status: ParticipantComplianceEventStatus | null;
   occurred_at: string;
   metadata_json: unknown;
+  proof_uri: string | null;
+  signature_present: boolean;
+  created_by_role: string | null;
+  source_track: ObligationSourceTrack | null;
+  external_event_id: string | null;
+  created_at: string;
+}
+
+export interface HouseRow {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface ParticipantProfileRow {
+  user_id: string;
+  tenant_id: string;
+  participant_type: ParticipantType;
+  organization_id: string | null;
+  house_id: string | null;
+  court_program_id: string | null;
+  status: ParticipantProfileStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ObligationRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  obligation_type: ObligationType;
+  source_track: ObligationSourceTrack;
+  title: string;
+  description: string | null;
+  organization_id: string | null;
+  house_id: string | null;
+  court_program_id: string | null;
+  due_at: string | null;
+  recurrence_json: unknown;
+  priority: ObligationPriority | null;
+  requires_proof: boolean;
+  requires_signature: boolean;
+  status: ObligationStatus;
+  sync_source: string | null;
+  sync_key: string | null;
+  created_by_user_id: string | null;
+  created_by_role: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ViolationRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  obligation_id: string | null;
+  organization_id: string | null;
+  house_id: string | null;
+  court_program_id: string | null;
+  violation_type: ViolationType;
+  severity: ViolationSeverity;
+  status: ViolationStatus;
+  detected_at: string;
+  resolved_at: string | null;
+  notes: string | null;
+  detected_from_event_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ObligationSnapshotInput {
+  syncKey: string;
+  obligationType: ObligationType;
+  sourceTrack: ObligationSourceTrack;
+  title: string;
+  description?: string | null;
+  organizationId?: string | null;
+  houseId?: string | null;
+  courtProgramId?: string | null;
+  dueAt?: string | null;
+  recurrence?: Record<string, unknown> | null;
+  priority?: ObligationPriority | null;
+  requiresProof?: boolean;
+  requiresSignature?: boolean;
+  status: ObligationStatus;
+}
+
+export interface ParticipantComplianceEventInput {
+  obligationId?: string | null;
+  eventType: ParticipantComplianceEventType;
+  eventStatus: ParticipantComplianceEventStatus;
+  occurredAt: Date;
+  metadata?: Record<string, unknown>;
+  proofUri?: string | null;
+  signaturePresent?: boolean;
+  createdByRole?: string | null;
+  sourceTrack?: ObligationSourceTrack | null;
+  externalEventId?: string | null;
+}
+
+export interface RecordParticipantComplianceEventResult {
+  event: ComplianceEventRow;
+  violation: ViolationRow | null;
 }
 
 export interface SponsorConfigRow {
@@ -431,6 +563,74 @@ function toAccessGrantRole(role: string): AccessGrantRole | null {
   return parsed.success ? parsed.data : null;
 }
 
+function toParticipantType(value: string): ParticipantType | null {
+  const parsed = participantTypeSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toParticipantProfileStatus(value: string): ParticipantProfileStatus | null {
+  const parsed = participantProfileStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toObligationType(value: string): ObligationType | null {
+  const parsed = obligationTypeSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toObligationSourceTrack(value: string): ObligationSourceTrack | null {
+  const parsed = obligationSourceTrackSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toObligationPriority(value: string | null): ObligationPriority | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = obligationPrioritySchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toObligationStatus(value: string): ObligationStatus | null {
+  const parsed = obligationStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toParticipantComplianceEventType(
+  value: string,
+): ComplianceEventType | ParticipantComplianceEventType | null {
+  if (Object.values(ComplianceEventType).includes(value as ComplianceEventType)) {
+    return value as ComplianceEventType;
+  }
+  const parsed = participantComplianceEventTypeSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toParticipantComplianceEventStatus(
+  value: string | null,
+): ParticipantComplianceEventStatus | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = participantComplianceEventStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toViolationType(value: string): ViolationType | null {
+  const parsed = violationTypeSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toViolationSeverity(value: string): ViolationSeverity | null {
+  const parsed = violationSeveritySchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toViolationStatus(value: string): ViolationStatus | null {
+  const parsed = violationStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 const organizationManagerRoles: AccessGrantRole[] = [
   "org_admin",
   "house_manager",
@@ -449,6 +649,71 @@ const participantAccessRoles: AccessGrantRole[] = [
   "resident_user",
   "court_participant",
 ];
+
+function mapViolationTypeFromEvent(
+  eventType: ParticipantComplianceEventType,
+): ViolationType | null {
+  switch (eventType) {
+    case "MEETING_MISSED":
+      return "missed_meeting";
+    case "SPONSOR_CONTACT_MISSED":
+      return "missed_sponsor_contact";
+    case "TREATMENT_SESSION_MISSED":
+      return "missed_treatment";
+    case "COURT_APPEARANCE_MISSED":
+      return "other";
+    case "DRUG_TEST_MISSED":
+      return "missed_test";
+    case "CHORE_MISSED":
+      return "missed_chore";
+    case "CURFEW_VIOLATION_DETECTED":
+      return "missed_curfew";
+    case "SIGNATURE_CAPTURED":
+      return "missing_signature";
+    case "PROOF_UPLOADED":
+      return "missing_proof";
+    default:
+      return null;
+  }
+}
+
+function shouldCreateViolationFromEvent(input: {
+  eventType: ParticipantComplianceEventType;
+  eventStatus: ParticipantComplianceEventStatus;
+  proofUri?: string | null;
+  signaturePresent?: boolean;
+}): boolean {
+  if (
+    input.eventType === "SIGNATURE_CAPTURED" &&
+    input.eventStatus === "FAILED" &&
+    input.signaturePresent === false
+  ) {
+    return true;
+  }
+  if (input.eventType === "PROOF_UPLOADED" && input.eventStatus === "FAILED" && !input.proofUri) {
+    return true;
+  }
+  return input.eventStatus === "MISSED" || input.eventType === "CURFEW_VIOLATION_DETECTED";
+}
+
+function violationSeverityFromEvent(eventType: ParticipantComplianceEventType): ViolationSeverity {
+  switch (eventType) {
+    case "CURFEW_VIOLATION_DETECTED":
+    case "DRUG_TEST_MISSED":
+    case "COURT_APPEARANCE_MISSED":
+      return "HIGH";
+    case "MEETING_MISSED":
+    case "TREATMENT_SESSION_MISSED":
+    case "CHORE_MISSED":
+    case "SPONSOR_CONTACT_MISSED":
+      return "MEDIUM";
+    case "PROOF_UPLOADED":
+    case "SIGNATURE_CAPTURED":
+      return "LOW";
+    default:
+      return "MEDIUM";
+  }
+}
 
 function uniqueAccessRoles(roles: AccessGrantRole[]): AccessGrantRole[] {
   return Array.from(new Set(roles));
@@ -745,6 +1010,743 @@ export function createRepositories(db: DbClient) {
           isPlatformOwner: grants.some((grant) => grant.role === "platform_owner"),
         },
       };
+    },
+
+    async upsertParticipantProfile(
+      tenantId: string,
+      userId: string,
+      payload: {
+        participantType: ParticipantType;
+        organizationId?: string | null;
+        houseId?: string | null;
+        courtProgramId?: string | null;
+        status: ParticipantProfileStatus;
+      },
+    ): Promise<ParticipantProfileRow | null> {
+      const result = await db.query<ParticipantProfileRow>(
+        `
+        INSERT INTO participant_profiles (
+          user_id,
+          tenant_id,
+          participant_type,
+          organization_id,
+          house_id,
+          court_program_id,
+          status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (user_id)
+        DO UPDATE SET
+          participant_type = EXCLUDED.participant_type,
+          organization_id = EXCLUDED.organization_id,
+          house_id = EXCLUDED.house_id,
+          court_program_id = EXCLUDED.court_program_id,
+          status = EXCLUDED.status,
+          updated_at = NOW()
+        RETURNING
+          user_id,
+          tenant_id,
+          participant_type,
+          organization_id,
+          house_id,
+          court_program_id,
+          status,
+          created_at,
+          updated_at
+      `,
+        [
+          userId,
+          tenantId,
+          payload.participantType,
+          payload.organizationId ?? null,
+          payload.houseId ?? null,
+          payload.courtProgramId ?? null,
+          payload.status,
+        ],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async getParticipantProfile(
+      tenantId: string,
+      userId: string,
+    ): Promise<ParticipantProfileRow | null> {
+      const result = await db.query<ParticipantProfileRow>(
+        `
+        SELECT
+          user_id,
+          tenant_id,
+          participant_type,
+          organization_id,
+          house_id,
+          court_program_id,
+          status,
+          created_at,
+          updated_at
+        FROM participant_profiles
+        WHERE tenant_id = $1
+          AND user_id = $2
+        LIMIT 1
+      `,
+        [tenantId, userId],
+      );
+
+      const row = result.rows[0];
+      if (!row) {
+        return null;
+      }
+
+      const participantType = toParticipantType(String(row.participant_type));
+      const status = toParticipantProfileStatus(String(row.status));
+      if (!participantType || !status) {
+        return null;
+      }
+
+      return {
+        ...row,
+        participant_type: participantType,
+        status,
+      };
+    },
+
+    async listParticipantProfiles(tenantId: string): Promise<ParticipantProfileRow[]> {
+      const result = await db.query<ParticipantProfileRow>(
+        `
+        SELECT
+          user_id,
+          tenant_id,
+          participant_type,
+          organization_id,
+          house_id,
+          court_program_id,
+          status,
+          created_at,
+          updated_at
+        FROM participant_profiles
+        WHERE tenant_id = $1
+        ORDER BY updated_at DESC
+      `,
+        [tenantId],
+      );
+
+      return result.rows
+        .map((row) => {
+          const participantType = toParticipantType(String(row.participant_type));
+          const status = toParticipantProfileStatus(String(row.status));
+          if (!participantType || !status) {
+            return null;
+          }
+          return {
+            ...row,
+            participant_type: participantType,
+            status,
+          };
+        })
+        .filter((row): row is ParticipantProfileRow => row !== null);
+    },
+
+    async syncParticipantObligations(
+      tenantId: string,
+      userId: string,
+      source: string,
+      obligations: ObligationSnapshotInput[],
+      createdByUserId: string,
+      createdByRole: string,
+    ): Promise<ObligationRow[]> {
+      const existingResult = await db.query<ObligationRow>(
+        `
+        SELECT
+          id,
+          tenant_id,
+          user_id,
+          obligation_type,
+          source_track,
+          title,
+          description,
+          organization_id,
+          house_id,
+          court_program_id,
+          due_at,
+          recurrence_json,
+          priority,
+          requires_proof,
+          requires_signature,
+          status,
+          sync_source,
+          sync_key,
+          created_by_user_id,
+          created_by_role,
+          created_at,
+          updated_at
+        FROM obligations
+        WHERE tenant_id = $1
+          AND user_id = $2
+          AND sync_source = $3
+      `,
+        [tenantId, userId, source],
+      );
+      const existingByKey = new Map(
+        existingResult.rows
+          .filter((row) => row.sync_key)
+          .map((row) => [String(row.sync_key), row] as const),
+      );
+      const incomingKeys = new Set(obligations.map((obligation) => obligation.syncKey));
+      const nextRows: ObligationRow[] = [];
+
+      for (const obligation of obligations) {
+        const existing = existingByKey.get(obligation.syncKey);
+        const result = await db.query<ObligationRow>(
+          `
+          INSERT INTO obligations (
+            id,
+            tenant_id,
+            user_id,
+            obligation_type,
+            source_track,
+            title,
+            description,
+            organization_id,
+            house_id,
+            court_program_id,
+            due_at,
+            recurrence_json,
+            priority,
+            requires_proof,
+            requires_signature,
+            status,
+            sync_source,
+            sync_key,
+            created_by_user_id,
+            created_by_role
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20)
+          ON CONFLICT (tenant_id, user_id, sync_source, sync_key)
+          DO UPDATE SET
+            obligation_type = EXCLUDED.obligation_type,
+            source_track = EXCLUDED.source_track,
+            title = EXCLUDED.title,
+            description = EXCLUDED.description,
+            organization_id = EXCLUDED.organization_id,
+            house_id = EXCLUDED.house_id,
+            court_program_id = EXCLUDED.court_program_id,
+            due_at = EXCLUDED.due_at,
+            recurrence_json = EXCLUDED.recurrence_json,
+            priority = EXCLUDED.priority,
+            requires_proof = EXCLUDED.requires_proof,
+            requires_signature = EXCLUDED.requires_signature,
+            status = EXCLUDED.status,
+            created_by_user_id = EXCLUDED.created_by_user_id,
+            created_by_role = EXCLUDED.created_by_role,
+            updated_at = NOW()
+          RETURNING
+            id,
+            tenant_id,
+            user_id,
+            obligation_type,
+            source_track,
+            title,
+            description,
+            organization_id,
+            house_id,
+            court_program_id,
+            due_at,
+            recurrence_json,
+            priority,
+            requires_proof,
+            requires_signature,
+            status,
+            sync_source,
+            sync_key,
+            created_by_user_id,
+            created_by_role,
+            created_at,
+            updated_at
+        `,
+          [
+            existing?.id ?? randomUUID(),
+            tenantId,
+            userId,
+            obligation.obligationType,
+            obligation.sourceTrack,
+            obligation.title,
+            obligation.description ?? null,
+            obligation.organizationId ?? null,
+            obligation.houseId ?? null,
+            obligation.courtProgramId ?? null,
+            obligation.dueAt ?? null,
+            toJsonParam(obligation.recurrence ?? null),
+            obligation.priority ?? null,
+            obligation.requiresProof ?? false,
+            obligation.requiresSignature ?? false,
+            obligation.status,
+            source,
+            obligation.syncKey,
+            createdByUserId,
+            createdByRole,
+          ],
+        );
+        if (result.rows[0]) {
+          nextRows.push(result.rows[0]);
+        }
+      }
+
+      for (const existing of existingResult.rows) {
+        if (!existing.sync_key || incomingKeys.has(existing.sync_key)) {
+          continue;
+        }
+        await db.query(
+          `
+          UPDATE obligations
+          SET status = 'CANCELED',
+              updated_at = NOW()
+          WHERE tenant_id = $1
+            AND user_id = $2
+            AND id = $3
+        `,
+          [tenantId, userId, existing.id],
+        );
+      }
+
+      return this.listObligations(tenantId, { userId, syncSource: source });
+    },
+
+    async listObligations(
+      tenantId: string,
+      filters: {
+        userId?: string;
+        status?: ObligationStatus;
+        organizationId?: string;
+        houseId?: string;
+        courtProgramId?: string;
+        syncSource?: string;
+      } = {},
+    ): Promise<ObligationRow[]> {
+      const result = await db.query<ObligationRow>(
+        `
+        SELECT
+          id,
+          tenant_id,
+          user_id,
+          obligation_type,
+          source_track,
+          title,
+          description,
+          organization_id,
+          house_id,
+          court_program_id,
+          due_at,
+          recurrence_json,
+          priority,
+          requires_proof,
+          requires_signature,
+          status,
+          sync_source,
+          sync_key,
+          created_by_user_id,
+          created_by_role,
+          created_at,
+          updated_at
+        FROM obligations
+        WHERE tenant_id = $1
+        ORDER BY COALESCE(due_at, updated_at) ASC, created_at DESC
+      `,
+        [tenantId],
+      );
+
+      return result.rows
+        .map((row) => {
+          const obligationType = toObligationType(String(row.obligation_type));
+          const sourceTrack = toObligationSourceTrack(String(row.source_track));
+          const status = toObligationStatus(String(row.status));
+          const priority = toObligationPriority(row.priority);
+          if (!obligationType || !sourceTrack || !status) {
+            return null;
+          }
+
+          return {
+            ...row,
+            obligation_type: obligationType,
+            source_track: sourceTrack,
+            priority,
+            status,
+          };
+        })
+        .filter((row): row is ObligationRow => row !== null)
+        .filter((row) => {
+          if (filters.userId && row.user_id !== filters.userId) {
+            return false;
+          }
+          if (filters.status && row.status !== filters.status) {
+            return false;
+          }
+          if (filters.organizationId && row.organization_id !== filters.organizationId) {
+            return false;
+          }
+          if (filters.houseId && row.house_id !== filters.houseId) {
+            return false;
+          }
+          if (filters.courtProgramId && row.court_program_id !== filters.courtProgramId) {
+            return false;
+          }
+          if (filters.syncSource && row.sync_source !== filters.syncSource) {
+            return false;
+          }
+          return true;
+        });
+    },
+
+    async getObligationById(tenantId: string, obligationId: string): Promise<ObligationRow | null> {
+      const obligations = await this.listObligations(tenantId);
+      return obligations.find((row) => row.id === obligationId) ?? null;
+    },
+
+    async recordParticipantComplianceEvent(
+      tenantId: string,
+      userId: string,
+      payload: ParticipantComplianceEventInput,
+    ): Promise<RecordParticipantComplianceEventResult | null> {
+      const profile = await this.getParticipantProfile(tenantId, userId);
+      if (!profile) {
+        return null;
+      }
+
+      const obligation = payload.obligationId
+        ? await this.getObligationById(tenantId, payload.obligationId)
+        : null;
+      if (payload.obligationId && (!obligation || obligation.user_id !== userId)) {
+        return null;
+      }
+
+      const existingByExternalEvent = payload.externalEventId
+        ? ((
+            await db.query<ComplianceEventRow>(
+              `
+              SELECT
+                id,
+                tenant_id,
+                user_id,
+                obligation_id,
+                organization_id,
+                house_id,
+                court_program_id,
+                event_type,
+                event_status,
+                occurred_at,
+                metadata_json,
+                proof_uri,
+                signature_present,
+                created_by_role,
+                source_track,
+                external_event_id,
+                created_at
+              FROM compliance_events
+              WHERE tenant_id = $1
+                AND user_id = $2
+                AND external_event_id = $3
+              LIMIT 1
+            `,
+              [tenantId, userId, payload.externalEventId],
+            )
+          ).rows[0] ?? null)
+        : null;
+
+      const eventResult = await db.query<ComplianceEventRow>(
+        `
+        INSERT INTO compliance_events (
+          id,
+          tenant_id,
+          user_id,
+          obligation_id,
+          organization_id,
+          house_id,
+          court_program_id,
+          event_type,
+          event_status,
+          occurred_at,
+          metadata_json,
+          proof_uri,
+          signature_present,
+          created_by_role,
+          source_track,
+          external_event_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16)
+        ON CONFLICT (tenant_id, user_id, external_event_id)
+        DO UPDATE SET
+          metadata_json = EXCLUDED.metadata_json,
+          proof_uri = EXCLUDED.proof_uri,
+          signature_present = EXCLUDED.signature_present,
+          created_by_role = EXCLUDED.created_by_role,
+          source_track = EXCLUDED.source_track
+        RETURNING
+          id,
+          tenant_id,
+          user_id,
+          obligation_id,
+          organization_id,
+          house_id,
+          court_program_id,
+          event_type,
+          event_status,
+          occurred_at,
+          metadata_json,
+          proof_uri,
+          signature_present,
+          created_by_role,
+          source_track,
+          external_event_id,
+          created_at
+      `,
+        [
+          existingByExternalEvent?.id ?? randomUUID(),
+          tenantId,
+          userId,
+          payload.obligationId ?? null,
+          obligation?.organization_id ?? profile.organization_id ?? null,
+          obligation?.house_id ?? profile.house_id ?? null,
+          obligation?.court_program_id ?? profile.court_program_id ?? null,
+          payload.eventType,
+          payload.eventStatus,
+          payload.occurredAt.toISOString(),
+          toJsonParam(payload.metadata ?? {}),
+          payload.proofUri ?? null,
+          payload.signaturePresent ?? false,
+          payload.createdByRole ?? null,
+          payload.sourceTrack ?? obligation?.source_track ?? null,
+          payload.externalEventId ?? null,
+        ],
+      );
+
+      const event = eventResult.rows[0];
+      if (!event) {
+        return null;
+      }
+
+      let violation: ViolationRow | null = null;
+      if (
+        shouldCreateViolationFromEvent({
+          eventType: payload.eventType,
+          eventStatus: payload.eventStatus,
+          proofUri: payload.proofUri,
+          signaturePresent: payload.signaturePresent,
+        })
+      ) {
+        const violationType = mapViolationTypeFromEvent(payload.eventType) ?? "other";
+        const violationResult = await db.query<ViolationRow>(
+          `
+          INSERT INTO violations (
+            id,
+            tenant_id,
+            user_id,
+            obligation_id,
+            organization_id,
+            house_id,
+            court_program_id,
+            violation_type,
+            severity,
+            status,
+            detected_at,
+            notes,
+            detected_from_event_id
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'OPEN', $10, $11, $12)
+          ON CONFLICT (detected_from_event_id)
+          DO UPDATE SET
+            notes = EXCLUDED.notes,
+            updated_at = NOW()
+          RETURNING
+            id,
+            tenant_id,
+            user_id,
+            obligation_id,
+            organization_id,
+            house_id,
+            court_program_id,
+            violation_type,
+            severity,
+            status,
+            detected_at,
+            resolved_at,
+            notes,
+            detected_from_event_id,
+            created_at,
+            updated_at
+        `,
+          [
+            randomUUID(),
+            tenantId,
+            userId,
+            payload.obligationId ?? null,
+            obligation?.organization_id ?? profile.organization_id ?? null,
+            obligation?.house_id ?? profile.house_id ?? null,
+            obligation?.court_program_id ?? profile.court_program_id ?? null,
+            violationType,
+            violationSeverityFromEvent(payload.eventType),
+            payload.occurredAt.toISOString(),
+            obligation?.title ?? payload.eventType,
+            event.id,
+          ],
+        );
+        violation = violationResult.rows[0] ?? null;
+      }
+
+      return { event, violation };
+    },
+
+    async listComplianceEvents(
+      tenantId: string,
+      filters: {
+        userId?: string;
+        obligationId?: string;
+        organizationId?: string;
+        houseId?: string;
+        courtProgramId?: string;
+      } = {},
+    ): Promise<ComplianceEventRow[]> {
+      const result = await db.query<ComplianceEventRow>(
+        `
+        SELECT
+          id,
+          tenant_id,
+          user_id,
+          obligation_id,
+          organization_id,
+          house_id,
+          court_program_id,
+          event_type,
+          event_status,
+          occurred_at,
+          metadata_json,
+          proof_uri,
+          signature_present,
+          created_by_role,
+          source_track,
+          external_event_id,
+          created_at
+        FROM compliance_events
+        WHERE tenant_id = $1
+        ORDER BY occurred_at DESC, created_at DESC
+      `,
+        [tenantId],
+      );
+
+      return result.rows
+        .map((row) => {
+          const eventType = toParticipantComplianceEventType(String(row.event_type));
+          const eventStatus = toParticipantComplianceEventStatus(row.event_status);
+          const sourceTrack = row.source_track
+            ? toObligationSourceTrack(String(row.source_track))
+            : null;
+          if (!eventType) {
+            return null;
+          }
+          return {
+            ...row,
+            event_type: eventType,
+            event_status: eventStatus,
+            source_track: sourceTrack,
+          };
+        })
+        .filter((row): row is ComplianceEventRow => row !== null)
+        .filter((row) => {
+          if (filters.userId && row.user_id !== filters.userId) {
+            return false;
+          }
+          if (filters.obligationId && row.obligation_id !== filters.obligationId) {
+            return false;
+          }
+          if (filters.organizationId && row.organization_id !== filters.organizationId) {
+            return false;
+          }
+          if (filters.houseId && row.house_id !== filters.houseId) {
+            return false;
+          }
+          if (filters.courtProgramId && row.court_program_id !== filters.courtProgramId) {
+            return false;
+          }
+          return true;
+        });
+    },
+
+    async listViolations(
+      tenantId: string,
+      filters: {
+        userId?: string;
+        obligationId?: string;
+        organizationId?: string;
+        houseId?: string;
+        courtProgramId?: string;
+        status?: ViolationStatus;
+        violationType?: ViolationType;
+      } = {},
+    ): Promise<ViolationRow[]> {
+      const result = await db.query<ViolationRow>(
+        `
+        SELECT
+          id,
+          tenant_id,
+          user_id,
+          obligation_id,
+          organization_id,
+          house_id,
+          court_program_id,
+          violation_type,
+          severity,
+          status,
+          detected_at,
+          resolved_at,
+          notes,
+          detected_from_event_id,
+          created_at,
+          updated_at
+        FROM violations
+        WHERE tenant_id = $1
+        ORDER BY detected_at DESC, created_at DESC
+      `,
+        [tenantId],
+      );
+
+      return result.rows
+        .map((row) => {
+          const violationType = toViolationType(String(row.violation_type));
+          const severity = toViolationSeverity(String(row.severity));
+          const status = toViolationStatus(String(row.status));
+          if (!violationType || !severity || !status) {
+            return null;
+          }
+          return {
+            ...row,
+            violation_type: violationType,
+            severity,
+            status,
+          };
+        })
+        .filter((row): row is ViolationRow => row !== null)
+        .filter((row) => {
+          if (filters.userId && row.user_id !== filters.userId) {
+            return false;
+          }
+          if (filters.obligationId && row.obligation_id !== filters.obligationId) {
+            return false;
+          }
+          if (filters.organizationId && row.organization_id !== filters.organizationId) {
+            return false;
+          }
+          if (filters.houseId && row.house_id !== filters.houseId) {
+            return false;
+          }
+          if (filters.courtProgramId && row.court_program_id !== filters.courtProgramId) {
+            return false;
+          }
+          if (filters.status && row.status !== filters.status) {
+            return false;
+          }
+          if (filters.violationType && row.violation_type !== filters.violationType) {
+            return false;
+          }
+          return true;
+        });
     },
 
     async findTenantUser(tenantId: string, userId: string): Promise<TenantUserRow | null> {
@@ -1330,16 +2332,33 @@ export function createRepositories(db: DbClient) {
           user_id,
           event_type,
           occurred_at,
-          metadata_json
+          metadata_json,
+          event_status,
+          proof_uri,
+          signature_present,
+          created_by_role,
+          source_track,
+          external_event_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, NULL, NULL, FALSE, 'SYSTEM', NULL, NULL)
         RETURNING
           id,
           tenant_id,
           user_id,
+          obligation_id,
+          organization_id,
+          house_id,
+          court_program_id,
           event_type,
+          event_status,
           occurred_at,
-          metadata_json
+          metadata_json,
+          proof_uri,
+          signature_present,
+          created_by_role,
+          source_track,
+          external_event_id,
+          created_at
       `,
         [
           randomUUID(),

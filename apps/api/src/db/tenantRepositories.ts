@@ -1,13 +1,24 @@
 import {
+  type ObligationPriority,
+  type ObligationSourceTrack,
+  type ObligationStatus,
+  type ObligationType,
+  type ParticipantProfileStatus,
+  type ParticipantType,
   ComplianceEventType,
   IncidentType,
   Role,
   SponsorRepeatDay,
   SponsorRepeatUnit,
+  type ViolationStatus,
+  type ViolationType,
 } from "@recovery/shared-types";
 import type { ActorContext } from "../domain/actor";
 import type {
   ExclusionZoneType,
+  ObligationSnapshotInput,
+  ParticipantComplianceEventInput,
+  ParticipantProfileRow,
   MeetingGuideNearbyFilters,
   Repositories,
   SupervisorAttendanceFilters,
@@ -21,6 +32,71 @@ export class AccessDeniedError extends Error {
     super(message);
     this.name = "AccessDeniedError";
   }
+}
+
+type ParticipantAccessScope = {
+  isPlatformOwner: boolean;
+  organizationIds: string[];
+  courtProgramIds: string[];
+};
+
+const ORGANIZATION_MANAGER_ROLES = new Set(["org_admin", "house_manager"]);
+const COURT_MANAGER_ROLES = new Set(["probation_officer", "parole_officer", "court_supervisor"]);
+
+async function resolveParticipantAccessScope(
+  repositories: Repositories,
+  actor: ActorContext,
+): Promise<ParticipantAccessScope> {
+  const accessContext = await repositories.findAccessContextByUserId(actor.userId);
+  if (!accessContext) {
+    return {
+      isPlatformOwner: false,
+      organizationIds: [],
+      courtProgramIds: [],
+    };
+  }
+
+  return {
+    isPlatformOwner: accessContext.capabilities.isPlatformOwner,
+    organizationIds: Array.from(
+      new Set(
+        accessContext.grants
+          .filter(
+            (grant) =>
+              (ORGANIZATION_MANAGER_ROLES.has(grant.role) || grant.role === "platform_owner") &&
+              grant.organizationId,
+          )
+          .map((grant) => grant.organizationId as string),
+      ),
+    ),
+    courtProgramIds: Array.from(
+      new Set(
+        accessContext.grants
+          .filter(
+            (grant) =>
+              (COURT_MANAGER_ROLES.has(grant.role) || grant.role === "platform_owner") &&
+              grant.courtProgramId,
+          )
+          .map((grant) => grant.courtProgramId as string),
+      ),
+    ),
+  };
+}
+
+function isProfileVisibleToScope(
+  scope: ParticipantAccessScope,
+  profile: Pick<ParticipantProfileRow, "organization_id" | "court_program_id">,
+): boolean {
+  if (scope.isPlatformOwner) {
+    return true;
+  }
+  if (profile.organization_id && scope.organizationIds.includes(profile.organization_id)) {
+    return true;
+  }
+  if (profile.court_program_id && scope.courtProgramIds.includes(profile.court_program_id)) {
+    return true;
+  }
+  return false;
 }
 
 export function createTenantRepositories(repositories: Repositories) {
@@ -381,6 +457,257 @@ export function createTenantRepositories(repositories: Repositories) {
           metadata,
           occurredAt,
         );
+      },
+    },
+    participantProfiles: {
+      upsertSelf(
+        actor: ActorContext,
+        payload: {
+          participantType: ParticipantType;
+          organizationId?: string | null;
+          houseId?: string | null;
+          courtProgramId?: string | null;
+          status: ParticipantProfileStatus;
+        },
+      ) {
+        return repositories.upsertParticipantProfile(actor.tenantId, actor.userId, payload);
+      },
+      getSelf(actor: ActorContext) {
+        return repositories.getParticipantProfile(actor.tenantId, actor.userId);
+      },
+      async listScoped(
+        actor: ActorContext,
+        filters: {
+          userId?: string;
+          participantType?: ParticipantType;
+          organizationId?: string;
+          houseId?: string;
+          courtProgramId?: string;
+          status?: ParticipantProfileStatus;
+        } = {},
+      ) {
+        const scope = await resolveParticipantAccessScope(repositories, actor);
+        if (
+          !scope.isPlatformOwner &&
+          scope.organizationIds.length === 0 &&
+          scope.courtProgramIds.length === 0
+        ) {
+          throw new AccessDeniedError("Protected participant scope is required.");
+        }
+
+        return (await repositories.listParticipantProfiles(actor.tenantId)).filter((profile) => {
+          if (!isProfileVisibleToScope(scope, profile)) {
+            return false;
+          }
+          if (filters.userId && profile.user_id !== filters.userId) {
+            return false;
+          }
+          if (filters.participantType && profile.participant_type !== filters.participantType) {
+            return false;
+          }
+          if (filters.organizationId && profile.organization_id !== filters.organizationId) {
+            return false;
+          }
+          if (filters.houseId && profile.house_id !== filters.houseId) {
+            return false;
+          }
+          if (filters.courtProgramId && profile.court_program_id !== filters.courtProgramId) {
+            return false;
+          }
+          if (filters.status && profile.status !== filters.status) {
+            return false;
+          }
+          return true;
+        });
+      },
+    },
+    participantObligations: {
+      syncSelf(actor: ActorContext, source: string, obligations: ObligationSnapshotInput[]) {
+        return repositories.syncParticipantObligations(
+          actor.tenantId,
+          actor.userId,
+          source,
+          obligations,
+          actor.userId,
+          "MOBILE_APP",
+        );
+      },
+      listSelf(
+        actor: ActorContext,
+        filters: {
+          status?: ObligationStatus;
+          organizationId?: string;
+          houseId?: string;
+          courtProgramId?: string;
+        } = {},
+      ) {
+        return repositories.listObligations(actor.tenantId, {
+          userId: actor.userId,
+          status: filters.status,
+          organizationId: filters.organizationId,
+          houseId: filters.houseId,
+          courtProgramId: filters.courtProgramId,
+        });
+      },
+      async listScoped(
+        actor: ActorContext,
+        filters: {
+          userId?: string;
+          status?: ObligationStatus;
+          obligationType?: ObligationType;
+          organizationId?: string;
+          houseId?: string;
+          courtProgramId?: string;
+          sourceTrack?: ObligationSourceTrack;
+          priority?: ObligationPriority;
+        } = {},
+      ) {
+        const scope = await resolveParticipantAccessScope(repositories, actor);
+        if (
+          !scope.isPlatformOwner &&
+          scope.organizationIds.length === 0 &&
+          scope.courtProgramIds.length === 0
+        ) {
+          throw new AccessDeniedError("Protected participant scope is required.");
+        }
+
+        return (
+          await repositories.listObligations(actor.tenantId, {
+            userId: filters.userId,
+            status: filters.status,
+            organizationId: filters.organizationId,
+            houseId: filters.houseId,
+            courtProgramId: filters.courtProgramId,
+          })
+        ).filter((obligation) => {
+          if (
+            !scope.isPlatformOwner &&
+            !(
+              (obligation.organization_id &&
+                scope.organizationIds.includes(obligation.organization_id)) ||
+              (obligation.court_program_id &&
+                scope.courtProgramIds.includes(obligation.court_program_id))
+            )
+          ) {
+            return false;
+          }
+          if (filters.obligationType && obligation.obligation_type !== filters.obligationType) {
+            return false;
+          }
+          if (filters.sourceTrack && obligation.source_track !== filters.sourceTrack) {
+            return false;
+          }
+          if (filters.priority && obligation.priority !== filters.priority) {
+            return false;
+          }
+          return true;
+        });
+      },
+    },
+    participantCompliance: {
+      recordSelf(actor: ActorContext, payload: ParticipantComplianceEventInput) {
+        return repositories.recordParticipantComplianceEvent(actor.tenantId, actor.userId, payload);
+      },
+      listSelf(
+        actor: ActorContext,
+        filters: {
+          obligationId?: string;
+          organizationId?: string;
+          houseId?: string;
+          courtProgramId?: string;
+        } = {},
+      ) {
+        return repositories.listComplianceEvents(actor.tenantId, {
+          userId: actor.userId,
+          obligationId: filters.obligationId,
+          organizationId: filters.organizationId,
+          houseId: filters.houseId,
+          courtProgramId: filters.courtProgramId,
+        });
+      },
+      async listScoped(
+        actor: ActorContext,
+        filters: {
+          userId?: string;
+          obligationId?: string;
+          organizationId?: string;
+          houseId?: string;
+          courtProgramId?: string;
+        } = {},
+      ) {
+        const scope = await resolveParticipantAccessScope(repositories, actor);
+        if (
+          !scope.isPlatformOwner &&
+          scope.organizationIds.length === 0 &&
+          scope.courtProgramIds.length === 0
+        ) {
+          throw new AccessDeniedError("Protected participant scope is required.");
+        }
+
+        return (await repositories.listComplianceEvents(actor.tenantId, filters)).filter(
+          (event) => {
+            if (scope.isPlatformOwner) {
+              return true;
+            }
+            return (
+              (event.organization_id && scope.organizationIds.includes(event.organization_id)) ||
+              (event.court_program_id && scope.courtProgramIds.includes(event.court_program_id))
+            );
+          },
+        );
+      },
+    },
+    participantViolations: {
+      listSelf(
+        actor: ActorContext,
+        filters: {
+          status?: ViolationStatus;
+          violationType?: ViolationType;
+          organizationId?: string;
+          houseId?: string;
+          courtProgramId?: string;
+        } = {},
+      ) {
+        return repositories.listViolations(actor.tenantId, {
+          userId: actor.userId,
+          status: filters.status,
+          violationType: filters.violationType,
+          organizationId: filters.organizationId,
+          houseId: filters.houseId,
+          courtProgramId: filters.courtProgramId,
+        });
+      },
+      async listScoped(
+        actor: ActorContext,
+        filters: {
+          userId?: string;
+          status?: ViolationStatus;
+          violationType?: ViolationType;
+          organizationId?: string;
+          houseId?: string;
+          courtProgramId?: string;
+        } = {},
+      ) {
+        const scope = await resolveParticipantAccessScope(repositories, actor);
+        if (
+          !scope.isPlatformOwner &&
+          scope.organizationIds.length === 0 &&
+          scope.courtProgramIds.length === 0
+        ) {
+          throw new AccessDeniedError("Protected participant scope is required.");
+        }
+
+        return (await repositories.listViolations(actor.tenantId, filters)).filter((violation) => {
+          if (scope.isPlatformOwner) {
+            return true;
+          }
+          return (
+            (violation.organization_id &&
+              scope.organizationIds.includes(violation.organization_id)) ||
+            (violation.court_program_id &&
+              scope.courtProgramIds.includes(violation.court_program_id))
+          );
+        });
       },
     },
     notificationEvents: {
