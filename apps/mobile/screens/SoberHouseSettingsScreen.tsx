@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { GlassCard } from "../lib/ui/GlassCard";
 import { AppButton } from "../lib/ui/AppButton";
+import {
+  canManageSoberHouseHierarchy,
+  canViewSoberHouseResidentExperience,
+  type AppAccessRole,
+} from "../lib/access";
 import { formatUsPhoneDisplay, normalizeUsPhoneInput } from "../lib/phone";
 import { SoberHouseResidentManager } from "../components/SoberHouseResidentManager";
 import { SoberHouseComplianceSection } from "../components/SoberHouseComplianceSection";
@@ -73,6 +78,7 @@ type SoberHouseSettingsScreenProps = {
   userId: string;
   actorId: string;
   actorName: string;
+  viewerRole: AppAccessRole;
   onBack: () => void;
 };
 
@@ -618,6 +624,7 @@ export function SoberHouseSettingsScreen({
   userId,
   actorId,
   actorName,
+  viewerRole,
   onBack,
 }: SoberHouseSettingsScreenProps) {
   const actor = useMemo<AuditActor>(() => ({ id: actorId, name: actorName }), [actorId, actorName]);
@@ -759,6 +766,10 @@ export function SoberHouseSettingsScreen({
     if (!store) {
       return;
     }
+    if (!canManageSoberHouseHierarchy(viewerRole)) {
+      setStatusMessage("Only authorized administrators can change sober-house configuration.");
+      return;
+    }
     if (organizationDraft.name.trim().length === 0) {
       setStatusMessage("Organization name is required.");
       return;
@@ -789,10 +800,14 @@ export function SoberHouseSettingsScreen({
       `Organization saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
     );
     setOrganizationDraft(createOrganizationDraft(result.store.organization));
-  }, [actor, organizationDraft, persistStore, store]);
+  }, [actor, organizationDraft, persistStore, store, viewerRole]);
 
   const saveAccessProfile = useCallback(async () => {
     if (!store) {
+      return;
+    }
+    if (!canManageSoberHouseHierarchy(viewerRole)) {
+      setStatusMessage("Only authorized administrators can change sober-house configuration.");
       return;
     }
     if (accessDraft.role === "HOUSE_RESIDENT" && !accessDraft.houseId) {
@@ -822,10 +837,14 @@ export function SoberHouseSettingsScreen({
       `Access profile saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
     );
     setAccessDraft(createAccessDraft(result.store.userAccessProfile));
-  }, [accessDraft, actor, persistStore, store, userId]);
+  }, [accessDraft, actor, persistStore, store, userId, viewerRole]);
 
   const saveHouseGroup = useCallback(async () => {
     if (!store) {
+      return;
+    }
+    if (!canManageSoberHouseHierarchy(viewerRole)) {
+      setStatusMessage("Only authorized administrators can change sober-house configuration.");
       return;
     }
     if (houseGroupDraft.name.trim().length === 0) {
@@ -854,10 +873,14 @@ export function SoberHouseSettingsScreen({
     setHouseGroupDraft(createHouseGroupDraft(null));
     setEditingHouseGroupId(null);
     setIsHouseGroupEditorVisible(false);
-  }, [actor, editingHouseGroupId, houseGroupDraft, persistStore, store]);
+  }, [actor, editingHouseGroupId, houseGroupDraft, persistStore, store, viewerRole]);
 
   const saveHouse = useCallback(async () => {
     if (!store) {
+      return;
+    }
+    if (!canManageSoberHouseHierarchy(viewerRole)) {
+      setStatusMessage("Only authorized administrators can change sober-house configuration.");
       return;
     }
     if (houseDraft.name.trim().length === 0) {
@@ -907,10 +930,14 @@ export function SoberHouseSettingsScreen({
     setHouseDraft(createHouseDraft(null));
     setEditingHouseId(null);
     setIsHouseEditorVisible(false);
-  }, [actor, editingHouseId, houseDraft, persistStore, store]);
+  }, [actor, editingHouseId, houseDraft, persistStore, store, viewerRole]);
 
   const saveStaffAssignment = useCallback(async () => {
     if (!store) {
+      return;
+    }
+    if (!canManageSoberHouseHierarchy(viewerRole)) {
+      setStatusMessage("Only authorized administrators can change sober-house configuration.");
       return;
     }
     if (staffDraft.firstName.trim().length === 0 || staffDraft.lastName.trim().length === 0) {
@@ -955,10 +982,14 @@ export function SoberHouseSettingsScreen({
     );
     setStaffDraft(createStaffAssignmentDraft(null));
     setEditingStaffAssignmentId(null);
-  }, [actor, editingStaffAssignmentId, persistStore, staffDraft, store]);
+  }, [actor, editingStaffAssignmentId, persistStore, staffDraft, store, viewerRole]);
 
   const saveRuleSet = useCallback(async () => {
     if (!store) {
+      return;
+    }
+    if (!canManageSoberHouseHierarchy(viewerRole)) {
+      setStatusMessage("Only authorized administrators can change sober-house configuration.");
       return;
     }
     if (selectedRuleScope.scopeType !== "ORGANIZATION" && !selectedRuleScope.scopeId) {
@@ -1060,10 +1091,14 @@ export function SoberHouseSettingsScreen({
       result.store,
       `Rules saved with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
     );
-  }, [actor, persistStore, ruleDraft, selectedRuleScope, store]);
+  }, [actor, persistStore, ruleDraft, selectedRuleScope, store, viewerRole]);
 
   const saveAlertPreference = useCallback(async () => {
     if (!store) {
+      return;
+    }
+    if (!canManageSoberHouseHierarchy(viewerRole)) {
+      setStatusMessage("Only authorized administrators can change sober-house configuration.");
       return;
     }
     if (alertDraft.label.trim().length === 0) {
@@ -1151,7 +1186,7 @@ export function SoberHouseSettingsScreen({
         : null;
     setAlertDraft(createAlertPreferenceDraft(savedPreference));
     setEditingAlertPreferenceId(savedPreference?.id ?? null);
-  }, [actor, alertDraft, editingAlertPreferenceId, persistStore, store]);
+  }, [actor, alertDraft, editingAlertPreferenceId, persistStore, store, viewerRole]);
 
   const userAccessProfile = store ? getUserAccessProfile(store) : null;
   const residentMode = store ? isResidentAccess(store) : false;
@@ -1167,7 +1202,7 @@ export function SoberHouseSettingsScreen({
           : null) ??
         getRuleSetForScope(store, "ORGANIZATION", null))
       : null;
-  const showAdminControls = !residentMode;
+  const showAdminControls = canManageSoberHouseHierarchy(viewerRole);
 
   if (loading || !store) {
     return (
@@ -1178,44 +1213,92 @@ export function SoberHouseSettingsScreen({
     );
   }
 
+  if (!showAdminControls && !residentMode && !canViewSoberHouseResidentExperience(viewerRole)) {
+    return (
+      <GlassCard style={styles.card} strong>
+        <SectionHeader
+          title="Sober House Profile"
+          meta="This area is limited to sober-house residents and authorized organization administrators."
+          action={<AppButton title="Back to Dashboard" onPress={onBack} variant="secondary" />}
+        />
+      </GlassCard>
+    );
+  }
+
   return (
     <View style={styles.wrap}>
       <GlassCard style={styles.card} strong>
-        <SectionHeader
-          title="Sober Housing Settings"
-          meta="System of record for sober-house configuration, house rules, staff routing, and audit history."
-          action={<AppButton title="Back to Dashboard" onPress={onBack} variant="secondary" />}
-        />
-        <View style={styles.summaryRow}>
-          <View style={styles.summaryPill}>
-            <Text style={styles.summaryValue}>{store.organization ? "1" : "0"}</Text>
-            <Text style={styles.summaryLabel}>Organization</Text>
-          </View>
-          <View style={styles.summaryPill}>
-            <Text style={styles.summaryValue}>{store.houses.length}</Text>
-            <Text style={styles.summaryLabel}>Houses</Text>
-          </View>
-          <View style={styles.summaryPill}>
-            <Text style={styles.summaryValue}>{store.staffAssignments.length}</Text>
-            <Text style={styles.summaryLabel}>Staff</Text>
-          </View>
-          <View style={styles.summaryPill}>
-            <Text style={styles.summaryValue}>{store.violations.length}</Text>
-            <Text style={styles.summaryLabel}>Violations</Text>
-          </View>
-          <View style={styles.summaryPill}>
-            <Text style={styles.summaryValue}>{store.chatThreads.length}</Text>
-            <Text style={styles.summaryLabel}>Threads</Text>
-          </View>
-          <View style={styles.summaryPill}>
-            <Text style={styles.summaryValue}>{store.monthlyReports.length}</Text>
-            <Text style={styles.summaryLabel}>Reports</Text>
-          </View>
-          <View style={styles.summaryPill}>
-            <Text style={styles.summaryValue}>{store.auditLogEntries.length}</Text>
-            <Text style={styles.summaryLabel}>Audit</Text>
-          </View>
-        </View>
+        {showAdminControls ? (
+          <>
+            <SectionHeader
+              title="Sober Housing Settings"
+              meta="System of record for sober-house configuration, house rules, staff routing, and audit history."
+              action={<AppButton title="Back to Dashboard" onPress={onBack} variant="secondary" />}
+            />
+            <View style={styles.summaryRow}>
+              <View style={styles.summaryPill}>
+                <Text style={styles.summaryValue}>{store.organization ? "1" : "0"}</Text>
+                <Text style={styles.summaryLabel}>Organization</Text>
+              </View>
+              <View style={styles.summaryPill}>
+                <Text style={styles.summaryValue}>{store.houses.length}</Text>
+                <Text style={styles.summaryLabel}>Houses</Text>
+              </View>
+              <View style={styles.summaryPill}>
+                <Text style={styles.summaryValue}>{store.staffAssignments.length}</Text>
+                <Text style={styles.summaryLabel}>Staff</Text>
+              </View>
+              <View style={styles.summaryPill}>
+                <Text style={styles.summaryValue}>{store.violations.length}</Text>
+                <Text style={styles.summaryLabel}>Violations</Text>
+              </View>
+              <View style={styles.summaryPill}>
+                <Text style={styles.summaryValue}>{store.chatThreads.length}</Text>
+                <Text style={styles.summaryLabel}>Threads</Text>
+              </View>
+              <View style={styles.summaryPill}>
+                <Text style={styles.summaryValue}>{store.monthlyReports.length}</Text>
+                <Text style={styles.summaryLabel}>Reports</Text>
+              </View>
+              <View style={styles.summaryPill}>
+                <Text style={styles.summaryValue}>{store.auditLogEntries.length}</Text>
+                <Text style={styles.summaryLabel}>Audit</Text>
+              </View>
+            </View>
+          </>
+        ) : (
+          <>
+            <SectionHeader
+              title="Sober House Profile"
+              meta="Your resident-facing house details, requirements, and progress live here."
+              action={<AppButton title="Back to Dashboard" onPress={onBack} variant="secondary" />}
+            />
+            <Text style={styles.entityTitle}>
+              {residentAssignedHouse?.name ?? "No house assigned"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              Organization: {store.organization?.name ?? "No organization configured"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              Meetings required:{" "}
+              {residentAssignedRuleSet?.meetings.meetingsRequired
+                ? `${residentAssignedRuleSet.meetings.meetingsPerWeek} per week`
+                : "No weekly meeting requirement"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              Sponsor contact:{" "}
+              {residentAssignedRuleSet?.sponsorContact.enabled
+                ? `${residentAssignedRuleSet.sponsorContact.contactsRequiredPerWeek} per week`
+                : "Not required"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              Curfew:{" "}
+              {residentAssignedRuleSet?.curfew.enabled
+                ? `${residentAssignedRuleSet.curfew.weekdayCurfew} weekdays`
+                : "Disabled"}
+            </Text>
+          </>
+        )}
         <SaveStatus message={statusMessage} />
       </GlassCard>
 

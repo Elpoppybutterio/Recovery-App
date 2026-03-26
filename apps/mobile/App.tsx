@@ -104,9 +104,29 @@ import {
 } from "./lib/homeGroupBirthdays";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import {
+  canManageCourtHierarchy,
+  canManageSoberHouseHierarchy,
+  canViewCourtParticipantExperience,
+  canViewSoberHouseResidentExperience,
+  courtEntryLabel,
+  deriveAppAccessRole,
+  soberHouseEntryLabel,
+} from "./lib/access";
+import {
   buildMeetingConsistencyTrend,
   computeMeetingConsistencyStreak,
 } from "./lib/dashboard/meetingStreak";
+import {
+  getLegacyWizardStateForPath,
+  getSetupFlowSteps,
+  inferOnboardingPath,
+  ONBOARDING_PATH_OPTIONS,
+  pathRequiresRecovery,
+  type OnboardingPath,
+  type SetupJusticeTrack,
+  type SetupStep,
+  type SetupSupervisionMode,
+} from "./lib/onboarding";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
 import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
 import {
@@ -384,9 +404,6 @@ type HomeScreen =
   | "SETTINGS"
   | "TOOLS"
   | "DIAGNOSTICS";
-type SetupStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
-type SetupSupervisionMode = "INDEPENDENT" | "SOBER_HOUSE_RESIDENT" | "SOBER_HOUSE_OWNER";
-type SetupJusticeTrack = "NONE" | "DRUG_COURT" | "PROBATION_PAROLE";
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
 type MeetingsLocationFilter = "CURRENT" | "MILES_50" | "MILES_100";
@@ -412,6 +429,7 @@ type SignaturePoint = {
   y: number;
   isStrokeStart: boolean;
 };
+type ServerActorRole = "END_USER" | "SPONSOR" | "MEETING_VERIFIER" | "SUPERVISOR" | "ADMIN";
 
 type MapBoundaryCenter = {
   lat: number;
@@ -2198,6 +2216,8 @@ export default function App() {
     () => (authHeader ? ({ Authorization: authHeader } as Record<string, string>) : undefined),
     [authHeader],
   );
+  const [serverActorRoles, setServerActorRoles] = useState<ServerActorRole[]>([]);
+  const [serverRoleCheckStatus, setServerRoleCheckStatus] = useState<string | null>(null);
   const enableHomeGroupBirthdayApiSync = Boolean(apiUrl && authHeader);
   const [clockTickMs, setClockTickMs] = useState(Date.now());
   const [meetingRadiusMiles, setMeetingRadiusMiles] = useState(defaultMeetingRadiusMiles);
@@ -2425,10 +2445,15 @@ export default function App() {
   const [activeRecoveryInsightSubstance, setActiveRecoveryInsightSubstance] =
     useState<RecoverySubstanceCategory | null>(null);
   const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
+  const [wizardOnboardingPath, setWizardOnboardingPath] = useState<OnboardingPath>("RECOVERY");
   const [wizardSupervisionMode, setWizardSupervisionMode] =
     useState<SetupSupervisionMode>("INDEPENDENT");
   const [wizardSoberHouseId, setWizardSoberHouseId] = useState<string | null>(null);
   const [wizardJusticeTrack, setWizardJusticeTrack] = useState<SetupJusticeTrack>("NONE");
+  const [wizardCourtProgramName, setWizardCourtProgramName] = useState("");
+  const [wizardCourtSupervisorName, setWizardCourtSupervisorName] = useState("");
+  const [wizardCourtRequirementsSummary, setWizardCourtRequirementsSummary] = useState("");
+  const [wizardCourtDeadlineSummary, setWizardCourtDeadlineSummary] = useState("");
   const [wizardOrganizationName, setWizardOrganizationName] = useState("");
   const [wizardOrganizationPrimaryContactName, setWizardOrganizationPrimaryContactName] =
     useState("");
@@ -2678,15 +2703,44 @@ export default function App() {
         : [],
     [soberHouseResidentChatViewer, soberHouseStore],
   );
+  const hasVerifiedPlatformAdminRole = serverActorRoles.includes("ADMIN");
+  const hasVerifiedCourtSupervisorRole =
+    hasVerifiedPlatformAdminRole || serverActorRoles.includes("SUPERVISOR");
+  const appAccessRole = useMemo(
+    () =>
+      deriveAppAccessRole({
+        onboardingPath: wizardOnboardingPath,
+        soberHouseRole: soberHouseAccessProfile?.role,
+        isCourtSupervisor: hasVerifiedCourtSupervisorRole,
+        isPlatformAdmin: hasVerifiedPlatformAdminRole,
+      }),
+    [
+      hasVerifiedCourtSupervisorRole,
+      hasVerifiedPlatformAdminRole,
+      soberHouseAccessProfile?.role,
+      wizardOnboardingPath,
+    ],
+  );
+  const canOpenSoberHouseEntry = canViewSoberHouseResidentExperience(appAccessRole);
+  const canOpenCourtEntry = canViewCourtParticipantExperience(appAccessRole);
+  const protectedOrgSetupAuthorized = canManageSoberHouseHierarchy(appAccessRole);
+  const protectedCourtConfigAuthorized = canManageCourtHierarchy(appAccessRole);
+  const setupFlowSteps = useMemo(
+    () => getSetupFlowSteps(wizardOnboardingPath),
+    [wizardOnboardingPath],
+  );
+  const setupStepIndex = Math.max(0, setupFlowSteps.indexOf(setupStep));
+  const setupVisibleStepNumber = setupStepIndex + 1;
+  const setupLastStep = setupFlowSteps[setupFlowSteps.length - 1] ?? 1;
   const communicationMode: CommunicationMode = useMemo(() => {
-    if (soberHouseAccessProfile?.role === "HOUSE_RESIDENT" || mode === "B") {
+    if (canOpenSoberHouseEntry || mode === "B") {
       return "SOBER_HOUSE";
     }
-    if (mode === "C") {
+    if (canOpenCourtEntry || mode === "C") {
       return "JUSTICE";
     }
     return "RECOVERY";
-  }, [mode, soberHouseAccessProfile?.role]);
+  }, [canOpenCourtEntry, canOpenSoberHouseEntry, mode]);
   const soberHouseManagerContact = useMemo(() => {
     const primaryManagerContext =
       soberHouseManagerContexts.find((context) => context.role === "MANAGER") ??
@@ -2730,6 +2784,10 @@ export default function App() {
     wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" &&
     (wizardSelectedSoberHouseRules?.meetings.proofMethod === "SIGNATURE" ||
       wizardSelectedSoberHouseRules?.meetings.proofMethod === "GEOFENCE_SIGNATURE");
+  const showProtectedOrgAccessGate =
+    homeScreen === "SETUP" &&
+    wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" &&
+    !protectedOrgSetupAuthorized;
   const shouldShowSoberHouseLock =
     mode === "B" &&
     homeScreen === "SETTINGS" &&
@@ -6179,6 +6237,64 @@ export default function App() {
     }
   }, [homeScreen, isDiagnosticsEnabled]);
 
+  useEffect(() => {
+    let active = true;
+
+    if (!apiUrl || !authHeaders) {
+      setServerActorRoles([]);
+      setServerRoleCheckStatus("Sign in to continue.");
+      return () => {
+        active = false;
+      };
+    }
+
+    void (async () => {
+      try {
+        const response = await fetch(`${apiUrl}/v1/me`, { headers: authHeaders });
+        if (!active) {
+          return;
+        }
+        if (!response.ok) {
+          setServerActorRoles([]);
+          setServerRoleCheckStatus(
+            response.status === 401
+              ? "Sign in to continue."
+              : "Organization and supervision setup is available only to authorized admins.",
+          );
+          return;
+        }
+
+        const payload = (await response.json()) as {
+          actor?: { roles?: unknown };
+        };
+        const nextRoles = Array.isArray(payload.actor?.roles)
+          ? payload.actor.roles.filter(
+              (role): role is ServerActorRole =>
+                role === "END_USER" ||
+                role === "SPONSOR" ||
+                role === "MEETING_VERIFIER" ||
+                role === "SUPERVISOR" ||
+                role === "ADMIN",
+            )
+          : [];
+        setServerActorRoles(nextRoles);
+        setServerRoleCheckStatus(null);
+      } catch {
+        if (!active) {
+          return;
+        }
+        setServerActorRoles([]);
+        setServerRoleCheckStatus(
+          "Organization and supervision setup is available only to authorized admins.",
+        );
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [apiUrl, authHeaders]);
+
   const handleModeSelect = useCallback(
     (nextMode: RecoveryMode) => {
       setMode(nextMode);
@@ -6300,6 +6416,22 @@ export default function App() {
     setSelectedDayOffset(0);
   }, [activeAttendance]);
 
+  const selectOnboardingPath = useCallback((path: OnboardingPath) => {
+    const legacyWizardState = getLegacyWizardStateForPath(path);
+    setWizardOnboardingPath(path);
+    setWizardSupervisionMode(legacyWizardState.wizardSupervisionMode);
+    setWizardJusticeTrack((current) =>
+      path === "COURT_PROGRAM"
+        ? current === "NONE"
+          ? legacyWizardState.wizardJusticeTrack
+          : current
+        : "NONE",
+    );
+    if (path !== "SOBER_HOUSE_RESIDENT") {
+      setWizardSoberHouseId(null);
+    }
+  }, []);
+
   const openOnlineMeetingsNow = useCallback(async () => {
     try {
       await Linking.openURL(AA_ONLINE_MEETINGS_URL);
@@ -6361,12 +6493,7 @@ export default function App() {
     attendanceEntryPoint === "meetings" ? "Back to upcoming meetings" : "Back to dashboard";
 
   const openSoberHousingSettings = useCallback(() => {
-    if (!soberHousingConfigured) {
-      setMode("A");
-      setHomeScreen("SETTINGS");
-      setToolsScreen("HOME");
-      setScreen("LIST");
-      setSelectedMeeting(null);
+    if (!canOpenSoberHouseEntry) {
       return;
     }
     setMode("B");
@@ -6374,15 +6501,18 @@ export default function App() {
     setToolsScreen("HOME");
     setScreen("LIST");
     setSelectedMeeting(null);
-  }, [soberHousingConfigured]);
+  }, [canOpenSoberHouseEntry]);
 
   const openProbationParoleSettings = useCallback(() => {
+    if (!canOpenCourtEntry) {
+      return;
+    }
     setMode("C");
     setHomeScreen("SETTINGS");
     setToolsScreen("HOME");
     setScreen("LIST");
     setSelectedMeeting(null);
-  }, []);
+  }, [canOpenCourtEntry]);
 
   const persistSoberHouseStore = useCallback(
     async (nextStore: SoberHouseSettingsStore) => {
@@ -6481,11 +6611,23 @@ export default function App() {
   const restartSetup = useCallback(() => {
     const residentProfile = soberHouseStore.residentHousingProfile;
     const organization = soberHouseStore.organization;
+    const recoveredOnboardingPath = inferOnboardingPath({
+      onboardingPath: wizardOnboardingPath,
+      wizardSupervisionMode:
+        soberHouseStore.userAccessProfile?.role === "HOUSE_RESIDENT"
+          ? "SOBER_HOUSE_RESIDENT"
+          : soberHouseStore.userAccessProfile?.role === "OWNER_OPERATOR"
+            ? "SOBER_HOUSE_OWNER"
+            : wizardSupervisionMode,
+      wizardJusticeTrack,
+      soberHouseRole: soberHouseStore.userAccessProfile?.role ?? null,
+    });
     setMode("A");
     setSetupComplete(false);
     setHomeScreen("SETUP");
     setSetupStep(1);
     setSetupError(null);
+    setWizardOnboardingPath(recoveredOnboardingPath);
     setWizardSupervisionMode(
       soberHouseStore.userAccessProfile?.role === "HOUSE_RESIDENT"
         ? "SOBER_HOUSE_RESIDENT"
@@ -6527,7 +6669,9 @@ export default function App() {
     sponsorEnabled,
     sponsorKneesSuggested,
     recoverySubstances,
+    wizardOnboardingPath,
     wizardJusticeTrack,
+    wizardSupervisionMode,
   ]);
 
   const hydratePersistedRecoverySettings = useCallback(
@@ -6600,8 +6744,13 @@ export default function App() {
             sponsorLeadMinutes?: SponsorLeadMinutes;
             sponsorKneesSuggested?: boolean | null;
             meetingAutoAddToCalendar?: boolean;
+            wizardOnboardingPath?: OnboardingPath;
             wizardSupervisionMode?: SetupSupervisionMode;
             wizardJusticeTrack?: SetupJusticeTrack;
+            wizardCourtProgramName?: string;
+            wizardCourtSupervisorName?: string;
+            wizardCourtRequirementsSummary?: string;
+            wizardCourtDeadlineSummary?: string;
           };
 
           if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
@@ -6769,6 +6918,12 @@ export default function App() {
           if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
             setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
           }
+          const inferredOnboardingPath = inferOnboardingPath({
+            onboardingPath: parsedProfile.wizardOnboardingPath,
+            wizardSupervisionMode: parsedProfile.wizardSupervisionMode,
+            wizardJusticeTrack: parsedProfile.wizardJusticeTrack,
+          });
+          setWizardOnboardingPath(inferredOnboardingPath);
           if (
             parsedProfile.wizardSupervisionMode === "INDEPENDENT" ||
             parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ||
@@ -6782,6 +6937,18 @@ export default function App() {
             parsedProfile.wizardJusticeTrack === "PROBATION_PAROLE"
           ) {
             setWizardJusticeTrack(parsedProfile.wizardJusticeTrack);
+          }
+          if (typeof parsedProfile.wizardCourtProgramName === "string") {
+            setWizardCourtProgramName(parsedProfile.wizardCourtProgramName);
+          }
+          if (typeof parsedProfile.wizardCourtSupervisorName === "string") {
+            setWizardCourtSupervisorName(parsedProfile.wizardCourtSupervisorName);
+          }
+          if (typeof parsedProfile.wizardCourtRequirementsSummary === "string") {
+            setWizardCourtRequirementsSummary(parsedProfile.wizardCourtRequirementsSummary);
+          }
+          if (typeof parsedProfile.wizardCourtDeadlineSummary === "string") {
+            setWizardCourtDeadlineSummary(parsedProfile.wizardCourtDeadlineSummary);
           }
         } catch (error) {
           console.log("[setup-persist] read failure", {
@@ -6820,14 +6987,6 @@ export default function App() {
     [],
   );
 
-  const recurringServiceCommitmentReviewLines = useMemo(
-    () =>
-      recurringServiceCommitments.map(
-        (commitment) =>
-          `${commitment.name} • ${buildRecurringServiceCommitmentSummary(commitment)}`,
-      ),
-    [recurringServiceCommitments],
-  );
   const attendanceSlipServiceCommitmentsForExport = useMemo(
     () =>
       recurringServiceCommitments
@@ -6961,10 +7120,19 @@ export default function App() {
     setSetupError(null);
 
     if (setupStep === 1) {
-      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
-        setSetupStep(2);
+      setSetupStep(2);
+      return;
+    }
+
+    if (setupStep === 2 && wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
+      if (!protectedOrgSetupAuthorized) {
+        setSetupError("Sign in to continue. Organization setup is limited to authorized admins.");
         return;
       }
+      return;
+    }
+
+    if (setupStep === 2) {
       const parsedDateIso = parseUsDateToIso(sobrietyDateInput);
       if (!parsedDateIso) {
         setSetupError("Enter sobriety date as MM-DD-YYYY.");
@@ -6978,63 +7146,10 @@ export default function App() {
       setSobrietyDateIso(parsedDateIso);
       setNinetyDayGoalTarget(parsedGoal);
       setNinetyDayGoalInput(String(parsedGoal));
-      setSetupStep(2);
-      return;
-    }
-
-    if (setupStep === 2) {
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && !wizardSoberHouseId) {
-        setSetupError("Select the sober house you live in.");
-        return;
-      }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
-        if (!wizardResidentFirstName.trim() || !wizardResidentLastName.trim()) {
-          setSetupError("Enter your first and last name for sober-house placement.");
-          return;
-        }
-        if (!parseUsDateToIso(wizardResidentMoveInDate)) {
-          setSetupError("Move-in date must use MM-DD-YYYY.");
-          return;
-        }
-        if (!wizardResidentRoomOrBed.trim()) {
-          setSetupError("Enter your room or bed assignment.");
-          return;
-        }
-        if (
-          !wizardResidentEmergencyContactName.trim() ||
-          !wizardResidentEmergencyContactPhone.trim()
-        ) {
-          setSetupError("Enter emergency contact name and phone.");
-          return;
-        }
-        if (!wizardResidentProgramPhase.trim()) {
-          setSetupError("Enter your current program phase.");
-          return;
-        }
-      }
-      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
-        if (!wizardOrganizationName.trim()) {
-          setSetupError("Enter your organization name.");
-          return;
-        }
-        if (!wizardOrganizationPrimaryContactName.trim()) {
-          setSetupError("Enter the primary contact name.");
-          return;
-        }
-        if (
-          !wizardOrganizationPrimaryEmail.trim() ||
-          !/\S+@\S+\.\S+/.test(wizardOrganizationPrimaryEmail.trim())
-        ) {
-          setSetupError("Enter a valid primary email.");
-          return;
-        }
-        setSetupStep(10);
-        return;
-      }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && wizardRequiresSponsorDetails) {
+      if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" && wizardRequiresSponsorDetails) {
         setWizardHasSponsor(true);
       }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && wizardMeetingProofLockedByHouse) {
+      if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" && wizardMeetingProofLockedByHouse) {
         setWizardMeetingSignatureRequired(true);
       }
       setSetupStep(3);
@@ -7144,26 +7259,70 @@ export default function App() {
         setSetupError("Choose whether signatures are required at meetings.");
         return;
       }
-      setSetupStep(10);
+      if (
+        wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ||
+        wizardOnboardingPath === "COURT_PROGRAM"
+      ) {
+        setSetupStep(10);
+      }
+      return;
+    }
+
+    if (setupStep === 10 && wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
+      if (!wizardSoberHouseId) {
+        setSetupError("Select the sober house you live in.");
+        return;
+      }
+      if (!wizardResidentFirstName.trim() || !wizardResidentLastName.trim()) {
+        setSetupError("Enter your first and last name for sober-house placement.");
+        return;
+      }
+      if (!parseUsDateToIso(wizardResidentMoveInDate)) {
+        setSetupError("Move-in date must use MM-DD-YYYY.");
+        return;
+      }
+      if (!wizardResidentRoomOrBed.trim()) {
+        setSetupError("Enter your room or bed assignment.");
+        return;
+      }
+      if (
+        !wizardResidentEmergencyContactName.trim() ||
+        !wizardResidentEmergencyContactPhone.trim()
+      ) {
+        setSetupError("Enter emergency contact name and phone.");
+        return;
+      }
+      if (!wizardResidentProgramPhase.trim()) {
+        setSetupError("Enter your current program phase.");
+        return;
+      }
+      return;
+    }
+
+    if (setupStep === 10 && wizardOnboardingPath === "COURT_PROGRAM") {
+      if (wizardJusticeTrack === "NONE") {
+        setSetupError("Select the court or supervision track that applies to you.");
+        return;
+      }
+      setSetupStep(11);
+      return;
+    }
+
+    if (setupStep === 11 && wizardOnboardingPath === "COURT_PROGRAM") {
+      if (!wizardCourtProgramName.trim()) {
+        setSetupError("Enter the court or program name.");
+        return;
+      }
+      if (!wizardCourtRequirementsSummary.trim()) {
+        setSetupError("Add the participant requirements you need to keep in front of you.");
+        return;
+      }
     }
   }, [
+    protectedOrgSetupAuthorized,
     setupStep,
     sobrietyDateInput,
     ninetyDayGoalInput,
-    wizardOrganizationName,
-    wizardOrganizationPrimaryContactName,
-    wizardOrganizationPrimaryEmail,
-    wizardSupervisionMode,
-    wizardSoberHouseId,
-    wizardRequiresSponsorDetails,
-    wizardMeetingProofLockedByHouse,
-    wizardResidentEmergencyContactName,
-    wizardResidentEmergencyContactPhone,
-    wizardResidentFirstName,
-    wizardResidentLastName,
-    wizardResidentMoveInDate,
-    wizardResidentProgramPhase,
-    wizardResidentRoomOrBed,
     wizardHasSponsor,
     wizardSponsorKneesSuggested,
     normalizedSponsorName,
@@ -7176,12 +7335,31 @@ export default function App() {
     wizardHasHomeGroup,
     homeGroupMeetingIds.length,
     wizardMeetingSignatureRequired,
+    wizardJusticeTrack,
+    wizardCourtProgramName,
+    wizardCourtRequirementsSummary,
+    wizardMeetingProofLockedByHouse,
+    wizardOnboardingPath,
+    wizardRequiresSponsorDetails,
+    wizardResidentEmergencyContactName,
+    wizardResidentEmergencyContactPhone,
+    wizardResidentFirstName,
+    wizardResidentLastName,
+    wizardResidentMoveInDate,
+    wizardResidentProgramPhase,
+    wizardResidentRoomOrBed,
+    wizardSoberHouseId,
   ]);
 
   const previousSetupStep = useCallback(() => {
     setSetupError(null);
-    setSetupStep((current) => (current <= 1 ? 1 : ((current - 1) as SetupStep)));
-  }, []);
+    const currentIndex = setupFlowSteps.indexOf(setupStep);
+    if (currentIndex <= 0) {
+      setSetupStep(1);
+      return;
+    }
+    setSetupStep(setupFlowSteps[currentIndex - 1] ?? 1);
+  }, [setupFlowSteps, setupStep]);
 
   const onMapRegionChangeComplete = useCallback(
     (nextRegion: Region) => {
@@ -8180,8 +8358,13 @@ export default function App() {
         sponsorRepeatPreset: RepeatPreset;
         sponsorRepeatDays: WeekdayCode[];
         sponsorLeadMinutes: SponsorLeadMinutes;
+        wizardOnboardingPath: OnboardingPath;
         wizardSupervisionMode: SetupSupervisionMode;
         wizardJusticeTrack: SetupJusticeTrack;
+        wizardCourtProgramName: string;
+        wizardCourtSupervisorName: string;
+        wizardCourtRequirementsSummary: string;
+        wizardCourtDeadlineSummary: string;
       }>,
     ) => {
       const resolvedSobrietyDateIso = overrides?.sobrietyDateIso ?? sobrietyDateIso;
@@ -8217,8 +8400,16 @@ export default function App() {
         sponsorLeadMinutes: overrides?.sponsorLeadMinutes ?? sponsorLeadMinutes,
         sponsorKneesSuggested: overrides?.sponsorKneesSuggested ?? sponsorKneesSuggested,
         meetingAutoAddToCalendar: overrides?.meetingAutoAddToCalendar ?? meetingAutoAddToCalendar,
+        wizardOnboardingPath: overrides?.wizardOnboardingPath ?? wizardOnboardingPath,
         wizardSupervisionMode: overrides?.wizardSupervisionMode ?? wizardSupervisionMode,
         wizardJusticeTrack: overrides?.wizardJusticeTrack ?? wizardJusticeTrack,
+        wizardCourtProgramName: overrides?.wizardCourtProgramName ?? wizardCourtProgramName,
+        wizardCourtSupervisorName:
+          overrides?.wizardCourtSupervisorName ?? wizardCourtSupervisorName,
+        wizardCourtRequirementsSummary:
+          overrides?.wizardCourtRequirementsSummary ?? wizardCourtRequirementsSummary,
+        wizardCourtDeadlineSummary:
+          overrides?.wizardCourtDeadlineSummary ?? wizardCourtDeadlineSummary,
       };
 
       const writes: Promise<unknown>[] = [
@@ -8283,7 +8474,12 @@ export default function App() {
       sponsorPhoneDigits,
       sponsorRepeatDaysSorted,
       sponsorRepeatPreset,
+      wizardCourtDeadlineSummary,
+      wizardCourtProgramName,
+      wizardCourtRequirementsSummary,
+      wizardCourtSupervisorName,
       wizardJusticeTrack,
+      wizardOnboardingPath,
       wizardSupervisionMode,
     ],
   );
@@ -8468,43 +8664,49 @@ export default function App() {
     setSetupFinishing(true);
     try {
       setSetupError(null);
-      const parsedDateIso =
-        wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-          ? sobrietyDateIso
-          : parseUsDateToIso(sobrietyDateInput);
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedDateIso) {
+      const recoveryRequired = pathRequiresRecovery(wizardOnboardingPath);
+      const parsedDateIso = recoveryRequired
+        ? parseUsDateToIso(sobrietyDateInput)
+        : sobrietyDateIso;
+      if (recoveryRequired && !parsedDateIso) {
         setSetupError("Enter sobriety date as MM-DD-YYYY.");
-        setSetupStep(1);
-        return;
-      }
-      const parsedGoal =
-        wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-          ? ninetyDayGoalTarget
-          : parseGoalTargetInput(ninetyDayGoalInput);
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedGoal) {
-        setSetupError("Enter a valid 90-day meeting goal (1 or higher).");
-        setSetupStep(1);
-        return;
-      }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && !wizardSoberHouseId) {
-        setSetupError("Select the sober house you live in.");
         setSetupStep(2);
         return;
       }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
+      const parsedGoal = recoveryRequired
+        ? parseGoalTargetInput(ninetyDayGoalInput)
+        : ninetyDayGoalTarget;
+      if (recoveryRequired && !parsedGoal) {
+        setSetupError("Enter a valid 90-day meeting goal (1 or higher).");
+        setSetupStep(2);
+        return;
+      }
+
+      if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" && !protectedOrgSetupAuthorized) {
+        setSetupError("Sign in to continue. Organization setup is limited to authorized admins.");
+        setSetupStep(2);
+        return;
+      }
+
+      if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" && !wizardSoberHouseId) {
+        setSetupError("Select the sober house you live in.");
+        setSetupStep(10);
+        return;
+      }
+      if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
         if (!wizardResidentFirstName.trim() || !wizardResidentLastName.trim()) {
           setSetupError("Enter your first and last name for sober-house placement.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
         if (!parseUsDateToIso(wizardResidentMoveInDate)) {
           setSetupError("Move-in date must use MM-DD-YYYY.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
         if (!wizardResidentRoomOrBed.trim()) {
           setSetupError("Enter your room or bed assignment.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
         if (
@@ -8512,16 +8714,33 @@ export default function App() {
           !wizardResidentEmergencyContactPhone.trim()
         ) {
           setSetupError("Enter emergency contact name and phone.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
         if (!wizardResidentProgramPhase.trim()) {
           setSetupError("Enter your current program phase.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
       }
-      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
+      if (wizardOnboardingPath === "COURT_PROGRAM") {
+        if (wizardJusticeTrack === "NONE") {
+          setSetupError("Select the court or supervision track that applies to you.");
+          setSetupStep(10);
+          return;
+        }
+        if (!wizardCourtProgramName.trim()) {
+          setSetupError("Enter the court or program name.");
+          setSetupStep(11);
+          return;
+        }
+        if (!wizardCourtRequirementsSummary.trim()) {
+          setSetupError("Add the participant requirements you need to keep in front of you.");
+          setSetupStep(11);
+          return;
+        }
+      }
+      if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
         if (!wizardOrganizationName.trim()) {
           setSetupError("Enter your organization name.");
           setSetupStep(2);
@@ -8545,7 +8764,7 @@ export default function App() {
       const hasSponsor = wizardHasSponsor === true;
       const wantsReminders = hasSponsor && wizardWantsReminders === true;
       if (
-        wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" &&
+        wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" &&
         wizardRequiresSponsorDetails &&
         !hasSponsor
       ) {
@@ -8553,26 +8772,18 @@ export default function App() {
         setSetupStep(3);
         return;
       }
-      if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-        hasSponsor &&
-        (!normalizedSponsorName || !sponsorPhoneE164)
-      ) {
+      if (recoveryRequired && hasSponsor && (!normalizedSponsorName || !sponsorPhoneE164)) {
         setSetupError("Enter sponsor name and phone.");
         setSetupStep(3);
         return;
       }
-      if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-        hasSponsor &&
-        wizardSponsorKneesSuggested === null
-      ) {
+      if (recoveryRequired && hasSponsor && wizardSponsorKneesSuggested === null) {
         setSetupError("Choose whether your sponsor suggests praying on your knees.");
         setSetupStep(4);
         return;
       }
       if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
+        recoveryRequired &&
         wantsReminders &&
         sponsorRepeatUnit === "WEEKLY" &&
         sponsorRepeatDaysSorted.length === 0
@@ -8581,25 +8792,18 @@ export default function App() {
         setSetupStep(6);
         return;
       }
-      if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-        wizardHasHomeGroup === true &&
-        homeGroupMeetingIds.length === 0
-      ) {
+      if (recoveryRequired && wizardHasHomeGroup === true && homeGroupMeetingIds.length === 0) {
         setSetupError("Select a home group meeting.");
         setSetupStep(8);
         return;
       }
-      if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-        wizardMeetingSignatureRequired === null
-      ) {
+      if (recoveryRequired && wizardMeetingSignatureRequired === null) {
         setSetupError("Choose whether signatures are required at meetings.");
         setSetupStep(9);
         return;
       }
 
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER") {
+      if (recoveryRequired) {
         const resolvedSobrietyDateIso = parsedDateIso as string;
         const resolvedGoalTarget = parsedGoal as number;
         const resolvedMeetingSignatureRequired = wizardMeetingSignatureRequired as boolean;
@@ -8648,8 +8852,13 @@ export default function App() {
             homeGroupBirthdayLastName: homeGroupBirthdayLastName,
             sponsorName: normalizedSponsorName,
             sponsorPhoneDigits,
+            wizardOnboardingPath,
             wizardSupervisionMode,
             wizardJusticeTrack,
+            wizardCourtProgramName,
+            wizardCourtSupervisorName,
+            wizardCourtRequirementsSummary,
+            wizardCourtDeadlineSummary,
           });
         }
         if (!hasSponsor) {
@@ -8673,20 +8882,25 @@ export default function App() {
             homeGroupBirthdayLastName: homeGroupBirthdayLastName,
             sponsorName: "",
             sponsorPhoneDigits: "",
+            wizardOnboardingPath,
             wizardSupervisionMode,
             wizardJusticeTrack,
+            wizardCourtProgramName,
+            wizardCourtSupervisorName,
+            wizardCourtRequirementsSummary,
+            wizardCourtDeadlineSummary,
           });
         }
       }
 
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && wizardHasHomeGroup !== true) {
+      if (recoveryRequired && wizardHasHomeGroup !== true) {
         setHomeGroupMeetingIds([]);
         setHomeGroupSeriesKey(null);
         setHomeGroupName(null);
         setHomeGroupBirthdayOptIn(false);
       }
 
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER") {
+      if (recoveryRequired) {
         await syncHomeGroupBirthdayConfig(
           wizardHasHomeGroup === true ? currentHomeGroupSelection : null,
           {
@@ -8701,7 +8915,7 @@ export default function App() {
       let nextSoberHouseStore = soberHouseStore;
       const soberHouseTimestamp = new Date().toISOString();
       const actor = { id: devAuthUserId, name: devUserDisplayName };
-      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
+      if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
         nextSoberHouseStore = upsertOrganization(
           nextSoberHouseStore,
           actor,
@@ -8760,7 +8974,7 @@ export default function App() {
           },
           soberHouseTimestamp,
         ).store;
-      } else if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
+      } else if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
         const residentHouse =
           nextSoberHouseStore.houses.find((house) => house.id === wizardSoberHouseId) ?? null;
         nextSoberHouseStore = upsertUserAccessProfile(
@@ -8801,6 +9015,23 @@ export default function App() {
             : baseResidentDraft.sponsorContactFrequency,
           updatedAt: soberHouseTimestamp,
         });
+      } else if (wizardOnboardingPath === "COURT_PROGRAM") {
+        nextSoberHouseStore = upsertUserAccessProfile(
+          nextSoberHouseStore,
+          actor,
+          {
+            linkedUserId: devAuthUserId,
+            role:
+              wizardJusticeTrack === "DRUG_COURT"
+                ? "DRUG_COURT_PARTICIPANT"
+                : "PROBATION_PAROLE_PARTICIPANT",
+            organizationId: nextSoberHouseStore.organization?.id ?? null,
+            houseId: null,
+            houseGroupId: null,
+            status: "ACTIVE",
+          },
+          soberHouseTimestamp,
+        ).store;
       } else {
         nextSoberHouseStore = upsertUserAccessProfile(
           nextSoberHouseStore,
@@ -8820,37 +9051,62 @@ export default function App() {
       await persistRecoveryStateSnapshot({
         mode: "A",
         setupComplete: true,
-        sobrietyDateIso:
-          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-            ? sobrietyDateIso
-            : (parsedDateIso as string | null),
-        ninetyDayGoalTarget:
-          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-            ? ninetyDayGoalTarget
-            : (parsedGoal as number),
-        recoverySubstances:
-          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-            ? recoverySubstances
-            : normalizeRecoverySubstances(wizardRecoverySubstances),
-        meetingSignatureRequired:
-          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-            ? meetingSignatureRequired
-            : (wizardMeetingSignatureRequired as boolean),
-        sponsorEnabled: hasSponsor,
-        sponsorActive: wantsReminders,
-        sponsorEnabledAtIso: hasSponsor ? (sponsorEnabledAtIso ?? new Date().toISOString()) : null,
-        sponsorKneesSuggested: hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null,
+        sobrietyDateIso: recoveryRequired ? (parsedDateIso as string | null) : sobrietyDateIso,
+        ninetyDayGoalTarget: recoveryRequired ? (parsedGoal as number) : ninetyDayGoalTarget,
+        recoverySubstances: recoveryRequired
+          ? normalizeRecoverySubstances(wizardRecoverySubstances)
+          : recoverySubstances,
+        meetingSignatureRequired: recoveryRequired
+          ? (wizardMeetingSignatureRequired as boolean)
+          : meetingSignatureRequired,
+        sponsorEnabled: recoveryRequired ? hasSponsor : sponsorEnabled,
+        sponsorActive: recoveryRequired ? wantsReminders : sponsorActive,
+        sponsorEnabledAtIso: recoveryRequired
+          ? hasSponsor
+            ? (sponsorEnabledAtIso ?? new Date().toISOString())
+            : null
+          : sponsorEnabledAtIso,
+        sponsorKneesSuggested: recoveryRequired
+          ? hasSponsor
+            ? (wizardSponsorKneesSuggested ?? true)
+            : null
+          : sponsorKneesSuggested,
         meetingAutoAddToCalendar,
-        homeGroupMeetingIds: wizardHasHomeGroup === true ? homeGroupMeetingIds : [],
-        homeGroupSeriesKey: wizardHasHomeGroup === true ? homeGroupSeriesKey : null,
-        homeGroupName: wizardHasHomeGroup === true ? homeGroupName : null,
-        homeGroupBirthdayOptIn: wizardHasHomeGroup === true ? homeGroupBirthdayOptIn : false,
+        homeGroupMeetingIds: recoveryRequired
+          ? wizardHasHomeGroup === true
+            ? homeGroupMeetingIds
+            : []
+          : homeGroupMeetingIds,
+        homeGroupSeriesKey: recoveryRequired
+          ? wizardHasHomeGroup === true
+            ? homeGroupSeriesKey
+            : null
+          : homeGroupSeriesKey,
+        homeGroupName: recoveryRequired
+          ? wizardHasHomeGroup === true
+            ? homeGroupName
+            : null
+          : homeGroupName,
+        homeGroupBirthdayOptIn: recoveryRequired
+          ? wizardHasHomeGroup === true
+            ? homeGroupBirthdayOptIn
+            : false
+          : homeGroupBirthdayOptIn,
         homeGroupBirthdayFirstName,
         homeGroupBirthdayLastName,
-        sponsorName: hasSponsor ? normalizedSponsorName : "",
-        sponsorPhoneDigits: hasSponsor ? sponsorPhoneDigits : "",
+        sponsorName: recoveryRequired ? (hasSponsor ? normalizedSponsorName : "") : sponsorName,
+        sponsorPhoneDigits: recoveryRequired
+          ? hasSponsor
+            ? sponsorPhoneDigits
+            : ""
+          : sponsorPhoneDigits,
+        wizardOnboardingPath,
         wizardSupervisionMode,
         wizardJusticeTrack,
+        wizardCourtProgramName,
+        wizardCourtSupervisorName,
+        wizardCourtRequirementsSummary,
+        wizardCourtDeadlineSummary,
       });
 
       setSetupComplete(true);
@@ -8897,6 +9153,10 @@ export default function App() {
     wizardMeetingSignatureRequired,
     wizardResidentEmergencyContactName,
     wizardResidentEmergencyContactPhone,
+    wizardCourtDeadlineSummary,
+    wizardCourtProgramName,
+    wizardCourtRequirementsSummary,
+    wizardCourtSupervisorName,
     wizardResidentFirstName,
     wizardResidentLastName,
     wizardResidentMoveInDate,
@@ -8905,6 +9165,7 @@ export default function App() {
     wizardRequiresSponsorDetails,
     wizardSelectedSoberHouseRules,
     wizardJusticeTrack,
+    wizardOnboardingPath,
     wizardSponsorKneesSuggested,
     wizardSoberHouseId,
     wizardSupervisionMode,
@@ -8916,6 +9177,7 @@ export default function App() {
     syncHomeGroupBirthdayConfig,
     recoverySubstances,
     ninetyDayGoalTarget,
+    protectedOrgSetupAuthorized,
   ]);
 
   const saveRecoveryTileAndOpenDashboard = useCallback(async () => {
@@ -12250,11 +12512,31 @@ export default function App() {
       setWizardOrganizationPrimaryPhone(nextStore.organization?.primaryPhone ?? "");
       setWizardOrganizationPrimaryEmail(nextStore.organization?.primaryEmail ?? "");
       setWizardOrganizationNotes(nextStore.organization?.notes ?? "");
+      setWizardOnboardingPath(
+        inferOnboardingPath({
+          onboardingPath: wizardOnboardingPath,
+          wizardSupervisionMode:
+            role === "HOUSE_RESIDENT"
+              ? "SOBER_HOUSE_RESIDENT"
+              : role === "OWNER_OPERATOR"
+                ? "SOBER_HOUSE_OWNER"
+                : wizardSupervisionMode,
+          wizardJusticeTrack,
+          soberHouseRole: role ?? null,
+        }),
+      );
     })();
     return () => {
       active = false;
     };
-  }, [devAuthUserId, homeScreen, mode]);
+  }, [
+    devAuthUserId,
+    homeScreen,
+    mode,
+    wizardJusticeTrack,
+    wizardOnboardingPath,
+    wizardSupervisionMode,
+  ]);
 
   useEffect(() => {
     if (!bootstrapped || homeScreen !== "DASHBOARD") {
@@ -12400,6 +12682,13 @@ export default function App() {
         sponsorLeadMinutes,
         sponsorKneesSuggested,
         meetingAutoAddToCalendar,
+        wizardOnboardingPath,
+        wizardSupervisionMode,
+        wizardJusticeTrack,
+        wizardCourtProgramName,
+        wizardCourtSupervisorName,
+        wizardCourtRequirementsSummary,
+        wizardCourtDeadlineSummary,
       }),
     );
   }, [
@@ -12428,6 +12717,13 @@ export default function App() {
     sponsorLeadMinutes,
     sponsorKneesSuggested,
     meetingAutoAddToCalendar,
+    wizardCourtDeadlineSummary,
+    wizardCourtProgramName,
+    wizardCourtRequirementsSummary,
+    wizardCourtSupervisorName,
+    wizardJusticeTrack,
+    wizardOnboardingPath,
+    wizardSupervisionMode,
     profileStorage,
     bootstrapped,
   ]);
@@ -13472,214 +13768,80 @@ export default function App() {
               {homeScreen === "SETUP" ? (
                 <GlassCard style={styles.card} strong>
                   <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
-                  <Text style={styles.sectionMeta}>Step {setupStep} of 10</Text>
+                  <Text style={styles.sectionMeta}>
+                    Step {setupVisibleStepNumber} of {setupFlowSteps.length}
+                  </Text>
                   {setupStep === 1 ? (
                     <>
-                      <Text style={styles.label}>How are you using the app?</Text>
+                      <Text style={styles.label}>What should Sober² help you with first?</Text>
+                      <Text style={styles.sectionMeta}>
+                        Choose the path that best matches why you're here right now.
+                      </Text>
                       <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardSupervisionMode === "INDEPENDENT" ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardSupervisionMode("INDEPENDENT")}
-                        >
-                          <Text
+                        {ONBOARDING_PATH_OPTIONS.map((option) => (
+                          <Pressable
+                            key={option.value}
                             style={[
-                              styles.chipText,
-                              wizardSupervisionMode === "INDEPENDENT"
-                                ? styles.chipTextSelected
-                                : null,
+                              styles.chip,
+                              wizardOnboardingPath === option.value ? styles.chipSelected : null,
                             ]}
+                            onPress={() => selectOnboardingPath(option.value)}
                           >
-                            Personal recovery
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardSupervisionMode === "SOBER_HOUSE_RESIDENT"
-                              ? styles.chipSelected
-                              : null,
-                          ]}
-                          onPress={() => setWizardSupervisionMode("SOBER_HOUSE_RESIDENT")}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardSupervisionMode === "SOBER_HOUSE_RESIDENT"
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            Sober-house resident
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-                              ? styles.chipSelected
-                              : null,
-                          ]}
-                          onPress={() => setWizardSupervisionMode("SOBER_HOUSE_OWNER")}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            Sober-house organization admin
-                          </Text>
-                        </Pressable>
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardOnboardingPath === option.value
+                                  ? styles.chipTextSelected
+                                  : null,
+                              ]}
+                            >
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        ))}
                       </View>
-                      {wizardSupervisionMode === "SOBER_HOUSE_OWNER" ? (
+                      {wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
                         <Text style={styles.sectionMeta}>
-                          Organization admins skip recovery-only setup and continue into
-                          organization bootstrap.
+                          This only selects the intended flow. Organization setup stays locked until
+                          the account is signed in and verified by the backend.
                         </Text>
-                      ) : wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ? (
+                      ) : wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
                         <Text style={styles.sectionMeta}>
-                          Resident setup continues into sober-house placement and inherited house
-                          requirements.
+                          Recovery stays first. Resident setup follows after your recovery
+                          foundation is complete.
+                        </Text>
+                      ) : wizardOnboardingPath === "COURT_PROGRAM" ? (
+                        <Text style={styles.sectionMeta}>
+                          Recovery stays first. Court or program setup is added after recovery is
+                          complete.
                         </Text>
                       ) : (
-                        <>
-                          <Text style={styles.label}>What is your sobriety date?</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={sobrietyDateInput}
-                            onChangeText={(value) =>
-                              setSobrietyDateInput(normalizeUsDateInput(value))
-                            }
-                            placeholder="MM-DD-YYYY"
-                            keyboardType="number-pad"
-                            maxLength={10}
-                          />
-                          <Text style={styles.label}>90-day meeting goal (any number)</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={ninetyDayGoalInput}
-                            onChangeText={(value) =>
-                              setNinetyDayGoalInput(normalizeGoalInput(value))
-                            }
-                            placeholder="90"
-                            keyboardType="number-pad"
-                            maxLength={4}
-                          />
-                        </>
+                        <Text style={styles.sectionMeta}>
+                          Recovery setup stays focused on your daily program and recovery tools.
+                        </Text>
                       )}
                     </>
                   ) : null}
 
                   {setupStep === 2 ? (
                     <>
-                      {wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ? (
+                      {showProtectedOrgAccessGate ? (
                         <>
-                          <Text style={styles.label}>Select your sober house</Text>
-                          <View style={styles.chipRow}>
-                            {soberHouseStore.houses.map((house) => (
-                              <Pressable
-                                key={house.id}
-                                style={[
-                                  styles.chip,
-                                  wizardSoberHouseId === house.id ? styles.chipSelected : null,
-                                ]}
-                                onPress={() => setWizardSoberHouseId(house.id)}
-                              >
-                                <Text
-                                  style={[
-                                    styles.chipText,
-                                    wizardSoberHouseId === house.id
-                                      ? styles.chipTextSelected
-                                      : null,
-                                  ]}
-                                >
-                                  {house.name}
-                                </Text>
-                              </Pressable>
-                            ))}
-                          </View>
-                          <Text style={styles.sectionMeta}>
-                            House requirements will be inherited into your recovery workflow and
-                            shown on the dashboard.
+                          <Text style={styles.sectionMeta}>Sign in to continue.</Text>
+                          <Text style={styles.label}>
+                            Organization and supervision setup is available only to authorized
+                            admins.
                           </Text>
-                          <Text style={styles.label}>Resident first name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentFirstName}
-                            onChangeText={setWizardResidentFirstName}
-                            placeholder="First name"
-                          />
-                          <Text style={styles.label}>Resident last name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentLastName}
-                            onChangeText={setWizardResidentLastName}
-                            placeholder="Last name"
-                          />
-                          <Text style={styles.label}>Move-in date</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentMoveInDate}
-                            onChangeText={(value) =>
-                              setWizardResidentMoveInDate(normalizeUsDateInput(value))
-                            }
-                            placeholder="MM-DD-YYYY"
-                            autoCapitalize="none"
-                          />
-                          <Text style={styles.label}>Room / bed</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentRoomOrBed}
-                            onChangeText={setWizardResidentRoomOrBed}
-                            placeholder="Room 2B"
-                          />
-                          <Text style={styles.label}>Emergency contact name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentEmergencyContactName}
-                            onChangeText={setWizardResidentEmergencyContactName}
-                            placeholder="Emergency contact"
-                          />
-                          <Text style={styles.label}>Emergency contact phone</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentEmergencyContactPhone}
-                            onChangeText={(value) =>
-                              setWizardResidentEmergencyContactPhone(normalizeUsPhoneInput(value))
-                            }
-                            placeholder="(555) 555-1234"
-                            keyboardType="phone-pad"
-                          />
-                          <Text style={styles.label}>Program phase on entry</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentProgramPhase}
-                            onChangeText={setWizardResidentProgramPhase}
-                            placeholder="Phase 1"
-                          />
-                          {wizardSelectedSoberHouseRules ? (
-                            <Text style={styles.sectionMeta}>
-                              Meetings:{" "}
-                              {wizardSelectedSoberHouseRules.meetings.meetingsRequired
-                                ? `${wizardSelectedSoberHouseRules.meetings.meetingsPerWeek}/week`
-                                : "not required"}{" "}
-                              • Sponsor contact:{" "}
-                              {wizardSelectedSoberHouseRules.sponsorContact.enabled
-                                ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek}/week`
-                                : "not required"}
-                            </Text>
-                          ) : null}
+                          <Text style={styles.sectionMeta}>
+                            {serverRoleCheckStatus ??
+                              "Sign in with an authorized account to continue into organization setup."}
+                          </Text>
                         </>
-                      ) : wizardSupervisionMode === "SOBER_HOUSE_OWNER" ? (
+                      ) : wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
                         <>
                           <Text style={styles.sectionMeta}>
-                            Owner/operators are routed into organization-scoped sober-house admin
-                            and only manage their own organization, groups, houses, and staff.
+                            Verified admin access is active for this account. Complete the
+                            organization bootstrap below.
                           </Text>
                           <Text style={styles.label}>Organization name</Text>
                           <TextInput
@@ -13726,9 +13888,34 @@ export default function App() {
                       ) : (
                         <>
                           <Text style={styles.sectionMeta}>
-                            Independent recovery mode keeps your personal recovery settings
-                            editable.
+                            {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT"
+                              ? "Recovery is the foundation for sober-house residents. House-specific setup comes next."
+                              : wizardOnboardingPath === "COURT_PROGRAM"
+                                ? "Recovery is the foundation for court and program participants. Program-specific setup comes next."
+                                : "Recovery setup stays focused on your personal program."}
                           </Text>
+                          <Text style={styles.label}>What is your sobriety date?</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={sobrietyDateInput}
+                            onChangeText={(value) =>
+                              setSobrietyDateInput(normalizeUsDateInput(value))
+                            }
+                            placeholder="MM-DD-YYYY"
+                            keyboardType="number-pad"
+                            maxLength={10}
+                          />
+                          <Text style={styles.label}>90-day meeting goal</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={ninetyDayGoalInput}
+                            onChangeText={(value) =>
+                              setNinetyDayGoalInput(normalizeGoalInput(value))
+                            }
+                            placeholder="90"
+                            keyboardType="number-pad"
+                            maxLength={4}
+                          />
                           <Text style={styles.label}>
                             Which substances are part of your recovery?
                           </Text>
@@ -14642,75 +14829,112 @@ export default function App() {
 
                   {setupStep === 10 ? (
                     <>
-                      {wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ? (
+                      {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
                         <>
-                          <Text style={styles.label}>Next step</Text>
+                          <Text style={styles.label}>Select your sober house</Text>
+                          <View style={styles.chipRow}>
+                            {soberHouseStore.houses.map((house) => (
+                              <Pressable
+                                key={house.id}
+                                style={[
+                                  styles.chip,
+                                  wizardSoberHouseId === house.id ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => setWizardSoberHouseId(house.id)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardSoberHouseId === house.id
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  {house.name}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
                           <Text style={styles.sectionMeta}>
-                            Recovery setup is complete. You will continue into the sober-house
-                            resident wizard for role, requirement, and consent steps.
+                            This resident setup only collects participant-facing details and house
+                            requirements.
                           </Text>
-                          <Text style={styles.sectionMeta}>
-                            Selected house: {wizardSelectedSoberHouse?.name ?? "Not selected"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Resident: {wizardResidentFirstName || "Not set"}{" "}
-                            {wizardResidentLastName || ""}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Move-in: {wizardResidentMoveInDate || "Not set"} • Room/Bed:{" "}
-                            {wizardResidentRoomOrBed || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Emergency contact: {wizardResidentEmergencyContactName || "Not set"} •{" "}
-                            {formatUsPhoneDisplay(wizardResidentEmergencyContactPhone) || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Program phase: {wizardResidentProgramPhase || "Not set"}
-                          </Text>
-                        </>
-                      ) : wizardSupervisionMode === "SOBER_HOUSE_OWNER" ? (
-                        <>
-                          <Text style={styles.label}>Organization admin review</Text>
-                          <Text style={styles.sectionMeta}>
-                            Organization: {wizardOrganizationName || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Primary contact: {wizardOrganizationPrimaryContactName || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Phone:{" "}
-                            {formatUsPhoneDisplay(wizardOrganizationPrimaryPhone) || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Email: {wizardOrganizationPrimaryEmail || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            After finish, sober-house settings will open in organization admin scope
-                            so you can manage your groups, houses, managers, and rules.
-                          </Text>
+                          <Text style={styles.label}>Resident first name</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={wizardResidentFirstName}
+                            onChangeText={setWizardResidentFirstName}
+                            placeholder="First name"
+                          />
+                          <Text style={styles.label}>Resident last name</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={wizardResidentLastName}
+                            onChangeText={setWizardResidentLastName}
+                            placeholder="Last name"
+                          />
+                          <Text style={styles.label}>Move-in date</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={wizardResidentMoveInDate}
+                            onChangeText={(value) =>
+                              setWizardResidentMoveInDate(normalizeUsDateInput(value))
+                            }
+                            placeholder="MM-DD-YYYY"
+                            autoCapitalize="none"
+                          />
+                          <Text style={styles.label}>Room / bed</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={wizardResidentRoomOrBed}
+                            onChangeText={setWizardResidentRoomOrBed}
+                            placeholder="Room 2B"
+                          />
+                          <Text style={styles.label}>Emergency contact name</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={wizardResidentEmergencyContactName}
+                            onChangeText={setWizardResidentEmergencyContactName}
+                            placeholder="Emergency contact"
+                          />
+                          <Text style={styles.label}>Emergency contact phone</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={wizardResidentEmergencyContactPhone}
+                            onChangeText={(value) =>
+                              setWizardResidentEmergencyContactPhone(normalizeUsPhoneInput(value))
+                            }
+                            placeholder="(555) 555-1234"
+                            keyboardType="phone-pad"
+                          />
+                          <Text style={styles.label}>Program phase on entry</Text>
+                          <TextInput
+                            style={styles.input}
+                            value={wizardResidentProgramPhase}
+                            onChangeText={setWizardResidentProgramPhase}
+                            placeholder="Phase 1"
+                          />
+                          {wizardSelectedSoberHouseRules ? (
+                            <Text style={styles.sectionMeta}>
+                              Meetings:{" "}
+                              {wizardSelectedSoberHouseRules.meetings.meetingsRequired
+                                ? `${wizardSelectedSoberHouseRules.meetings.meetingsPerWeek}/week`
+                                : "not required"}{" "}
+                              • Sponsor contact:{" "}
+                              {wizardSelectedSoberHouseRules.sponsorContact.enabled
+                                ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek}/week`
+                                : "not required"}
+                            </Text>
+                          ) : null}
                         </>
                       ) : (
                         <>
-                          <Text style={styles.label}>
-                            Are you in Drug Court or Probation / Parole supervision?
+                          <Text style={styles.label}>Select your court or program track</Text>
+                          <Text style={styles.sectionMeta}>
+                            This track selection shapes only the participant-facing setup that comes
+                            next. It does not grant supervision or configuration access.
                           </Text>
                           <View style={styles.chipRow}>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardJusticeTrack === "NONE" ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardJusticeTrack("NONE")}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardJusticeTrack === "NONE" ? styles.chipTextSelected : null,
-                                ]}
-                              >
-                                No
-                              </Text>
-                            </Pressable>
                             <Pressable
                               style={[
                                 styles.chip,
@@ -14750,86 +14974,74 @@ export default function App() {
                               </Text>
                             </Pressable>
                           </View>
-                          <Text style={styles.label}>Review</Text>
                           <Text style={styles.sectionMeta}>
-                            Sobriety date: {sobrietyDateInput || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>90-day goal: {ninetyDayGoalTarget}</Text>
-                          <Text style={styles.sectionMeta}>Supervision: Independent recovery</Text>
-                          <Text style={styles.sectionMeta}>
-                            Recovery profile:{" "}
-                            {wizardRecoverySubstances.length > 0
-                              ? wizardRecoverySubstances
-                                  .map(
-                                    (value) =>
-                                      RECOVERY_SUBSTANCE_OPTIONS.find(
-                                        (option) => option.value === value,
-                                      )?.label ?? value,
-                                  )
-                                  .join(", ")
-                              : "Not personalized yet"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Justice track:{" "}
-                            {wizardJusticeTrack === "NONE"
-                              ? "None"
-                              : wizardJusticeTrack === "DRUG_COURT"
-                                ? "Drug Court"
-                                : "Probation / Parole"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Sponsor: {wizardHasSponsor ? "Enabled" : "Not enabled"}
-                          </Text>
-                          {wizardHasSponsor ? (
-                            <Text style={styles.sectionMeta}>
-                              Sponsor suggests knees prayer:{" "}
-                              {wizardSponsorKneesSuggested === false ? "No" : "Yes"}
-                            </Text>
-                          ) : null}
-                          <Text style={styles.sectionMeta}>
-                            Calendar notifications and alerts:{" "}
-                            {wizardWantsReminders ? "Enabled" : "Disabled"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Recurring service commitments:{" "}
-                            {recurringServiceCommitmentReviewLines.length > 0
-                              ? recurringServiceCommitmentReviewLines.join("; ")
-                              : "None added"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Home group:{" "}
-                            {homeGroupMeetingIds.length > 0 || homeGroupSeriesKey
-                              ? (selectedHomeGroupOption?.name ??
-                                homeGroupName ??
-                                allMeetings.find((meeting) => meeting.id === homeGroupMeetingIds[0])
-                                  ?.name ??
-                                "Selected")
-                              : "Not selected"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Signature required: {wizardMeetingSignatureRequired ? "Yes" : "No"}
+                            Selected track:{" "}
+                            {wizardJusticeTrack === "DRUG_COURT"
+                              ? "Drug Court"
+                              : wizardJusticeTrack === "PROBATION_PAROLE"
+                                ? "Probation / Parole"
+                                : "Not selected"}
                           </Text>
                         </>
                       )}
                     </>
                   ) : null}
 
+                  {setupStep === 11 ? (
+                    <>
+                      <Text style={styles.label}>Court or program name</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={wizardCourtProgramName}
+                        onChangeText={setWizardCourtProgramName}
+                        placeholder="Program or court name"
+                      />
+                      <Text style={styles.label}>Supervising contact</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={wizardCourtSupervisorName}
+                        onChangeText={setWizardCourtSupervisorName}
+                        placeholder="Officer, case manager, or coordinator"
+                      />
+                      <Text style={styles.label}>Your current requirements</Text>
+                      <TextInput
+                        style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
+                        value={wizardCourtRequirementsSummary}
+                        onChangeText={setWizardCourtRequirementsSummary}
+                        placeholder="Meetings, check-ins, proof requirements, deadlines, or actions to track"
+                        multiline
+                      />
+                      <Text style={styles.label}>Upcoming deadline or check-in notes</Text>
+                      <TextInput
+                        style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
+                        value={wizardCourtDeadlineSummary}
+                        onChangeText={setWizardCourtDeadlineSummary}
+                        placeholder="Next court date, reporting deadline, or weekly focus"
+                        multiline
+                      />
+                      <Text style={styles.sectionMeta}>
+                        This wizard stays participant-facing. Court hierarchy, templates, and
+                        supervisory settings remain restricted to authorized backend-verified roles.
+                      </Text>
+                    </>
+                  ) : null}
+
                   {setupError ? <Text style={styles.errorText}>{setupError}</Text> : null}
 
                   <View style={styles.buttonRow}>
-                    {setupStep > 1 ? (
+                    {setupVisibleStepNumber > 1 ? (
                       <>
                         <AppButton title="Back" onPress={previousSetupStep} />
                         <View style={styles.buttonSpacer} />
                       </>
                     ) : null}
-                    {setupStep < 10 ? (
+                    {setupStep < setupLastStep ? (
                       <AppButton title="Next" onPress={() => void nextSetupStep()} />
                     ) : (
                       <AppButton
                         title={setupFinishing ? "Saving..." : "Save & Finish"}
                         onPress={() => void finishSetup()}
-                        disabled={setupFinishing}
+                        disabled={setupFinishing || showProtectedOrgAccessGate}
                       />
                     )}
                   </View>
@@ -14837,6 +15049,7 @@ export default function App() {
               ) : null}
 
               {homeScreen === "DASHBOARD" ? (
+                canManageSoberHouseHierarchy(appAccessRole) &&
                 soberHouseAccessProfile?.role === "OWNER_OPERATOR" ? (
                   <SoberHouseOwnerDashboard
                     store={soberHouseStore}
@@ -15021,7 +15234,7 @@ export default function App() {
                           ))}
                           <View style={styles.buttonRow}>
                             <AppButton
-                              title="Open sober-house profile"
+                              title="View sober-house profile"
                               variant="secondary"
                               onPress={openSoberHousingSettings}
                             />
@@ -15032,7 +15245,11 @@ export default function App() {
                     onOpenAttendance={() => openAttendanceHub("dashboard")}
                     onOpenAttendanceToday={() => openAttendanceHub("dashboard")}
                     onOpenTools={openToolsHub}
+                    soberHousingEntryVisible={canOpenSoberHouseEntry}
+                    soberHousingEntryLabel={soberHouseEntryLabel(appAccessRole)}
                     onOpenSoberHousingSettings={openSoberHousingSettings}
+                    courtEntryVisible={canOpenCourtEntry}
+                    courtEntryLabel={courtEntryLabel(appAccessRole)}
                     onOpenProbationParoleSettings={openProbationParoleSettings}
                     onRefresh={() => {
                       void (async () => {
@@ -15144,7 +15361,8 @@ export default function App() {
 
               {homeScreen === "CHAT" ? (
                 soberHouseAccessProfile?.role === "HOUSE_RESIDENT" ||
-                soberHouseAccessProfile?.role === "OWNER_OPERATOR" ? (
+                (soberHouseAccessProfile?.role === "OWNER_OPERATOR" &&
+                  canManageSoberHouseHierarchy(appAccessRole)) ? (
                   <>
                     <GlassCard style={styles.card} strong>
                       <Text style={styles.sectionTitle}>
@@ -17451,7 +17669,17 @@ export default function App() {
 
           {mode !== "A" && homeScreen === "SETTINGS" ? (
             mode === "B" ? (
-              shouldShowSoberHouseLock ? (
+              !canOpenSoberHouseEntry ? (
+                <GlassCard style={styles.card} strong>
+                  <Text style={styles.sectionTitle}>Sober House Profile</Text>
+                  <Text style={styles.sectionMeta}>
+                    This area is limited to sober-house residents and authorized admins.
+                  </Text>
+                  <View style={styles.buttonRow}>
+                    <AppButton title="Back to Dashboard" onPress={() => handleModeSelect("A")} />
+                  </View>
+                </GlassCard>
+              ) : shouldShowSoberHouseLock ? (
                 <GlassCard style={styles.card} strong>
                   <Text style={styles.sectionTitle}>Unlock Sober House</Text>
                   <Text style={styles.sectionMeta}>
@@ -17483,29 +17711,61 @@ export default function App() {
                   userId={devAuthUserId}
                   actorId={devAuthUserId}
                   actorName={devUserDisplayName}
+                  viewerRole={appAccessRole}
                   onBack={() => handleModeSelect("A")}
                 />
               )
             ) : (
               <>
                 <GlassCard style={styles.card} strong>
-                  <Text style={styles.sectionTitle}>Drug Court / Probation Settings</Text>
-                  <Text style={styles.sectionMeta}>
-                    Continue supervision setup here for drug court, probation, or parole
-                    requirements.
+                  <Text style={styles.sectionTitle}>
+                    {protectedCourtConfigAuthorized
+                      ? "Court Configuration"
+                      : "Court / Program Requirements"}
                   </Text>
+                  <Text style={styles.sectionMeta}>
+                    {protectedCourtConfigAuthorized
+                      ? "Authenticated supervisory access is required for court or program configuration."
+                      : "Participant-facing court and program requirements are shown here. Supervisory hierarchy and configuration stay restricted."}
+                  </Text>
+                  {canOpenCourtEntry && !protectedCourtConfigAuthorized ? (
+                    <>
+                      <Text style={styles.sectionMeta}>
+                        Track:{" "}
+                        {wizardJusticeTrack === "DRUG_COURT"
+                          ? "Drug Court"
+                          : wizardJusticeTrack === "PROBATION_PAROLE"
+                            ? "Probation / Parole"
+                            : "Not selected"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Program: {wizardCourtProgramName || "Not set"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Supervising contact: {wizardCourtSupervisorName || "Not set"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Requirements: {wizardCourtRequirementsSummary || "Not set"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Upcoming: {wizardCourtDeadlineSummary || "Not set"}
+                      </Text>
+                    </>
+                  ) : null}
                   <View style={styles.buttonRow}>
                     <AppButton title="Back to Dashboard" onPress={() => handleModeSelect("A")} />
                   </View>
                 </GlassCard>
 
-                <GlassCard style={styles.card} strong>
-                  <Text style={styles.sectionTitle}>Status</Text>
-                  <Text style={styles.sectionMeta}>
-                    This settings page is active from the dashboard hamburger menu and reserved for
-                    mode-specific configuration.
-                  </Text>
-                </GlassCard>
+                {!canOpenCourtEntry ? (
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.sectionTitle}>Access Restricted</Text>
+                    <Text style={styles.sectionMeta}>
+                      Court and probation configuration requires authenticated, backend-authorized
+                      supervisory access.
+                    </Text>
+                  </GlassCard>
+                ) : null}
               </>
             )
           ) : null}

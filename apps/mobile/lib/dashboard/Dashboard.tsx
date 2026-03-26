@@ -140,7 +140,11 @@ type DashboardProps = {
   onOpenAttendance: () => void;
   onOpenAttendanceToday: () => void;
   onOpenTools: () => void;
+  soberHousingEntryVisible?: boolean;
+  soberHousingEntryLabel?: string;
   onOpenSoberHousingSettings: () => void;
+  courtEntryVisible?: boolean;
+  courtEntryLabel?: string;
   onOpenProbationParoleSettings: () => void;
   onRefresh: () => void;
   onLogMeeting: (meetingId: string) => void;
@@ -428,7 +432,11 @@ export function Dashboard({
   onOpenAttendance,
   onOpenAttendanceToday,
   onOpenTools,
+  soberHousingEntryVisible = false,
+  soberHousingEntryLabel = "Sober Housing Settings",
   onOpenSoberHousingSettings,
+  courtEntryVisible = false,
+  courtEntryLabel = "Court Program",
   onOpenProbationParoleSettings,
   onLogMeeting,
   onCaptureSignature,
@@ -603,24 +611,28 @@ export function Dashboard({
               >
                 <Text style={styles.menuItemText}>AM/PM Routine</Text>
               </Pressable>
-              <Pressable
-                style={styles.menuItem}
-                onPress={() => {
-                  setMenuOpen(false);
-                  onOpenSoberHousingSettings();
-                }}
-              >
-                <Text style={styles.menuItemText}>Sober Housing Settings</Text>
-              </Pressable>
-              <Pressable
-                style={styles.menuItem}
-                onPress={() => {
-                  setMenuOpen(false);
-                  onOpenProbationParoleSettings();
-                }}
-              >
-                <Text style={styles.menuItemText}>Probation/Parole Settings</Text>
-              </Pressable>
+              {soberHousingEntryVisible ? (
+                <Pressable
+                  style={styles.menuItem}
+                  onPress={() => {
+                    setMenuOpen(false);
+                    onOpenSoberHousingSettings();
+                  }}
+                >
+                  <Text style={styles.menuItemText}>{soberHousingEntryLabel}</Text>
+                </Pressable>
+              ) : null}
+              {courtEntryVisible ? (
+                <Pressable
+                  style={styles.menuItem}
+                  onPress={() => {
+                    setMenuOpen(false);
+                    onOpenProbationParoleSettings();
+                  }}
+                >
+                  <Text style={styles.menuItemText}>{courtEntryLabel}</Text>
+                </Pressable>
+              ) : null}
             </GlassCard>
           </View>
         ) : null}
