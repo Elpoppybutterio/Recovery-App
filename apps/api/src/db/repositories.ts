@@ -12,10 +12,12 @@ import {
   participantComplianceEventTypeSchema,
   participantProfileStatusSchema,
   participantTypeSchema,
+  proofTypeSchema,
   Role,
   SponsorRepeatDay,
   SponsorRepeatRule,
   SponsorRepeatUnit,
+  verificationStatusSchema,
   violationSeveritySchema,
   violationStatusSchema,
   violationTypeSchema,
@@ -27,6 +29,8 @@ import {
   type ParticipantComplianceEventType,
   type ParticipantProfileStatus,
   type ParticipantType,
+  type ProofType,
+  type VerificationStatus,
   type ViolationSeverity,
   type ViolationStatus,
   type ViolationType,
@@ -258,7 +262,12 @@ export interface ComplianceEventRow {
   occurred_at: string;
   metadata_json: unknown;
   proof_uri: string | null;
+  proof_metadata_json: unknown;
   signature_present: boolean;
+  proof_type: ProofType | null;
+  verification_status: VerificationStatus | null;
+  verified_by_role: string | null;
+  verified_at: string | null;
   created_by_role: string | null;
   source_track: ObligationSourceTrack | null;
   external_event_id: string | null;
@@ -276,6 +285,7 @@ export interface HouseRow {
 export interface ParticipantProfileRow {
   user_id: string;
   tenant_id: string;
+  display_name: string | null;
   participant_type: ParticipantType;
   organization_id: string | null;
   house_id: string | null;
@@ -301,6 +311,8 @@ export interface ObligationRow {
   priority: ObligationPriority | null;
   requires_proof: boolean;
   requires_signature: boolean;
+  proof_type: ProofType | null;
+  verification_status: VerificationStatus;
   status: ObligationStatus;
   sync_source: string | null;
   sync_key: string | null;
@@ -343,6 +355,8 @@ export interface ObligationSnapshotInput {
   priority?: ObligationPriority | null;
   requiresProof?: boolean;
   requiresSignature?: boolean;
+  proofType?: ProofType | null;
+  verificationStatus?: VerificationStatus | null;
   status: ObligationStatus;
 }
 
@@ -353,7 +367,12 @@ export interface ParticipantComplianceEventInput {
   occurredAt: Date;
   metadata?: Record<string, unknown>;
   proofUri?: string | null;
+  proofMetadata?: Record<string, unknown> | null;
   signaturePresent?: boolean;
+  proofType?: ProofType | null;
+  verificationStatus?: VerificationStatus | null;
+  verifiedByRole?: string | null;
+  verifiedAt?: Date | null;
   createdByRole?: string | null;
   sourceTrack?: ObligationSourceTrack | null;
   externalEventId?: string | null;
@@ -596,6 +615,22 @@ function toObligationStatus(value: string): ObligationStatus | null {
   return parsed.success ? parsed.data : null;
 }
 
+function toProofType(value: string | null): ProofType | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = proofTypeSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toVerificationStatus(value: string | null): VerificationStatus | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = verificationStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 function toParticipantComplianceEventType(
   value: string,
 ): ComplianceEventType | ParticipantComplianceEventType | null {
@@ -672,6 +707,8 @@ function mapViolationTypeFromEvent(
       return "missing_signature";
     case "PROOF_UPLOADED":
       return "missing_proof";
+    case "OBLIGATION_MISSED":
+      return "other";
     default:
       return null;
   }
@@ -682,6 +719,8 @@ function shouldCreateViolationFromEvent(input: {
   eventStatus: ParticipantComplianceEventStatus;
   proofUri?: string | null;
   signaturePresent?: boolean;
+  proofType?: ProofType | null;
+  verificationStatus?: VerificationStatus | null;
 }): boolean {
   if (
     input.eventType === "SIGNATURE_CAPTURED" &&
@@ -693,7 +732,35 @@ function shouldCreateViolationFromEvent(input: {
   if (input.eventType === "PROOF_UPLOADED" && input.eventStatus === "FAILED" && !input.proofUri) {
     return true;
   }
+  if (input.verificationStatus === "REJECTED") {
+    return true;
+  }
   return input.eventStatus === "MISSED" || input.eventType === "CURFEW_VIOLATION_DETECTED";
+}
+
+function resolveViolationTypeForEvent(input: {
+  eventType: ParticipantComplianceEventType;
+  proofUri?: string | null;
+  signaturePresent?: boolean;
+  proofType?: ProofType | null;
+  verificationStatus?: VerificationStatus | null;
+}): ViolationType | null {
+  if (
+    input.verificationStatus === "REJECTED" &&
+    (input.proofType === "selfie" ||
+      input.proofType === "photo" ||
+      input.proofType === "officer_verification" ||
+      input.proofType === "staff_verification")
+  ) {
+    return "failed_identity_verification";
+  }
+  if (input.eventType === "SIGNATURE_CAPTURED" && input.signaturePresent === false) {
+    return "missing_signature";
+  }
+  if (input.eventType === "PROOF_UPLOADED" && !input.proofUri) {
+    return "missing_proof";
+  }
+  return mapViolationTypeFromEvent(input.eventType);
 }
 
 function violationSeverityFromEvent(eventType: ParticipantComplianceEventType): ViolationSeverity {
@@ -710,6 +777,8 @@ function violationSeverityFromEvent(eventType: ParticipantComplianceEventType): 
     case "PROOF_UPLOADED":
     case "SIGNATURE_CAPTURED":
       return "LOW";
+    case "OBLIGATION_MISSED":
+      return "MEDIUM";
     default:
       return "MEDIUM";
   }
@@ -1017,6 +1086,7 @@ export function createRepositories(db: DbClient) {
       userId: string,
       payload: {
         participantType: ParticipantType;
+        displayName?: string | null;
         organizationId?: string | null;
         houseId?: string | null;
         courtProgramId?: string | null;
@@ -1028,15 +1098,26 @@ export function createRepositories(db: DbClient) {
         INSERT INTO participant_profiles (
           user_id,
           tenant_id,
+          display_name,
           participant_type,
           organization_id,
           house_id,
           court_program_id,
           status
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES (
+          $1,
+          $2,
+          COALESCE($3, (SELECT display_name FROM users WHERE tenant_id = $2 AND id = $1 LIMIT 1)),
+          $4,
+          $5,
+          $6,
+          $7,
+          $8
+        )
         ON CONFLICT (user_id)
         DO UPDATE SET
+          display_name = EXCLUDED.display_name,
           participant_type = EXCLUDED.participant_type,
           organization_id = EXCLUDED.organization_id,
           house_id = EXCLUDED.house_id,
@@ -1046,6 +1127,7 @@ export function createRepositories(db: DbClient) {
         RETURNING
           user_id,
           tenant_id,
+          display_name,
           participant_type,
           organization_id,
           house_id,
@@ -1057,6 +1139,7 @@ export function createRepositories(db: DbClient) {
         [
           userId,
           tenantId,
+          payload.displayName ?? null,
           payload.participantType,
           payload.organizationId ?? null,
           payload.houseId ?? null,
@@ -1077,6 +1160,7 @@ export function createRepositories(db: DbClient) {
         SELECT
           user_id,
           tenant_id,
+          display_name,
           participant_type,
           organization_id,
           house_id,
@@ -1116,6 +1200,7 @@ export function createRepositories(db: DbClient) {
         SELECT
           user_id,
           tenant_id,
+          display_name,
           participant_type,
           organization_id,
           house_id,
@@ -1172,6 +1257,8 @@ export function createRepositories(db: DbClient) {
           priority,
           requires_proof,
           requires_signature,
+          proof_type,
+          verification_status,
           status,
           sync_source,
           sync_key,
@@ -1214,13 +1301,38 @@ export function createRepositories(db: DbClient) {
             priority,
             requires_proof,
             requires_signature,
+            proof_type,
+            verification_status,
             status,
             sync_source,
             sync_key,
             created_by_user_id,
             created_by_role
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20)
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            $8,
+            $9,
+            $10,
+            $11,
+            $12::jsonb,
+            $13,
+            $14,
+            $15,
+            $16,
+            $17,
+            $18,
+            $19,
+            $20,
+            $21,
+            $22
+          )
           ON CONFLICT (tenant_id, user_id, sync_source, sync_key)
           DO UPDATE SET
             obligation_type = EXCLUDED.obligation_type,
@@ -1235,6 +1347,8 @@ export function createRepositories(db: DbClient) {
             priority = EXCLUDED.priority,
             requires_proof = EXCLUDED.requires_proof,
             requires_signature = EXCLUDED.requires_signature,
+            proof_type = EXCLUDED.proof_type,
+            verification_status = EXCLUDED.verification_status,
             status = EXCLUDED.status,
             created_by_user_id = EXCLUDED.created_by_user_id,
             created_by_role = EXCLUDED.created_by_role,
@@ -1255,6 +1369,8 @@ export function createRepositories(db: DbClient) {
             priority,
             requires_proof,
             requires_signature,
+            proof_type,
+            verification_status,
             status,
             sync_source,
             sync_key,
@@ -1279,6 +1395,11 @@ export function createRepositories(db: DbClient) {
             obligation.priority ?? null,
             obligation.requiresProof ?? false,
             obligation.requiresSignature ?? false,
+            obligation.proofType ?? null,
+            obligation.verificationStatus ??
+              (obligation.requiresProof || obligation.requiresSignature
+                ? "PENDING"
+                : "NOT_REQUIRED"),
             obligation.status,
             source,
             obligation.syncKey,
@@ -1320,6 +1441,9 @@ export function createRepositories(db: DbClient) {
         houseId?: string;
         courtProgramId?: string;
         syncSource?: string;
+        requiresProof?: boolean;
+        proofType?: ProofType;
+        verificationStatus?: VerificationStatus;
       } = {},
     ): Promise<ObligationRow[]> {
       const result = await db.query<ObligationRow>(
@@ -1340,6 +1464,8 @@ export function createRepositories(db: DbClient) {
           priority,
           requires_proof,
           requires_signature,
+          proof_type,
+          verification_status,
           status,
           sync_source,
           sync_key,
@@ -1360,6 +1486,8 @@ export function createRepositories(db: DbClient) {
           const sourceTrack = toObligationSourceTrack(String(row.source_track));
           const status = toObligationStatus(String(row.status));
           const priority = toObligationPriority(row.priority);
+          const proofType = toProofType(row.proof_type);
+          const verificationStatus = toVerificationStatus(row.verification_status);
           if (!obligationType || !sourceTrack || !status) {
             return null;
           }
@@ -1369,6 +1497,8 @@ export function createRepositories(db: DbClient) {
             obligation_type: obligationType,
             source_track: sourceTrack,
             priority,
+            proof_type: proofType,
+            verification_status: verificationStatus ?? "NOT_REQUIRED",
             status,
           };
         })
@@ -1390,6 +1520,21 @@ export function createRepositories(db: DbClient) {
             return false;
           }
           if (filters.syncSource && row.sync_source !== filters.syncSource) {
+            return false;
+          }
+          if (
+            typeof filters.requiresProof === "boolean" &&
+            row.requires_proof !== filters.requiresProof
+          ) {
+            return false;
+          }
+          if (filters.proofType && row.proof_type !== filters.proofType) {
+            return false;
+          }
+          if (
+            filters.verificationStatus &&
+            row.verification_status !== filters.verificationStatus
+          ) {
             return false;
           }
           return true;
@@ -1435,7 +1580,12 @@ export function createRepositories(db: DbClient) {
                 occurred_at,
                 metadata_json,
                 proof_uri,
+                proof_metadata_json,
                 signature_present,
+                proof_type,
+                verification_status,
+                verified_by_role,
+                verified_at,
                 created_by_role,
                 source_track,
                 external_event_id,
@@ -1466,17 +1616,51 @@ export function createRepositories(db: DbClient) {
           occurred_at,
           metadata_json,
           proof_uri,
+          proof_metadata_json,
           signature_present,
+          proof_type,
+          verification_status,
+          verified_by_role,
+          verified_at,
           created_by_role,
           source_track,
           external_event_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16)
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          $9,
+          $10,
+          $11::jsonb,
+          $12,
+          $13::jsonb,
+          $14,
+          $15,
+          $16,
+          $17,
+          $18,
+          $19,
+          $20,
+          $21
+        )
         ON CONFLICT (tenant_id, user_id, external_event_id)
         DO UPDATE SET
+          event_status = EXCLUDED.event_status,
+          occurred_at = EXCLUDED.occurred_at,
           metadata_json = EXCLUDED.metadata_json,
           proof_uri = EXCLUDED.proof_uri,
+          proof_metadata_json = EXCLUDED.proof_metadata_json,
           signature_present = EXCLUDED.signature_present,
+          proof_type = EXCLUDED.proof_type,
+          verification_status = EXCLUDED.verification_status,
+          verified_by_role = EXCLUDED.verified_by_role,
+          verified_at = EXCLUDED.verified_at,
           created_by_role = EXCLUDED.created_by_role,
           source_track = EXCLUDED.source_track
         RETURNING
@@ -1492,7 +1676,12 @@ export function createRepositories(db: DbClient) {
           occurred_at,
           metadata_json,
           proof_uri,
+          proof_metadata_json,
           signature_present,
+          proof_type,
+          verification_status,
+          verified_by_role,
+          verified_at,
           created_by_role,
           source_track,
           external_event_id,
@@ -1511,7 +1700,15 @@ export function createRepositories(db: DbClient) {
           payload.occurredAt.toISOString(),
           toJsonParam(payload.metadata ?? {}),
           payload.proofUri ?? null,
+          toJsonParam(payload.proofMetadata ?? null),
           payload.signaturePresent ?? false,
+          payload.proofType ?? obligation?.proof_type ?? null,
+          payload.verificationStatus ??
+            (payload.proofUri || payload.signaturePresent
+              ? "SUBMITTED"
+              : (obligation?.verification_status ?? null)),
+          payload.verifiedByRole ?? null,
+          payload.verifiedAt?.toISOString() ?? null,
           payload.createdByRole ?? null,
           payload.sourceTrack ?? obligation?.source_track ?? null,
           payload.externalEventId ?? null,
@@ -1530,9 +1727,18 @@ export function createRepositories(db: DbClient) {
           eventStatus: payload.eventStatus,
           proofUri: payload.proofUri,
           signaturePresent: payload.signaturePresent,
+          proofType: payload.proofType ?? obligation?.proof_type ?? null,
+          verificationStatus: payload.verificationStatus ?? null,
         })
       ) {
-        const violationType = mapViolationTypeFromEvent(payload.eventType) ?? "other";
+        const violationType =
+          resolveViolationTypeForEvent({
+            eventType: payload.eventType,
+            proofUri: payload.proofUri,
+            signaturePresent: payload.signaturePresent,
+            proofType: payload.proofType ?? obligation?.proof_type ?? null,
+            verificationStatus: payload.verificationStatus ?? null,
+          }) ?? "other";
         const violationResult = await db.query<ViolationRow>(
           `
           INSERT INTO violations (
@@ -1602,6 +1808,8 @@ export function createRepositories(db: DbClient) {
         organizationId?: string;
         houseId?: string;
         courtProgramId?: string;
+        verificationStatus?: VerificationStatus;
+        proofType?: ProofType;
       } = {},
     ): Promise<ComplianceEventRow[]> {
       const result = await db.query<ComplianceEventRow>(
@@ -1619,7 +1827,12 @@ export function createRepositories(db: DbClient) {
           occurred_at,
           metadata_json,
           proof_uri,
+          proof_metadata_json,
           signature_present,
+          proof_type,
+          verification_status,
+          verified_by_role,
+          verified_at,
           created_by_role,
           source_track,
           external_event_id,
@@ -1635,6 +1848,8 @@ export function createRepositories(db: DbClient) {
         .map((row) => {
           const eventType = toParticipantComplianceEventType(String(row.event_type));
           const eventStatus = toParticipantComplianceEventStatus(row.event_status);
+          const proofType = toProofType(row.proof_type);
+          const verificationStatus = toVerificationStatus(row.verification_status);
           const sourceTrack = row.source_track
             ? toObligationSourceTrack(String(row.source_track))
             : null;
@@ -1645,6 +1860,8 @@ export function createRepositories(db: DbClient) {
             ...row,
             event_type: eventType,
             event_status: eventStatus,
+            proof_type: proofType,
+            verification_status: verificationStatus,
             source_track: sourceTrack,
           };
         })
@@ -1665,6 +1882,15 @@ export function createRepositories(db: DbClient) {
           if (filters.courtProgramId && row.court_program_id !== filters.courtProgramId) {
             return false;
           }
+          if (
+            filters.verificationStatus &&
+            row.verification_status !== filters.verificationStatus
+          ) {
+            return false;
+          }
+          if (filters.proofType && row.proof_type !== filters.proofType) {
+            return false;
+          }
           return true;
         });
     },
@@ -1679,6 +1905,7 @@ export function createRepositories(db: DbClient) {
         courtProgramId?: string;
         status?: ViolationStatus;
         violationType?: ViolationType;
+        severity?: ViolationSeverity;
       } = {},
     ): Promise<ViolationRow[]> {
       const result = await db.query<ViolationRow>(
@@ -1743,6 +1970,9 @@ export function createRepositories(db: DbClient) {
             return false;
           }
           if (filters.violationType && row.violation_type !== filters.violationType) {
+            return false;
+          }
+          if (filters.severity && row.severity !== filters.severity) {
             return false;
           }
           return true;
@@ -2335,12 +2565,35 @@ export function createRepositories(db: DbClient) {
           metadata_json,
           event_status,
           proof_uri,
+          proof_metadata_json,
           signature_present,
+          proof_type,
+          verification_status,
+          verified_by_role,
+          verified_at,
           created_by_role,
           source_track,
           external_event_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, NULL, NULL, FALSE, 'SYSTEM', NULL, NULL)
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6::jsonb,
+          NULL,
+          NULL,
+          NULL,
+          FALSE,
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          'SYSTEM',
+          NULL,
+          NULL
+        )
         RETURNING
           id,
           tenant_id,
@@ -2354,7 +2607,12 @@ export function createRepositories(db: DbClient) {
           occurred_at,
           metadata_json,
           proof_uri,
+          proof_metadata_json,
           signature_present,
+          proof_type,
+          verification_status,
+          verified_by_role,
+          verified_at,
           created_by_role,
           source_track,
           external_event_id,

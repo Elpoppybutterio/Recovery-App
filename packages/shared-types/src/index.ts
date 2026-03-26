@@ -62,6 +62,24 @@ export const obligationStatusSchema = z.enum([
   "CANCELED",
   "WAIVED",
 ]);
+export const proofTypeSchema = z.enum([
+  "signature",
+  "photo",
+  "selfie",
+  "geofence",
+  "qr_or_code",
+  "officer_verification",
+  "staff_verification",
+  "document_upload",
+]);
+export const verificationStatusSchema = z.enum([
+  "NOT_REQUIRED",
+  "PENDING",
+  "SUBMITTED",
+  "VERIFIED",
+  "REJECTED",
+  "WAIVED",
+]);
 
 export const participantComplianceEventTypeSchema = z.enum([
   "MEETING_ATTENDED",
@@ -83,6 +101,8 @@ export const participantComplianceEventTypeSchema = z.enum([
   "SIGNATURE_CAPTURED",
   "GEOFENCE_ENTERED",
   "GEOFENCE_EXITED",
+  "OBLIGATION_ACKNOWLEDGED",
+  "OBLIGATION_MISSED",
   "ADMIN_NOTE_ADDED",
   "OBLIGATION_SYNCED",
 ]);
@@ -96,6 +116,9 @@ export const participantComplianceEventStatusSchema = z.enum([
   "CAPTURED",
   "ENTERED",
   "EXITED",
+  "ACKNOWLEDGED",
+  "VERIFIED",
+  "REJECTED",
   "NOTED",
 ]);
 
@@ -108,6 +131,7 @@ export const violationTypeSchema = z.enum([
   "missed_curfew",
   "missing_signature",
   "missing_proof",
+  "failed_identity_verification",
   "other",
 ]);
 
@@ -120,6 +144,8 @@ export type ObligationType = z.infer<typeof obligationTypeSchema>;
 export type ObligationSourceTrack = z.infer<typeof obligationSourceTrackSchema>;
 export type ObligationPriority = z.infer<typeof obligationPrioritySchema>;
 export type ObligationStatus = z.infer<typeof obligationStatusSchema>;
+export type ProofType = z.infer<typeof proofTypeSchema>;
+export type VerificationStatus = z.infer<typeof verificationStatusSchema>;
 export type ParticipantComplianceEventType = z.infer<typeof participantComplianceEventTypeSchema>;
 export type ParticipantComplianceEventStatus = z.infer<
   typeof participantComplianceEventStatusSchema
@@ -432,6 +458,7 @@ export const accessContextResponseSchema = z.object({
 
 export const participantProfileSchema = z.object({
   userId: z.string().min(1),
+  displayName: z.string().min(1).nullable(),
   participantType: participantTypeSchema,
   organizationId: z.string().min(1).nullable(),
   houseId: z.string().min(1).nullable(),
@@ -456,6 +483,8 @@ export const obligationSchema = z.object({
   priority: obligationPrioritySchema.nullable(),
   requiresProof: z.boolean(),
   requiresSignature: z.boolean(),
+  proofType: proofTypeSchema.nullable(),
+  verificationStatus: verificationStatusSchema,
   status: obligationStatusSchema,
   syncSource: z.string().min(1).nullable(),
   syncKey: z.string().min(1).nullable(),
@@ -475,7 +504,12 @@ export const participantComplianceEventSchema = z.object({
   occurredAt: z.string().datetime(),
   metadata: z.record(z.unknown()),
   proofUri: z.string().nullable(),
+  proofMetadata: z.record(z.unknown()).nullable(),
   signaturePresent: z.boolean(),
+  proofType: proofTypeSchema.nullable(),
+  verificationStatus: verificationStatusSchema.nullable(),
+  verifiedByRole: z.string().nullable(),
+  verifiedAt: z.string().datetime().nullable(),
   createdByRole: z.string().nullable(),
   sourceTrack: obligationSourceTrackSchema.nullable(),
   externalEventId: z.string().nullable(),

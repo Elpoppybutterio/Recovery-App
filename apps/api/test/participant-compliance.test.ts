@@ -21,6 +21,25 @@ describe("participant compliance foundation", () => {
     syncKey?: string;
     obligationType?: "sponsor_contact" | "chore" | "court_appearance";
     sourceTrack?: "sponsor" | "resident" | "court";
+    requiresProof?: boolean;
+    requiresSignature?: boolean;
+    proofType?:
+      | "signature"
+      | "photo"
+      | "selfie"
+      | "geofence"
+      | "qr_or_code"
+      | "officer_verification"
+      | "staff_verification"
+      | "document_upload"
+      | null;
+    verificationStatus?:
+      | "NOT_REQUIRED"
+      | "PENDING"
+      | "SUBMITTED"
+      | "VERIFIED"
+      | "REJECTED"
+      | "WAIVED";
   }) {
     const profileResponse = await input.app.inject({
       method: "PUT",
@@ -52,8 +71,10 @@ describe("participant compliance foundation", () => {
             organizationId: input.organizationId ?? null,
             houseId: input.houseId ?? null,
             courtProgramId: input.courtProgramId ?? null,
-            requiresProof: false,
-            requiresSignature: false,
+            requiresProof: input.requiresProof ?? false,
+            requiresSignature: input.requiresSignature ?? false,
+            proofType: input.proofType ?? null,
+            verificationStatus: input.verificationStatus ?? "NOT_REQUIRED",
             status: "ACTIVE",
           },
         ],
@@ -153,6 +174,8 @@ describe("participant compliance foundation", () => {
       priority: null,
       requires_proof: false,
       requires_signature: false,
+      proof_type: null,
+      verification_status: "NOT_REQUIRED",
       status: "ACTIVE",
       sync_source: "mobile_sync",
       sync_key: "resident-ember-primary",
@@ -227,6 +250,8 @@ describe("participant compliance foundation", () => {
       priority: "HIGH",
       requires_proof: true,
       requires_signature: false,
+      proof_type: "officer_verification",
+      verification_status: "PENDING",
       status: "ACTIVE",
       sync_source: "mobile_sync",
       sync_key: "court-other-primary",
@@ -296,6 +321,49 @@ describe("participant compliance foundation", () => {
     await db.end?.();
   });
 
+  it("persists proof-required obligation fields and exposes them on reads", async () => {
+    const app = createTestApp(db);
+    await syncParticipantProfileAndObligation({
+      app,
+      authUserId: "enduser-a2",
+      participantType: "court_participant",
+      courtProgramId: "court-boulder",
+      obligationType: "court_appearance",
+      sourceTrack: "court",
+      requiresProof: true,
+      proofType: "officer_verification",
+      verificationStatus: "PENDING",
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/me/obligations",
+      headers: { authorization: "Bearer DEV_enduser-a2" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(
+      (
+        response.json() as {
+          obligations: Array<{
+            requires_proof: boolean;
+            proof_type: string | null;
+            verification_status: string;
+          }>;
+        }
+      ).obligations,
+    ).toEqual([
+      expect.objectContaining({
+        requires_proof: true,
+        proof_type: "officer_verification",
+        verification_status: "PENDING",
+      }),
+    ]);
+
+    await app.close();
+    await db.end?.();
+  });
+
   it("creates violations from missed obligation events", async () => {
     const app = createTestApp(db);
     const synced = await syncParticipantProfileAndObligation({
@@ -341,6 +409,88 @@ describe("participant compliance foundation", () => {
     expect(
       (violationsResponse.json() as { violations: Array<{ violation_type: string }> }).violations,
     ).toHaveLength(1);
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("persists proof verification event fields and derives failed identity violations", async () => {
+    const app = createTestApp(db);
+    const synced = await syncParticipantProfileAndObligation({
+      app,
+      authUserId: "enduser-a2",
+      participantType: "court_participant",
+      courtProgramId: "court-boulder",
+      obligationType: "court_appearance",
+      sourceTrack: "court",
+      requiresProof: true,
+      proofType: "selfie",
+      verificationStatus: "PENDING",
+    });
+    const obligationId = synced.obligations[0]?.id;
+    expect(obligationId).toBeTruthy();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/me/compliance-events",
+      headers: { authorization: "Bearer DEV_enduser-a2" },
+      payload: {
+        obligationId,
+        eventType: "PROOF_UPLOADED",
+        eventStatus: "FAILED",
+        occurredAt: "2026-03-26T19:00:00.000Z",
+        metadata: { uploadSource: "camera" },
+        proofUri: "s3://proofs/enduser-a2/selfie-1.jpg",
+        proofMetadata: { captureMode: "selfie" },
+        proofType: "selfie",
+        verificationStatus: "REJECTED",
+        verifiedByRole: "probation_officer",
+        verifiedAt: "2026-03-26T19:15:00.000Z",
+        externalEventId: "evt-proof-review-rejected-1",
+        sourceTrack: "court",
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(
+      (response.json() as { violation: { violation_type: string } | null }).violation,
+    ).toMatchObject({
+      violation_type: "failed_identity_verification",
+    });
+
+    const eventsResponse = await app.inject({
+      method: "GET",
+      url: "/v1/me/compliance-events?proofType=selfie&verificationStatus=REJECTED",
+      headers: { authorization: "Bearer DEV_enduser-a2" },
+    });
+    expect(eventsResponse.statusCode).toBe(200);
+    expect(
+      (
+        eventsResponse.json() as {
+          complianceEvents: Array<{
+            proof_type: string | null;
+            verification_status: string | null;
+            verified_by_role: string | null;
+          }>;
+        }
+      ).complianceEvents,
+    ).toEqual([
+      expect.objectContaining({
+        proof_type: "selfie",
+        verification_status: "REJECTED",
+        verified_by_role: "probation_officer",
+      }),
+    ]);
+
+    const violationsResponse = await app.inject({
+      method: "GET",
+      url: "/v1/me/violations?violationType=failed_identity_verification&status=OPEN",
+      headers: { authorization: "Bearer DEV_enduser-a2" },
+    });
+    expect(violationsResponse.statusCode).toBe(200);
+    expect(
+      (violationsResponse.json() as { violations: Array<{ violation_type: string }> }).violations,
+    ).toEqual([expect.objectContaining({ violation_type: "failed_identity_verification" })]);
 
     await app.close();
     await db.end?.();

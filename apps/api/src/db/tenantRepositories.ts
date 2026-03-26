@@ -5,11 +5,14 @@ import {
   type ObligationType,
   type ParticipantProfileStatus,
   type ParticipantType,
+  type ProofType,
+  type VerificationStatus,
   ComplianceEventType,
   IncidentType,
   Role,
   SponsorRepeatDay,
   SponsorRepeatUnit,
+  type ViolationSeverity,
   type ViolationStatus,
   type ViolationType,
 } from "@recovery/shared-types";
@@ -463,6 +466,7 @@ export function createTenantRepositories(repositories: Repositories) {
       upsertSelf(
         actor: ActorContext,
         payload: {
+          displayName?: string | null;
           participantType: ParticipantType;
           organizationId?: string | null;
           houseId?: string | null;
@@ -539,6 +543,9 @@ export function createTenantRepositories(repositories: Repositories) {
           organizationId?: string;
           houseId?: string;
           courtProgramId?: string;
+          requiresProof?: boolean;
+          proofType?: ProofType;
+          verificationStatus?: VerificationStatus;
         } = {},
       ) {
         return repositories.listObligations(actor.tenantId, {
@@ -547,6 +554,9 @@ export function createTenantRepositories(repositories: Repositories) {
           organizationId: filters.organizationId,
           houseId: filters.houseId,
           courtProgramId: filters.courtProgramId,
+          requiresProof: filters.requiresProof,
+          proofType: filters.proofType,
+          verificationStatus: filters.verificationStatus,
         });
       },
       async listScoped(
@@ -560,6 +570,9 @@ export function createTenantRepositories(repositories: Repositories) {
           courtProgramId?: string;
           sourceTrack?: ObligationSourceTrack;
           priority?: ObligationPriority;
+          requiresProof?: boolean;
+          proofType?: ProofType;
+          verificationStatus?: VerificationStatus;
         } = {},
       ) {
         const scope = await resolveParticipantAccessScope(repositories, actor);
@@ -578,6 +591,9 @@ export function createTenantRepositories(repositories: Repositories) {
             organizationId: filters.organizationId,
             houseId: filters.houseId,
             courtProgramId: filters.courtProgramId,
+            requiresProof: filters.requiresProof,
+            proofType: filters.proofType,
+            verificationStatus: filters.verificationStatus,
           })
         ).filter((obligation) => {
           if (
@@ -615,6 +631,8 @@ export function createTenantRepositories(repositories: Repositories) {
           organizationId?: string;
           houseId?: string;
           courtProgramId?: string;
+          proofType?: ProofType;
+          verificationStatus?: VerificationStatus;
         } = {},
       ) {
         return repositories.listComplianceEvents(actor.tenantId, {
@@ -623,6 +641,8 @@ export function createTenantRepositories(repositories: Repositories) {
           organizationId: filters.organizationId,
           houseId: filters.houseId,
           courtProgramId: filters.courtProgramId,
+          proofType: filters.proofType,
+          verificationStatus: filters.verificationStatus,
         });
       },
       async listScoped(
@@ -633,6 +653,8 @@ export function createTenantRepositories(repositories: Repositories) {
           organizationId?: string;
           houseId?: string;
           courtProgramId?: string;
+          proofType?: ProofType;
+          verificationStatus?: VerificationStatus;
         } = {},
       ) {
         const scope = await resolveParticipantAccessScope(repositories, actor);
@@ -663,6 +685,7 @@ export function createTenantRepositories(repositories: Repositories) {
         filters: {
           status?: ViolationStatus;
           violationType?: ViolationType;
+          severity?: ViolationSeverity;
           organizationId?: string;
           houseId?: string;
           courtProgramId?: string;
@@ -672,6 +695,7 @@ export function createTenantRepositories(repositories: Repositories) {
           userId: actor.userId,
           status: filters.status,
           violationType: filters.violationType,
+          severity: filters.severity,
           organizationId: filters.organizationId,
           houseId: filters.houseId,
           courtProgramId: filters.courtProgramId,
@@ -683,6 +707,7 @@ export function createTenantRepositories(repositories: Repositories) {
           userId?: string;
           status?: ViolationStatus;
           violationType?: ViolationType;
+          severity?: ViolationSeverity;
           organizationId?: string;
           houseId?: string;
           courtProgramId?: string;

@@ -115,6 +115,8 @@ import {
   type AccessContext,
 } from "./lib/access";
 import {
+  type BackendObligationRecord,
+  type BackendViolationRecord,
   buildComplianceEventPayloads,
   buildObligationSnapshotPayloads,
   buildParticipantProfileSyncPayload,
@@ -2520,24 +2522,10 @@ export default function App() {
   const [sponsorCallLogs, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
   const [meetingAttendanceLogs, setMeetingAttendanceLogs] = useState<MeetingAttendanceLog[]>([]);
   const [backendParticipantObligations, setBackendParticipantObligations] = useState<
-    Array<{
-      id: string;
-      syncKey: string | null;
-      title: string;
-      obligationType: string;
-      status: string;
-      dueAt: string | null;
-      sourceTrack: string;
-    }>
+    BackendObligationRecord[]
   >([]);
   const [backendParticipantViolations, setBackendParticipantViolations] = useState<
-    Array<{
-      id: string;
-      violationType: string;
-      severity: string;
-      status: string;
-      detectedAt: string;
-    }>
+    BackendViolationRecord[]
   >([]);
   const [participantSyncStatus, setParticipantSyncStatus] = useState<string | null>(null);
   const [routinesStore, setRoutinesStore] = useState<RecoveryRoutinesStore>(

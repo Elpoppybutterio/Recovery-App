@@ -4,6 +4,7 @@ import type { RecurringServiceCommitment } from "./recurringServiceCommitments";
 import type { SoberHouseAccessRole } from "./soberHouse/types";
 
 export type ParticipantProfileSyncPayload = {
+  displayName: string | null;
   participantType: "recovery_user" | "resident_user" | "court_participant";
   organizationId: string | null;
   houseId: string | null;
@@ -43,6 +44,17 @@ export type ObligationSnapshotPayload = {
   priority: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | null;
   requiresProof: boolean;
   requiresSignature: boolean;
+  proofType:
+    | "signature"
+    | "photo"
+    | "selfie"
+    | "geofence"
+    | "qr_or_code"
+    | "officer_verification"
+    | "staff_verification"
+    | "document_upload"
+    | null;
+  verificationStatus: "NOT_REQUIRED" | "PENDING" | "SUBMITTED" | "VERIFIED" | "REJECTED" | "WAIVED";
   status: "ACTIVE" | "COMPLETED" | "MISSED" | "CANCELED" | "WAIVED";
 };
 
@@ -52,6 +64,27 @@ export type ComplianceEventPayload = {
   eventStatus: "COMPLETED";
   occurredAt: string;
   metadata: Record<string, unknown>;
+  proofUri?: string | null;
+  proofMetadata?: Record<string, unknown> | null;
+  signaturePresent?: boolean;
+  proofType?:
+    | "signature"
+    | "photo"
+    | "selfie"
+    | "geofence"
+    | "qr_or_code"
+    | "officer_verification"
+    | "staff_verification"
+    | "document_upload"
+    | null;
+  verificationStatus?:
+    | "NOT_REQUIRED"
+    | "PENDING"
+    | "SUBMITTED"
+    | "VERIFIED"
+    | "REJECTED"
+    | "WAIVED"
+    | null;
   sourceTrack: "resident" | "sponsor";
   externalEventId: string;
 };
@@ -64,6 +97,9 @@ export type BackendObligationRecord = {
   status: string;
   dueAt: string | null;
   sourceTrack: string;
+  requiresProof: boolean;
+  proofType: string | null;
+  verificationStatus: string | null;
 };
 
 export type BackendViolationRecord = {
@@ -163,6 +199,47 @@ function findGrant(
   return accessContext?.grants.find((grant) => grant.role === role) ?? null;
 }
 
+function normalizeProofType(
+  value: string | string[] | null | undefined,
+): ObligationSnapshotPayload["proofType"] {
+  if (!value) {
+    return null;
+  }
+  const joined = Array.isArray(value) ? value.join(" ").toUpperCase() : value.toUpperCase();
+  if (joined.includes("SIGN")) {
+    return "signature";
+  }
+  if (joined.includes("SELFIE")) {
+    return "selfie";
+  }
+  if (joined.includes("PHOTO")) {
+    return "photo";
+  }
+  if (joined.includes("GEOFENCE") || joined.includes("GPS")) {
+    return "geofence";
+  }
+  if (joined.includes("QR") || joined.includes("CODE")) {
+    return "qr_or_code";
+  }
+  if (joined.includes("OFFICER")) {
+    return "officer_verification";
+  }
+  if (joined.includes("MANAGER") || joined.includes("STAFF")) {
+    return "staff_verification";
+  }
+  if (joined.includes("DOCUMENT") || joined.includes("UPLOAD")) {
+    return "document_upload";
+  }
+  return null;
+}
+
+function defaultVerificationStatus(
+  requiresProof: boolean,
+  requiresSignature: boolean,
+): ObligationSnapshotPayload["verificationStatus"] {
+  return requiresProof || requiresSignature ? "PENDING" : "NOT_REQUIRED";
+}
+
 export function buildParticipantProfileSyncPayload(
   input: Pick<
     SyncInputs,
@@ -184,6 +261,7 @@ export function buildParticipantProfileSyncPayload(
     input.appAccessRole === "SOBER_HOUSE_RESIDENT"
   ) {
     return {
+      displayName: input.accessContext?.user.displayName ?? null,
       participantType: "resident_user",
       organizationId: residentGrant?.organizationId ?? null,
       houseId: input.houseId,
@@ -200,6 +278,7 @@ export function buildParticipantProfileSyncPayload(
     input.appAccessRole === "COURT_PARTICIPANT"
   ) {
     return {
+      displayName: input.accessContext?.user.displayName ?? null,
       participantType: "court_participant",
       organizationId: null,
       houseId: null,
@@ -213,6 +292,7 @@ export function buildParticipantProfileSyncPayload(
   }
 
   return {
+    displayName: input.accessContext?.user.displayName ?? null,
     participantType: "recovery_user",
     organizationId: null,
     houseId: null,
@@ -234,6 +314,8 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
     input.sponsor.sponsorName.trim().length > 0 &&
     input.sponsor.sponsorPhoneE164
   ) {
+    const proofType = normalizeProofType(input.residentRules?.sponsorProofType);
+    const requiresProof = Boolean(input.residentRules?.sponsorContactEnabled && proofType);
     obligations.push({
       syncKey: "sponsor-contact-primary",
       obligationType: "sponsor_contact",
@@ -250,8 +332,10 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
         repeatDays: input.sponsor.sponsorRepeatDays,
       },
       priority: profile.participantType === "court_participant" ? "HIGH" : "MEDIUM",
-      requiresProof: Boolean(input.residentRules?.sponsorContactEnabled),
+      requiresProof,
       requiresSignature: false,
+      proofType,
+      verificationStatus: defaultVerificationStatus(requiresProof, false),
       status: "ACTIVE",
     });
   }
@@ -271,6 +355,8 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
       priority: "LOW",
       requiresProof: false,
       requiresSignature: false,
+      proofType: null,
+      verificationStatus: "NOT_REQUIRED",
       status: "ACTIVE",
     });
   }
@@ -311,12 +397,16 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
       priority: "HIGH",
       requiresProof: true,
       requiresSignature: false,
+      proofType: "officer_verification",
+      verificationStatus: "PENDING",
       status: "ACTIVE",
     });
   }
 
   if (profile.participantType === "resident_user" && input.residentRules) {
     if (input.residentRules.meetingsRequired && input.residentRules.meetingsPerWeek > 0) {
+      const proofType = normalizeProofType(input.residentRules.meetingsProofMethod) ?? "geofence";
+      const requiresSignature = proofType === "signature";
       obligations.push({
         syncKey: "resident-meetings-weekly",
         obligationType: "meeting_attendance",
@@ -333,7 +423,12 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
         },
         priority: "HIGH",
         requiresProof: input.residentRules.meetingsProofMethod !== "NONE",
-        requiresSignature: input.residentRules.meetingsProofMethod.includes("SIGNATURE"),
+        requiresSignature,
+        proofType,
+        verificationStatus: defaultVerificationStatus(
+          input.residentRules.meetingsProofMethod !== "NONE",
+          requiresSignature,
+        ),
         status: "ACTIVE",
       });
     }
@@ -358,11 +453,15 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
         priority: "HIGH",
         requiresProof: false,
         requiresSignature: false,
+        proofType: null,
+        verificationStatus: "NOT_REQUIRED",
         status: "ACTIVE",
       });
     }
 
     if (input.residentRules.choresEnabled) {
+      const proofType = normalizeProofType(input.residentRules.choresProofRequirement);
+      const requiresSignature = proofType === "signature";
       obligations.push({
         syncKey: "resident-chores",
         obligationType: "chore",
@@ -378,8 +477,12 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
         },
         priority: "MEDIUM",
         requiresProof: input.residentRules.choresProofRequirement.length > 0,
-        requiresSignature:
-          input.residentRules.choresProofRequirement.includes("MANAGER_CONFIRMATION"),
+        requiresSignature,
+        proofType,
+        verificationStatus: defaultVerificationStatus(
+          input.residentRules.choresProofRequirement.length > 0,
+          requiresSignature,
+        ),
         status: "ACTIVE",
       });
     }
@@ -411,6 +514,9 @@ export function buildComplianceEventPayloads(input: {
         sponsorPhoneE164: entry.sponsorPhoneE164,
         source: entry.source,
       },
+      proofType: sponsorObligation?.proofType as ComplianceEventPayload["proofType"],
+      verificationStatus:
+        sponsorObligation?.verificationStatus as ComplianceEventPayload["verificationStatus"],
       sourceTrack: "sponsor",
       externalEventId: `sponsor-call:${entry.id}`,
     }));
@@ -424,6 +530,19 @@ export function buildComplianceEventPayloads(input: {
       meetingId: entry.meetingId,
       method: entry.method,
     },
+    signaturePresent: entry.method === "verified",
+    proofType:
+      entry.method === "verified"
+        ? "signature"
+        : entry.method === "arrivalPrompt"
+          ? "geofence"
+          : (meetingObligation?.proofType as ComplianceEventPayload["proofType"]),
+    verificationStatus:
+      entry.method === "verified" || entry.method === "arrivalPrompt"
+        ? "VERIFIED"
+        : meetingObligation?.requiresProof
+          ? "PENDING"
+          : "NOT_REQUIRED",
     sourceTrack: "resident",
     externalEventId: `meeting-attendance:${entry.id}`,
   }));
@@ -453,6 +572,10 @@ export function parseBackendObligationsResponse(value: unknown): BackendObligati
         status: typeof entry.status === "string" ? entry.status : "ACTIVE",
         dueAt: typeof entry.due_at === "string" ? entry.due_at : null,
         sourceTrack: typeof entry.source_track === "string" ? entry.source_track : "other",
+        requiresProof: entry.requires_proof === true,
+        proofType: typeof entry.proof_type === "string" ? entry.proof_type : null,
+        verificationStatus:
+          typeof entry.verification_status === "string" ? entry.verification_status : null,
       };
     })
     .filter((entry): entry is BackendObligationRecord => entry !== null);

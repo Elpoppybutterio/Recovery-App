@@ -10,6 +10,8 @@ import type {
   ParticipantComplianceEventType,
   ParticipantProfileStatus,
   ParticipantType,
+  ProofType,
+  VerificationStatus,
   ViolationSeverity,
   ViolationStatus,
   ViolationType,
@@ -199,7 +201,12 @@ type ComplianceEvent = {
   occurred_at: string;
   metadata_json: unknown;
   proof_uri: string | null;
+  proof_metadata_json: unknown;
   signature_present: boolean;
+  proof_type: ProofType | null;
+  verification_status: VerificationStatus | null;
+  verified_by_role: string | null;
+  verified_at: string | null;
   created_by_role: string | null;
   source_track: ObligationSourceTrack | null;
   external_event_id: string | null;
@@ -209,6 +216,7 @@ type ComplianceEvent = {
 type ParticipantProfile = {
   user_id: string;
   tenant_id: string;
+  display_name: string | null;
   participant_type: ParticipantType;
   organization_id: string | null;
   house_id: string | null;
@@ -234,6 +242,8 @@ type Obligation = {
   priority: ObligationPriority | null;
   requires_proof: boolean;
   requires_signature: boolean;
+  proof_type: ProofType | null;
+  verification_status: VerificationStatus;
   status: ObligationStatus;
   sync_source: string | null;
   sync_key: string | null;
@@ -410,7 +420,8 @@ export class InMemoryDb implements DbPool {
   }
 
   addParticipantProfile(
-    record: Omit<ParticipantProfile, "created_at" | "updated_at"> & {
+    record: Omit<ParticipantProfile, "created_at" | "updated_at" | "display_name"> & {
+      display_name?: string | null;
       created_at?: string;
       updated_at?: string;
     },
@@ -419,6 +430,7 @@ export class InMemoryDb implements DbPool {
     this.participantProfiles = [
       {
         created_at: record.created_at ?? nowIso,
+        display_name: record.display_name ?? null,
         updated_at: record.updated_at ?? nowIso,
         ...record,
       },
@@ -427,7 +439,9 @@ export class InMemoryDb implements DbPool {
   }
 
   addObligation(
-    record: Omit<Obligation, "created_at" | "updated_at"> & {
+    record: Omit<Obligation, "created_at" | "updated_at" | "proof_type" | "verification_status"> & {
+      proof_type?: ProofType | null;
+      verification_status?: VerificationStatus;
       created_at?: string;
       updated_at?: string;
     },
@@ -436,6 +450,8 @@ export class InMemoryDb implements DbPool {
     this.obligations = [
       {
         created_at: record.created_at ?? nowIso,
+        proof_type: record.proof_type ?? null,
+        verification_status: record.verification_status ?? "NOT_REQUIRED",
         updated_at: record.updated_at ?? nowIso,
         ...record,
       },
@@ -623,16 +639,25 @@ export class InMemoryDb implements DbPool {
     }
 
     if (normalized.includes("insert into participant_profiles")) {
-      const [userId, tenantId, participantType, organizationId, houseId, courtProgramId, status] =
-        params as [
-          string,
-          string,
-          ParticipantType,
-          string | null,
-          string | null,
-          string | null,
-          ParticipantProfileStatus,
-        ];
+      const [
+        userId,
+        tenantId,
+        displayName,
+        participantType,
+        organizationId,
+        houseId,
+        courtProgramId,
+        status,
+      ] = params as [
+        string,
+        string,
+        string | null,
+        ParticipantType,
+        string | null,
+        string | null,
+        string | null,
+        ParticipantProfileStatus,
+      ];
       const nowIso = new Date().toISOString();
       const existingIndex = this.participantProfiles.findIndex(
         (entry) => entry.user_id === userId && entry.tenant_id === tenantId,
@@ -640,6 +665,11 @@ export class InMemoryDb implements DbPool {
       const row: ParticipantProfile = {
         user_id: userId,
         tenant_id: tenantId,
+        display_name:
+          displayName ??
+          this.users.find((entry) => entry.tenant_id === tenantId && entry.id === userId)
+            ?.display_name ??
+          null,
         participant_type: participantType,
         organization_id: organizationId,
         house_id: houseId,
@@ -729,6 +759,8 @@ export class InMemoryDb implements DbPool {
         priority,
         requiresProof,
         requiresSignature,
+        proofType,
+        verificationStatus,
         status,
         syncSource,
         syncKey,
@@ -750,6 +782,8 @@ export class InMemoryDb implements DbPool {
         ObligationPriority | null,
         boolean,
         boolean,
+        ProofType | null,
+        VerificationStatus,
         ObligationStatus,
         string | null,
         string | null,
@@ -781,6 +815,8 @@ export class InMemoryDb implements DbPool {
         priority,
         requires_proof: requiresProof,
         requires_signature: requiresSignature,
+        proof_type: proofType,
+        verification_status: verificationStatus,
         status,
         sync_source: syncSource,
         sync_key: syncKey,
@@ -2008,14 +2044,20 @@ export class InMemoryDb implements DbPool {
         seventhMaybeOccurredAt,
         eighthMaybeMetadataJson,
         ninthMaybeProofUri,
-        tenthMaybeSignaturePresent,
-        eleventhMaybeCreatedByRole,
-        twelfthMaybeSourceTrack,
-        thirteenthMaybeExternalEventId,
+        tenthMaybeProofMetadataJson,
+        eleventhMaybeSignaturePresent,
+        twelfthMaybeProofType,
+        thirteenthMaybeVerificationStatus,
+        fourteenthMaybeVerifiedByRole,
+        fifteenthMaybeVerifiedAt,
+        sixteenthMaybeCreatedByRole,
+        seventeenthMaybeSourceTrack,
+        eighteenthMaybeExternalEventId,
       ] = params as unknown[];
 
-      const isDetailedInsert = params.length >= 16;
-      if (!isDetailedInsert) {
+      const isDetailedInsert = params.length >= 18;
+      const isSystemInsert = params.length >= 17 && params.length < 18;
+      if (!isDetailedInsert && !isSystemInsert) {
         const row: ComplianceEvent = {
           id: id as string,
           tenant_id: tenantId as string,
@@ -2029,7 +2071,44 @@ export class InMemoryDb implements DbPool {
           occurred_at: secondMaybeOrganizationId as string,
           metadata_json: JSON.parse(thirdMaybeHouseOrOccurredAt as string) as unknown,
           proof_uri: null,
+          proof_metadata_json: null,
           signature_present: false,
+          proof_type: null,
+          verification_status: null,
+          verified_by_role: null,
+          verified_at: null,
+          created_by_role: "SYSTEM",
+          source_track: null,
+          external_event_id: null,
+          created_at: new Date().toISOString(),
+        };
+        this.complianceEvents.push(row);
+        return {
+          rowCount: 1,
+          rows: [{ ...row } as Row],
+        };
+      }
+
+      if (isSystemInsert) {
+        const row: ComplianceEvent = {
+          id: id as string,
+          tenant_id: tenantId as string,
+          user_id: userId as string,
+          obligation_id: null,
+          organization_id: null,
+          house_id: null,
+          court_program_id: null,
+          event_type: firstMaybeObligationId as ComplianceEventType,
+          event_status: null,
+          occurred_at: secondMaybeOrganizationId as string,
+          metadata_json: JSON.parse(thirdMaybeHouseOrOccurredAt as string) as unknown,
+          proof_uri: null,
+          proof_metadata_json: null,
+          signature_present: false,
+          proof_type: null,
+          verification_status: null,
+          verified_by_role: null,
+          verified_at: null,
           created_by_role: "SYSTEM",
           source_track: null,
           external_event_id: null,
@@ -2043,7 +2122,7 @@ export class InMemoryDb implements DbPool {
       }
 
       const nowIso = new Date().toISOString();
-      const externalEventId = thirteenthMaybeExternalEventId as string | null;
+      const externalEventId = eighteenthMaybeExternalEventId as string | null;
       const existingIndex =
         externalEventId === null
           ? -1
@@ -2067,9 +2146,17 @@ export class InMemoryDb implements DbPool {
         occurred_at: seventhMaybeOccurredAt as string,
         metadata_json: JSON.parse(eighthMaybeMetadataJson as string) as unknown,
         proof_uri: ninthMaybeProofUri as string | null,
-        signature_present: tenthMaybeSignaturePresent as boolean,
-        created_by_role: eleventhMaybeCreatedByRole as string | null,
-        source_track: twelfthMaybeSourceTrack as ObligationSourceTrack | null,
+        proof_metadata_json:
+          tenthMaybeProofMetadataJson === null
+            ? null
+            : JSON.parse(tenthMaybeProofMetadataJson as string),
+        signature_present: eleventhMaybeSignaturePresent as boolean,
+        proof_type: twelfthMaybeProofType as ProofType | null,
+        verification_status: thirteenthMaybeVerificationStatus as VerificationStatus | null,
+        verified_by_role: fourteenthMaybeVerifiedByRole as string | null,
+        verified_at: fifteenthMaybeVerifiedAt as string | null,
+        created_by_role: sixteenthMaybeCreatedByRole as string | null,
+        source_track: seventeenthMaybeSourceTrack as ObligationSourceTrack | null,
         external_event_id: externalEventId,
         created_at: existing?.created_at ?? nowIso,
       };

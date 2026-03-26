@@ -169,6 +169,7 @@ const supervisionUpdateBodySchema = z.object({
 });
 
 const participantProfileBodySchema = z.object({
+  displayName: z.string().min(1).nullable().optional(),
   participantType: z.enum(["recovery_user", "resident_user", "court_participant"]),
   organizationId: z.string().min(1).nullable().optional(),
   houseId: z.string().min(1).nullable().optional(),
@@ -208,8 +209,25 @@ const obligationSnapshotItemSchema = z.object({
   dueAt: z.string().datetime().nullable().optional(),
   recurrence: z.record(z.unknown()).nullable().optional(),
   priority: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).nullable().optional(),
-  requiresProof: z.boolean().optional(),
+  requiresProof: z.coerce.boolean().optional(),
   requiresSignature: z.boolean().optional(),
+  proofType: z
+    .enum([
+      "signature",
+      "photo",
+      "selfie",
+      "geofence",
+      "qr_or_code",
+      "officer_verification",
+      "staff_verification",
+      "document_upload",
+    ])
+    .nullable()
+    .optional(),
+  verificationStatus: z
+    .enum(["NOT_REQUIRED", "PENDING", "SUBMITTED", "VERIFIED", "REJECTED", "WAIVED"])
+    .nullable()
+    .optional(),
   status: z.enum(["ACTIVE", "COMPLETED", "MISSED", "CANCELED", "WAIVED"]),
 });
 
@@ -240,6 +258,8 @@ const participantComplianceEventBodySchema = z.object({
     "SIGNATURE_CAPTURED",
     "GEOFENCE_ENTERED",
     "GEOFENCE_EXITED",
+    "OBLIGATION_ACKNOWLEDGED",
+    "OBLIGATION_MISSED",
     "ADMIN_NOTE_ADDED",
     "OBLIGATION_SYNCED",
   ]),
@@ -252,12 +272,35 @@ const participantComplianceEventBodySchema = z.object({
     "CAPTURED",
     "ENTERED",
     "EXITED",
+    "ACKNOWLEDGED",
+    "VERIFIED",
+    "REJECTED",
     "NOTED",
   ]),
   occurredAt: z.string().datetime(),
   metadata: z.record(z.unknown()).optional(),
   proofUri: z.string().nullable().optional(),
+  proofMetadata: z.record(z.unknown()).nullable().optional(),
   signaturePresent: z.boolean().optional(),
+  proofType: z
+    .enum([
+      "signature",
+      "photo",
+      "selfie",
+      "geofence",
+      "qr_or_code",
+      "officer_verification",
+      "staff_verification",
+      "document_upload",
+    ])
+    .nullable()
+    .optional(),
+  verificationStatus: z
+    .enum(["NOT_REQUIRED", "PENDING", "SUBMITTED", "VERIFIED", "REJECTED", "WAIVED"])
+    .nullable()
+    .optional(),
+  verifiedByRole: z.string().nullable().optional(),
+  verifiedAt: z.string().datetime().nullable().optional(),
   createdByRole: z.string().nullable().optional(),
   sourceTrack: z
     .enum([
@@ -317,6 +360,22 @@ const participantObligationsQuerySchema = z.object({
     ])
     .optional(),
   priority: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
+  requiresProof: z.boolean().optional(),
+  proofType: z
+    .enum([
+      "signature",
+      "photo",
+      "selfie",
+      "geofence",
+      "qr_or_code",
+      "officer_verification",
+      "staff_verification",
+      "document_upload",
+    ])
+    .optional(),
+  verificationStatus: z
+    .enum(["NOT_REQUIRED", "PENDING", "SUBMITTED", "VERIFIED", "REJECTED", "WAIVED"])
+    .optional(),
 });
 
 const participantComplianceEventsQuerySchema = z.object({
@@ -325,11 +384,27 @@ const participantComplianceEventsQuerySchema = z.object({
   organizationId: z.string().min(1).optional(),
   houseId: z.string().min(1).optional(),
   courtProgramId: z.string().min(1).optional(),
+  proofType: z
+    .enum([
+      "signature",
+      "photo",
+      "selfie",
+      "geofence",
+      "qr_or_code",
+      "officer_verification",
+      "staff_verification",
+      "document_upload",
+    ])
+    .optional(),
+  verificationStatus: z
+    .enum(["NOT_REQUIRED", "PENDING", "SUBMITTED", "VERIFIED", "REJECTED", "WAIVED"])
+    .optional(),
 });
 
 const participantViolationsQuerySchema = z.object({
   userId: z.string().min(1).optional(),
   status: z.enum(["OPEN", "UNDER_REVIEW", "RESOLVED", "DISMISSED"]).optional(),
+  severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
   violationType: z
     .enum([
       "missed_meeting",
@@ -340,6 +415,7 @@ const participantViolationsQuerySchema = z.object({
       "missed_curfew",
       "missing_signature",
       "missing_proof",
+      "failed_identity_verification",
       "other",
     ])
     .optional(),
@@ -852,7 +928,12 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
         occurredAt: new Date(parsedBody.data.occurredAt),
         metadata: parsedBody.data.metadata,
         proofUri: parsedBody.data.proofUri ?? null,
+        proofMetadata: parsedBody.data.proofMetadata ?? null,
         signaturePresent: parsedBody.data.signaturePresent ?? false,
+        proofType: parsedBody.data.proofType ?? null,
+        verificationStatus: parsedBody.data.verificationStatus ?? null,
+        verifiedByRole: parsedBody.data.verifiedByRole ?? null,
+        verifiedAt: parsedBody.data.verifiedAt ? new Date(parsedBody.data.verifiedAt) : null,
         createdByRole: parsedBody.data.createdByRole ?? null,
         sourceTrack: parsedBody.data.sourceTrack ?? null,
         externalEventId: parsedBody.data.externalEventId ?? null,
