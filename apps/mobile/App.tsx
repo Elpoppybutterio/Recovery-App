@@ -1594,6 +1594,19 @@ function isPermissionBlocked(
   return response?.granted !== true && response?.canAskAgain === false;
 }
 
+function isPermissionDenied(
+  response:
+    | {
+        granted?: boolean;
+        status?: string | null;
+        canAskAgain?: boolean | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  return response?.granted !== true && response?.status === "denied";
+}
+
 function formatError(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -2543,6 +2556,7 @@ export default function App() {
   const writableCalendarIdRef = useRef<string | null>(null);
   const calendarPermissionBlockedRef = useRef(false);
   const notificationPermissionBlockedRef = useRef(false);
+  const notificationSettingsPromptShownRef = useRef(false);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
   const meetingsSearchOrigin = mapBoundaryCenter ?? currentLocation;
@@ -4068,42 +4082,47 @@ export default function App() {
     async (requestIfNeeded = true): Promise<boolean> => {
       if (!notificationsRuntimeEnabled) {
         notificationPermissionBlockedRef.current = false;
+        notificationSettingsPromptShownRef.current = false;
         return false;
       }
 
       const existing = await Notifications.getPermissionsAsync();
       if (existing.granted || existing.status === Notifications.PermissionStatus.GRANTED) {
         notificationPermissionBlockedRef.current = false;
+        notificationSettingsPromptShownRef.current = false;
         return true;
       }
 
+      const notificationPermissionSettled =
+        isPermissionBlocked(existing) || (Platform.OS === "ios" && isPermissionDenied(existing));
+
       if (!requestIfNeeded) {
-        notificationPermissionBlockedRef.current = isPermissionBlocked(existing);
+        notificationPermissionBlockedRef.current = notificationPermissionSettled;
         return false;
       }
 
-      if (isPermissionBlocked(existing)) {
+      if (notificationPermissionSettled) {
         notificationPermissionBlockedRef.current = true;
-        promptToOpenAppSettings(
-          "Notifications are off",
-          "Open Settings to enable Sober² notifications for sponsor reminders and meeting alerts.",
-        );
+        if (!notificationSettingsPromptShownRef.current) {
+          notificationSettingsPromptShownRef.current = true;
+          promptToOpenAppSettings(
+            "Notifications are off",
+            "Open Settings to enable Sober² notifications for sponsor reminders and meeting alerts.",
+          );
+        }
         return false;
       }
 
       const requested = await Notifications.requestPermissionsAsync();
       if (requested.granted || requested.status === Notifications.PermissionStatus.GRANTED) {
         notificationPermissionBlockedRef.current = false;
+        notificationSettingsPromptShownRef.current = false;
         return true;
       }
 
-      notificationPermissionBlockedRef.current = isPermissionBlocked(requested);
-      if (notificationPermissionBlockedRef.current) {
-        promptToOpenAppSettings(
-          "Notifications are off",
-          "Open Settings to enable Sober² notifications for sponsor reminders and meeting alerts.",
-        );
-      }
+      notificationPermissionBlockedRef.current =
+        isPermissionBlocked(requested) || (Platform.OS === "ios" && isPermissionDenied(requested));
+      notificationSettingsPromptShownRef.current = false;
       return false;
     },
     [notificationsRuntimeEnabled, promptToOpenAppSettings],
@@ -6512,6 +6531,296 @@ export default function App() {
     recoverySubstances,
     wizardJusticeTrack,
   ]);
+
+  const hydratePersistedRecoverySettings = useCallback(
+    (input: {
+      modeRaw: string | null;
+      sponsorUiPrefsRaw: string | null;
+      setupCompleteRaw: string | null;
+      sobrietyDateRaw: string | null;
+      profileRaw: string | null;
+      ninetyDayGoalRaw: string | null;
+      sponsorEnabledAtRaw: string | null;
+    }) => {
+      console.log("[setup-persist] read start");
+      const resolvedMode: RecoveryMode =
+        input.modeRaw === "A" || input.modeRaw === "B" || input.modeRaw === "C"
+          ? input.modeRaw
+          : "A";
+      const resolvedSetupComplete = input.setupCompleteRaw === "true";
+      setSetupComplete(resolvedSetupComplete);
+
+      if (input.sponsorUiPrefsRaw) {
+        try {
+          const parsedPrefs = JSON.parse(input.sponsorUiPrefsRaw) as { leadMinutes?: number };
+          if (
+            parsedPrefs &&
+            typeof parsedPrefs.leadMinutes === "number" &&
+            [0, 5, 10, 30].includes(parsedPrefs.leadMinutes)
+          ) {
+            setSponsorLeadMinutes(parsedPrefs.leadMinutes as SponsorLeadMinutes);
+          }
+        } catch (error) {
+          console.log("[setup-persist] read failure", {
+            key: "sponsorUiPrefs",
+            error: formatError(error),
+          });
+        }
+      }
+
+      if (input.sobrietyDateRaw) {
+        setSobrietyDateIso(input.sobrietyDateRaw);
+        setSobrietyDateInput(formatIsoToUsDate(input.sobrietyDateRaw));
+      }
+
+      let hasLocalSponsorProfile = false;
+      if (input.profileRaw) {
+        try {
+          const parsedProfile = JSON.parse(input.profileRaw) as {
+            radiusMiles?: number;
+            homeGroupMeetingIds?: string[];
+            homeGroupSeriesKey?: string | null;
+            homeGroupName?: string | null;
+            homeGroupBirthdayOptIn?: boolean;
+            homeGroupBirthdayFirstName?: string;
+            homeGroupBirthdayLastName?: string;
+            recurringServiceCommitments?: RecurringServiceCommitment[];
+            attendanceAutomationPlan?: AttendanceAutomationPlan | null;
+            sponsorEnabledAtIso?: string | null;
+            ninetyDayGoalTarget?: number;
+            recoverySubstances?: RecoverySubstanceCategory[];
+            meetingSignatureRequired?: boolean;
+            sponsorName?: string;
+            sponsorPhoneDigits?: string;
+            sponsorHour12?: number;
+            sponsorMinute?: number;
+            sponsorMeridiem?: "AM" | "PM";
+            sponsorRepeatPreset?: RepeatPreset;
+            sponsorRepeatDays?: WeekdayCode[];
+            sponsorEnabled?: boolean;
+            sponsorActive?: boolean;
+            sponsorLeadMinutes?: SponsorLeadMinutes;
+            sponsorKneesSuggested?: boolean | null;
+            meetingAutoAddToCalendar?: boolean;
+            wizardSupervisionMode?: SetupSupervisionMode;
+            wizardJusticeTrack?: SetupJusticeTrack;
+          };
+
+          if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
+            setMeetingRadiusMiles(parsedProfile.radiusMiles);
+          }
+          if (Array.isArray(parsedProfile.homeGroupMeetingIds)) {
+            setHomeGroupMeetingIds(
+              parsedProfile.homeGroupMeetingIds.filter(
+                (entry): entry is string => typeof entry === "string" && entry.length > 0,
+              ),
+            );
+          }
+          if (
+            typeof parsedProfile.homeGroupSeriesKey === "string" ||
+            parsedProfile.homeGroupSeriesKey === null
+          ) {
+            setHomeGroupSeriesKey(parsedProfile.homeGroupSeriesKey ?? null);
+          }
+          if (
+            typeof parsedProfile.homeGroupName === "string" ||
+            parsedProfile.homeGroupName === null
+          ) {
+            setHomeGroupName(parsedProfile.homeGroupName ?? null);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayOptIn === "boolean") {
+            setHomeGroupBirthdayOptIn(parsedProfile.homeGroupBirthdayOptIn);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayFirstName === "string") {
+            setHomeGroupBirthdayFirstName(parsedProfile.homeGroupBirthdayFirstName);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayLastName === "string") {
+            setHomeGroupBirthdayLastName(parsedProfile.homeGroupBirthdayLastName);
+          }
+          if (Array.isArray(parsedProfile.recurringServiceCommitments)) {
+            setRecurringServiceCommitments(
+              normalizeRecurringServiceCommitments(parsedProfile.recurringServiceCommitments),
+            );
+          }
+          if (
+            parsedProfile.attendanceAutomationPlan &&
+            typeof parsedProfile.attendanceAutomationPlan === "object"
+          ) {
+            const candidate = parsedProfile.attendanceAutomationPlan as Record<string, unknown>;
+            if (
+              typeof candidate.meetingId === "string" &&
+              candidate.meetingId.trim().length > 0 &&
+              typeof candidate.dateKey === "string" &&
+              candidate.dateKey.trim().length > 0 &&
+              (candidate.status === "planned" || candidate.status === "eligible_to_start") &&
+              typeof candidate.plannedAtIso === "string" &&
+              candidate.plannedAtIso.trim().length > 0
+            ) {
+              setAttendanceAutomationPlan({
+                meetingId: candidate.meetingId,
+                dateKey: candidate.dateKey,
+                status: candidate.status,
+                plannedAtIso: candidate.plannedAtIso,
+                scheduledStartAtIso:
+                  typeof candidate.scheduledStartAtIso === "string" &&
+                  candidate.scheduledStartAtIso.trim().length > 0
+                    ? candidate.scheduledStartAtIso
+                    : null,
+                calendarEventId:
+                  typeof candidate.calendarEventId === "string" &&
+                  candidate.calendarEventId.trim().length > 0 &&
+                  candidate.calendarEventId.trim().length <= CALENDAR_EVENT_ID_MAX_LENGTH
+                    ? candidate.calendarEventId
+                    : null,
+              });
+            }
+          } else if (parsedProfile.attendanceAutomationPlan === null) {
+            setAttendanceAutomationPlan(null);
+          }
+          if (
+            typeof parsedProfile.sponsorEnabledAtIso === "string" ||
+            parsedProfile.sponsorEnabledAtIso === null
+          ) {
+            setSponsorEnabledAtIso(parsedProfile.sponsorEnabledAtIso ?? null);
+          }
+          if (
+            typeof parsedProfile.ninetyDayGoalTarget === "number" &&
+            Number.isFinite(parsedProfile.ninetyDayGoalTarget)
+          ) {
+            const nextGoal = Math.max(
+              1,
+              Math.min(9999, Math.floor(parsedProfile.ninetyDayGoalTarget)),
+            );
+            setNinetyDayGoalTarget(nextGoal);
+            setNinetyDayGoalInput(String(nextGoal));
+          }
+          if (Array.isArray(parsedProfile.recoverySubstances)) {
+            const normalizedSubstances = normalizeRecoverySubstances(
+              parsedProfile.recoverySubstances,
+            );
+            setRecoverySubstances(normalizedSubstances);
+            setWizardRecoverySubstances(normalizedSubstances);
+          }
+          if (typeof parsedProfile.meetingSignatureRequired === "boolean") {
+            setMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
+            setWizardMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
+          }
+          if (typeof parsedProfile.sponsorName === "string") {
+            setSponsorName(parsedProfile.sponsorName);
+            hasLocalSponsorProfile =
+              hasLocalSponsorProfile || parsedProfile.sponsorName.trim().length > 0;
+          }
+          if (typeof parsedProfile.sponsorPhoneDigits === "string") {
+            const normalized = normalizePhoneDigits(parsedProfile.sponsorPhoneDigits);
+            setSponsorPhoneDigits(normalized);
+            hasLocalSponsorProfile = hasLocalSponsorProfile || normalized.length > 0;
+          }
+          if (
+            typeof parsedProfile.sponsorHour12 === "number" &&
+            Number.isFinite(parsedProfile.sponsorHour12) &&
+            parsedProfile.sponsorHour12 >= 1 &&
+            parsedProfile.sponsorHour12 <= 12
+          ) {
+            setSponsorHour12(Math.floor(parsedProfile.sponsorHour12));
+          }
+          if (
+            typeof parsedProfile.sponsorMinute === "number" &&
+            Number.isFinite(parsedProfile.sponsorMinute) &&
+            parsedProfile.sponsorMinute >= 0 &&
+            parsedProfile.sponsorMinute <= 59
+          ) {
+            setSponsorMinute(Math.floor(parsedProfile.sponsorMinute));
+          }
+          if (parsedProfile.sponsorMeridiem === "AM" || parsedProfile.sponsorMeridiem === "PM") {
+            setSponsorMeridiem(parsedProfile.sponsorMeridiem);
+          }
+          if (
+            parsedProfile.sponsorRepeatPreset === "WEEKLY" ||
+            parsedProfile.sponsorRepeatPreset === "BIWEEKLY" ||
+            parsedProfile.sponsorRepeatPreset === "MONTHLY"
+          ) {
+            setSponsorRepeatPreset(parsedProfile.sponsorRepeatPreset);
+          }
+          if (Array.isArray(parsedProfile.sponsorRepeatDays)) {
+            const safeDays = parsedProfile.sponsorRepeatDays.filter((day): day is WeekdayCode =>
+              WEEKDAY_CODES.includes(day),
+            );
+            if (safeDays.length > 0) {
+              setSponsorRepeatDays(sortWeekdays(safeDays));
+            }
+          }
+          if (typeof parsedProfile.sponsorEnabled === "boolean") {
+            setSponsorEnabled(parsedProfile.sponsorEnabled);
+          }
+          if (typeof parsedProfile.sponsorActive === "boolean") {
+            setSponsorActive(parsedProfile.sponsorActive);
+          }
+          if (
+            typeof parsedProfile.sponsorLeadMinutes === "number" &&
+            [0, 5, 10, 30].includes(parsedProfile.sponsorLeadMinutes)
+          ) {
+            setSponsorLeadMinutes(parsedProfile.sponsorLeadMinutes as SponsorLeadMinutes);
+          }
+          if (
+            typeof parsedProfile.sponsorKneesSuggested === "boolean" ||
+            parsedProfile.sponsorKneesSuggested === null
+          ) {
+            setSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
+            setWizardSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
+          }
+          if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
+            setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
+          }
+          if (
+            parsedProfile.wizardSupervisionMode === "INDEPENDENT" ||
+            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ||
+            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+          ) {
+            setWizardSupervisionMode(parsedProfile.wizardSupervisionMode);
+          }
+          if (
+            parsedProfile.wizardJusticeTrack === "NONE" ||
+            parsedProfile.wizardJusticeTrack === "DRUG_COURT" ||
+            parsedProfile.wizardJusticeTrack === "PROBATION_PAROLE"
+          ) {
+            setWizardJusticeTrack(parsedProfile.wizardJusticeTrack);
+          }
+        } catch (error) {
+          console.log("[setup-persist] read failure", {
+            key: "profile",
+            error: formatError(error),
+          });
+        }
+      }
+
+      if (typeof input.ninetyDayGoalRaw === "string" && input.ninetyDayGoalRaw.trim().length > 0) {
+        const parsedGoal = Number(input.ninetyDayGoalRaw);
+        if (Number.isFinite(parsedGoal)) {
+          const nextGoal = Math.max(1, Math.min(9999, Math.floor(parsedGoal)));
+          setNinetyDayGoalTarget(nextGoal);
+          setNinetyDayGoalInput(String(nextGoal));
+        }
+      }
+
+      if (
+        typeof input.sponsorEnabledAtRaw === "string" &&
+        input.sponsorEnabledAtRaw.trim().length > 0
+      ) {
+        setSponsorEnabledAtIso(input.sponsorEnabledAtRaw);
+      }
+
+      setMode(resolvedSetupComplete ? "A" : resolvedMode);
+      setHomeScreen(resolvedSetupComplete ? "DASHBOARD" : "SETUP");
+      console.log("[setup-persist] hydration complete", {
+        resolvedSetupComplete,
+        resolvedMode,
+        hasLocalSponsorProfile,
+      });
+
+      return { hasLocalSponsorProfile };
+    },
+    [],
+  );
 
   const recurringServiceCommitmentReviewLines = useMemo(
     () =>
@@ -11416,6 +11725,35 @@ export default function App() {
 
       if (iosStartupCompatibilityGuardEnabled || recoveredModeFromPreviousCrash) {
         try {
+          const [
+            modeRaw,
+            sponsorUiPrefsRaw,
+            setupCompleteRaw,
+            sobrietyDateRaw,
+            profileRaw,
+            ninetyDayGoalRaw,
+            sponsorEnabledAtRaw,
+          ] = await Promise.all([
+            AsyncStorage.getItem(modeStorage),
+            AsyncStorage.getItem(sponsorUiPrefsStorage),
+            AsyncStorage.getItem(setupCompleteStorage),
+            AsyncStorage.getItem(sobrietyDateStorage),
+            AsyncStorage.getItem(profileStorage),
+            AsyncStorage.getItem(ninetyDayGoalStorage),
+            AsyncStorage.getItem(sponsorEnabledAtStorage),
+          ]);
+          const { hasLocalSponsorProfile } = hydratePersistedRecoverySettings({
+            modeRaw,
+            sponsorUiPrefsRaw,
+            setupCompleteRaw,
+            sobrietyDateRaw,
+            profileRaw,
+            ninetyDayGoalRaw,
+            sponsorEnabledAtRaw,
+          });
+          if (enableSponsorApiSync && !hasLocalSponsorProfile) {
+            await fetchSponsorConfig();
+          }
           await refreshMeetings();
           setMeetingsStatus(
             recoveredModeFromPreviousCrash
@@ -11500,20 +11838,15 @@ export default function App() {
             locationIssue: locationIssueRef.current ?? "none",
           });
         }
-
-        const resolvedMode: RecoveryMode =
-          modeRaw === "A" || modeRaw === "B" || modeRaw === "C" ? modeRaw : "A";
-
-        if (sponsorUiPrefsRaw) {
-          const parsedPrefs = JSON.parse(sponsorUiPrefsRaw) as { leadMinutes?: number };
-          if (
-            parsedPrefs &&
-            typeof parsedPrefs.leadMinutes === "number" &&
-            [0, 5, 10, 30].includes(parsedPrefs.leadMinutes)
-          ) {
-            setSponsorLeadMinutes(parsedPrefs.leadMinutes as SponsorLeadMinutes);
-          }
-        }
+        const { hasLocalSponsorProfile } = hydratePersistedRecoverySettings({
+          modeRaw,
+          sponsorUiPrefsRaw,
+          setupCompleteRaw,
+          sobrietyDateRaw,
+          profileRaw,
+          ninetyDayGoalRaw,
+          sponsorEnabledAtRaw,
+        });
 
         if (attendanceRaw) {
           if (attendanceRaw.length > MAX_BOOTSTRAP_ATTENDANCE_RAW_CHARS) {
@@ -11771,229 +12104,16 @@ export default function App() {
         }
 
         if (planRaw) {
-          const parsedPlans = JSON.parse(planRaw) as MeetingPlansState;
-          if (parsedPlans && typeof parsedPlans === "object") {
-            setMeetingPlansByDate(parsedPlans);
-          }
-        }
-
-        const resolvedSetupComplete = setupCompleteRaw === "true";
-        setSetupComplete(resolvedSetupComplete);
-
-        if (sobrietyDateRaw) {
-          setSobrietyDateIso(sobrietyDateRaw);
-          setSobrietyDateInput(formatIsoToUsDate(sobrietyDateRaw));
-        }
-
-        let hasLocalSponsorProfile = false;
-        if (profileRaw) {
-          const parsedProfile = JSON.parse(profileRaw) as {
-            radiusMiles?: number;
-            homeGroupMeetingIds?: string[];
-            homeGroupSeriesKey?: string | null;
-            homeGroupName?: string | null;
-            homeGroupBirthdayOptIn?: boolean;
-            homeGroupBirthdayFirstName?: string;
-            homeGroupBirthdayLastName?: string;
-            recurringServiceCommitments?: RecurringServiceCommitment[];
-            attendanceAutomationPlan?: AttendanceAutomationPlan | null;
-            sponsorEnabledAtIso?: string | null;
-            ninetyDayGoalTarget?: number;
-            recoverySubstances?: RecoverySubstanceCategory[];
-            meetingSignatureRequired?: boolean;
-            sponsorName?: string;
-            sponsorPhoneDigits?: string;
-            sponsorHour12?: number;
-            sponsorMinute?: number;
-            sponsorMeridiem?: "AM" | "PM";
-            sponsorRepeatPreset?: RepeatPreset;
-            sponsorRepeatDays?: WeekdayCode[];
-            sponsorEnabled?: boolean;
-            sponsorActive?: boolean;
-            sponsorLeadMinutes?: SponsorLeadMinutes;
-            sponsorKneesSuggested?: boolean | null;
-            meetingAutoAddToCalendar?: boolean;
-            wizardSupervisionMode?: SetupSupervisionMode;
-            wizardJusticeTrack?: SetupJusticeTrack;
-          };
-          if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
-            setMeetingRadiusMiles(parsedProfile.radiusMiles);
-          }
-          if (Array.isArray(parsedProfile.homeGroupMeetingIds)) {
-            setHomeGroupMeetingIds(
-              parsedProfile.homeGroupMeetingIds.filter(
-                (entry): entry is string => typeof entry === "string" && entry.length > 0,
-              ),
-            );
-          }
-          if (
-            typeof parsedProfile.homeGroupSeriesKey === "string" ||
-            parsedProfile.homeGroupSeriesKey === null
-          ) {
-            setHomeGroupSeriesKey(parsedProfile.homeGroupSeriesKey ?? null);
-          }
-          if (
-            typeof parsedProfile.homeGroupName === "string" ||
-            parsedProfile.homeGroupName === null
-          ) {
-            setHomeGroupName(parsedProfile.homeGroupName ?? null);
-          }
-          if (typeof parsedProfile.homeGroupBirthdayOptIn === "boolean") {
-            setHomeGroupBirthdayOptIn(parsedProfile.homeGroupBirthdayOptIn);
-          }
-          if (typeof parsedProfile.homeGroupBirthdayFirstName === "string") {
-            setHomeGroupBirthdayFirstName(parsedProfile.homeGroupBirthdayFirstName);
-          }
-          if (typeof parsedProfile.homeGroupBirthdayLastName === "string") {
-            setHomeGroupBirthdayLastName(parsedProfile.homeGroupBirthdayLastName);
-          }
-          if (Array.isArray(parsedProfile.recurringServiceCommitments)) {
-            setRecurringServiceCommitments(
-              normalizeRecurringServiceCommitments(parsedProfile.recurringServiceCommitments),
-            );
-          }
-          if (
-            parsedProfile.attendanceAutomationPlan &&
-            typeof parsedProfile.attendanceAutomationPlan === "object"
-          ) {
-            const candidate = parsedProfile.attendanceAutomationPlan as Record<string, unknown>;
-            if (
-              typeof candidate.meetingId === "string" &&
-              candidate.meetingId.trim().length > 0 &&
-              typeof candidate.dateKey === "string" &&
-              candidate.dateKey.trim().length > 0 &&
-              (candidate.status === "planned" || candidate.status === "eligible_to_start") &&
-              typeof candidate.plannedAtIso === "string" &&
-              candidate.plannedAtIso.trim().length > 0
-            ) {
-              setAttendanceAutomationPlan({
-                meetingId: candidate.meetingId,
-                dateKey: candidate.dateKey,
-                status: candidate.status,
-                plannedAtIso: candidate.plannedAtIso,
-                scheduledStartAtIso:
-                  typeof candidate.scheduledStartAtIso === "string" &&
-                  candidate.scheduledStartAtIso.trim().length > 0
-                    ? candidate.scheduledStartAtIso
-                    : null,
-                calendarEventId:
-                  typeof candidate.calendarEventId === "string" &&
-                  candidate.calendarEventId.trim().length > 0 &&
-                  candidate.calendarEventId.trim().length <= CALENDAR_EVENT_ID_MAX_LENGTH
-                    ? candidate.calendarEventId
-                    : null,
-              });
+          try {
+            const parsedPlans = JSON.parse(planRaw) as MeetingPlansState;
+            if (parsedPlans && typeof parsedPlans === "object") {
+              setMeetingPlansByDate(parsedPlans);
             }
-          } else if (parsedProfile.attendanceAutomationPlan === null) {
-            setAttendanceAutomationPlan(null);
-          }
-          if (
-            typeof parsedProfile.sponsorEnabledAtIso === "string" ||
-            parsedProfile.sponsorEnabledAtIso === null
-          ) {
-            setSponsorEnabledAtIso(parsedProfile.sponsorEnabledAtIso ?? null);
-          }
-          if (
-            typeof parsedProfile.ninetyDayGoalTarget === "number" &&
-            Number.isFinite(parsedProfile.ninetyDayGoalTarget)
-          ) {
-            const nextGoal = Math.max(
-              1,
-              Math.min(9999, Math.floor(parsedProfile.ninetyDayGoalTarget)),
-            );
-            setNinetyDayGoalTarget(nextGoal);
-            setNinetyDayGoalInput(String(nextGoal));
-          }
-          if (Array.isArray(parsedProfile.recoverySubstances)) {
-            const normalizedSubstances = normalizeRecoverySubstances(
-              parsedProfile.recoverySubstances,
-            );
-            setRecoverySubstances(normalizedSubstances);
-            setWizardRecoverySubstances(normalizedSubstances);
-          }
-          if (typeof parsedProfile.meetingSignatureRequired === "boolean") {
-            setMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
-            setWizardMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
-          }
-          if (typeof parsedProfile.sponsorName === "string") {
-            setSponsorName(parsedProfile.sponsorName);
-            hasLocalSponsorProfile =
-              hasLocalSponsorProfile || parsedProfile.sponsorName.trim().length > 0;
-          }
-          if (typeof parsedProfile.sponsorPhoneDigits === "string") {
-            const normalized = normalizePhoneDigits(parsedProfile.sponsorPhoneDigits);
-            setSponsorPhoneDigits(normalized);
-            hasLocalSponsorProfile = hasLocalSponsorProfile || normalized.length > 0;
-          }
-          if (
-            typeof parsedProfile.sponsorHour12 === "number" &&
-            Number.isFinite(parsedProfile.sponsorHour12) &&
-            parsedProfile.sponsorHour12 >= 1 &&
-            parsedProfile.sponsorHour12 <= 12
-          ) {
-            setSponsorHour12(Math.floor(parsedProfile.sponsorHour12));
-          }
-          if (
-            typeof parsedProfile.sponsorMinute === "number" &&
-            Number.isFinite(parsedProfile.sponsorMinute) &&
-            parsedProfile.sponsorMinute >= 0 &&
-            parsedProfile.sponsorMinute <= 59
-          ) {
-            setSponsorMinute(Math.floor(parsedProfile.sponsorMinute));
-          }
-          if (parsedProfile.sponsorMeridiem === "AM" || parsedProfile.sponsorMeridiem === "PM") {
-            setSponsorMeridiem(parsedProfile.sponsorMeridiem);
-          }
-          if (
-            parsedProfile.sponsorRepeatPreset === "WEEKLY" ||
-            parsedProfile.sponsorRepeatPreset === "BIWEEKLY" ||
-            parsedProfile.sponsorRepeatPreset === "MONTHLY"
-          ) {
-            setSponsorRepeatPreset(parsedProfile.sponsorRepeatPreset);
-          }
-          if (Array.isArray(parsedProfile.sponsorRepeatDays)) {
-            const safeDays = parsedProfile.sponsorRepeatDays.filter((day): day is WeekdayCode =>
-              WEEKDAY_CODES.includes(day),
-            );
-            if (safeDays.length > 0) {
-              setSponsorRepeatDays(sortWeekdays(safeDays));
-            }
-          }
-          if (typeof parsedProfile.sponsorEnabled === "boolean") {
-            setSponsorEnabled(parsedProfile.sponsorEnabled);
-          }
-          if (typeof parsedProfile.sponsorActive === "boolean") {
-            setSponsorActive(parsedProfile.sponsorActive);
-          }
-          if (
-            typeof parsedProfile.sponsorLeadMinutes === "number" &&
-            [0, 5, 10, 30].includes(parsedProfile.sponsorLeadMinutes)
-          ) {
-            setSponsorLeadMinutes(parsedProfile.sponsorLeadMinutes as SponsorLeadMinutes);
-          }
-          if (
-            typeof parsedProfile.sponsorKneesSuggested === "boolean" ||
-            parsedProfile.sponsorKneesSuggested === null
-          ) {
-            setSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
-            setWizardSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
-          }
-          if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
-            setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
-          }
-          if (
-            parsedProfile.wizardSupervisionMode === "INDEPENDENT" ||
-            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ||
-            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-          ) {
-            setWizardSupervisionMode(parsedProfile.wizardSupervisionMode);
-          }
-          if (
-            parsedProfile.wizardJusticeTrack === "NONE" ||
-            parsedProfile.wizardJusticeTrack === "DRUG_COURT" ||
-            parsedProfile.wizardJusticeTrack === "PROBATION_PAROLE"
-          ) {
-            setWizardJusticeTrack(parsedProfile.wizardJusticeTrack);
+          } catch (error) {
+            console.log("[setup-persist] read failure", {
+              key: "meetingPlans",
+              error: formatError(error),
+            });
           }
         }
 
@@ -12001,30 +12121,31 @@ export default function App() {
           await fetchSponsorConfig();
         }
 
-        if (typeof ninetyDayGoalRaw === "string" && ninetyDayGoalRaw.trim().length > 0) {
-          const parsedGoal = Number(ninetyDayGoalRaw);
-          if (Number.isFinite(parsedGoal)) {
-            const nextGoal = Math.max(1, Math.min(9999, Math.floor(parsedGoal)));
-            setNinetyDayGoalTarget(nextGoal);
-            setNinetyDayGoalInput(String(nextGoal));
-          }
-        }
-
-        if (typeof sponsorEnabledAtRaw === "string" && sponsorEnabledAtRaw.trim().length > 0) {
-          setSponsorEnabledAtIso(sponsorEnabledAtRaw);
-        }
-
         if (sponsorCallLogRaw) {
-          const parsedLogs = JSON.parse(sponsorCallLogRaw) as SponsorCallLog[];
-          if (Array.isArray(parsedLogs)) {
-            setSponsorCallLogs(parsedLogs);
+          try {
+            const parsedLogs = JSON.parse(sponsorCallLogRaw) as SponsorCallLog[];
+            if (Array.isArray(parsedLogs)) {
+              setSponsorCallLogs(parsedLogs);
+            }
+          } catch (error) {
+            console.log("[setup-persist] read failure", {
+              key: "sponsorCallLogs",
+              error: formatError(error),
+            });
           }
         }
 
         if (meetingAttendanceLogRaw) {
-          const parsedLogs = JSON.parse(meetingAttendanceLogRaw) as MeetingAttendanceLog[];
-          if (Array.isArray(parsedLogs)) {
-            setMeetingAttendanceLogs(parsedLogs);
+          try {
+            const parsedLogs = JSON.parse(meetingAttendanceLogRaw) as MeetingAttendanceLog[];
+            if (Array.isArray(parsedLogs)) {
+              setMeetingAttendanceLogs(parsedLogs);
+            }
+          } catch (error) {
+            console.log("[setup-persist] read failure", {
+              key: "meetingAttendanceLogs",
+              error: formatError(error),
+            });
           }
         }
 
@@ -12049,9 +12170,6 @@ export default function App() {
         }
 
         setRoutinesStore(loadedRoutinesStore);
-
-        setMode(resolvedSetupComplete ? "A" : resolvedMode);
-        setHomeScreen(resolvedSetupComplete ? "DASHBOARD" : "SETUP");
         bootstrapCompletedSuccessfully = true;
       } catch {
         setAttendanceStatus("Unable to load local attendance history.");
@@ -12099,6 +12217,7 @@ export default function App() {
     devAuthUserId,
     enableSponsorApiSync,
     fetchSponsorConfig,
+    hydratePersistedRecoverySettings,
     readCurrentLocation,
     refreshMeetings,
     sanitizeStoredCalendarStateOnLaunch,
