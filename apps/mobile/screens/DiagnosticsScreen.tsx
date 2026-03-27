@@ -5,11 +5,18 @@ import { GlassCard } from "../lib/ui/GlassCard";
 export type DiagnosticsBuildInfo = {
   appEnv: string;
   apiUrl: string;
+  apiBackendSelection: "render_default" | "local_override";
+  localApiOverrideActive: boolean;
   appVersion: string;
   buildNumber: string;
   timeZone: string;
   devAuthUserId: string;
   hasAuthHeader: boolean;
+  authMode: string;
+  currentUserId: string;
+  currentIdentity: string;
+  currentTenantId: string;
+  backendRoles: string[];
 };
 
 export type DiagnosticsMeetingsApiHealth = {
@@ -127,13 +134,29 @@ export function DiagnosticsScreen({
       <GlassCard style={styles.card} strong>
         <Text style={styles.sectionTitle}>Build / Env</Text>
         <Text style={styles.meta}>APP_ENV: {buildInfo.appEnv || "unknown"}</Text>
-        <Text style={styles.meta}>EXPO_PUBLIC_API_URL: {buildInfo.apiUrl || "unset"}</Text>
+        <Text style={styles.meta}>API base URL: {buildInfo.apiUrl || "unset"}</Text>
+        <Text style={styles.meta}>API selection: {buildInfo.apiBackendSelection}</Text>
+        <Text style={styles.meta}>
+          Local override active: {buildInfo.localApiOverrideActive ? "Yes" : "No"}
+        </Text>
         <Text style={styles.meta}>App version: {buildInfo.appVersion}</Text>
         <Text style={styles.meta}>Build number: {buildInfo.buildNumber}</Text>
         <Text style={styles.meta}>Time zone: {buildInfo.timeZone}</Text>
         <Text style={styles.meta}>DEV auth user: {buildInfo.devAuthUserId || "unset"}</Text>
+        <Text style={styles.meta}>Auth mode: {buildInfo.authMode}</Text>
         <Text style={styles.meta}>
           Meetings auth header: {buildInfo.hasAuthHeader ? "attached" : "missing"}
+        </Text>
+        <Text style={styles.meta}>
+          Current identity: {buildInfo.currentIdentity || "Unavailable"}
+        </Text>
+        <Text style={styles.meta}>Current user id: {buildInfo.currentUserId || "Unavailable"}</Text>
+        <Text style={styles.meta}>
+          Current tenant: {buildInfo.currentTenantId || "Unavailable"}
+        </Text>
+        <Text style={styles.meta}>
+          Backend roles:{" "}
+          {buildInfo.backendRoles.length > 0 ? buildInfo.backendRoles.join(", ") : "None loaded"}
         </Text>
       </GlassCard>
 

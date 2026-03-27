@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
+import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import Constants from "expo-constants";
+import { BlurView } from "expo-blur";
 import { geocodeAsync } from "expo-location";
 import type * as NotificationsTypes from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
@@ -11,12 +12,14 @@ import Svg, { Path } from "react-native-svg";
 import {
   AppState,
   type AppStateStatus,
+  AccessibilityInfo,
   Alert,
+  Animated,
+  Easing,
   GestureResponderEvent,
   KeyboardAvoidingView,
   Linking,
   Modal,
-  NativeModules,
   Platform,
   Pressable,
   Share,
@@ -26,6 +29,7 @@ import {
   Text,
   TextInput,
   ToastAndroid,
+  useWindowDimensions,
   View,
 } from "react-native";
 import appJson from "./app.json";
@@ -34,6 +38,7 @@ import {
   buildHomeGroupWeekOptions,
   type HomeGroupWeekOption,
 } from "./lib/meetings/discovery";
+import { resolveRuntimeApiBaseUrl, type ApiBackendSelection } from "./lib/apiEnvironment";
 import {
   createMeetingsSource,
   MeetingRecord,
@@ -99,9 +104,43 @@ import {
 } from "./lib/homeGroupBirthdays";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import {
+  buildPlatformOwnerGrantSql,
+  canManageCourtHierarchy,
+  canManageSoberHouseHierarchy,
+  canViewCourtParticipantExperience,
+  deriveProtectedOrgAccessGateState,
+  canViewSoberHouseResidentExperience,
+  courtEntryLabel,
+  deriveAppAccessRole,
+  parseAccessContextResponse,
+  soberHouseEntryLabel,
+  type AccessContext,
+  type ProtectedOrgAccessGateOutcome,
+} from "./lib/access";
+import {
+  type BackendObligationRecord,
+  type BackendViolationRecord,
+  buildComplianceEventPayloads,
+  buildObligationSnapshotPayloads,
+  buildParticipantProfileSyncPayload,
+  parseBackendObligationsResponse,
+  parseBackendViolationsResponse,
+} from "./lib/participantCompliance";
+import {
   buildMeetingConsistencyTrend,
   computeMeetingConsistencyStreak,
 } from "./lib/dashboard/meetingStreak";
+import {
+  getLegacyWizardStateForPath,
+  getSetupFlowSteps,
+  inferOnboardingPath,
+  ONBOARDING_PATH_OPTIONS,
+  pathRequiresRecovery,
+  type OnboardingPath,
+  type SetupJusticeTrack,
+  type SetupStep,
+  type SetupSupervisionMode,
+} from "./lib/onboarding";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
 import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
 import {
@@ -139,6 +178,7 @@ import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
 import { SoberHouseSettingsScreen } from "./screens/SoberHouseSettingsScreen";
+import { ProtectedOrgAccessGateScreen } from "./screens/ProtectedOrgAccessGateScreen";
 import { SoberHouseChatSection } from "./components/SoberHouseChatSection";
 import { SoberHouseOwnerDashboard } from "./components/SoberHouseOwnerDashboard";
 import {
@@ -191,6 +231,29 @@ import {
   getWisdomCacheKey,
   type DailyWisdomPayload,
 } from "./lib/wisdom/daily";
+import {
+  buildRecurringServiceCommitmentFromDraft,
+  buildRecurringServiceCommitmentSummary,
+  createDefaultRecurringServiceCommitmentDraft,
+  createRecurringServiceCommitmentDraftFromItem,
+  hasUnsavedRecurringServiceCommitmentDraftChanges,
+  isValidHhmm,
+  normalizeRecurringServiceCommitments,
+  removeRecurringServiceCommitment as removeRecurringServiceCommitmentFromList,
+  RECURRING_SERVICE_COMMITMENTS_STEP_COPY,
+  RECURRING_SERVICE_COMMITMENT_ORDINAL_OPTIONS,
+  RECURRING_SERVICE_COMMITMENT_TYPE_OPTIONS,
+  upsertRecurringServiceCommitment as upsertRecurringServiceCommitmentInList,
+  type RecurringServiceCommitment,
+  type RecurringServiceCommitmentDraft,
+} from "./lib/recurringServiceCommitments";
+import {
+  buildRecurringServiceCommitmentCalendarEventInput,
+  getRecurringServiceCommitmentCalendarFingerprint,
+  mapRecurringServiceCommitmentCalendarErrorToUserMessage,
+  resolveRecurringServiceCommitmentReminderPlan,
+  withRecurringServiceCommitmentCalendarSync,
+} from "./lib/serviceCommitmentCalendar";
 const THIRD_STEP_PRAYER_ITEM_ID = "prayer-third-step";
 const THIRD_STEP_PRAYER_YOUTUBE_URL = "https://www.youtube.com/watch?v=b63wxijyK2A";
 const AA_ONLINE_MEETINGS_URL = "https://aa-intergroup.org/meetings/";
@@ -230,7 +293,12 @@ type RepeatUnit = "WEEKLY" | "MONTHLY";
 type RepeatPreset = "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 type LocationPermissionState = "unknown" | "granted" | "denied" | "unavailable";
 type SponsorLeadMinutes = 0 | 5 | 10 | 30;
-type SponsorTimeDraft = { hour12: number; minute: number; meridiem: "AM" | "PM" };
+type SponsorTimeDraft = Date;
+type ServiceCommitmentTimeField = "startsAtLocal" | "endsAtLocal";
+type ServiceCommitmentTimePickerState = {
+  field: ServiceCommitmentTimeField;
+  value: Date;
+};
 type AttendanceAutomationState =
   | "planned"
   | "eligible_to_start"
@@ -243,6 +311,8 @@ type AttendanceAutomationPlan = {
   dateKey: string;
   status: Extract<AttendanceAutomationState, "planned" | "eligible_to_start">;
   plannedAtIso: string;
+  scheduledStartAtIso?: string | null;
+  calendarEventId?: string | null;
 };
 
 type SponsorConfigPayload = {
@@ -265,20 +335,12 @@ type HomeGroupBirthdayConfigPayload = {
   lastName: string | null;
   sobrietyDateIso: string | null;
 };
-type HomeGroupBirthdayConfigResponse = HomeGroupBirthdayConfigPayload & {
-  id: string;
-  userId: string;
-  createdAt: string;
-  updatedAt: string;
-  updatedByUserId: string;
-};
 type HomeGroupSelection = {
   key: string;
   name: string;
   meetingIds: string[];
   primaryMeetingId: string | null;
 };
-type HomeGroupBirthdayPromptSource = "wizard" | "meeting-detail";
 type SaveSponsorConfigOverrides = {
   sponsorEnabled?: boolean;
   sponsorActive?: boolean;
@@ -357,9 +419,6 @@ type HomeScreen =
   | "SETTINGS"
   | "TOOLS"
   | "DIAGNOSTICS";
-type SetupStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
-type SetupSupervisionMode = "INDEPENDENT" | "SOBER_HOUSE_RESIDENT" | "SOBER_HOUSE_OWNER";
-type SetupJusticeTrack = "NONE" | "DRUG_COURT" | "PROBATION_PAROLE";
 type MeetingsFormatFilter = "ALL" | "IN_PERSON" | "ONLINE";
 type MeetingsTimeFilter = "ANY" | "MORNING" | "AFTERNOON" | "EVENING";
 type MeetingsLocationFilter = "CURRENT" | "MILES_50" | "MILES_100";
@@ -385,7 +444,6 @@ type SignaturePoint = {
   y: number;
   isStrokeStart: boolean;
 };
-
 type MapBoundaryCenter = {
   lat: number;
   lng: number;
@@ -431,7 +489,7 @@ type CalendarEventInputCompat = {
   recurrenceRule?: {
     frequency: CalendarRecurrenceFrequencyCompat;
     interval?: number;
-    daysOfTheWeek?: Array<{ dayOfTheWeek: number }>;
+    daysOfTheWeek?: Array<{ dayOfTheWeek: number; weekNumber?: number }>;
   };
 };
 type CalendarDialogResultCompat = {
@@ -477,7 +535,6 @@ type DiagnosticsLocationSnapshot = {
 
 const DASHBOARD_FOOTER_NAV_HEIGHT = Platform.OS === "ios" ? 74 : 66;
 const DASHBOARD_SCROLL_FADE_HEIGHT = 34;
-const DEFAULT_REMOTE_API_URL = "https://sober-ai-api.onrender.com";
 
 type SponsorCallLog = {
   id: string;
@@ -571,9 +628,6 @@ const SPONSOR_REPEAT_OPTIONS: Array<{ value: RepeatPreset; label: string }> = [
   { value: "BIWEEKLY", label: "Bi-weekly" },
   { value: "MONTHLY", label: "Monthly" },
 ];
-const SPONSOR_TIME_HOUR_OPTIONS = Array.from({ length: 12 }, (_, index) => index + 1);
-const SPONSOR_TIME_MINUTE_OPTIONS = Array.from({ length: 60 }, (_, index) => index);
-const SPONSOR_TIME_MERIDIEM_OPTIONS: Array<"AM" | "PM"> = ["AM", "PM"];
 const MEETINGS_FORMAT_OPTIONS: Array<{ value: MeetingsFormatFilter; label: string }> = [
   { value: "ALL", label: "All" },
   { value: "IN_PERSON", label: "In-person" },
@@ -1407,6 +1461,25 @@ function recoveryCelebrationShownStorageKey(userId: string): string {
   return `${RECOVERY_CELEBRATION_SHOWN_STORAGE_KEY_PREFIX}${userId}`;
 }
 
+function mapHomeGroupBirthdayPromptStatus(status: string): {
+  primary: string;
+  secondary?: string;
+  technical?: string;
+} {
+  const normalized = status.trim();
+  const technicalCodeMatch = normalized.match(/\b(4\d{2}|5\d{2})\b/);
+
+  if (/load failed|unavailable right now|couldn'?t load/i.test(normalized)) {
+    return {
+      primary: "Couldn’t load birthday recognition details right now.",
+      secondary: "Please try again later.",
+      technical: technicalCodeMatch ? `Error ${technicalCodeMatch[1]}` : undefined,
+    };
+  }
+
+  return { primary: normalized };
+}
+
 function normalizeGoalInput(value: string): string {
   return value.replace(/\D/g, "").slice(0, 4);
 }
@@ -1482,12 +1555,13 @@ function buildNativeCalendarRecurrenceRule(
       typeof recurrenceRule.interval === "number" && Number.isFinite(recurrenceRule.interval)
         ? Math.max(1, Math.trunc(recurrenceRule.interval))
         : 1,
-    daysOfTheWeek:
-      recurrenceRule.frequency === "weekly"
-        ? recurrenceRule.daysOfTheWeek?.map((entry) => ({
-            dayOfTheWeek: entry.dayOfTheWeek,
-          }))
-        : undefined,
+    daysOfTheWeek: recurrenceRule.daysOfTheWeek?.map((entry) => ({
+      dayOfTheWeek: entry.dayOfTheWeek,
+      weekNumber:
+        typeof entry.weekNumber === "number" && Number.isFinite(entry.weekNumber)
+          ? Math.trunc(entry.weekNumber)
+          : undefined,
+    })),
   };
 }
 
@@ -1526,6 +1600,7 @@ function isCalendarPermissionGranted(
     | {
         granted?: boolean;
         status?: string | null;
+        canAskAgain?: boolean | null;
       }
     | null
     | undefined,
@@ -1535,14 +1610,30 @@ function isCalendarPermissionGranted(
   );
 }
 
-function getIosMajorSystemVersion(version: string | number): number | null {
-  const raw = typeof version === "string" ? version.trim() : String(version);
-  const match = raw.match(/^(\d+)/);
-  if (!match) {
-    return null;
-  }
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) ? parsed : null;
+function isPermissionBlocked(
+  response:
+    | {
+        granted?: boolean;
+        status?: string | null;
+        canAskAgain?: boolean | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  return response?.granted !== true && response?.canAskAgain === false;
+}
+
+function isPermissionDenied(
+  response:
+    | {
+        granted?: boolean;
+        status?: string | null;
+        canAskAgain?: boolean | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  return response?.granted !== true && response?.status === "denied";
 }
 
 function formatError(error: unknown): string {
@@ -1693,12 +1784,50 @@ function resolveUserRegionHintFromLocation(location: LocationStamp | null): stri
   return inMontanaBounds ? "MT" : null;
 }
 
+function getRuntimeIosInfoPlist(): Record<string, unknown> {
+  const runtimeExpoConfig =
+    (Constants.expoConfig as { ios?: { infoPlist?: Record<string, unknown> } } | null | undefined)
+      ?.ios?.infoPlist ?? null;
+  const bundledExpoConfig = appJson.expo.ios?.infoPlist ?? null;
+  return {
+    ...(bundledExpoConfig ?? {}),
+    ...(runtimeExpoConfig ?? {}),
+  };
+}
+
+function hasUsageDescription(infoPlist: Record<string, unknown>, key: string): boolean {
+  const value = infoPlist[key];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isExpoCalendarConfiguredForIos(): boolean {
+  if (Platform.OS !== "ios") {
+    return true;
+  }
+  const infoPlist = getRuntimeIosInfoPlist();
+  const hasCalendarUsageDescription =
+    hasUsageDescription(infoPlist, "NSCalendarsFullAccessUsageDescription") ||
+    hasUsageDescription(infoPlist, "NSCalendarsUsageDescription") ||
+    hasUsageDescription(infoPlist, "NSCalendarsWriteOnlyAccessUsageDescription");
+  const hasRemindersUsageDescription =
+    hasUsageDescription(infoPlist, "NSRemindersFullAccessUsageDescription") ||
+    hasUsageDescription(infoPlist, "NSRemindersUsageDescription");
+  return hasCalendarUsageDescription && hasRemindersUsageDescription;
+}
+
 function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     switch (moduleName) {
-      case "expo-calendar":
+      case "expo-calendar": {
+        if (!isExpoCalendarConfiguredForIos()) {
+          console.warn(
+            "[calendar] expo-calendar unavailable: missing iOS usage descriptions for calendar/reminders",
+          );
+          return null;
+        }
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("expo-calendar") as T;
+      }
       case "react-native-maps":
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         return require("react-native-maps") as T;
@@ -1728,6 +1857,10 @@ function loadOptionalModule<T>(moduleName: string): T | null {
   } catch {
     return null;
   }
+}
+
+function hasCalendarNativeModule(): boolean {
+  return isExpoCalendarConfiguredForIos();
 }
 
 const mapsModule = loadOptionalModule<typeof import("react-native-maps")>("react-native-maps");
@@ -1767,66 +1900,13 @@ const notificationsModule =
 const Notifications: any = notificationsModule;
 const notificationsModuleAvailable = Boolean(notificationsModuleRaw);
 
-function trimTrailingSlashes(value: string): string {
-  return value.replace(/\/+$/, "");
-}
-
-function isLocalNetworkHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  if (["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(normalized)) {
-    return true;
-  }
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized)) {
-    const [a, b] = normalized.split(".").map((part) => Number(part));
-    if (a === 10) {
-      return true;
-    }
-    if (a === 127) {
-      return true;
-    }
-    if (a === 192 && b === 168) {
-      return true;
-    }
-    if (a === 172 && b >= 16 && b <= 31) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function resolveApiBaseUrl(fromEnv: string, fromConfig: string): string {
-  const preferred = fromEnv || fromConfig;
-  if (preferred) {
-    return trimTrailingSlashes(preferred);
-  }
-
-  const scriptUrl = (NativeModules as { SourceCode?: { scriptURL?: string } }).SourceCode
-    ?.scriptURL;
-  if (typeof scriptUrl === "string" && scriptUrl.length > 0) {
-    try {
-      const parsed = new URL(scriptUrl);
-      const host = parsed.hostname;
-      if (host && isLocalNetworkHost(host)) {
-        return `http://${host}:3031`;
-      }
-    } catch {
-      // fall through to localhost default
-    }
-  }
-
-  return DEFAULT_REMOTE_API_URL;
+function resolveApiBaseUrl(fromConfig: string): string {
+  return resolveRuntimeApiBaseUrl(fromConfig);
 }
 
 function resolveFallbackApiUrls(primaryApiUrl: string): string[] {
-  const normalizedPrimary = trimTrailingSlashes(primaryApiUrl.trim());
-  const fallback = trimTrailingSlashes(DEFAULT_REMOTE_API_URL);
-  if (!normalizedPrimary || normalizedPrimary === fallback) {
-    return [];
-  }
-  return [fallback];
+  void primaryApiUrl;
+  return [];
 }
 
 function buildSponsorEventFingerprint(input: {
@@ -1989,6 +2069,7 @@ function sanitizeMeetingRecords(meetings: MeetingRecord[]): MeetingRecord[] {
 }
 
 export default function App() {
+  const { height: viewportHeight } = useWindowDimensions();
   type LocalAuthenticationModule = {
     authenticateAsync: (options: {
       promptMessage?: string;
@@ -2027,28 +2108,21 @@ export default function App() {
   const isDiagnosticsEnabled = resolvedAppEnv !== "production";
   const iosStartupCompatibilityGuardEnabled =
     Platform.OS === "ios" && (iosForcedSafeBoot || !__DEV__);
-  const iosMajorSystemVersion =
-    Platform.OS === "ios" ? getIosMajorSystemVersion(Platform.Version) : null;
-  // expo-calendar 15.x still routes iOS 17+ event permissions through the full-access bridge.
-  const iosWriteOnlyCalendarModeEnabled =
-    Platform.OS === "ios" && (iosMajorSystemVersion ?? 0) >= 17;
+  const calendarRuntimeEnabled =
+    (Platform.OS === "ios" || Platform.OS === "android") && hasCalendarNativeModule();
   const calendarStartupPolicy = useMemo(
     () => ({
-      blockNativeStartup: iosWriteOnlyCalendarModeEnabled,
-      allowAutomaticSync: !iosWriteOnlyCalendarModeEnabled,
-      allowExplicitNativeActions: Platform.OS !== "ios" || !iosWriteOnlyCalendarModeEnabled,
+      blockNativeStartup: false,
+      allowAutomaticSync: calendarRuntimeEnabled,
+      allowExplicitNativeActions: calendarRuntimeEnabled,
     }),
-    [iosWriteOnlyCalendarModeEnabled],
+    [calendarRuntimeEnabled],
   );
-  const apiUrlFromEnv =
-    typeof process.env.EXPO_PUBLIC_API_URL === "string"
-      ? process.env.EXPO_PUBLIC_API_URL.trim()
-      : "";
   const apiUrlFromConfig = typeof extra.apiUrl === "string" ? extra.apiUrl.trim() : "";
-  const apiUrl = useMemo(
-    () => resolveApiBaseUrl(apiUrlFromEnv, apiUrlFromConfig),
-    [apiUrlFromConfig, apiUrlFromEnv],
-  );
+  const configuredApiBackendSelection =
+    extra.apiBackendSelection === "local_override" ? "local_override" : "render_default";
+  const localApiOverrideActive = extra.localApiOverrideActive === true;
+  const apiUrl = useMemo(() => resolveApiBaseUrl(apiUrlFromConfig), [apiUrlFromConfig]);
   const appVersion =
     typeof runtimeExpoConfig.version === "string"
       ? runtimeExpoConfig.version
@@ -2068,6 +2142,9 @@ export default function App() {
   const configuredDevAuthUserId =
     typeof extra.devAuthUserId === "string" ? extra.devAuthUserId.trim() : "";
   const devAuthUserId = configuredDevAuthUserId || "enduser-a1";
+  const [devAuthIdentityDraft, setDevAuthIdentityDraft] = useState(devAuthUserId);
+  const [devAuthOverrideUserId, setDevAuthOverrideUserId] = useState<string | null>(null);
+  const [devAuthSignedOut, setDevAuthSignedOut] = useState(false);
   const devUserDisplayName =
     typeof extra.devUserDisplayName === "string" && extra.devUserDisplayName.trim().length > 0
       ? extra.devUserDisplayName.trim()
@@ -2082,20 +2159,41 @@ export default function App() {
     typeof extra.meetingRadiusMiles === "number" && Number.isFinite(extra.meetingRadiusMiles)
       ? extra.meetingRadiusMiles
       : 50;
+  const currentDevAuthUserId =
+    devAuthSignedOut === true ? "" : (devAuthOverrideUserId?.trim() || devAuthUserId).trim();
+  const usesDevAuthShim = true;
 
   const authHeader = useMemo(() => {
-    // Until the mobile app ships a real session provider, keep the meetings/home-group API
-    // on the existing DEV_<userId> contract across simulator and device builds.
-    const fallbackUserId =
-      configuredDevAuthUserId.length > 0 ? configuredDevAuthUserId : devAuthUserId;
-    if (!fallbackUserId) {
+    // Until the mobile app ships a real session provider, keep API access on the existing
+    // DEV_<userId> contract across simulator and device builds.
+    if (!currentDevAuthUserId) {
       return null;
     }
-    return `Bearer DEV_${fallbackUserId}`;
-  }, [configuredDevAuthUserId, devAuthUserId]);
+    return `Bearer DEV_${currentDevAuthUserId}`;
+  }, [currentDevAuthUserId]);
   const authHeaders = useMemo(
     () => (authHeader ? ({ Authorization: authHeader } as Record<string, string>) : undefined),
     [authHeader],
+  );
+  const authModeLabel = currentDevAuthUserId
+    ? `DEV shim (Bearer DEV_${currentDevAuthUserId})`
+    : "DEV shim signed out";
+  const [serverAccessContext, setServerAccessContext] = useState<AccessContext | null>(null);
+  const [serverRoleCheckStatus, setServerRoleCheckStatus] = useState<string | null>(null);
+  const [protectedOrgAccessGateOutcome, setProtectedOrgAccessGateOutcome] =
+    useState<ProtectedOrgAccessGateOutcome>("idle");
+  const [protectedOrgAccessChecking, setProtectedOrgAccessChecking] = useState(false);
+  const currentAccessUserId = serverAccessContext?.user.userId ?? (currentDevAuthUserId || "");
+  const currentAccessTenantId = serverAccessContext?.user.tenantId ?? "";
+  const currentAccessEmail = serverAccessContext?.user.email ?? "";
+  const currentAccessIdentityLabel = serverAccessContext
+    ? `${serverAccessContext.user.displayName} (${serverAccessContext.user.email})`
+    : currentDevAuthUserId
+      ? `${devUserDisplayName} (DEV_${currentDevAuthUserId})`
+      : "Signed out";
+  const currentAccessRoles = useMemo(
+    () => serverAccessContext?.grants.map((grant) => grant.role) ?? [],
+    [serverAccessContext],
   );
   const enableHomeGroupBirthdayApiSync = Boolean(apiUrl && authHeader);
   const [clockTickMs, setClockTickMs] = useState(Date.now());
@@ -2192,6 +2290,7 @@ export default function App() {
   const [setupStep, setSetupStep] = useState<SetupStep>(1);
   const [setupComplete, setSetupComplete] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const [serviceCommitmentStatus, setServiceCommitmentStatus] = useState<string | null>(null);
   const [screen, setScreen] = useState<AppScreen>("LIST");
   const [meetingsViewMode, setMeetingsViewMode] = useState<MeetingsViewMode>("LIST");
 
@@ -2281,6 +2380,8 @@ export default function App() {
   const [sponsorMeridiem, setSponsorMeridiem] = useState<"AM" | "PM">("PM");
   const [isSponsorTimePickerVisible, setIsSponsorTimePickerVisible] = useState(false);
   const [sponsorTimeDraft, setSponsorTimeDraft] = useState<SponsorTimeDraft | null>(null);
+  const [serviceCommitmentTimePicker, setServiceCommitmentTimePicker] =
+    useState<ServiceCommitmentTimePickerState | null>(null);
   const [sponsorRepeatPreset, setSponsorRepeatPreset] = useState<RepeatPreset>("WEEKLY");
   const [sponsorRepeatDays, setSponsorRepeatDays] = useState<WeekdayCode[]>([
     getCurrentWeekdayCode(new Date()),
@@ -2321,10 +2422,15 @@ export default function App() {
   const [activeRecoveryInsightSubstance, setActiveRecoveryInsightSubstance] =
     useState<RecoverySubstanceCategory | null>(null);
   const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
+  const [wizardOnboardingPath, setWizardOnboardingPath] = useState<OnboardingPath>("RECOVERY");
   const [wizardSupervisionMode, setWizardSupervisionMode] =
     useState<SetupSupervisionMode>("INDEPENDENT");
   const [wizardSoberHouseId, setWizardSoberHouseId] = useState<string | null>(null);
   const [wizardJusticeTrack, setWizardJusticeTrack] = useState<SetupJusticeTrack>("NONE");
+  const [wizardCourtProgramName, setWizardCourtProgramName] = useState("");
+  const [wizardCourtSupervisorName, setWizardCourtSupervisorName] = useState("");
+  const [wizardCourtRequirementsSummary, setWizardCourtRequirementsSummary] = useState("");
+  const [wizardCourtDeadlineSummary, setWizardCourtDeadlineSummary] = useState("");
   const [wizardOrganizationName, setWizardOrganizationName] = useState("");
   const [wizardOrganizationPrimaryContactName, setWizardOrganizationPrimaryContactName] =
     useState("");
@@ -2350,6 +2456,13 @@ export default function App() {
   const [wizardMeetingSignatureRequired, setWizardMeetingSignatureRequired] = useState<
     boolean | null
   >(null);
+  const [recurringServiceCommitments, setRecurringServiceCommitments] = useState<
+    RecurringServiceCommitment[]
+  >([]);
+  const [recurringServiceCommitmentDraft, setRecurringServiceCommitmentDraft] =
+    useState<RecurringServiceCommitmentDraft>(createDefaultRecurringServiceCommitmentDraft);
+  const [recurringServiceCommitmentEditorVisible, setRecurringServiceCommitmentEditorVisible] =
+    useState(false);
   const [meetingSignatureRequired, setMeetingSignatureRequired] = useState(false);
   const [sponsorKneesSuggested, setSponsorKneesSuggested] = useState<boolean | null>(null);
   const [homeGroupMeetingIds, setHomeGroupMeetingIds] = useState<string[]>([]);
@@ -2361,14 +2474,28 @@ export default function App() {
   const [homeGroupBirthdayStatus, setHomeGroupBirthdayStatus] = useState<string | null>(null);
   const [homeGroupBirthdaySaving, setHomeGroupBirthdaySaving] = useState(false);
   const [showHomeGroupBirthdayPrompt, setShowHomeGroupBirthdayPrompt] = useState(false);
-  const [homeGroupBirthdayPromptSource, setHomeGroupBirthdayPromptSource] =
-    useState<HomeGroupBirthdayPromptSource | null>(null);
   const [homeGroupBirthdayPromptOptIn, setHomeGroupBirthdayPromptOptIn] = useState(false);
   const [homeGroupBirthdayPromptFirstName, setHomeGroupBirthdayPromptFirstName] = useState("");
-  const [homeGroupBirthdayPromptLastName, setHomeGroupBirthdayPromptLastName] = useState("");
+  const homeGroupBirthdayPromptBackdropOpacity = useRef(new Animated.Value(0)).current;
+  const homeGroupBirthdayPromptCardOpacity = useRef(new Animated.Value(0)).current;
+  const homeGroupBirthdayPromptCardScale = useRef(new Animated.Value(0.96)).current;
+  const shouldUseHomeGroupBirthdayPromptBlur = Platform.OS === "ios";
+  const homeGroupBirthdayPromptCardMaxHeight = Math.max(420, Math.min(viewportHeight - 40, 640));
+  const homeGroupBirthdayPromptStatusCopy = useMemo(
+    () =>
+      homeGroupBirthdayStatus ? mapHomeGroupBirthdayPromptStatus(homeGroupBirthdayStatus) : null,
+    [homeGroupBirthdayStatus],
+  );
   const [sponsorEnabledAtIso, setSponsorEnabledAtIso] = useState<string | null>(null);
-  const [, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
+  const [sponsorCallLogs, setSponsorCallLogs] = useState<SponsorCallLog[]>([]);
   const [meetingAttendanceLogs, setMeetingAttendanceLogs] = useState<MeetingAttendanceLog[]>([]);
+  const [backendParticipantObligations, setBackendParticipantObligations] = useState<
+    BackendObligationRecord[]
+  >([]);
+  const [backendParticipantViolations, setBackendParticipantViolations] = useState<
+    BackendViolationRecord[]
+  >([]);
+  const [participantSyncStatus, setParticipantSyncStatus] = useState<string | null>(null);
   const [routinesStore, setRoutinesStore] = useState<RecoveryRoutinesStore>(
     createDefaultRoutinesStore,
   );
@@ -2398,6 +2525,7 @@ export default function App() {
   const attendanceRecordsRef = useRef<AttendanceRecord[]>([]);
   const attendanceExportInFlightRef = useRef(false);
   const startAttendanceInFlightRef = useRef(false);
+  const syncedComplianceEventIdsRef = useRef<Set<string>>(new Set());
   const meetingsByIdRef = useRef<Record<string, MeetingRecord>>({});
   const meetingsShapeLoggedRef = useRef(false);
   const [locationIssue, setLocationIssue] = useState<LocationIssue>(null);
@@ -2434,6 +2562,9 @@ export default function App() {
   const wizardHomeGroupLocationPromptedRef = useRef(false);
   const dashboardLocationPromptedRef = useRef(false);
   const writableCalendarIdRef = useRef<string | null>(null);
+  const calendarPermissionBlockedRef = useRef(false);
+  const notificationPermissionBlockedRef = useRef(false);
+  const notificationSettingsPromptShownRef = useRef(false);
 
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
   const meetingsSearchOrigin = mapBoundaryCenter ?? currentLocation;
@@ -2457,11 +2588,6 @@ export default function App() {
     [sponsorHour12, sponsorMinute, sponsorMeridiem],
   );
   const sponsorTimeLabel = useMemo(() => formatTimeLabel(sponsorTimeDate), [sponsorTimeDate]);
-  const sponsorTimeDraftValue = sponsorTimeDraft ?? {
-    hour12: sponsorHour12,
-    minute: sponsorMinute,
-    meridiem: sponsorMeridiem,
-  };
   const sponsorRepeatUnit = useMemo<RepeatUnit>(
     () => (sponsorRepeatPreset === "MONTHLY" ? "MONTHLY" : "WEEKLY"),
     [sponsorRepeatPreset],
@@ -2562,15 +2688,125 @@ export default function App() {
         : [],
     [soberHouseResidentChatViewer, soberHouseStore],
   );
+  const appAccessRole = useMemo(
+    () =>
+      deriveAppAccessRole({
+        onboardingPath: wizardOnboardingPath,
+        soberHouseRole: soberHouseAccessProfile?.role,
+        accessContext: serverAccessContext,
+      }),
+    [serverAccessContext, soberHouseAccessProfile?.role, wizardOnboardingPath],
+  );
+  const canOpenSoberHouseEntry = canViewSoberHouseResidentExperience(appAccessRole);
+  const canOpenCourtEntry = canViewCourtParticipantExperience(appAccessRole);
+  const protectedOrgSetupAuthorized = canManageSoberHouseHierarchy(appAccessRole);
+  const protectedCourtConfigAuthorized = canManageCourtHierarchy(appAccessRole);
+  const participantProfileSyncPayload = useMemo(
+    () =>
+      buildParticipantProfileSyncPayload({
+        onboardingPath: wizardOnboardingPath,
+        setupComplete,
+        appAccessRole,
+        accessContext: serverAccessContext,
+        soberHouseRole: soberHouseAccessProfile?.role,
+        houseId: soberHouseAccessProfile?.houseId ?? null,
+      }),
+    [
+      appAccessRole,
+      serverAccessContext,
+      setupComplete,
+      soberHouseAccessProfile?.houseId,
+      soberHouseAccessProfile?.role,
+      wizardOnboardingPath,
+    ],
+  );
+  const participantObligationSnapshotPayloads = useMemo(
+    () =>
+      buildObligationSnapshotPayloads({
+        onboardingPath: wizardOnboardingPath,
+        setupComplete,
+        appAccessRole,
+        accessContext: serverAccessContext,
+        soberHouseRole: soberHouseAccessProfile?.role,
+        houseId: soberHouseAccessProfile?.houseId ?? null,
+        sponsor: {
+          sponsorCallAvailable,
+          sponsorName: normalizedSponsorName,
+          sponsorPhoneE164,
+          sponsorCallTimeLocalHhmm,
+          sponsorRepeatDays: sponsorRepeatDaysSorted,
+          sponsorRepeatInterval,
+          sponsorRepeatUnit,
+        },
+        court: {
+          wizardJusticeTrack,
+          wizardCourtProgramName,
+          wizardCourtSupervisorName,
+          wizardCourtRequirementsSummary,
+          wizardCourtDeadlineSummary,
+        },
+        recurringServiceCommitments,
+        residentRules:
+          soberHouseAccessProfile?.role === "HOUSE_RESIDENT" && soberHouseEffectiveRules
+            ? {
+                meetingsRequired: soberHouseEffectiveRules.meetings.meetingsRequired,
+                meetingsPerWeek: soberHouseEffectiveRules.meetings.meetingsPerWeek,
+                meetingsProofMethod: soberHouseEffectiveRules.meetings.proofMethod,
+                sponsorContactEnabled: soberHouseEffectiveRules.sponsorContact.enabled,
+                sponsorContactsRequiredPerWeek:
+                  soberHouseEffectiveRules.sponsorContact.contactsRequiredPerWeek,
+                sponsorProofType: soberHouseEffectiveRules.sponsorContact.proofType,
+                curfewEnabled: soberHouseEffectiveRules.curfew.enabled,
+                weekdayCurfew: soberHouseEffectiveRules.curfew.weekdayCurfew,
+                fridayCurfew: soberHouseEffectiveRules.curfew.fridayCurfew,
+                saturdayCurfew: soberHouseEffectiveRules.curfew.saturdayCurfew,
+                sundayCurfew: soberHouseEffectiveRules.curfew.sundayCurfew,
+                choresEnabled: soberHouseEffectiveRules.chores.enabled,
+                choresFrequency: soberHouseEffectiveRules.chores.frequency,
+                choresDueTime: soberHouseEffectiveRules.chores.dueTime,
+                choresProofRequirement: soberHouseEffectiveRules.chores.proofRequirement,
+              }
+            : null,
+      }),
+    [
+      appAccessRole,
+      normalizedSponsorName,
+      recurringServiceCommitments,
+      serverAccessContext,
+      setupComplete,
+      soberHouseAccessProfile?.houseId,
+      soberHouseAccessProfile?.role,
+      soberHouseEffectiveRules,
+      sponsorCallAvailable,
+      sponsorCallTimeLocalHhmm,
+      sponsorPhoneE164,
+      sponsorRepeatDaysSorted,
+      sponsorRepeatInterval,
+      sponsorRepeatUnit,
+      wizardCourtDeadlineSummary,
+      wizardCourtProgramName,
+      wizardCourtRequirementsSummary,
+      wizardCourtSupervisorName,
+      wizardJusticeTrack,
+      wizardOnboardingPath,
+    ],
+  );
+  const setupFlowSteps = useMemo(
+    () => getSetupFlowSteps(wizardOnboardingPath),
+    [wizardOnboardingPath],
+  );
+  const setupStepIndex = Math.max(0, setupFlowSteps.indexOf(setupStep));
+  const setupVisibleStepNumber = setupStepIndex + 1;
+  const setupLastStep = setupFlowSteps[setupFlowSteps.length - 1] ?? 1;
   const communicationMode: CommunicationMode = useMemo(() => {
-    if (soberHouseAccessProfile?.role === "HOUSE_RESIDENT" || mode === "B") {
+    if (canOpenSoberHouseEntry || mode === "B") {
       return "SOBER_HOUSE";
     }
-    if (mode === "C") {
+    if (canOpenCourtEntry || mode === "C") {
       return "JUSTICE";
     }
     return "RECOVERY";
-  }, [mode, soberHouseAccessProfile?.role]);
+  }, [canOpenCourtEntry, canOpenSoberHouseEntry, mode]);
   const soberHouseManagerContact = useMemo(() => {
     const primaryManagerContext =
       soberHouseManagerContexts.find((context) => context.role === "MANAGER") ??
@@ -2614,6 +2850,36 @@ export default function App() {
     wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" &&
     (wizardSelectedSoberHouseRules?.meetings.proofMethod === "SIGNATURE" ||
       wizardSelectedSoberHouseRules?.meetings.proofMethod === "GEOFENCE_SIGNATURE");
+  const showProtectedOrgAccessGate =
+    homeScreen === "SETUP" &&
+    wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" &&
+    setupStep === 2 &&
+    !protectedOrgSetupAuthorized;
+  const protectedOrgAccessGateState = deriveProtectedOrgAccessGateState({
+    authorized: protectedOrgSetupAuthorized,
+    outcome: protectedOrgAccessGateOutcome,
+  });
+  const protectedOrgCurrentUserId = currentAccessUserId || null;
+  const protectedOrgCurrentTenantId = currentAccessTenantId || null;
+  const protectedOrgCurrentEmail = currentAccessEmail || null;
+  const protectedOrgSignedInAccountLabel = currentAccessIdentityLabel;
+  const protectedOrgBackendRoles = currentAccessRoles;
+  const protectedOrgAuthModeLabel = usesDevAuthShim
+    ? "Development auth shim active"
+    : "Authenticated account";
+  const protectedOrgAuthModeDetail = usesDevAuthShim
+    ? "This build still uses Authorization: Bearer DEV_<userId>. There is no normal sign-in screen yet, so switch account uses development identities."
+    : null;
+  const protectedOrgBootstrapSql = useMemo(
+    () =>
+      protectedOrgCurrentUserId && protectedOrgCurrentTenantId
+        ? buildPlatformOwnerGrantSql({
+            tenantId: protectedOrgCurrentTenantId,
+            userId: protectedOrgCurrentUserId,
+          })
+        : null,
+    [protectedOrgCurrentTenantId, protectedOrgCurrentUserId],
+  );
   const shouldShowSoberHouseLock =
     mode === "B" &&
     homeScreen === "SETTINGS" &&
@@ -3946,51 +4212,153 @@ export default function App() {
     },
     [isLocalhostApiUrl],
   );
-  const notificationsRuntimeEnabled = Platform.OS !== "ios" && notificationsModuleAvailable;
-  const calendarRuntimeEnabled = Platform.OS === "ios" || Platform.OS === "android";
+  const notificationsRuntimeEnabled = notificationsModuleAvailable;
 
-  const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
-    if (!notificationsRuntimeEnabled) {
+  const promptToOpenAppSettings = useCallback((title: string, message: string) => {
+    Alert.alert(title, message, [
+      { text: "Not now", style: "cancel" },
+      {
+        text: "Open Settings",
+        onPress: () => {
+          void Linking.openSettings().catch(() => {});
+        },
+      },
+    ]);
+  }, []);
+
+  const ensureNotificationPermission = useCallback(
+    async (requestIfNeeded = true): Promise<boolean> => {
+      if (!notificationsRuntimeEnabled) {
+        notificationPermissionBlockedRef.current = false;
+        notificationSettingsPromptShownRef.current = false;
+        return false;
+      }
+
+      const existing = await Notifications.getPermissionsAsync();
+      if (existing.granted || existing.status === Notifications.PermissionStatus.GRANTED) {
+        notificationPermissionBlockedRef.current = false;
+        notificationSettingsPromptShownRef.current = false;
+        return true;
+      }
+
+      const notificationPermissionSettled =
+        isPermissionBlocked(existing) || (Platform.OS === "ios" && isPermissionDenied(existing));
+
+      if (!requestIfNeeded) {
+        notificationPermissionBlockedRef.current = notificationPermissionSettled;
+        return false;
+      }
+
+      if (notificationPermissionSettled) {
+        notificationPermissionBlockedRef.current = true;
+        if (!notificationSettingsPromptShownRef.current) {
+          notificationSettingsPromptShownRef.current = true;
+          promptToOpenAppSettings(
+            "Notifications are off",
+            "Open Settings to enable Sober² notifications for sponsor reminders and meeting alerts.",
+          );
+        }
+        return false;
+      }
+
+      const requested = await Notifications.requestPermissionsAsync();
+      if (requested.granted || requested.status === Notifications.PermissionStatus.GRANTED) {
+        notificationPermissionBlockedRef.current = false;
+        notificationSettingsPromptShownRef.current = false;
+        return true;
+      }
+
+      notificationPermissionBlockedRef.current =
+        isPermissionBlocked(requested) || (Platform.OS === "ios" && isPermissionDenied(requested));
+      notificationSettingsPromptShownRef.current = false;
       return false;
-    }
-    const existing = await Notifications.getPermissionsAsync();
-    if (existing.granted || existing.status === Notifications.PermissionStatus.GRANTED) {
-      return true;
-    }
-
-    const requested = await Notifications.requestPermissionsAsync();
-    return requested.granted || requested.status === Notifications.PermissionStatus.GRANTED;
-  }, [notificationsRuntimeEnabled]);
+    },
+    [notificationsRuntimeEnabled, promptToOpenAppSettings],
+  );
 
   const ensureCalendarPermission = useCallback(
     async (requestIfNeeded = true): Promise<boolean> => {
+      console.log("[calendar] permission flow start", {
+        requestIfNeeded,
+        runtimeEnabled: calendarRuntimeEnabled,
+        allowExplicitNativeActions: calendarStartupPolicy.allowExplicitNativeActions,
+      });
       if (!calendarRuntimeEnabled) {
+        calendarPermissionBlockedRef.current = false;
+        console.log("[calendar] permission flow blocked", { reason: "runtime-disabled" });
         return false;
       }
       if (!calendarStartupPolicy.allowExplicitNativeActions) {
+        calendarPermissionBlockedRef.current = false;
+        console.log("[calendar] permission flow blocked", {
+          reason: "explicit-actions-disabled",
+        });
         return false;
       }
       const calendarModule = getCalendarModule();
       if (!calendarModule) {
+        calendarPermissionBlockedRef.current = false;
+        console.log("[calendar] permission flow blocked", { reason: "module-unavailable" });
         return false;
       }
 
       try {
         const existing = await calendarModule.getCalendarPermissionsAsync();
+        console.log("[calendar] permission existing", {
+          status: existing?.status ?? null,
+          granted: existing?.granted ?? null,
+          canAskAgain: existing?.canAskAgain ?? null,
+        });
         if (isCalendarPermissionGranted(existing)) {
+          calendarPermissionBlockedRef.current = false;
           return true;
         }
         if (!requestIfNeeded) {
+          calendarPermissionBlockedRef.current = isPermissionBlocked(existing);
+          return false;
+        }
+
+        if (isPermissionBlocked(existing)) {
+          calendarPermissionBlockedRef.current = true;
+          promptToOpenAppSettings(
+            "Calendar access is off",
+            "Open Settings to enable Sober² calendar access for sponsor calls, meetings, and service commitments.",
+          );
           return false;
         }
 
         const requested = await calendarModule.requestCalendarPermissionsAsync();
-        return isCalendarPermissionGranted(requested);
-      } catch {
+        console.log("[calendar] permission requested", {
+          status: requested?.status ?? null,
+          granted: requested?.granted ?? null,
+          canAskAgain: requested?.canAskAgain ?? null,
+        });
+        if (isCalendarPermissionGranted(requested)) {
+          calendarPermissionBlockedRef.current = false;
+          return true;
+        }
+
+        calendarPermissionBlockedRef.current = isPermissionBlocked(requested);
+        if (calendarPermissionBlockedRef.current) {
+          promptToOpenAppSettings(
+            "Calendar access is off",
+            "Open Settings to enable Sober² calendar access for sponsor calls, meetings, and service commitments.",
+          );
+        }
+        return false;
+      } catch (error) {
+        calendarPermissionBlockedRef.current = false;
+        console.log("[calendar] permission flow failed", {
+          message: formatError(error),
+        });
         return false;
       }
     },
-    [calendarRuntimeEnabled, calendarStartupPolicy.allowExplicitNativeActions],
+    [
+      calendarRuntimeEnabled,
+      calendarStartupPolicy.allowExplicitNativeActions,
+      promptToOpenAppSettings,
+    ],
   );
 
   const resolveWritableCalendarId = useCallback(async (): Promise<string | null> => {
@@ -4036,6 +4404,10 @@ export default function App() {
       eventId: string | null;
       errorCode: "none" | "permission" | "unavailable";
     }> => {
+      console.log("[calendar] composer flow entered", {
+        runtimeEnabled: calendarRuntimeEnabled,
+        allowExplicitNativeActions: calendarStartupPolicy.allowExplicitNativeActions,
+      });
       if (!calendarRuntimeEnabled) {
         return {
           saved: false,
@@ -4046,6 +4418,9 @@ export default function App() {
       }
       const calendarModule = getCalendarModule();
       if (!calendarModule || !calendarStartupPolicy.allowExplicitNativeActions) {
+        console.log("[calendar] composer flow blocked", {
+          reason: !calendarModule ? "module-unavailable" : "explicit-actions-disabled",
+        });
         return {
           saved: false,
           action: null,
@@ -4070,6 +4445,10 @@ export default function App() {
         )) as CalendarDialogResultCompat | null;
         const action = typeof result?.action === "string" ? result.action : "done";
         const eventId = typeof result?.id === "string" ? result.id : null;
+        console.log("[calendar] composer flow result", {
+          action,
+          eventId,
+        });
         return {
           saved: action !== "canceled" && action !== "deleted",
           action,
@@ -4078,6 +4457,9 @@ export default function App() {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
+        console.log("[calendar] composer flow failed", {
+          message: message || "unknown",
+        });
         return {
           saved: false,
           action: null,
@@ -4102,6 +4484,11 @@ export default function App() {
       eventId: string | null;
       errorCode: "none" | "permission" | "unavailable";
     }> => {
+      console.log("[calendar] upsert flow entered", {
+        existingEventId,
+        runtimeEnabled: calendarRuntimeEnabled,
+        allowExplicitNativeActions: calendarStartupPolicy.allowExplicitNativeActions,
+      });
       if (!calendarRuntimeEnabled) {
         return {
           saved: false,
@@ -4111,6 +4498,9 @@ export default function App() {
       }
       const calendarModule = getCalendarModule();
       if (!calendarModule) {
+        console.log("[calendar] upsert flow blocked", {
+          reason: "module-unavailable",
+        });
         return {
           saved: false,
           eventId: null,
@@ -4118,6 +4508,9 @@ export default function App() {
         };
       }
       if (!calendarStartupPolicy.allowExplicitNativeActions) {
+        console.log("[calendar] upsert flow blocked", {
+          reason: "explicit-actions-disabled",
+        });
         return {
           saved: false,
           eventId: null,
@@ -4136,6 +4529,9 @@ export default function App() {
 
       const calendarId = await resolveWritableCalendarId();
       if (!calendarId) {
+        console.log("[calendar] upsert flow blocked", {
+          reason: "calendar-id-unavailable",
+        });
         return {
           saved: false,
           eventId: null,
@@ -4149,6 +4545,10 @@ export default function App() {
         if (existingEventId) {
           try {
             const updatedId = await calendarModule.updateEventAsync(existingEventId, nativeDetails);
+            console.log("[calendar] upsert flow updated", {
+              existingEventId,
+              updatedId: updatedId || existingEventId,
+            });
             return {
               saved: true,
               eventId: updatedId || existingEventId,
@@ -4160,6 +4560,10 @@ export default function App() {
         }
 
         const createdId = await calendarModule.createEventAsync(calendarId, nativeDetails);
+        console.log("[calendar] upsert flow created", {
+          calendarId,
+          createdId,
+        });
         return {
           saved: true,
           eventId: createdId,
@@ -4167,6 +4571,9 @@ export default function App() {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
+        console.log("[calendar] upsert flow failed", {
+          message: message || "unknown",
+        });
         return {
           saved: false,
           eventId: null,
@@ -4213,6 +4620,128 @@ export default function App() {
       ensureCalendarPermission,
       calendarStartupPolicy.allowExplicitNativeActions,
     ],
+  );
+
+  const syncRecurringServiceCommitmentCalendar = useCallback(
+    async (
+      commitment: RecurringServiceCommitment,
+      options?: { allowPermissionPrompt?: boolean; reason?: string },
+    ): Promise<{
+      saved: boolean;
+      commitment: RecurringServiceCommitment;
+      errorCode: "none" | "permission" | "unavailable";
+    }> => {
+      console.log("[calendar] recurring commitment flow entered", {
+        commitmentId: commitment.id,
+        reason: options?.reason ?? "unspecified",
+        allowPermissionPrompt: options?.allowPermissionPrompt ?? true,
+      });
+      if (!calendarRuntimeEnabled || !calendarStartupPolicy.allowAutomaticSync) {
+        return {
+          saved: false,
+          commitment,
+          errorCode: "unavailable",
+        };
+      }
+
+      const allowPermissionPrompt = options?.allowPermissionPrompt ?? true;
+      const hasPermission = await ensureCalendarPermission(allowPermissionPrompt);
+      if (!hasPermission) {
+        return {
+          saved: false,
+          commitment,
+          errorCode: "permission",
+        };
+      }
+
+      let travelDurationSeconds: number | null = null;
+      const origin = currentLocationRef.current ?? (await readCurrentLocation(false));
+      if (origin && commitment.location.trim().length > 0) {
+        try {
+          const geocoded = await geocodeAsync(commitment.location.trim());
+          const destinationCandidate = geocoded[0];
+          if (
+            destinationCandidate &&
+            typeof destinationCandidate.latitude === "number" &&
+            typeof destinationCandidate.longitude === "number"
+          ) {
+            const directions = await getDirectionsDuration({
+              origin: { lat: origin.lat, lng: origin.lng },
+              destination: {
+                lat: destinationCandidate.latitude,
+                lng: destinationCandidate.longitude,
+              },
+            });
+            travelDurationSeconds = directions.durationSeconds;
+          }
+        } catch (error) {
+          console.log("[calendar] service commitment travel fallback", {
+            commitmentId: commitment.id,
+            reason: options?.reason ?? "unknown",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      const reminderPlan = resolveRecurringServiceCommitmentReminderPlan({
+        travelDurationSeconds,
+        arrivalBufferMinutes: commitment.arriveEarlyMinutes,
+      });
+      const nextFingerprint = getRecurringServiceCommitmentCalendarFingerprint(commitment);
+      let existingEventId = commitment.calendarEventId;
+
+      if (
+        existingEventId &&
+        commitment.calendarSyncFingerprint &&
+        commitment.calendarSyncFingerprint !== nextFingerprint
+      ) {
+        await removeNativeCalendarEvent(existingEventId);
+        existingEventId = null;
+      }
+
+      const result = await upsertNativeCalendarEvent(
+        existingEventId,
+        buildRecurringServiceCommitmentCalendarEventInput({
+          commitment,
+          relativeOffsetMinutes: reminderPlan.relativeOffsetMinutes,
+        }),
+      );
+      if (!result.saved) {
+        return {
+          saved: false,
+          commitment,
+          errorCode: result.errorCode,
+        };
+      }
+
+      return {
+        saved: true,
+        commitment: withRecurringServiceCommitmentCalendarSync(commitment, {
+          calendarEventId: result.eventId ?? existingEventId ?? null,
+          calendarSeriesId: result.eventId ?? existingEventId ?? null,
+          calendarSyncFingerprint: nextFingerprint,
+        }),
+        errorCode: "none",
+      };
+    },
+    [
+      calendarRuntimeEnabled,
+      calendarStartupPolicy.allowAutomaticSync,
+      ensureCalendarPermission,
+      readCurrentLocation,
+      removeNativeCalendarEvent,
+      upsertNativeCalendarEvent,
+    ],
+  );
+
+  const removeRecurringServiceCommitmentCalendarLink = useCallback(
+    async (commitment: RecurringServiceCommitment): Promise<boolean> => {
+      if (!commitment.calendarEventId) {
+        return true;
+      }
+      return removeNativeCalendarEvent(commitment.calendarEventId);
+    },
+    [removeNativeCalendarEvent],
   );
 
   const applyScheduleTime = useCallback(
@@ -5800,6 +6329,202 @@ export default function App() {
     }
   }, [homeScreen, isDiagnosticsEnabled]);
 
+  useEffect(() => {
+    if (!devAuthIdentityDraft.trim()) {
+      setDevAuthIdentityDraft(devAuthUserId);
+    }
+  }, [devAuthIdentityDraft, devAuthUserId]);
+
+  const refreshServerAccessContext = useCallback(async () => {
+    if (!apiUrl || !authHeaders) {
+      setServerAccessContext(null);
+      setServerRoleCheckStatus("Sign in to continue.");
+      return "unauthenticated" as const;
+    }
+
+    try {
+      const response = await fetch(`${apiUrl}/v1/me/access-context`, { headers: authHeaders });
+      if (!response.ok) {
+        setServerAccessContext(null);
+        setServerRoleCheckStatus(
+          response.status === 401
+            ? "Sign in to continue."
+            : "Organization setup is available only to authorized admins.",
+        );
+        return response.status === 401 ? ("unauthenticated" as const) : ("unauthorized" as const);
+      }
+
+      const payload = parseAccessContextResponse(await response.json());
+      if (!payload) {
+        setServerAccessContext(null);
+        setServerRoleCheckStatus("Organization setup is available only to authorized admins.");
+        return "unauthorized" as const;
+      }
+
+      setServerAccessContext(payload);
+      setServerRoleCheckStatus(null);
+      return "authorized" as const;
+    } catch {
+      setServerAccessContext(null);
+      setServerRoleCheckStatus("Organization setup is available only to authorized admins.");
+      return "unauthorized" as const;
+    }
+  }, [apiUrl, authHeaders]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!apiUrl || !authHeaders) {
+      setServerAccessContext(null);
+      setServerRoleCheckStatus("Sign in to continue.");
+      return () => {
+        active = false;
+      };
+    }
+
+    void (async () => {
+      if (!active) {
+        return;
+      }
+      await refreshServerAccessContext();
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [apiUrl, authHeaders, refreshServerAccessContext]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!apiUrl || !authHeaders || !participantProfileSyncPayload) {
+      setBackendParticipantObligations([]);
+      setBackendParticipantViolations([]);
+      setParticipantSyncStatus(null);
+      return () => {
+        active = false;
+      };
+    }
+
+    void (async () => {
+      try {
+        const profileResponse = await fetch(`${apiUrl}/v1/me/participant-profile`, {
+          method: "PUT",
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(participantProfileSyncPayload),
+        });
+        if (!active || !profileResponse.ok) {
+          return;
+        }
+
+        const obligationsResponse = await fetch(`${apiUrl}/v1/me/obligations/snapshot`, {
+          method: "PUT",
+          headers: {
+            ...authHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            source: "mobile_sync",
+            obligations: participantObligationSnapshotPayloads,
+          }),
+        });
+        if (!active || !obligationsResponse.ok) {
+          setParticipantSyncStatus("Participant obligations could not be synced yet.");
+          return;
+        }
+
+        const obligationsPayload = parseBackendObligationsResponse(
+          await obligationsResponse.json(),
+        );
+        if (!active) {
+          return;
+        }
+        setBackendParticipantObligations(obligationsPayload);
+
+        const violationsResponse = await fetch(`${apiUrl}/v1/me/violations`, {
+          headers: authHeaders,
+        });
+        if (violationsResponse.ok) {
+          const violationsPayload = parseBackendViolationsResponse(await violationsResponse.json());
+          if (active) {
+            setBackendParticipantViolations(violationsPayload);
+          }
+        }
+
+        setParticipantSyncStatus(
+          obligationsPayload.length > 0
+            ? `${obligationsPayload.length} backend obligation${
+                obligationsPayload.length === 1 ? "" : "s"
+              } synced.`
+            : "Participant profile synced.",
+        );
+      } catch {
+        if (!active) {
+          return;
+        }
+        setParticipantSyncStatus("Participant obligations could not be synced yet.");
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [apiUrl, authHeaders, participantObligationSnapshotPayloads, participantProfileSyncPayload]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!apiUrl || !authHeaders || backendParticipantObligations.length === 0) {
+      return () => {
+        active = false;
+      };
+    }
+
+    const pendingEvents = buildComplianceEventPayloads({
+      sponsorCallLogs,
+      meetingAttendanceLogs,
+      obligations: backendParticipantObligations,
+    }).filter((event) => !syncedComplianceEventIdsRef.current.has(event.externalEventId));
+
+    if (pendingEvents.length === 0) {
+      return () => {
+        active = false;
+      };
+    }
+
+    void (async () => {
+      for (const event of pendingEvents) {
+        try {
+          const response = await fetch(`${apiUrl}/v1/me/compliance-events`, {
+            method: "POST",
+            headers: {
+              ...authHeaders,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(event),
+          });
+          if (!active) {
+            return;
+          }
+          if (response.ok) {
+            syncedComplianceEventIdsRef.current.add(event.externalEventId);
+          }
+        } catch {
+          if (!active) {
+            return;
+          }
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [apiUrl, authHeaders, backendParticipantObligations, meetingAttendanceLogs, sponsorCallLogs]);
+
   const handleModeSelect = useCallback(
     (nextMode: RecoveryMode) => {
       setMode(nextMode);
@@ -5921,6 +6646,22 @@ export default function App() {
     setSelectedDayOffset(0);
   }, [activeAttendance]);
 
+  const selectOnboardingPath = useCallback((path: OnboardingPath) => {
+    const legacyWizardState = getLegacyWizardStateForPath(path);
+    setWizardOnboardingPath(path);
+    setWizardSupervisionMode(legacyWizardState.wizardSupervisionMode);
+    setWizardJusticeTrack((current) =>
+      path === "COURT_PROGRAM"
+        ? current === "NONE"
+          ? legacyWizardState.wizardJusticeTrack
+          : current
+        : "NONE",
+    );
+    if (path !== "SOBER_HOUSE_RESIDENT") {
+      setWizardSoberHouseId(null);
+    }
+  }, []);
+
   const openOnlineMeetingsNow = useCallback(async () => {
     try {
       await Linking.openURL(AA_ONLINE_MEETINGS_URL);
@@ -5982,12 +6723,7 @@ export default function App() {
     attendanceEntryPoint === "meetings" ? "Back to upcoming meetings" : "Back to dashboard";
 
   const openSoberHousingSettings = useCallback(() => {
-    if (!soberHousingConfigured) {
-      setMode("A");
-      setHomeScreen("SETTINGS");
-      setToolsScreen("HOME");
-      setScreen("LIST");
-      setSelectedMeeting(null);
+    if (!canOpenSoberHouseEntry) {
       return;
     }
     setMode("B");
@@ -5995,15 +6731,18 @@ export default function App() {
     setToolsScreen("HOME");
     setScreen("LIST");
     setSelectedMeeting(null);
-  }, [soberHousingConfigured]);
+  }, [canOpenSoberHouseEntry]);
 
   const openProbationParoleSettings = useCallback(() => {
+    if (!canOpenCourtEntry) {
+      return;
+    }
     setMode("C");
     setHomeScreen("SETTINGS");
     setToolsScreen("HOME");
     setScreen("LIST");
     setSelectedMeeting(null);
-  }, []);
+  }, [canOpenCourtEntry]);
 
   const persistSoberHouseStore = useCallback(
     async (nextStore: SoberHouseSettingsStore) => {
@@ -6102,11 +6841,23 @@ export default function App() {
   const restartSetup = useCallback(() => {
     const residentProfile = soberHouseStore.residentHousingProfile;
     const organization = soberHouseStore.organization;
+    const recoveredOnboardingPath = inferOnboardingPath({
+      onboardingPath: wizardOnboardingPath,
+      wizardSupervisionMode:
+        soberHouseStore.userAccessProfile?.role === "HOUSE_RESIDENT"
+          ? "SOBER_HOUSE_RESIDENT"
+          : soberHouseStore.userAccessProfile?.role === "OWNER_OPERATOR"
+            ? "SOBER_HOUSE_OWNER"
+            : wizardSupervisionMode,
+      wizardJusticeTrack,
+      soberHouseRole: soberHouseStore.userAccessProfile?.role ?? null,
+    });
     setMode("A");
     setSetupComplete(false);
     setHomeScreen("SETUP");
     setSetupStep(1);
     setSetupError(null);
+    setWizardOnboardingPath(recoveredOnboardingPath);
     setWizardSupervisionMode(
       soberHouseStore.userAccessProfile?.role === "HOUSE_RESIDENT"
         ? "SOBER_HOUSE_RESIDENT"
@@ -6140,6 +6891,7 @@ export default function App() {
   }, [
     meetingSignatureRequired,
     refreshMeetings,
+    recurringServiceCommitments,
     soberHouseStore.residentHousingProfile,
     soberHouseStore.organization,
     soberHouseStore.userAccessProfile?.houseId,
@@ -6147,17 +6899,470 @@ export default function App() {
     sponsorEnabled,
     sponsorKneesSuggested,
     recoverySubstances,
+    wizardOnboardingPath,
     wizardJusticeTrack,
+    wizardSupervisionMode,
   ]);
+
+  const hydratePersistedRecoverySettings = useCallback(
+    (input: {
+      modeRaw: string | null;
+      sponsorUiPrefsRaw: string | null;
+      setupCompleteRaw: string | null;
+      sobrietyDateRaw: string | null;
+      profileRaw: string | null;
+      ninetyDayGoalRaw: string | null;
+      sponsorEnabledAtRaw: string | null;
+    }) => {
+      console.log("[setup-persist] read start");
+      const resolvedMode: RecoveryMode =
+        input.modeRaw === "A" || input.modeRaw === "B" || input.modeRaw === "C"
+          ? input.modeRaw
+          : "A";
+      const resolvedSetupComplete = input.setupCompleteRaw === "true";
+      setSetupComplete(resolvedSetupComplete);
+
+      if (input.sponsorUiPrefsRaw) {
+        try {
+          const parsedPrefs = JSON.parse(input.sponsorUiPrefsRaw) as { leadMinutes?: number };
+          if (
+            parsedPrefs &&
+            typeof parsedPrefs.leadMinutes === "number" &&
+            [0, 5, 10, 30].includes(parsedPrefs.leadMinutes)
+          ) {
+            setSponsorLeadMinutes(parsedPrefs.leadMinutes as SponsorLeadMinutes);
+          }
+        } catch (error) {
+          console.log("[setup-persist] read failure", {
+            key: "sponsorUiPrefs",
+            error: formatError(error),
+          });
+        }
+      }
+
+      if (input.sobrietyDateRaw) {
+        setSobrietyDateIso(input.sobrietyDateRaw);
+        setSobrietyDateInput(formatIsoToUsDate(input.sobrietyDateRaw));
+      }
+
+      let hasLocalSponsorProfile = false;
+      if (input.profileRaw) {
+        try {
+          const parsedProfile = JSON.parse(input.profileRaw) as {
+            radiusMiles?: number;
+            homeGroupMeetingIds?: string[];
+            homeGroupSeriesKey?: string | null;
+            homeGroupName?: string | null;
+            homeGroupBirthdayOptIn?: boolean;
+            homeGroupBirthdayFirstName?: string;
+            homeGroupBirthdayLastName?: string;
+            recurringServiceCommitments?: RecurringServiceCommitment[];
+            attendanceAutomationPlan?: AttendanceAutomationPlan | null;
+            sponsorEnabledAtIso?: string | null;
+            ninetyDayGoalTarget?: number;
+            recoverySubstances?: RecoverySubstanceCategory[];
+            meetingSignatureRequired?: boolean;
+            sponsorName?: string;
+            sponsorPhoneDigits?: string;
+            sponsorHour12?: number;
+            sponsorMinute?: number;
+            sponsorMeridiem?: "AM" | "PM";
+            sponsorRepeatPreset?: RepeatPreset;
+            sponsorRepeatDays?: WeekdayCode[];
+            sponsorEnabled?: boolean;
+            sponsorActive?: boolean;
+            sponsorLeadMinutes?: SponsorLeadMinutes;
+            sponsorKneesSuggested?: boolean | null;
+            meetingAutoAddToCalendar?: boolean;
+            wizardOnboardingPath?: OnboardingPath;
+            wizardSupervisionMode?: SetupSupervisionMode;
+            wizardJusticeTrack?: SetupJusticeTrack;
+            wizardCourtProgramName?: string;
+            wizardCourtSupervisorName?: string;
+            wizardCourtRequirementsSummary?: string;
+            wizardCourtDeadlineSummary?: string;
+          };
+
+          if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
+            setMeetingRadiusMiles(parsedProfile.radiusMiles);
+          }
+          if (Array.isArray(parsedProfile.homeGroupMeetingIds)) {
+            setHomeGroupMeetingIds(
+              parsedProfile.homeGroupMeetingIds.filter(
+                (entry): entry is string => typeof entry === "string" && entry.length > 0,
+              ),
+            );
+          }
+          if (
+            typeof parsedProfile.homeGroupSeriesKey === "string" ||
+            parsedProfile.homeGroupSeriesKey === null
+          ) {
+            setHomeGroupSeriesKey(parsedProfile.homeGroupSeriesKey ?? null);
+          }
+          if (
+            typeof parsedProfile.homeGroupName === "string" ||
+            parsedProfile.homeGroupName === null
+          ) {
+            setHomeGroupName(parsedProfile.homeGroupName ?? null);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayOptIn === "boolean") {
+            setHomeGroupBirthdayOptIn(parsedProfile.homeGroupBirthdayOptIn);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayFirstName === "string") {
+            setHomeGroupBirthdayFirstName(parsedProfile.homeGroupBirthdayFirstName);
+          }
+          if (typeof parsedProfile.homeGroupBirthdayLastName === "string") {
+            setHomeGroupBirthdayLastName(parsedProfile.homeGroupBirthdayLastName);
+          }
+          if (Array.isArray(parsedProfile.recurringServiceCommitments)) {
+            setRecurringServiceCommitments(
+              normalizeRecurringServiceCommitments(parsedProfile.recurringServiceCommitments),
+            );
+          }
+          if (
+            parsedProfile.attendanceAutomationPlan &&
+            typeof parsedProfile.attendanceAutomationPlan === "object"
+          ) {
+            const candidate = parsedProfile.attendanceAutomationPlan as Record<string, unknown>;
+            if (
+              typeof candidate.meetingId === "string" &&
+              candidate.meetingId.trim().length > 0 &&
+              typeof candidate.dateKey === "string" &&
+              candidate.dateKey.trim().length > 0 &&
+              (candidate.status === "planned" || candidate.status === "eligible_to_start") &&
+              typeof candidate.plannedAtIso === "string" &&
+              candidate.plannedAtIso.trim().length > 0
+            ) {
+              setAttendanceAutomationPlan({
+                meetingId: candidate.meetingId,
+                dateKey: candidate.dateKey,
+                status: candidate.status,
+                plannedAtIso: candidate.plannedAtIso,
+                scheduledStartAtIso:
+                  typeof candidate.scheduledStartAtIso === "string" &&
+                  candidate.scheduledStartAtIso.trim().length > 0
+                    ? candidate.scheduledStartAtIso
+                    : null,
+                calendarEventId:
+                  typeof candidate.calendarEventId === "string" &&
+                  candidate.calendarEventId.trim().length > 0 &&
+                  candidate.calendarEventId.trim().length <= CALENDAR_EVENT_ID_MAX_LENGTH
+                    ? candidate.calendarEventId
+                    : null,
+              });
+            }
+          } else if (parsedProfile.attendanceAutomationPlan === null) {
+            setAttendanceAutomationPlan(null);
+          }
+          if (
+            typeof parsedProfile.sponsorEnabledAtIso === "string" ||
+            parsedProfile.sponsorEnabledAtIso === null
+          ) {
+            setSponsorEnabledAtIso(parsedProfile.sponsorEnabledAtIso ?? null);
+          }
+          if (
+            typeof parsedProfile.ninetyDayGoalTarget === "number" &&
+            Number.isFinite(parsedProfile.ninetyDayGoalTarget)
+          ) {
+            const nextGoal = Math.max(
+              1,
+              Math.min(9999, Math.floor(parsedProfile.ninetyDayGoalTarget)),
+            );
+            setNinetyDayGoalTarget(nextGoal);
+            setNinetyDayGoalInput(String(nextGoal));
+          }
+          if (Array.isArray(parsedProfile.recoverySubstances)) {
+            const normalizedSubstances = normalizeRecoverySubstances(
+              parsedProfile.recoverySubstances,
+            );
+            setRecoverySubstances(normalizedSubstances);
+            setWizardRecoverySubstances(normalizedSubstances);
+          }
+          if (typeof parsedProfile.meetingSignatureRequired === "boolean") {
+            setMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
+            setWizardMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
+          }
+          if (typeof parsedProfile.sponsorName === "string") {
+            setSponsorName(parsedProfile.sponsorName);
+            hasLocalSponsorProfile =
+              hasLocalSponsorProfile || parsedProfile.sponsorName.trim().length > 0;
+          }
+          if (typeof parsedProfile.sponsorPhoneDigits === "string") {
+            const normalized = normalizePhoneDigits(parsedProfile.sponsorPhoneDigits);
+            setSponsorPhoneDigits(normalized);
+            hasLocalSponsorProfile = hasLocalSponsorProfile || normalized.length > 0;
+          }
+          if (
+            typeof parsedProfile.sponsorHour12 === "number" &&
+            Number.isFinite(parsedProfile.sponsorHour12) &&
+            parsedProfile.sponsorHour12 >= 1 &&
+            parsedProfile.sponsorHour12 <= 12
+          ) {
+            setSponsorHour12(Math.floor(parsedProfile.sponsorHour12));
+          }
+          if (
+            typeof parsedProfile.sponsorMinute === "number" &&
+            Number.isFinite(parsedProfile.sponsorMinute) &&
+            parsedProfile.sponsorMinute >= 0 &&
+            parsedProfile.sponsorMinute <= 59
+          ) {
+            setSponsorMinute(Math.floor(parsedProfile.sponsorMinute));
+          }
+          if (parsedProfile.sponsorMeridiem === "AM" || parsedProfile.sponsorMeridiem === "PM") {
+            setSponsorMeridiem(parsedProfile.sponsorMeridiem);
+          }
+          if (
+            parsedProfile.sponsorRepeatPreset === "WEEKLY" ||
+            parsedProfile.sponsorRepeatPreset === "BIWEEKLY" ||
+            parsedProfile.sponsorRepeatPreset === "MONTHLY"
+          ) {
+            setSponsorRepeatPreset(parsedProfile.sponsorRepeatPreset);
+          }
+          if (Array.isArray(parsedProfile.sponsorRepeatDays)) {
+            const safeDays = parsedProfile.sponsorRepeatDays.filter((day): day is WeekdayCode =>
+              WEEKDAY_CODES.includes(day),
+            );
+            if (safeDays.length > 0) {
+              setSponsorRepeatDays(sortWeekdays(safeDays));
+            }
+          }
+          if (typeof parsedProfile.sponsorEnabled === "boolean") {
+            setSponsorEnabled(parsedProfile.sponsorEnabled);
+          }
+          if (typeof parsedProfile.sponsorActive === "boolean") {
+            setSponsorActive(parsedProfile.sponsorActive);
+          }
+          if (
+            typeof parsedProfile.sponsorLeadMinutes === "number" &&
+            [0, 5, 10, 30].includes(parsedProfile.sponsorLeadMinutes)
+          ) {
+            setSponsorLeadMinutes(parsedProfile.sponsorLeadMinutes as SponsorLeadMinutes);
+          }
+          if (
+            typeof parsedProfile.sponsorKneesSuggested === "boolean" ||
+            parsedProfile.sponsorKneesSuggested === null
+          ) {
+            setSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
+            setWizardSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
+          }
+          if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
+            setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
+          }
+          const inferredOnboardingPath = inferOnboardingPath({
+            onboardingPath: parsedProfile.wizardOnboardingPath,
+            wizardSupervisionMode: parsedProfile.wizardSupervisionMode,
+            wizardJusticeTrack: parsedProfile.wizardJusticeTrack,
+          });
+          setWizardOnboardingPath(inferredOnboardingPath);
+          if (
+            parsedProfile.wizardSupervisionMode === "INDEPENDENT" ||
+            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ||
+            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_OWNER"
+          ) {
+            setWizardSupervisionMode(parsedProfile.wizardSupervisionMode);
+          }
+          if (
+            parsedProfile.wizardJusticeTrack === "NONE" ||
+            parsedProfile.wizardJusticeTrack === "DRUG_COURT" ||
+            parsedProfile.wizardJusticeTrack === "PROBATION_PAROLE"
+          ) {
+            setWizardJusticeTrack(parsedProfile.wizardJusticeTrack);
+          }
+          if (typeof parsedProfile.wizardCourtProgramName === "string") {
+            setWizardCourtProgramName(parsedProfile.wizardCourtProgramName);
+          }
+          if (typeof parsedProfile.wizardCourtSupervisorName === "string") {
+            setWizardCourtSupervisorName(parsedProfile.wizardCourtSupervisorName);
+          }
+          if (typeof parsedProfile.wizardCourtRequirementsSummary === "string") {
+            setWizardCourtRequirementsSummary(parsedProfile.wizardCourtRequirementsSummary);
+          }
+          if (typeof parsedProfile.wizardCourtDeadlineSummary === "string") {
+            setWizardCourtDeadlineSummary(parsedProfile.wizardCourtDeadlineSummary);
+          }
+        } catch (error) {
+          console.log("[setup-persist] read failure", {
+            key: "profile",
+            error: formatError(error),
+          });
+        }
+      }
+
+      if (typeof input.ninetyDayGoalRaw === "string" && input.ninetyDayGoalRaw.trim().length > 0) {
+        const parsedGoal = Number(input.ninetyDayGoalRaw);
+        if (Number.isFinite(parsedGoal)) {
+          const nextGoal = Math.max(1, Math.min(9999, Math.floor(parsedGoal)));
+          setNinetyDayGoalTarget(nextGoal);
+          setNinetyDayGoalInput(String(nextGoal));
+        }
+      }
+
+      if (
+        typeof input.sponsorEnabledAtRaw === "string" &&
+        input.sponsorEnabledAtRaw.trim().length > 0
+      ) {
+        setSponsorEnabledAtIso(input.sponsorEnabledAtRaw);
+      }
+
+      setMode(resolvedSetupComplete ? "A" : resolvedMode);
+      setHomeScreen(resolvedSetupComplete ? "DASHBOARD" : "SETUP");
+      console.log("[setup-persist] hydration complete", {
+        resolvedSetupComplete,
+        resolvedMode,
+        hasLocalSponsorProfile,
+      });
+
+      return { hasLocalSponsorProfile };
+    },
+    [],
+  );
+
+  const attendanceSlipServiceCommitmentsForExport = useMemo(
+    () =>
+      recurringServiceCommitments
+        .filter((commitment) => commitment.includeInAttendanceExport)
+        .map((commitment) => ({
+          name: commitment.name,
+          scheduleLabel: buildRecurringServiceCommitmentSummary(commitment),
+          location: commitment.location || null,
+          arriveEarlyMinutes:
+            commitment.arriveEarlyMinutes > 0 ? commitment.arriveEarlyMinutes : null,
+          stayAfterMinutes: commitment.stayAfterMinutes > 0 ? commitment.stayAfterMinutes : null,
+        })),
+    [recurringServiceCommitments],
+  );
+
+  const openRecurringServiceCommitmentEditor = useCallback(
+    (commitment?: RecurringServiceCommitment) => {
+      setSetupError(null);
+      setServiceCommitmentStatus(null);
+      setRecurringServiceCommitmentDraft(
+        commitment
+          ? createRecurringServiceCommitmentDraftFromItem(commitment)
+          : createDefaultRecurringServiceCommitmentDraft(),
+      );
+      setRecurringServiceCommitmentEditorVisible(true);
+    },
+    [],
+  );
+
+  const cancelRecurringServiceCommitmentEditor = useCallback(() => {
+    setServiceCommitmentStatus(null);
+    setRecurringServiceCommitmentDraft(createDefaultRecurringServiceCommitmentDraft());
+    setRecurringServiceCommitmentEditorVisible(false);
+  }, []);
+
+  const saveRecurringServiceCommitment = useCallback(async () => {
+    const draft = recurringServiceCommitmentDraft;
+    if (!draft.name.trim()) {
+      setSetupError("Enter a commitment name.");
+      return;
+    }
+    if (!isValidHhmm(draft.startsAtLocal.trim())) {
+      setSetupError("Enter a valid start time as HH:MM.");
+      return;
+    }
+    if (draft.endsAtLocal.trim().length > 0 && !isValidHhmm(draft.endsAtLocal.trim())) {
+      setSetupError("Enter a valid end time as HH:MM.");
+      return;
+    }
+    if (draft.recurrenceKind === "WEEKLY" && draft.weeklyDays.length === 0) {
+      setSetupError("Select at least one weekday for this commitment.");
+      return;
+    }
+    if (Number(draft.arriveEarlyMinutes || "0") > 180) {
+      setSetupError("Arrive early must be 180 minutes or less.");
+      return;
+    }
+    if (Number(draft.stayAfterMinutes || "0") > 180) {
+      setSetupError("Stay after must be 180 minutes or less.");
+      return;
+    }
+
+    setServiceCommitmentStatus(null);
+    const existingCommitment =
+      (draft.id
+        ? (recurringServiceCommitments.find((entry) => entry.id === draft.id) ?? null)
+        : null) ?? null;
+    const nextCommitment = buildRecurringServiceCommitmentFromDraft({
+      id: draft.id ?? createId("service-commitment"),
+      draft,
+      existing: existingCommitment,
+    });
+    setRecurringServiceCommitments((current) =>
+      upsertRecurringServiceCommitmentInList(current, nextCommitment),
+    );
+    setSetupError(null);
+    setRecurringServiceCommitmentDraft(createDefaultRecurringServiceCommitmentDraft());
+    setRecurringServiceCommitmentEditorVisible(false);
+    const syncResult = await syncRecurringServiceCommitmentCalendar(nextCommitment, {
+      allowPermissionPrompt: true,
+      reason: existingCommitment ? "edit" : "create",
+    });
+    if (!syncResult.saved) {
+      setServiceCommitmentStatus(
+        mapRecurringServiceCommitmentCalendarErrorToUserMessage({
+          errorCode: syncResult.errorCode,
+        }),
+      );
+      return;
+    }
+    setRecurringServiceCommitments((current) =>
+      upsertRecurringServiceCommitmentInList(current, syncResult.commitment),
+    );
+    setServiceCommitmentStatus(`Calendar synced for ${nextCommitment.name}.`);
+  }, [
+    recurringServiceCommitmentDraft,
+    recurringServiceCommitments,
+    syncRecurringServiceCommitmentCalendar,
+  ]);
+
+  const deleteRecurringServiceCommitment = useCallback(
+    async (commitmentId: string) => {
+      const target =
+        recurringServiceCommitments.find((commitment) => commitment.id === commitmentId) ?? null;
+      setRecurringServiceCommitments((current) =>
+        removeRecurringServiceCommitmentFromList(current, commitmentId),
+      );
+      setSetupError(null);
+      if (recurringServiceCommitmentDraft.id === commitmentId) {
+        setRecurringServiceCommitmentDraft(createDefaultRecurringServiceCommitmentDraft());
+        setRecurringServiceCommitmentEditorVisible(false);
+      }
+      if (!target) {
+        return;
+      }
+      const removed = await removeRecurringServiceCommitmentCalendarLink(target);
+      setServiceCommitmentStatus(
+        removed
+          ? `${target.name} was removed from your recurring commitments.`
+          : `${target.name} was removed in the app. Calendar cleanup may need to be retried.`,
+      );
+    },
+    [
+      recurringServiceCommitmentDraft.id,
+      recurringServiceCommitments,
+      removeRecurringServiceCommitmentCalendarLink,
+    ],
+  );
 
   const nextSetupStep = useCallback(async () => {
     setSetupError(null);
 
     if (setupStep === 1) {
-      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
-        setSetupStep(2);
+      setSetupStep(2);
+      return;
+    }
+
+    if (setupStep === 2 && wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
+      if (!protectedOrgSetupAuthorized) {
+        setSetupError("Sign in to continue. Organization setup is limited to authorized admins.");
         return;
       }
+      return;
+    }
+
+    if (setupStep === 2) {
       const parsedDateIso = parseUsDateToIso(sobrietyDateInput);
       if (!parsedDateIso) {
         setSetupError("Enter sobriety date as MM-DD-YYYY.");
@@ -6171,63 +7376,10 @@ export default function App() {
       setSobrietyDateIso(parsedDateIso);
       setNinetyDayGoalTarget(parsedGoal);
       setNinetyDayGoalInput(String(parsedGoal));
-      setSetupStep(2);
-      return;
-    }
-
-    if (setupStep === 2) {
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && !wizardSoberHouseId) {
-        setSetupError("Select the sober house you live in.");
-        return;
-      }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
-        if (!wizardResidentFirstName.trim() || !wizardResidentLastName.trim()) {
-          setSetupError("Enter your first and last name for sober-house placement.");
-          return;
-        }
-        if (!parseUsDateToIso(wizardResidentMoveInDate)) {
-          setSetupError("Move-in date must use MM-DD-YYYY.");
-          return;
-        }
-        if (!wizardResidentRoomOrBed.trim()) {
-          setSetupError("Enter your room or bed assignment.");
-          return;
-        }
-        if (
-          !wizardResidentEmergencyContactName.trim() ||
-          !wizardResidentEmergencyContactPhone.trim()
-        ) {
-          setSetupError("Enter emergency contact name and phone.");
-          return;
-        }
-        if (!wizardResidentProgramPhase.trim()) {
-          setSetupError("Enter your current program phase.");
-          return;
-        }
-      }
-      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
-        if (!wizardOrganizationName.trim()) {
-          setSetupError("Enter your organization name.");
-          return;
-        }
-        if (!wizardOrganizationPrimaryContactName.trim()) {
-          setSetupError("Enter the primary contact name.");
-          return;
-        }
-        if (
-          !wizardOrganizationPrimaryEmail.trim() ||
-          !/\S+@\S+\.\S+/.test(wizardOrganizationPrimaryEmail.trim())
-        ) {
-          setSetupError("Enter a valid primary email.");
-          return;
-        }
-        setSetupStep(8);
-        return;
-      }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && wizardRequiresSponsorDetails) {
+      if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" && wizardRequiresSponsorDetails) {
         setWizardHasSponsor(true);
       }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && wizardMeetingProofLockedByHouse) {
+      if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" && wizardMeetingProofLockedByHouse) {
         setWizardMeetingSignatureRequired(true);
       }
       setSetupStep(3);
@@ -6308,6 +7460,18 @@ export default function App() {
     }
 
     if (setupStep === 7) {
+      if (
+        recurringServiceCommitmentEditorVisible &&
+        hasUnsavedRecurringServiceCommitmentDraftChanges(recurringServiceCommitmentDraft)
+      ) {
+        setSetupError("Save or cancel the service commitment you are editing.");
+        return;
+      }
+      setSetupStep(8);
+      return;
+    }
+
+    if (setupStep === 8) {
       if (wizardHasHomeGroup === null) {
         setSetupError("Choose whether you have a home group.");
         return;
@@ -6316,30 +7480,79 @@ export default function App() {
         setSetupError("Select a home group meeting.");
         return;
       }
+      setSetupStep(9);
+      return;
+    }
+
+    if (setupStep === 9) {
       if (wizardMeetingSignatureRequired === null) {
         setSetupError("Choose whether signatures are required at meetings.");
         return;
       }
-      setSetupStep(8);
+      if (
+        wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ||
+        wizardOnboardingPath === "COURT_PROGRAM"
+      ) {
+        setSetupStep(10);
+      }
+      return;
+    }
+
+    if (setupStep === 10 && wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
+      if (!wizardSoberHouseId) {
+        setSetupError("Select the sober house you live in.");
+        return;
+      }
+      if (!wizardResidentFirstName.trim() || !wizardResidentLastName.trim()) {
+        setSetupError("Enter your first and last name for sober-house placement.");
+        return;
+      }
+      if (!parseUsDateToIso(wizardResidentMoveInDate)) {
+        setSetupError("Move-in date must use MM-DD-YYYY.");
+        return;
+      }
+      if (!wizardResidentRoomOrBed.trim()) {
+        setSetupError("Enter your room or bed assignment.");
+        return;
+      }
+      if (
+        !wizardResidentEmergencyContactName.trim() ||
+        !wizardResidentEmergencyContactPhone.trim()
+      ) {
+        setSetupError("Enter emergency contact name and phone.");
+        return;
+      }
+      if (!wizardResidentProgramPhase.trim()) {
+        setSetupError("Enter your current program phase.");
+        return;
+      }
+      return;
+    }
+
+    if (setupStep === 10 && wizardOnboardingPath === "COURT_PROGRAM") {
+      if (wizardJusticeTrack === "NONE") {
+        setSetupError("Select the court or supervision track that applies to you.");
+        return;
+      }
+      setSetupStep(11);
+      return;
+    }
+
+    if (setupStep === 11 && wizardOnboardingPath === "COURT_PROGRAM") {
+      if (!wizardCourtProgramName.trim()) {
+        setSetupError("Enter the court or program name.");
+        return;
+      }
+      if (!wizardCourtRequirementsSummary.trim()) {
+        setSetupError("Add the participant requirements you need to keep in front of you.");
+        return;
+      }
     }
   }, [
+    protectedOrgSetupAuthorized,
     setupStep,
     sobrietyDateInput,
     ninetyDayGoalInput,
-    wizardOrganizationName,
-    wizardOrganizationPrimaryContactName,
-    wizardOrganizationPrimaryEmail,
-    wizardSupervisionMode,
-    wizardSoberHouseId,
-    wizardRequiresSponsorDetails,
-    wizardMeetingProofLockedByHouse,
-    wizardResidentEmergencyContactName,
-    wizardResidentEmergencyContactPhone,
-    wizardResidentFirstName,
-    wizardResidentLastName,
-    wizardResidentMoveInDate,
-    wizardResidentProgramPhase,
-    wizardResidentRoomOrBed,
     wizardHasSponsor,
     wizardSponsorKneesSuggested,
     normalizedSponsorName,
@@ -6347,14 +7560,104 @@ export default function App() {
     wizardWantsReminders,
     sponsorRepeatUnit,
     sponsorRepeatDaysSorted.length,
+    recurringServiceCommitmentDraft,
+    recurringServiceCommitmentEditorVisible,
     wizardHasHomeGroup,
     homeGroupMeetingIds.length,
     wizardMeetingSignatureRequired,
+    wizardJusticeTrack,
+    wizardCourtProgramName,
+    wizardCourtRequirementsSummary,
+    wizardMeetingProofLockedByHouse,
+    wizardOnboardingPath,
+    wizardRequiresSponsorDetails,
+    wizardResidentEmergencyContactName,
+    wizardResidentEmergencyContactPhone,
+    wizardResidentFirstName,
+    wizardResidentLastName,
+    wizardResidentMoveInDate,
+    wizardResidentProgramPhase,
+    wizardResidentRoomOrBed,
+    wizardSoberHouseId,
   ]);
 
   const previousSetupStep = useCallback(() => {
     setSetupError(null);
-    setSetupStep((current) => (current <= 1 ? 1 : ((current - 1) as SetupStep)));
+    const currentIndex = setupFlowSteps.indexOf(setupStep);
+    if (currentIndex <= 0) {
+      setSetupStep(1);
+      return;
+    }
+    setSetupStep(setupFlowSteps[currentIndex - 1] ?? 1);
+  }, [setupFlowSteps, setupStep]);
+
+  useEffect(() => {
+    if (!showProtectedOrgAccessGate || protectedOrgSetupAuthorized) {
+      setProtectedOrgAccessGateOutcome("idle");
+      setProtectedOrgAccessChecking(false);
+    }
+  }, [protectedOrgSetupAuthorized, showProtectedOrgAccessGate]);
+
+  const beginProtectedOrgAccessSignIn = useCallback(async () => {
+    setSetupError(null);
+    if (usesDevAuthShim && devAuthSignedOut) {
+      const nextUserId = devAuthIdentityDraft.trim() || devAuthUserId;
+      setDevAuthOverrideUserId(nextUserId);
+      setDevAuthSignedOut(false);
+      setProtectedOrgAccessGateOutcome("idle");
+      setServerRoleCheckStatus(`Checking access for DEV_${nextUserId}...`);
+      return;
+    }
+    setProtectedOrgAccessChecking(true);
+    const result = await refreshServerAccessContext();
+    setProtectedOrgAccessGateOutcome(
+      result === "authorized"
+        ? "idle"
+        : result === "unauthorized"
+          ? "unauthorized"
+          : "unauthenticated",
+    );
+    setProtectedOrgAccessChecking(false);
+  }, [
+    devAuthIdentityDraft,
+    devAuthSignedOut,
+    devAuthUserId,
+    refreshServerAccessContext,
+    usesDevAuthShim,
+  ]);
+
+  const switchProtectedOrgDevIdentity = useCallback(() => {
+    const nextUserId = devAuthIdentityDraft.trim();
+    if (!nextUserId) {
+      setSetupError("Enter a development user id to switch accounts.");
+      return;
+    }
+
+    setSetupError(null);
+    setProtectedOrgAccessGateOutcome("idle");
+    setServerAccessContext(null);
+    setServerRoleCheckStatus(`Checking access for DEV_${nextUserId}...`);
+    setDevAuthOverrideUserId(nextUserId);
+    setDevAuthSignedOut(false);
+  }, [devAuthIdentityDraft]);
+
+  const signOutProtectedOrgIdentity = useCallback(() => {
+    setSetupError(null);
+    setProtectedOrgAccessGateOutcome("unauthenticated");
+    setDevAuthSignedOut(true);
+    setServerAccessContext(null);
+    setServerRoleCheckStatus(
+      usesDevAuthShim
+        ? "Signed out of the DEV auth shim. Enter a DEV user id to switch accounts."
+        : "Signed out. Sign in with an authorized account to continue.",
+    );
+  }, [usesDevAuthShim]);
+
+  const requestProtectedOrgAccess = useCallback(() => {
+    Alert.alert(
+      "Request access",
+      "Organization setup is limited to authorized admins. Ask your organization or the platform owner to grant an organization-admin or house-manager role to your account.",
+    );
   }, []);
 
   const onMapRegionChangeComplete = useCallback(
@@ -6460,54 +7763,6 @@ export default function App() {
     }
   }, [apiUrl, authHeaders, enableSponsorApiSync, formatApiErrorWithHint]);
 
-  const fetchHomeGroupBirthdayConfig = useCallback(async () => {
-    if (!enableHomeGroupBirthdayApiSync || !authHeaders) {
-      return;
-    }
-
-    try {
-      const response = await fetch(`${apiUrl}/v1/me/home-group-birthday`, {
-        headers: authHeaders,
-      });
-      if (!response.ok) {
-        setHomeGroupBirthdayStatus(
-          formatApiErrorWithHint(`Home group birthday load failed: ${response.status}`),
-        );
-        return;
-      }
-
-      const payload = (await response.json()) as {
-        homeGroupBirthdayConfig?: HomeGroupBirthdayConfigResponse | null;
-      };
-      const config = payload.homeGroupBirthdayConfig;
-      if (!config) {
-        return;
-      }
-
-      setHomeGroupBirthdayOptIn(Boolean(config.birthdaysEnabled));
-      setHomeGroupBirthdayFirstName(config.firstName ?? "");
-      setHomeGroupBirthdayLastName(config.lastName ?? "");
-      if (!homeGroupSeriesKey && config.homeGroupActive && config.homeGroupKey) {
-        setHomeGroupSeriesKey(config.homeGroupKey);
-      }
-      if (!homeGroupName && config.homeGroupActive && config.homeGroupName) {
-        setHomeGroupName(config.homeGroupName);
-      }
-      setHomeGroupBirthdayStatus(null);
-    } catch {
-      setHomeGroupBirthdayStatus(
-        formatApiErrorWithHint("Home group birthday load failed: network."),
-      );
-    }
-  }, [
-    apiUrl,
-    authHeaders,
-    enableHomeGroupBirthdayApiSync,
-    formatApiErrorWithHint,
-    homeGroupName,
-    homeGroupSeriesKey,
-  ]);
-
   const syncHomeGroupBirthdayConfig = useCallback(
     async (
       selection: HomeGroupSelection | null,
@@ -6524,20 +7779,22 @@ export default function App() {
       const nextSobrietyDateIso = overrides?.sobrietyDateIso ?? sobrietyDateIso;
 
       if (nextBirthdaysEnabled && nextFirstName.length === 0) {
-        setHomeGroupBirthdayStatus("First name is required for home group birthdays.");
+        setHomeGroupBirthdayStatus("First name is required.");
         return false;
       }
 
       if (nextBirthdaysEnabled && !nextSobrietyDateIso) {
-        setHomeGroupBirthdayStatus("Add your sobriety date before joining home group birthdays.");
+        setHomeGroupBirthdayStatus(
+          "Add your sobriety date in Recovery Settings before turning on birthday recognition.",
+        );
         return false;
       }
 
       if (!enableHomeGroupBirthdayApiSync || !authHeaders) {
         setHomeGroupBirthdayStatus(
           nextBirthdaysEnabled
-            ? "Home group birthday settings saved locally."
-            : "Home group saved locally without birthday participation.",
+            ? "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings."
+            : "Your home group was saved without birthday recognition.",
         );
         return true;
       }
@@ -6564,24 +7821,27 @@ export default function App() {
         });
 
         if (!response.ok) {
+          console.log("[home-group-birthday] save failed", {
+            status: response.status,
+            homeGroupKey: payload.homeGroupKey,
+          });
           setHomeGroupBirthdayStatus(
-            formatApiErrorWithHint(`Home group birthday save failed: ${response.status}`),
+            "Couldn't save home group birthday settings. Please try again.",
           );
           return false;
         }
 
         setHomeGroupBirthdayStatus(
           payload.birthdaysEnabled
-            ? "Home group birthday participation saved."
+            ? "Your home group and birthday recognition settings were saved."
             : payload.homeGroupActive
-              ? "Home group saved without birthday participation."
-              : "Home group birthday participation cleared.",
+              ? "Your home group was saved without birthday recognition."
+              : "Home group birthday recognition was turned off.",
         );
         return true;
-      } catch {
-        setHomeGroupBirthdayStatus(
-          formatApiErrorWithHint("Home group birthday save failed: network."),
-        );
+      } catch (error) {
+        console.log("[home-group-birthday] save failed", error);
+        setHomeGroupBirthdayStatus("Couldn't save home group birthday settings. Please try again.");
         return false;
       } finally {
         setHomeGroupBirthdaySaving(false);
@@ -6591,7 +7851,6 @@ export default function App() {
       apiUrl,
       authHeaders,
       enableHomeGroupBirthdayApiSync,
-      formatApiErrorWithHint,
       homeGroupBirthdayFirstName,
       homeGroupBirthdayLastName,
       homeGroupBirthdayOptIn,
@@ -6864,7 +8123,9 @@ export default function App() {
       if (!result.saved) {
         if (result.errorCode === "permission") {
           setCalendarStatus(
-            "Calendar permission is required before sponsor calls can be auto-added.",
+            calendarPermissionBlockedRef.current
+              ? "Calendar access is off. Open Settings to enable sponsor calendar sync."
+              : "Calendar permission is required before sponsor calls can be auto-added.",
           );
         } else {
           setCalendarStatus("Could not sync the sponsor call to Calendar.");
@@ -6933,7 +8194,11 @@ export default function App() {
         if (result.action === "canceled") {
           setMilestoneCalendarStatus("Sobriety milestone add canceled.");
         } else if (result.errorCode === "permission") {
-          setMilestoneCalendarStatus("Calendar permission is required to add milestones.");
+          setMilestoneCalendarStatus(
+            calendarPermissionBlockedRef.current
+              ? "Calendar access is off. Open Settings to add sobriety milestones."
+              : "Calendar permission is required to add milestones.",
+          );
         } else {
           setMilestoneCalendarStatus("Could not open the native calendar add flow.");
         }
@@ -6992,7 +8257,11 @@ export default function App() {
 
       const hasPermission = await ensureNotificationPermission();
       if (!hasPermission) {
-        setNotificationStatus("Notification permission denied.");
+        setNotificationStatus(
+          notificationPermissionBlockedRef.current
+            ? "Notifications are off. Open Settings to enable sponsor alerts."
+            : "Notification permission denied.",
+        );
         return;
       }
 
@@ -7095,7 +8364,11 @@ export default function App() {
 
       const hasPermission = await ensureNotificationPermission();
       if (!hasPermission) {
-        setMeetingsStatus("Notification permission denied for drive alerts.");
+        setMeetingsStatus(
+          notificationPermissionBlockedRef.current
+            ? "Notifications are off. Open Settings to enable drive alerts."
+            : "Notification permission denied for drive alerts.",
+        );
         return;
       }
 
@@ -7374,6 +8647,7 @@ export default function App() {
         homeGroupBirthdayOptIn: boolean;
         homeGroupBirthdayFirstName: string;
         homeGroupBirthdayLastName: string;
+        recurringServiceCommitments: RecurringServiceCommitment[];
         attendanceAutomationPlan: AttendanceAutomationPlan | null;
         sponsorName: string;
         sponsorPhoneDigits: string;
@@ -7383,8 +8657,13 @@ export default function App() {
         sponsorRepeatPreset: RepeatPreset;
         sponsorRepeatDays: WeekdayCode[];
         sponsorLeadMinutes: SponsorLeadMinutes;
+        wizardOnboardingPath: OnboardingPath;
         wizardSupervisionMode: SetupSupervisionMode;
         wizardJusticeTrack: SetupJusticeTrack;
+        wizardCourtProgramName: string;
+        wizardCourtSupervisorName: string;
+        wizardCourtRequirementsSummary: string;
+        wizardCourtDeadlineSummary: string;
       }>,
     ) => {
       const resolvedSobrietyDateIso = overrides?.sobrietyDateIso ?? sobrietyDateIso;
@@ -7402,6 +8681,7 @@ export default function App() {
           overrides?.homeGroupBirthdayFirstName ?? homeGroupBirthdayFirstName,
         homeGroupBirthdayLastName:
           overrides?.homeGroupBirthdayLastName ?? homeGroupBirthdayLastName,
+        recurringServiceCommitments,
         attendanceAutomationPlan: attendanceAutomationPlan,
         sponsorEnabledAtIso: resolvedSponsorEnabledAtIso,
         ninetyDayGoalTarget: overrides?.ninetyDayGoalTarget ?? ninetyDayGoalTarget,
@@ -7419,8 +8699,16 @@ export default function App() {
         sponsorLeadMinutes: overrides?.sponsorLeadMinutes ?? sponsorLeadMinutes,
         sponsorKneesSuggested: overrides?.sponsorKneesSuggested ?? sponsorKneesSuggested,
         meetingAutoAddToCalendar: overrides?.meetingAutoAddToCalendar ?? meetingAutoAddToCalendar,
+        wizardOnboardingPath: overrides?.wizardOnboardingPath ?? wizardOnboardingPath,
         wizardSupervisionMode: overrides?.wizardSupervisionMode ?? wizardSupervisionMode,
         wizardJusticeTrack: overrides?.wizardJusticeTrack ?? wizardJusticeTrack,
+        wizardCourtProgramName: overrides?.wizardCourtProgramName ?? wizardCourtProgramName,
+        wizardCourtSupervisorName:
+          overrides?.wizardCourtSupervisorName ?? wizardCourtSupervisorName,
+        wizardCourtRequirementsSummary:
+          overrides?.wizardCourtRequirementsSummary ?? wizardCourtRequirementsSummary,
+        wizardCourtDeadlineSummary:
+          overrides?.wizardCourtDeadlineSummary ?? wizardCourtDeadlineSummary,
       };
 
       const writes: Promise<unknown>[] = [
@@ -7457,6 +8745,7 @@ export default function App() {
       homeGroupBirthdayOptIn,
       homeGroupName,
       homeGroupSeriesKey,
+      recurringServiceCommitments,
       attendanceAutomationPlan,
       meetingAutoAddToCalendar,
       meetingRadiusMiles,
@@ -7484,7 +8773,12 @@ export default function App() {
       sponsorPhoneDigits,
       sponsorRepeatDaysSorted,
       sponsorRepeatPreset,
+      wizardCourtDeadlineSummary,
+      wizardCourtProgramName,
+      wizardCourtRequirementsSummary,
+      wizardCourtSupervisorName,
       wizardJusticeTrack,
+      wizardOnboardingPath,
       wizardSupervisionMode,
     ],
   );
@@ -7669,43 +8963,49 @@ export default function App() {
     setSetupFinishing(true);
     try {
       setSetupError(null);
-      const parsedDateIso =
-        wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-          ? sobrietyDateIso
-          : parseUsDateToIso(sobrietyDateInput);
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedDateIso) {
+      const recoveryRequired = pathRequiresRecovery(wizardOnboardingPath);
+      const parsedDateIso = recoveryRequired
+        ? parseUsDateToIso(sobrietyDateInput)
+        : sobrietyDateIso;
+      if (recoveryRequired && !parsedDateIso) {
         setSetupError("Enter sobriety date as MM-DD-YYYY.");
-        setSetupStep(1);
-        return;
-      }
-      const parsedGoal =
-        wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-          ? ninetyDayGoalTarget
-          : parseGoalTargetInput(ninetyDayGoalInput);
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && !parsedGoal) {
-        setSetupError("Enter a valid 90-day meeting goal (1 or higher).");
-        setSetupStep(1);
-        return;
-      }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" && !wizardSoberHouseId) {
-        setSetupError("Select the sober house you live in.");
         setSetupStep(2);
         return;
       }
-      if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
+      const parsedGoal = recoveryRequired
+        ? parseGoalTargetInput(ninetyDayGoalInput)
+        : ninetyDayGoalTarget;
+      if (recoveryRequired && !parsedGoal) {
+        setSetupError("Enter a valid 90-day meeting goal (1 or higher).");
+        setSetupStep(2);
+        return;
+      }
+
+      if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" && !protectedOrgSetupAuthorized) {
+        setSetupError("Sign in to continue. Organization setup is limited to authorized admins.");
+        setSetupStep(2);
+        return;
+      }
+
+      if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" && !wizardSoberHouseId) {
+        setSetupError("Select the sober house you live in.");
+        setSetupStep(10);
+        return;
+      }
+      if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
         if (!wizardResidentFirstName.trim() || !wizardResidentLastName.trim()) {
           setSetupError("Enter your first and last name for sober-house placement.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
         if (!parseUsDateToIso(wizardResidentMoveInDate)) {
           setSetupError("Move-in date must use MM-DD-YYYY.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
         if (!wizardResidentRoomOrBed.trim()) {
           setSetupError("Enter your room or bed assignment.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
         if (
@@ -7713,16 +9013,33 @@ export default function App() {
           !wizardResidentEmergencyContactPhone.trim()
         ) {
           setSetupError("Enter emergency contact name and phone.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
         if (!wizardResidentProgramPhase.trim()) {
           setSetupError("Enter your current program phase.");
-          setSetupStep(2);
+          setSetupStep(10);
           return;
         }
       }
-      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
+      if (wizardOnboardingPath === "COURT_PROGRAM") {
+        if (wizardJusticeTrack === "NONE") {
+          setSetupError("Select the court or supervision track that applies to you.");
+          setSetupStep(10);
+          return;
+        }
+        if (!wizardCourtProgramName.trim()) {
+          setSetupError("Enter the court or program name.");
+          setSetupStep(11);
+          return;
+        }
+        if (!wizardCourtRequirementsSummary.trim()) {
+          setSetupError("Add the participant requirements you need to keep in front of you.");
+          setSetupStep(11);
+          return;
+        }
+      }
+      if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
         if (!wizardOrganizationName.trim()) {
           setSetupError("Enter your organization name.");
           setSetupStep(2);
@@ -7746,7 +9063,7 @@ export default function App() {
       const hasSponsor = wizardHasSponsor === true;
       const wantsReminders = hasSponsor && wizardWantsReminders === true;
       if (
-        wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" &&
+        wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" &&
         wizardRequiresSponsorDetails &&
         !hasSponsor
       ) {
@@ -7754,26 +9071,18 @@ export default function App() {
         setSetupStep(3);
         return;
       }
-      if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-        hasSponsor &&
-        (!normalizedSponsorName || !sponsorPhoneE164)
-      ) {
+      if (recoveryRequired && hasSponsor && (!normalizedSponsorName || !sponsorPhoneE164)) {
         setSetupError("Enter sponsor name and phone.");
         setSetupStep(3);
         return;
       }
-      if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-        hasSponsor &&
-        wizardSponsorKneesSuggested === null
-      ) {
+      if (recoveryRequired && hasSponsor && wizardSponsorKneesSuggested === null) {
         setSetupError("Choose whether your sponsor suggests praying on your knees.");
         setSetupStep(4);
         return;
       }
       if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
+        recoveryRequired &&
         wantsReminders &&
         sponsorRepeatUnit === "WEEKLY" &&
         sponsorRepeatDaysSorted.length === 0
@@ -7782,25 +9091,18 @@ export default function App() {
         setSetupStep(6);
         return;
       }
-      if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-        wizardHasHomeGroup === true &&
-        homeGroupMeetingIds.length === 0
-      ) {
+      if (recoveryRequired && wizardHasHomeGroup === true && homeGroupMeetingIds.length === 0) {
         setSetupError("Select a home group meeting.");
-        setSetupStep(7);
+        setSetupStep(8);
         return;
       }
-      if (
-        wizardSupervisionMode !== "SOBER_HOUSE_OWNER" &&
-        wizardMeetingSignatureRequired === null
-      ) {
+      if (recoveryRequired && wizardMeetingSignatureRequired === null) {
         setSetupError("Choose whether signatures are required at meetings.");
-        setSetupStep(7);
+        setSetupStep(9);
         return;
       }
 
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER") {
+      if (recoveryRequired) {
         const resolvedSobrietyDateIso = parsedDateIso as string;
         const resolvedGoalTarget = parsedGoal as number;
         const resolvedMeetingSignatureRequired = wizardMeetingSignatureRequired as boolean;
@@ -7849,8 +9151,13 @@ export default function App() {
             homeGroupBirthdayLastName: homeGroupBirthdayLastName,
             sponsorName: normalizedSponsorName,
             sponsorPhoneDigits,
+            wizardOnboardingPath,
             wizardSupervisionMode,
             wizardJusticeTrack,
+            wizardCourtProgramName,
+            wizardCourtSupervisorName,
+            wizardCourtRequirementsSummary,
+            wizardCourtDeadlineSummary,
           });
         }
         if (!hasSponsor) {
@@ -7874,20 +9181,25 @@ export default function App() {
             homeGroupBirthdayLastName: homeGroupBirthdayLastName,
             sponsorName: "",
             sponsorPhoneDigits: "",
+            wizardOnboardingPath,
             wizardSupervisionMode,
             wizardJusticeTrack,
+            wizardCourtProgramName,
+            wizardCourtSupervisorName,
+            wizardCourtRequirementsSummary,
+            wizardCourtDeadlineSummary,
           });
         }
       }
 
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER" && wizardHasHomeGroup !== true) {
+      if (recoveryRequired && wizardHasHomeGroup !== true) {
         setHomeGroupMeetingIds([]);
         setHomeGroupSeriesKey(null);
         setHomeGroupName(null);
         setHomeGroupBirthdayOptIn(false);
       }
 
-      if (wizardSupervisionMode !== "SOBER_HOUSE_OWNER") {
+      if (recoveryRequired) {
         await syncHomeGroupBirthdayConfig(
           wizardHasHomeGroup === true ? currentHomeGroupSelection : null,
           {
@@ -7902,7 +9214,7 @@ export default function App() {
       let nextSoberHouseStore = soberHouseStore;
       const soberHouseTimestamp = new Date().toISOString();
       const actor = { id: devAuthUserId, name: devUserDisplayName };
-      if (wizardSupervisionMode === "SOBER_HOUSE_OWNER") {
+      if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
         nextSoberHouseStore = upsertOrganization(
           nextSoberHouseStore,
           actor,
@@ -7961,7 +9273,7 @@ export default function App() {
           },
           soberHouseTimestamp,
         ).store;
-      } else if (wizardSupervisionMode === "SOBER_HOUSE_RESIDENT") {
+      } else if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
         const residentHouse =
           nextSoberHouseStore.houses.find((house) => house.id === wizardSoberHouseId) ?? null;
         nextSoberHouseStore = upsertUserAccessProfile(
@@ -8002,6 +9314,23 @@ export default function App() {
             : baseResidentDraft.sponsorContactFrequency,
           updatedAt: soberHouseTimestamp,
         });
+      } else if (wizardOnboardingPath === "COURT_PROGRAM") {
+        nextSoberHouseStore = upsertUserAccessProfile(
+          nextSoberHouseStore,
+          actor,
+          {
+            linkedUserId: devAuthUserId,
+            role:
+              wizardJusticeTrack === "DRUG_COURT"
+                ? "DRUG_COURT_PARTICIPANT"
+                : "PROBATION_PAROLE_PARTICIPANT",
+            organizationId: nextSoberHouseStore.organization?.id ?? null,
+            houseId: null,
+            houseGroupId: null,
+            status: "ACTIVE",
+          },
+          soberHouseTimestamp,
+        ).store;
       } else {
         nextSoberHouseStore = upsertUserAccessProfile(
           nextSoberHouseStore,
@@ -8021,37 +9350,62 @@ export default function App() {
       await persistRecoveryStateSnapshot({
         mode: "A",
         setupComplete: true,
-        sobrietyDateIso:
-          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-            ? sobrietyDateIso
-            : (parsedDateIso as string | null),
-        ninetyDayGoalTarget:
-          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-            ? ninetyDayGoalTarget
-            : (parsedGoal as number),
-        recoverySubstances:
-          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-            ? recoverySubstances
-            : normalizeRecoverySubstances(wizardRecoverySubstances),
-        meetingSignatureRequired:
-          wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-            ? meetingSignatureRequired
-            : (wizardMeetingSignatureRequired as boolean),
-        sponsorEnabled: hasSponsor,
-        sponsorActive: wantsReminders,
-        sponsorEnabledAtIso: hasSponsor ? (sponsorEnabledAtIso ?? new Date().toISOString()) : null,
-        sponsorKneesSuggested: hasSponsor ? (wizardSponsorKneesSuggested ?? true) : null,
+        sobrietyDateIso: recoveryRequired ? (parsedDateIso as string | null) : sobrietyDateIso,
+        ninetyDayGoalTarget: recoveryRequired ? (parsedGoal as number) : ninetyDayGoalTarget,
+        recoverySubstances: recoveryRequired
+          ? normalizeRecoverySubstances(wizardRecoverySubstances)
+          : recoverySubstances,
+        meetingSignatureRequired: recoveryRequired
+          ? (wizardMeetingSignatureRequired as boolean)
+          : meetingSignatureRequired,
+        sponsorEnabled: recoveryRequired ? hasSponsor : sponsorEnabled,
+        sponsorActive: recoveryRequired ? wantsReminders : sponsorActive,
+        sponsorEnabledAtIso: recoveryRequired
+          ? hasSponsor
+            ? (sponsorEnabledAtIso ?? new Date().toISOString())
+            : null
+          : sponsorEnabledAtIso,
+        sponsorKneesSuggested: recoveryRequired
+          ? hasSponsor
+            ? (wizardSponsorKneesSuggested ?? true)
+            : null
+          : sponsorKneesSuggested,
         meetingAutoAddToCalendar,
-        homeGroupMeetingIds: wizardHasHomeGroup === true ? homeGroupMeetingIds : [],
-        homeGroupSeriesKey: wizardHasHomeGroup === true ? homeGroupSeriesKey : null,
-        homeGroupName: wizardHasHomeGroup === true ? homeGroupName : null,
-        homeGroupBirthdayOptIn: wizardHasHomeGroup === true ? homeGroupBirthdayOptIn : false,
+        homeGroupMeetingIds: recoveryRequired
+          ? wizardHasHomeGroup === true
+            ? homeGroupMeetingIds
+            : []
+          : homeGroupMeetingIds,
+        homeGroupSeriesKey: recoveryRequired
+          ? wizardHasHomeGroup === true
+            ? homeGroupSeriesKey
+            : null
+          : homeGroupSeriesKey,
+        homeGroupName: recoveryRequired
+          ? wizardHasHomeGroup === true
+            ? homeGroupName
+            : null
+          : homeGroupName,
+        homeGroupBirthdayOptIn: recoveryRequired
+          ? wizardHasHomeGroup === true
+            ? homeGroupBirthdayOptIn
+            : false
+          : homeGroupBirthdayOptIn,
         homeGroupBirthdayFirstName,
         homeGroupBirthdayLastName,
-        sponsorName: hasSponsor ? normalizedSponsorName : "",
-        sponsorPhoneDigits: hasSponsor ? sponsorPhoneDigits : "",
+        sponsorName: recoveryRequired ? (hasSponsor ? normalizedSponsorName : "") : sponsorName,
+        sponsorPhoneDigits: recoveryRequired
+          ? hasSponsor
+            ? sponsorPhoneDigits
+            : ""
+          : sponsorPhoneDigits,
+        wizardOnboardingPath,
         wizardSupervisionMode,
         wizardJusticeTrack,
+        wizardCourtProgramName,
+        wizardCourtSupervisorName,
+        wizardCourtRequirementsSummary,
+        wizardCourtDeadlineSummary,
       });
 
       setSetupComplete(true);
@@ -8098,6 +9452,10 @@ export default function App() {
     wizardMeetingSignatureRequired,
     wizardResidentEmergencyContactName,
     wizardResidentEmergencyContactPhone,
+    wizardCourtDeadlineSummary,
+    wizardCourtProgramName,
+    wizardCourtRequirementsSummary,
+    wizardCourtSupervisorName,
     wizardResidentFirstName,
     wizardResidentLastName,
     wizardResidentMoveInDate,
@@ -8106,6 +9464,7 @@ export default function App() {
     wizardRequiresSponsorDetails,
     wizardSelectedSoberHouseRules,
     wizardJusticeTrack,
+    wizardOnboardingPath,
     wizardSponsorKneesSuggested,
     wizardSoberHouseId,
     wizardSupervisionMode,
@@ -8117,6 +9476,7 @@ export default function App() {
     syncHomeGroupBirthdayConfig,
     recoverySubstances,
     ninetyDayGoalTarget,
+    protectedOrgSetupAuthorized,
   ]);
 
   const saveRecoveryTileAndOpenDashboard = useCallback(async () => {
@@ -8256,8 +9616,119 @@ export default function App() {
     return { startDate, endDate };
   }, []);
 
+  const resolveMeetingAttendReminderOffsetMinutes = useCallback(
+    async (
+      meeting: Pick<MeetingRecord, "id" | "lat" | "lng">,
+      scheduledStartAt: Date,
+      originOverride?: LocationStamp | null,
+    ): Promise<number> => {
+      const earlyMinutes =
+        selectedDayPlan.plans[meeting.id]?.earlyMinutes ?? DEFAULT_MEETING_EARLY_MINUTES;
+      const fallbackOffsetMinutes =
+        earlyMinutes > 0 ? Math.max(1, earlyMinutes) : DEFAULT_MEETING_EARLY_MINUTES;
+      const destination = normalizeCoordinates({ lat: meeting.lat, lng: meeting.lng });
+      if (!destination) {
+        return -fallbackOffsetMinutes;
+      }
+
+      const origin =
+        originOverride ?? currentLocationRef.current ?? (await readCurrentLocation(false));
+      if (!origin) {
+        return -fallbackOffsetMinutes;
+      }
+
+      try {
+        const directions = await getDirectionsDuration({
+          origin: { lat: origin.lat, lng: origin.lng },
+          destination,
+          arrivalTime: scheduledStartAt,
+        });
+        const leavePlan = buildLeaveTimePlan({
+          meetingStartAt: scheduledStartAt,
+          earlyMinutes,
+          travelDurationSeconds: directions.durationSeconds,
+        });
+        if (leavePlan.notifyImmediately) {
+          return 0;
+        }
+        const offsetMinutes = Math.round(
+          (scheduledStartAt.getTime() - leavePlan.leaveAt.getTime()) / 60_000,
+        );
+        if (!Number.isFinite(offsetMinutes) || offsetMinutes <= 0) {
+          return -fallbackOffsetMinutes;
+        }
+        return -Math.min(7 * 24 * 60, offsetMinutes);
+      } catch (error) {
+        console.log("[calendar] attend reminder fallback", {
+          meetingId: meeting.id,
+          message: formatError(error),
+        });
+        return -fallbackOffsetMinutes;
+      }
+    },
+    [readCurrentLocation, selectedDayPlan.plans],
+  );
+
+  const syncMeetingAttendCalendarEvent = useCallback(
+    async ({
+      meeting,
+      scheduledStartAt,
+      existingEventId,
+      originOverride,
+      endDate,
+      notePrefix,
+    }: {
+      meeting: Pick<
+        MeetingRecord,
+        "id" | "name" | "address" | "format" | "openness" | "lat" | "lng"
+      >;
+      scheduledStartAt: Date;
+      existingEventId: string | null;
+      originOverride?: LocationStamp | null;
+      endDate?: Date;
+      notePrefix: string;
+    }): Promise<{
+      saved: boolean;
+      eventId: string | null;
+      errorCode: "none" | "permission" | "unavailable";
+    }> => {
+      const reminderOffsetMinutes = await resolveMeetingAttendReminderOffsetMinutes(
+        meeting,
+        scheduledStartAt,
+        originOverride,
+      );
+      const meetingLocation =
+        meeting.address.trim().length > 0 ? meeting.address.trim() : meeting.name;
+      const notes = [
+        notePrefix,
+        meeting.format ? `Format: ${meeting.format.replace("_", " ")}` : null,
+        meeting.openness && meeting.openness !== "UNKNOWN" ? `Openness: ${meeting.openness}` : null,
+        meeting.address.trim().length > 0 ? `Address: ${meeting.address.trim()}` : null,
+        "Added by Sober² to help you get there on time.",
+      ]
+        .filter((entry): entry is string => Boolean(entry && entry.trim().length > 0))
+        .join("\n");
+
+      return upsertNativeCalendarEvent(existingEventId, {
+        title: `AA/NA Meeting: ${meeting.name}`,
+        startDate: scheduledStartAt,
+        endDate:
+          endDate && endDate > scheduledStartAt
+            ? endDate
+            : new Date(scheduledStartAt.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000),
+        location: meetingLocation,
+        notes,
+        alarms: [{ relativeOffset: reminderOffsetMinutes }],
+      });
+    },
+    [resolveMeetingAttendReminderOffsetMinutes, upsertNativeCalendarEvent],
+  );
+
   const attachCalendarEventToAttendance = useCallback(
     async (recordId: string): Promise<boolean> => {
+      console.log("[calendar] attendance flow entered", {
+        recordId,
+      });
       if (!calendarRuntimeEnabled) {
         setAttendanceStatus("Calendar sync is unavailable in this build.");
         return false;
@@ -8280,27 +9751,37 @@ export default function App() {
 
       let existingEventId = sourceRecord.calendarEventId ?? null;
       const window = getScheduledWindowForAttendance(sourceRecord);
-      const result = await upsertNativeCalendarEvent(existingEventId, {
-        title: `AA/NA Meeting - ${sourceRecord.meetingName}`,
-        startDate: window.startDate,
+      const resolvedMeeting = {
+        id: sourceRecord.meetingId,
+        name: sourceRecord.meetingName,
+        address: sourceRecord.meetingAddress,
+        format: sourceRecord.meetingFormat ?? "IN_PERSON",
+        openness: "UNKNOWN",
+        lat: sourceRecord.meetingLat ?? null,
+        lng: sourceRecord.meetingLng ?? null,
+      } satisfies Pick<
+        MeetingRecord,
+        "id" | "name" | "address" | "format" | "openness" | "lat" | "lng"
+      >;
+      const result = await syncMeetingAttendCalendarEvent({
+        meeting: resolvedMeeting,
+        scheduledStartAt: window.startDate,
+        existingEventId,
+        notePrefix:
+          (sourceRecord.requiresSignature ?? meetingSignatureRequired)
+            ? "Signature required. Planned attendance added by Sober²."
+            : "Planned attendance added by Sober².",
         endDate:
           window.endDate > window.startDate
             ? window.endDate
             : new Date(window.startDate.getTime() + DEFAULT_MEETING_DURATION_MINUTES * 60_000),
-        location:
-          sourceRecord.meetingAddress && sourceRecord.meetingAddress.trim().length > 0
-            ? sourceRecord.meetingAddress
-            : undefined,
-        notes:
-          (sourceRecord.requiresSignature ?? meetingSignatureRequired)
-            ? "Signature required. Added by Sober AI."
-            : "Attendance added by Sober AI.",
-        alarms: [{ relativeOffset: -10 }],
       });
       if (!result.saved) {
         if (result.errorCode === "permission") {
           setAttendanceStatus(
-            "Calendar permission is required before attended meetings can be auto-added.",
+            calendarPermissionBlockedRef.current
+              ? "Calendar access is off. Open Settings to enable attended-meeting calendar sync."
+              : "Calendar permission is required before attended meetings can be auto-added.",
           );
         } else {
           setAttendanceStatus("Could not sync the attended meeting to Calendar.");
@@ -8324,7 +9805,7 @@ export default function App() {
       getScheduledWindowForAttendance,
       calendarStartupPolicy.allowAutomaticSync,
       meetingSignatureRequired,
-      upsertNativeCalendarEvent,
+      syncMeetingAttendCalendarEvent,
       upsertAttendanceRecord,
     ],
   );
@@ -8383,7 +9864,9 @@ export default function App() {
         const hasNotificationPermission = await ensureNotificationPermission();
         if (!hasNotificationPermission) {
           setAttendanceStatus(
-            "Added to Calendar. Notification permission denied for leave alerts.",
+            notificationPermissionBlockedRef.current
+              ? "Added to Calendar. Notifications are off. Open Settings to enable leave alerts."
+              : "Added to Calendar. Notification permission denied for leave alerts.",
           );
           return;
         }
@@ -8561,7 +10044,7 @@ export default function App() {
           chairName: null,
           chairRole: null,
           signatureCapturedAtIso: null,
-          calendarEventId: null,
+          calendarEventId: options?.automationPlan?.calendarEventId ?? null,
           leaveNotificationId: null,
           leaveNotificationAtIso: null,
           requiresSignature: meetingSignatureRequired,
@@ -9160,19 +10643,33 @@ export default function App() {
     () => ({
       appEnv: resolvedAppEnv,
       apiUrl,
+      apiBackendSelection: configuredApiBackendSelection as ApiBackendSelection,
+      localApiOverrideActive,
       appVersion,
       buildNumber,
       timeZone: deviceTimeZone,
       devAuthUserId: configuredDevAuthUserId,
       hasAuthHeader: Boolean(authHeader),
+      authMode: authModeLabel,
+      currentUserId: currentAccessUserId,
+      currentIdentity: currentAccessIdentityLabel,
+      currentTenantId: currentAccessTenantId,
+      backendRoles: currentAccessRoles,
     }),
     [
       apiUrl,
+      authModeLabel,
       appVersion,
       authHeader,
       buildNumber,
+      configuredApiBackendSelection,
       configuredDevAuthUserId,
+      currentAccessIdentityLabel,
+      currentAccessRoles,
+      currentAccessTenantId,
+      currentAccessUserId,
       deviceTimeZone,
+      localApiOverrideActive,
       resolvedAppEnv,
     ],
   );
@@ -9189,6 +10686,15 @@ export default function App() {
     }),
     [lastMeetingsApiEvent],
   );
+
+  useEffect(() => {
+    console.log("[startup] api environment", {
+      apiUrl,
+      apiBackendSelection: configuredApiBackendSelection,
+      localApiOverrideActive,
+      authMode: authModeLabel,
+    });
+  }, [apiUrl, authModeLabel, configuredApiBackendSelection, localApiOverrideActive]);
 
   const diagnosticsLocationStatus = useMemo<DiagnosticsLocationStatus>(
     () => ({
@@ -9497,7 +11003,10 @@ export default function App() {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX}.pdf`;
       const { uri, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
-        { participantName: devUserDisplayName },
+        {
+          participantName: devUserDisplayName,
+          serviceCommitments: attendanceSlipServiceCommitmentsForExport,
+        },
         { fileName },
       );
       await settleBeforePdfShare();
@@ -9526,6 +11035,7 @@ export default function App() {
     }
   }, [
     activeAttendance,
+    attendanceSlipServiceCommitmentsForExport,
     devUserDisplayName,
     logSafeExportFailure,
     recordLastExportAttempt,
@@ -9601,7 +11111,10 @@ export default function App() {
       const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - Selected.pdf`;
       const { uri, uris, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
         payloadRecords,
-        { participantName: devUserDisplayName },
+        {
+          participantName: devUserDisplayName,
+          serviceCommitments: attendanceSlipServiceCommitmentsForExport,
+        },
         {
           fileName,
           onProgress: ({ chunkIndex, chunkCount }) => {
@@ -9643,6 +11156,7 @@ export default function App() {
     }
   }, [
     attendanceRecordsForView,
+    attendanceSlipServiceCommitmentsForExport,
     selectedAttendanceIds,
     logSafeExportFailure,
     setAttendanceExportProgressLabel,
@@ -9693,7 +11207,10 @@ export default function App() {
         const fileName = `${ATTENDANCE_SLIP_PDF_FILE_NAME_PREFIX} - ${label}.pdf`;
         const { uri, uris, diagnostics } = await attendanceSlipPdf.generateAttendanceSlipPdf(
           payloadRecords,
-          { participantName: devUserDisplayName },
+          {
+            participantName: devUserDisplayName,
+            serviceCommitments: attendanceSlipServiceCommitmentsForExport,
+          },
           {
             fileName,
             onProgress: ({ chunkIndex, chunkCount }) => {
@@ -9736,6 +11253,7 @@ export default function App() {
     },
     [
       attendanceRecords,
+      attendanceSlipServiceCommitmentsForExport,
       devUserDisplayName,
       logSafeExportFailure,
       recordLastExportAttempt,
@@ -9926,15 +11444,13 @@ export default function App() {
   );
 
   const openHomeGroupBirthdayPrompt = useCallback(
-    (selection: HomeGroupSelection, source: HomeGroupBirthdayPromptSource) => {
+    (selection: HomeGroupSelection) => {
       applyHomeGroupSelection(selection);
       setWizardHasHomeGroup(true);
-      setHomeGroupBirthdayPromptSource(source);
       setHomeGroupBirthdayPromptOptIn(homeGroupBirthdayOptIn);
       setHomeGroupBirthdayPromptFirstName(
         homeGroupBirthdayFirstName || devUserDisplayName.trim().split(" ").slice(0, 1).join(" "),
       );
-      setHomeGroupBirthdayPromptLastName(homeGroupBirthdayLastName);
       setShowHomeGroupBirthdayPrompt(true);
       setHomeGroupBirthdayStatus(null);
     },
@@ -9942,7 +11458,6 @@ export default function App() {
       applyHomeGroupSelection,
       devUserDisplayName,
       homeGroupBirthdayFirstName,
-      homeGroupBirthdayLastName,
       homeGroupBirthdayOptIn,
     ],
   );
@@ -9983,15 +11498,12 @@ export default function App() {
           nextMeeting: meeting,
         } as HomeGroupWeekOption);
 
-      openHomeGroupBirthdayPrompt(
-        {
-          key: matchingOption.key,
-          name: matchingOption.name,
-          meetingIds: matchingOption.meetings.map((entry) => entry.id),
-          primaryMeetingId: meeting.id,
-        },
-        "meeting-detail",
-      );
+      openHomeGroupBirthdayPrompt({
+        key: matchingOption.key,
+        name: matchingOption.name,
+        meetingIds: matchingOption.meetings.map((entry) => entry.id),
+        primaryMeetingId: meeting.id,
+      });
     },
     [
       clearHomeGroupSelection,
@@ -10004,16 +11516,15 @@ export default function App() {
 
   const closeHomeGroupBirthdayPrompt = useCallback(() => {
     setShowHomeGroupBirthdayPrompt(false);
-    setHomeGroupBirthdayPromptSource(null);
   }, []);
 
-  const announceHomeGroupBirthdayPromptFallback = useCallback((message: string) => {
+  const announceHomeGroupBirthdayPromptFallback = useCallback((title: string, message: string) => {
     if (Platform.OS === "android") {
       ToastAndroid.show(message, ToastAndroid.LONG);
       return;
     }
 
-    Alert.alert("Home Group Saved", message);
+    Alert.alert(title, message);
   }, []);
 
   const saveHomeGroupBirthdayPrompt = useCallback(async () => {
@@ -10024,9 +11535,9 @@ export default function App() {
     }
 
     const nextFirstName = homeGroupBirthdayPromptFirstName.trim();
-    const nextLastName = homeGroupBirthdayPromptLastName.trim();
+    const nextLastName = "";
     if (homeGroupBirthdayPromptOptIn && nextFirstName.length === 0) {
-      setHomeGroupBirthdayStatus("First name is required to join home group birthdays.");
+      setHomeGroupBirthdayStatus("First name is required.");
       return;
     }
 
@@ -10045,6 +11556,7 @@ export default function App() {
       );
       closeHomeGroupBirthdayPrompt();
       announceHomeGroupBirthdayPromptFallback(
+        "Home Group Saved",
         "Home group saved. Add your sobriety date in Recovery Settings to turn on birthday recognition.",
       );
       return;
@@ -10064,22 +11576,28 @@ export default function App() {
       setHomeGroupBirthdayFirstName(nextFirstName);
       setHomeGroupBirthdayLastName(nextLastName);
       setHomeGroupBirthdayStatus(
-        "Home group saved. Birthday recognition could not be synced yet. Update it later in Recovery Settings.",
+        "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings.",
       );
       closeHomeGroupBirthdayPrompt();
       announceHomeGroupBirthdayPromptFallback(
-        "Home group saved. Birthday recognition could not be synced yet. Update it later in Recovery Settings.",
+        "Home Group Saved",
+        "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings.",
       );
       return;
     }
 
     closeHomeGroupBirthdayPrompt();
+    announceHomeGroupBirthdayPromptFallback(
+      "Home Group Saved",
+      homeGroupBirthdayPromptOptIn
+        ? "Your home group and birthday recognition settings were saved."
+        : "Your home group was saved without birthday recognition.",
+    );
   }, [
     announceHomeGroupBirthdayPromptFallback,
     closeHomeGroupBirthdayPrompt,
     currentHomeGroupSelection,
     homeGroupBirthdayPromptFirstName,
-    homeGroupBirthdayPromptLastName,
     homeGroupBirthdayPromptOptIn,
     sobrietyDateIso,
     syncHomeGroupBirthdayConfig,
@@ -10093,7 +11611,7 @@ export default function App() {
     }
 
     const nextFirstName = homeGroupBirthdayPromptFirstName.trim();
-    const nextLastName = homeGroupBirthdayPromptLastName.trim();
+    const nextLastName = "";
     setHomeGroupBirthdayPromptOptIn(false);
     setHomeGroupBirthdayOptIn(false);
     setHomeGroupBirthdayFirstName(nextFirstName);
@@ -10105,35 +11623,78 @@ export default function App() {
     });
     if (!saved) {
       setHomeGroupBirthdayStatus(
-        "Home group saved. Birthday settings could not be synced yet. You can update them later in Recovery Settings.",
+        "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings.",
       );
       closeHomeGroupBirthdayPrompt();
       announceHomeGroupBirthdayPromptFallback(
-        "Home group saved. Birthday settings could not be synced yet. You can update them later in Recovery Settings.",
+        "Home Group Saved",
+        "Your home group was saved. Birthday recognition is unavailable right now. You can update it later in Recovery Settings.",
       );
       return;
     }
 
     closeHomeGroupBirthdayPrompt();
+    announceHomeGroupBirthdayPromptFallback(
+      "Home Group Saved",
+      "Your home group was saved without birthday recognition.",
+    );
   }, [
     announceHomeGroupBirthdayPromptFallback,
     closeHomeGroupBirthdayPrompt,
     currentHomeGroupSelection,
     homeGroupBirthdayPromptFirstName,
-    homeGroupBirthdayPromptLastName,
     syncHomeGroupBirthdayConfig,
+  ]);
+
+  useEffect(() => {
+    if (!showHomeGroupBirthdayPrompt) {
+      homeGroupBirthdayPromptBackdropOpacity.setValue(0);
+      homeGroupBirthdayPromptCardOpacity.setValue(0);
+      homeGroupBirthdayPromptCardScale.setValue(0.96);
+      return;
+    }
+
+    void AccessibilityInfo.announceForAccessibility?.(
+      "Want to join home group birthday recognition?",
+    );
+
+    Animated.parallel([
+      Animated.timing(homeGroupBirthdayPromptBackdropOpacity, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.timing(homeGroupBirthdayPromptCardOpacity, {
+        toValue: 1,
+        duration: 210,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.timing(homeGroupBirthdayPromptCardScale, {
+        toValue: 1,
+        duration: 210,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [
+    homeGroupBirthdayPromptBackdropOpacity,
+    homeGroupBirthdayPromptCardOpacity,
+    homeGroupBirthdayPromptCardScale,
+    showHomeGroupBirthdayPrompt,
   ]);
 
   const saveHomeGroupBirthdayFromSettings = useCallback(async () => {
     if (!currentHomeGroupSelection) {
-      setHomeGroupBirthdayStatus("Choose a home group before saving birthday participation.");
+      setHomeGroupBirthdayStatus("Choose a home group before saving birthday recognition.");
       return;
     }
 
     const nextFirstName = homeGroupBirthdayFirstName.trim();
     const nextLastName = homeGroupBirthdayLastName.trim();
     if (homeGroupBirthdayOptIn && nextFirstName.length === 0) {
-      setHomeGroupBirthdayStatus("First name is required when birthday participation is enabled.");
+      setHomeGroupBirthdayStatus("First name is required.");
       return;
     }
 
@@ -10191,7 +11752,7 @@ export default function App() {
       const announcementKey = buildHomeGroupBirthdayAnnouncementKey({
         homeGroupKey: currentHomeGroupSelection.key,
         todayIso: todayDateKey,
-        celebrantUserIds: announcements.map((announcement) => announcement.userId),
+        celebrantTokens: announcements.map((announcement) => announcement.dedupeToken),
       });
       if (recoveryCelebrationShownByKey[announcementKey]) {
         return;
@@ -10282,11 +11843,18 @@ export default function App() {
         resolveNextMeetingDateForDayOfWeek(meeting.dayOfWeek, nowLocal),
         meeting.startsAtLocal,
       );
+      const existingPlannedEventId =
+        attendanceAutomationPlan?.meetingId === meeting.id &&
+        attendanceAutomationPlan.scheduledStartAtIso === scheduledStart.toISOString()
+          ? (attendanceAutomationPlan.calendarEventId ?? null)
+          : null;
       const nextPlan: AttendanceAutomationPlan = {
         meetingId: meeting.id,
         dateKey: dateKeyForDate(scheduledStart),
         status: "planned",
         plannedAtIso: nowLocal.toISOString(),
+        scheduledStartAtIso: scheduledStart.toISOString(),
+        calendarEventId: existingPlannedEventId,
       };
       setAttendanceAutomationPlan(nextPlan);
       setSelectedMeeting(meeting);
@@ -10330,6 +11898,33 @@ export default function App() {
         }
       }
 
+      if (meetingAutoAddToCalendar) {
+        const calendarResult = await syncMeetingAttendCalendarEvent({
+          meeting,
+          scheduledStartAt: scheduledStart,
+          existingEventId: existingPlannedEventId,
+          originOverride: location,
+          notePrefix: "Planned attendance added by Sober².",
+        });
+        if (calendarResult.saved) {
+          setAttendanceAutomationPlan((current) =>
+            current &&
+            current.meetingId === meeting.id &&
+            current.scheduledStartAtIso === scheduledStart.toISOString()
+              ? {
+                  ...current,
+                  calendarEventId: calendarResult.eventId ?? existingPlannedEventId,
+                }
+              : current,
+          );
+        } else {
+          console.log("[calendar] queued attend event skipped", {
+            meetingId: meeting.id,
+            errorCode: calendarResult.errorCode,
+          });
+        }
+      }
+
       setAttendanceStatus(
         withinStartWindow
           ? `Queued ${meeting.name}. Attendance will start automatically when you enter the meeting geofence.`
@@ -10340,7 +11935,14 @@ export default function App() {
         `${meeting.name} will auto-start when you are at the meeting location and within 30 minutes of the meeting start.`,
       );
     },
-    [activeAttendance, readCurrentLocation, startAttendance],
+    [
+      activeAttendance,
+      attendanceAutomationPlan,
+      meetingAutoAddToCalendar,
+      readCurrentLocation,
+      startAttendance,
+      syncMeetingAttendCalendarEvent,
+    ],
   );
 
   const logUpcomingMeetingFromDashboard = useCallback(
@@ -10618,7 +12220,7 @@ export default function App() {
 
   useEffect(() => {
     const shouldPromptForWizardHomeGroupLocation =
-      bootstrapped && homeScreen === "SETUP" && setupStep === 7 && wizardHasHomeGroup === true;
+      bootstrapped && homeScreen === "SETUP" && setupStep === 8 && wizardHasHomeGroup === true;
 
     if (!shouldPromptForWizardHomeGroupLocation) {
       wizardHomeGroupLocationPromptedRef.current = false;
@@ -10705,6 +12307,35 @@ export default function App() {
 
       if (iosStartupCompatibilityGuardEnabled || recoveredModeFromPreviousCrash) {
         try {
+          const [
+            modeRaw,
+            sponsorUiPrefsRaw,
+            setupCompleteRaw,
+            sobrietyDateRaw,
+            profileRaw,
+            ninetyDayGoalRaw,
+            sponsorEnabledAtRaw,
+          ] = await Promise.all([
+            AsyncStorage.getItem(modeStorage),
+            AsyncStorage.getItem(sponsorUiPrefsStorage),
+            AsyncStorage.getItem(setupCompleteStorage),
+            AsyncStorage.getItem(sobrietyDateStorage),
+            AsyncStorage.getItem(profileStorage),
+            AsyncStorage.getItem(ninetyDayGoalStorage),
+            AsyncStorage.getItem(sponsorEnabledAtStorage),
+          ]);
+          const { hasLocalSponsorProfile } = hydratePersistedRecoverySettings({
+            modeRaw,
+            sponsorUiPrefsRaw,
+            setupCompleteRaw,
+            sobrietyDateRaw,
+            profileRaw,
+            ninetyDayGoalRaw,
+            sponsorEnabledAtRaw,
+          });
+          if (enableSponsorApiSync && !hasLocalSponsorProfile) {
+            await fetchSponsorConfig();
+          }
           await refreshMeetings();
           setMeetingsStatus(
             recoveredModeFromPreviousCrash
@@ -10789,20 +12420,15 @@ export default function App() {
             locationIssue: locationIssueRef.current ?? "none",
           });
         }
-
-        const resolvedMode: RecoveryMode =
-          modeRaw === "A" || modeRaw === "B" || modeRaw === "C" ? modeRaw : "A";
-
-        if (sponsorUiPrefsRaw) {
-          const parsedPrefs = JSON.parse(sponsorUiPrefsRaw) as { leadMinutes?: number };
-          if (
-            parsedPrefs &&
-            typeof parsedPrefs.leadMinutes === "number" &&
-            [0, 5, 10, 30].includes(parsedPrefs.leadMinutes)
-          ) {
-            setSponsorLeadMinutes(parsedPrefs.leadMinutes as SponsorLeadMinutes);
-          }
-        }
+        const { hasLocalSponsorProfile } = hydratePersistedRecoverySettings({
+          modeRaw,
+          sponsorUiPrefsRaw,
+          setupCompleteRaw,
+          sobrietyDateRaw,
+          profileRaw,
+          ninetyDayGoalRaw,
+          sponsorEnabledAtRaw,
+        });
 
         if (attendanceRaw) {
           if (attendanceRaw.length > MAX_BOOTSTRAP_ATTENDANCE_RAW_CHARS) {
@@ -11060,212 +12686,16 @@ export default function App() {
         }
 
         if (planRaw) {
-          const parsedPlans = JSON.parse(planRaw) as MeetingPlansState;
-          if (parsedPlans && typeof parsedPlans === "object") {
-            setMeetingPlansByDate(parsedPlans);
-          }
-        }
-
-        const resolvedSetupComplete = setupCompleteRaw === "true";
-        setSetupComplete(resolvedSetupComplete);
-
-        if (sobrietyDateRaw) {
-          setSobrietyDateIso(sobrietyDateRaw);
-          setSobrietyDateInput(formatIsoToUsDate(sobrietyDateRaw));
-        }
-
-        let hasLocalSponsorProfile = false;
-        if (profileRaw) {
-          const parsedProfile = JSON.parse(profileRaw) as {
-            radiusMiles?: number;
-            homeGroupMeetingIds?: string[];
-            homeGroupSeriesKey?: string | null;
-            homeGroupName?: string | null;
-            homeGroupBirthdayOptIn?: boolean;
-            homeGroupBirthdayFirstName?: string;
-            homeGroupBirthdayLastName?: string;
-            attendanceAutomationPlan?: AttendanceAutomationPlan | null;
-            sponsorEnabledAtIso?: string | null;
-            ninetyDayGoalTarget?: number;
-            recoverySubstances?: RecoverySubstanceCategory[];
-            meetingSignatureRequired?: boolean;
-            sponsorName?: string;
-            sponsorPhoneDigits?: string;
-            sponsorHour12?: number;
-            sponsorMinute?: number;
-            sponsorMeridiem?: "AM" | "PM";
-            sponsorRepeatPreset?: RepeatPreset;
-            sponsorRepeatDays?: WeekdayCode[];
-            sponsorEnabled?: boolean;
-            sponsorActive?: boolean;
-            sponsorLeadMinutes?: SponsorLeadMinutes;
-            sponsorKneesSuggested?: boolean | null;
-            meetingAutoAddToCalendar?: boolean;
-            wizardSupervisionMode?: SetupSupervisionMode;
-            wizardJusticeTrack?: SetupJusticeTrack;
-          };
-          if (typeof parsedProfile.radiusMiles === "number" && parsedProfile.radiusMiles > 0) {
-            setMeetingRadiusMiles(parsedProfile.radiusMiles);
-          }
-          if (Array.isArray(parsedProfile.homeGroupMeetingIds)) {
-            setHomeGroupMeetingIds(
-              parsedProfile.homeGroupMeetingIds.filter(
-                (entry): entry is string => typeof entry === "string" && entry.length > 0,
-              ),
-            );
-          }
-          if (
-            typeof parsedProfile.homeGroupSeriesKey === "string" ||
-            parsedProfile.homeGroupSeriesKey === null
-          ) {
-            setHomeGroupSeriesKey(parsedProfile.homeGroupSeriesKey ?? null);
-          }
-          if (
-            typeof parsedProfile.homeGroupName === "string" ||
-            parsedProfile.homeGroupName === null
-          ) {
-            setHomeGroupName(parsedProfile.homeGroupName ?? null);
-          }
-          if (typeof parsedProfile.homeGroupBirthdayOptIn === "boolean") {
-            setHomeGroupBirthdayOptIn(parsedProfile.homeGroupBirthdayOptIn);
-          }
-          if (typeof parsedProfile.homeGroupBirthdayFirstName === "string") {
-            setHomeGroupBirthdayFirstName(parsedProfile.homeGroupBirthdayFirstName);
-          }
-          if (typeof parsedProfile.homeGroupBirthdayLastName === "string") {
-            setHomeGroupBirthdayLastName(parsedProfile.homeGroupBirthdayLastName);
-          }
-          if (
-            parsedProfile.attendanceAutomationPlan &&
-            typeof parsedProfile.attendanceAutomationPlan === "object"
-          ) {
-            const candidate = parsedProfile.attendanceAutomationPlan as Record<string, unknown>;
-            if (
-              typeof candidate.meetingId === "string" &&
-              candidate.meetingId.trim().length > 0 &&
-              typeof candidate.dateKey === "string" &&
-              candidate.dateKey.trim().length > 0 &&
-              (candidate.status === "planned" || candidate.status === "eligible_to_start") &&
-              typeof candidate.plannedAtIso === "string" &&
-              candidate.plannedAtIso.trim().length > 0
-            ) {
-              setAttendanceAutomationPlan({
-                meetingId: candidate.meetingId,
-                dateKey: candidate.dateKey,
-                status: candidate.status,
-                plannedAtIso: candidate.plannedAtIso,
-              });
+          try {
+            const parsedPlans = JSON.parse(planRaw) as MeetingPlansState;
+            if (parsedPlans && typeof parsedPlans === "object") {
+              setMeetingPlansByDate(parsedPlans);
             }
-          } else if (parsedProfile.attendanceAutomationPlan === null) {
-            setAttendanceAutomationPlan(null);
-          }
-          if (
-            typeof parsedProfile.sponsorEnabledAtIso === "string" ||
-            parsedProfile.sponsorEnabledAtIso === null
-          ) {
-            setSponsorEnabledAtIso(parsedProfile.sponsorEnabledAtIso ?? null);
-          }
-          if (
-            typeof parsedProfile.ninetyDayGoalTarget === "number" &&
-            Number.isFinite(parsedProfile.ninetyDayGoalTarget)
-          ) {
-            const nextGoal = Math.max(
-              1,
-              Math.min(9999, Math.floor(parsedProfile.ninetyDayGoalTarget)),
-            );
-            setNinetyDayGoalTarget(nextGoal);
-            setNinetyDayGoalInput(String(nextGoal));
-          }
-          if (Array.isArray(parsedProfile.recoverySubstances)) {
-            const normalizedSubstances = normalizeRecoverySubstances(
-              parsedProfile.recoverySubstances,
-            );
-            setRecoverySubstances(normalizedSubstances);
-            setWizardRecoverySubstances(normalizedSubstances);
-          }
-          if (typeof parsedProfile.meetingSignatureRequired === "boolean") {
-            setMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
-            setWizardMeetingSignatureRequired(parsedProfile.meetingSignatureRequired);
-          }
-          if (typeof parsedProfile.sponsorName === "string") {
-            setSponsorName(parsedProfile.sponsorName);
-            hasLocalSponsorProfile =
-              hasLocalSponsorProfile || parsedProfile.sponsorName.trim().length > 0;
-          }
-          if (typeof parsedProfile.sponsorPhoneDigits === "string") {
-            const normalized = normalizePhoneDigits(parsedProfile.sponsorPhoneDigits);
-            setSponsorPhoneDigits(normalized);
-            hasLocalSponsorProfile = hasLocalSponsorProfile || normalized.length > 0;
-          }
-          if (
-            typeof parsedProfile.sponsorHour12 === "number" &&
-            Number.isFinite(parsedProfile.sponsorHour12) &&
-            parsedProfile.sponsorHour12 >= 1 &&
-            parsedProfile.sponsorHour12 <= 12
-          ) {
-            setSponsorHour12(Math.floor(parsedProfile.sponsorHour12));
-          }
-          if (
-            typeof parsedProfile.sponsorMinute === "number" &&
-            Number.isFinite(parsedProfile.sponsorMinute) &&
-            parsedProfile.sponsorMinute >= 0 &&
-            parsedProfile.sponsorMinute <= 59
-          ) {
-            setSponsorMinute(Math.floor(parsedProfile.sponsorMinute));
-          }
-          if (parsedProfile.sponsorMeridiem === "AM" || parsedProfile.sponsorMeridiem === "PM") {
-            setSponsorMeridiem(parsedProfile.sponsorMeridiem);
-          }
-          if (
-            parsedProfile.sponsorRepeatPreset === "WEEKLY" ||
-            parsedProfile.sponsorRepeatPreset === "BIWEEKLY" ||
-            parsedProfile.sponsorRepeatPreset === "MONTHLY"
-          ) {
-            setSponsorRepeatPreset(parsedProfile.sponsorRepeatPreset);
-          }
-          if (Array.isArray(parsedProfile.sponsorRepeatDays)) {
-            const safeDays = parsedProfile.sponsorRepeatDays.filter((day): day is WeekdayCode =>
-              WEEKDAY_CODES.includes(day),
-            );
-            if (safeDays.length > 0) {
-              setSponsorRepeatDays(sortWeekdays(safeDays));
-            }
-          }
-          if (typeof parsedProfile.sponsorEnabled === "boolean") {
-            setSponsorEnabled(parsedProfile.sponsorEnabled);
-          }
-          if (typeof parsedProfile.sponsorActive === "boolean") {
-            setSponsorActive(parsedProfile.sponsorActive);
-          }
-          if (
-            typeof parsedProfile.sponsorLeadMinutes === "number" &&
-            [0, 5, 10, 30].includes(parsedProfile.sponsorLeadMinutes)
-          ) {
-            setSponsorLeadMinutes(parsedProfile.sponsorLeadMinutes as SponsorLeadMinutes);
-          }
-          if (
-            typeof parsedProfile.sponsorKneesSuggested === "boolean" ||
-            parsedProfile.sponsorKneesSuggested === null
-          ) {
-            setSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
-            setWizardSponsorKneesSuggested(parsedProfile.sponsorKneesSuggested ?? null);
-          }
-          if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
-            setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
-          }
-          if (
-            parsedProfile.wizardSupervisionMode === "INDEPENDENT" ||
-            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ||
-            parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-          ) {
-            setWizardSupervisionMode(parsedProfile.wizardSupervisionMode);
-          }
-          if (
-            parsedProfile.wizardJusticeTrack === "NONE" ||
-            parsedProfile.wizardJusticeTrack === "DRUG_COURT" ||
-            parsedProfile.wizardJusticeTrack === "PROBATION_PAROLE"
-          ) {
-            setWizardJusticeTrack(parsedProfile.wizardJusticeTrack);
+          } catch (error) {
+            console.log("[setup-persist] read failure", {
+              key: "meetingPlans",
+              error: formatError(error),
+            });
           }
         }
 
@@ -11273,30 +12703,31 @@ export default function App() {
           await fetchSponsorConfig();
         }
 
-        if (typeof ninetyDayGoalRaw === "string" && ninetyDayGoalRaw.trim().length > 0) {
-          const parsedGoal = Number(ninetyDayGoalRaw);
-          if (Number.isFinite(parsedGoal)) {
-            const nextGoal = Math.max(1, Math.min(9999, Math.floor(parsedGoal)));
-            setNinetyDayGoalTarget(nextGoal);
-            setNinetyDayGoalInput(String(nextGoal));
-          }
-        }
-
-        if (typeof sponsorEnabledAtRaw === "string" && sponsorEnabledAtRaw.trim().length > 0) {
-          setSponsorEnabledAtIso(sponsorEnabledAtRaw);
-        }
-
         if (sponsorCallLogRaw) {
-          const parsedLogs = JSON.parse(sponsorCallLogRaw) as SponsorCallLog[];
-          if (Array.isArray(parsedLogs)) {
-            setSponsorCallLogs(parsedLogs);
+          try {
+            const parsedLogs = JSON.parse(sponsorCallLogRaw) as SponsorCallLog[];
+            if (Array.isArray(parsedLogs)) {
+              setSponsorCallLogs(parsedLogs);
+            }
+          } catch (error) {
+            console.log("[setup-persist] read failure", {
+              key: "sponsorCallLogs",
+              error: formatError(error),
+            });
           }
         }
 
         if (meetingAttendanceLogRaw) {
-          const parsedLogs = JSON.parse(meetingAttendanceLogRaw) as MeetingAttendanceLog[];
-          if (Array.isArray(parsedLogs)) {
-            setMeetingAttendanceLogs(parsedLogs);
+          try {
+            const parsedLogs = JSON.parse(meetingAttendanceLogRaw) as MeetingAttendanceLog[];
+            if (Array.isArray(parsedLogs)) {
+              setMeetingAttendanceLogs(parsedLogs);
+            }
+          } catch (error) {
+            console.log("[setup-persist] read failure", {
+              key: "meetingAttendanceLogs",
+              error: formatError(error),
+            });
           }
         }
 
@@ -11321,9 +12752,6 @@ export default function App() {
         }
 
         setRoutinesStore(loadedRoutinesStore);
-
-        setMode(resolvedSetupComplete ? "A" : resolvedMode);
-        setHomeScreen(resolvedSetupComplete ? "DASHBOARD" : "SETUP");
         bootstrapCompletedSuccessfully = true;
       } catch {
         setAttendanceStatus("Unable to load local attendance history.");
@@ -11371,6 +12799,7 @@ export default function App() {
     devAuthUserId,
     enableSponsorApiSync,
     fetchSponsorConfig,
+    hydratePersistedRecoverySettings,
     readCurrentLocation,
     refreshMeetings,
     sanitizeStoredCalendarStateOnLaunch,
@@ -11405,11 +12834,31 @@ export default function App() {
       setWizardOrganizationPrimaryPhone(nextStore.organization?.primaryPhone ?? "");
       setWizardOrganizationPrimaryEmail(nextStore.organization?.primaryEmail ?? "");
       setWizardOrganizationNotes(nextStore.organization?.notes ?? "");
+      setWizardOnboardingPath(
+        inferOnboardingPath({
+          onboardingPath: wizardOnboardingPath,
+          wizardSupervisionMode:
+            role === "HOUSE_RESIDENT"
+              ? "SOBER_HOUSE_RESIDENT"
+              : role === "OWNER_OPERATOR"
+                ? "SOBER_HOUSE_OWNER"
+                : wizardSupervisionMode,
+          wizardJusticeTrack,
+          soberHouseRole: role ?? null,
+        }),
+      );
     })();
     return () => {
       active = false;
     };
-  }, [devAuthUserId, homeScreen, mode]);
+  }, [
+    devAuthUserId,
+    homeScreen,
+    mode,
+    wizardJusticeTrack,
+    wizardOnboardingPath,
+    wizardSupervisionMode,
+  ]);
 
   useEffect(() => {
     if (!bootstrapped || homeScreen !== "DASHBOARD") {
@@ -11468,13 +12917,6 @@ export default function App() {
       setHomeGroupName(selectedHomeGroupOption.name);
     }
   }, [homeGroupName, homeGroupSeriesKey, selectedHomeGroupOption]);
-
-  useEffect(() => {
-    if (!bootstrapped) {
-      return;
-    }
-    void fetchHomeGroupBirthdayConfig();
-  }, [bootstrapped, fetchHomeGroupBirthdayConfig]);
 
   useEffect(() => {
     if (!bootstrapped) {
@@ -11544,6 +12986,7 @@ export default function App() {
         homeGroupBirthdayOptIn,
         homeGroupBirthdayFirstName,
         homeGroupBirthdayLastName,
+        recurringServiceCommitments,
         attendanceAutomationPlan,
         sponsorEnabledAtIso,
         ninetyDayGoalTarget,
@@ -11561,6 +13004,13 @@ export default function App() {
         sponsorLeadMinutes,
         sponsorKneesSuggested,
         meetingAutoAddToCalendar,
+        wizardOnboardingPath,
+        wizardSupervisionMode,
+        wizardJusticeTrack,
+        wizardCourtProgramName,
+        wizardCourtSupervisorName,
+        wizardCourtRequirementsSummary,
+        wizardCourtDeadlineSummary,
       }),
     );
   }, [
@@ -11571,6 +13021,7 @@ export default function App() {
     homeGroupBirthdayOptIn,
     homeGroupName,
     homeGroupSeriesKey,
+    recurringServiceCommitments,
     attendanceAutomationPlan,
     sponsorEnabledAtIso,
     ninetyDayGoalTarget,
@@ -11588,6 +13039,13 @@ export default function App() {
     sponsorLeadMinutes,
     sponsorKneesSuggested,
     meetingAutoAddToCalendar,
+    wizardCourtDeadlineSummary,
+    wizardCourtProgramName,
+    wizardCourtRequirementsSummary,
+    wizardCourtSupervisorName,
+    wizardJusticeTrack,
+    wizardOnboardingPath,
+    wizardSupervisionMode,
     profileStorage,
     bootstrapped,
   ]);
@@ -11624,6 +13082,68 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (
+      !bootstrapped ||
+      !calendarStartupPolicy.allowAutomaticSync ||
+      recurringServiceCommitments.length === 0
+    ) {
+      return;
+    }
+
+    const pending = recurringServiceCommitments.filter((commitment) => {
+      const nextFingerprint = getRecurringServiceCommitmentCalendarFingerprint(commitment);
+      return (
+        !commitment.calendarEventId ||
+        !commitment.calendarSyncFingerprint ||
+        commitment.calendarSyncFingerprint !== nextFingerprint
+      );
+    });
+
+    if (pending.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const syncedCommitments: RecurringServiceCommitment[] = [];
+      for (const commitment of pending) {
+        const result = await syncRecurringServiceCommitmentCalendar(commitment, {
+          allowPermissionPrompt: false,
+          reason: "reconcile",
+        });
+        if (cancelled || !result.saved) {
+          continue;
+        }
+        syncedCommitments.push(result.commitment);
+      }
+
+      if (cancelled || syncedCommitments.length === 0) {
+        return;
+      }
+
+      console.log("[calendar] recurring service commitments synced", {
+        count: syncedCommitments.length,
+        reason: "reconcile",
+      });
+      setRecurringServiceCommitments((current) =>
+        syncedCommitments.reduce(
+          (next, commitment) => upsertRecurringServiceCommitmentInList(next, commitment),
+          current,
+        ),
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    bootstrapped,
+    calendarStartupPolicy.allowAutomaticSync,
+    recurringServiceCommitments,
+    syncRecurringServiceCommitmentCalendar,
+  ]);
+
+  useEffect(() => {
     void checkHomeGroupBirthdayAnnouncements();
   }, [checkHomeGroupBirthdayAnnouncements, homeGroupBirthdayResumeTick]);
 
@@ -11653,7 +13173,7 @@ export default function App() {
   }, [meetingRadiusMiles]);
 
   useEffect(() => {
-    if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 6) {
+    if (!bootstrapped || homeScreen !== "SETUP" || setupStep !== 7) {
       setupStep4RefreshLocationKeyRef.current = null;
       return;
     }
@@ -12248,11 +13768,7 @@ export default function App() {
   }
 
   function openSponsorTimePickerFallback() {
-    setSponsorTimeDraft({
-      hour12: sponsorHour12,
-      minute: sponsorMinute,
-      meridiem: sponsorMeridiem,
-    });
+    setSponsorTimeDraft(sponsorTimeDate);
     setIsSponsorTimePickerVisible(true);
   }
 
@@ -12284,9 +13800,7 @@ export default function App() {
 
   function confirmSponsorTimePicker() {
     if (sponsorTimeDraft) {
-      setSponsorHour12(sponsorTimeDraft.hour12);
-      setSponsorMinute(sponsorTimeDraft.minute);
-      setSponsorMeridiem(sponsorTimeDraft.meridiem);
+      applySponsorTimeFromDate(sponsorTimeDraft);
     }
     closeSponsorTimePicker();
   }
@@ -12297,6 +13811,102 @@ export default function App() {
         <Text style={styles.label}>Sponsor call time</Text>
         <Pressable style={styles.timeFieldButton} onPress={openSponsorTimePicker}>
           <Text style={styles.timeFieldValue}>{sponsorTimeLabel}</Text>
+          <Text style={styles.timeFieldHelper}>Tap to change</Text>
+        </Pressable>
+        {options?.helperText ? <Text style={styles.sectionMeta}>{options.helperText}</Text> : null}
+      </>
+    );
+  }
+
+  function defaultServiceCommitmentTimeDate(field: ServiceCommitmentTimeField): Date {
+    const explicitValue = recurringServiceCommitmentDraft[field];
+    if (isValidHhmm(explicitValue.trim())) {
+      const parts = from24HourText(explicitValue.trim());
+      return sponsorTimePartsToDate(parts.hour12, parts.minute, parts.meridiem);
+    }
+
+    if (field === "endsAtLocal" && isValidHhmm(recurringServiceCommitmentDraft.startsAtLocal)) {
+      const parts = from24HourText(recurringServiceCommitmentDraft.startsAtLocal);
+      const date = sponsorTimePartsToDate(parts.hour12, parts.minute, parts.meridiem);
+      date.setHours(date.getHours() + 1);
+      return date;
+    }
+
+    return sponsorTimePartsToDate(field === "startsAtLocal" ? 9 : 10, 0, "AM");
+  }
+
+  function applyServiceCommitmentTimeToDraft(field: ServiceCommitmentTimeField, value: Date) {
+    const next = sponsorTimeDateToParts(value);
+    const nextHhmm = to24HourText(next.hour12, next.minute, next.meridiem);
+    setRecurringServiceCommitmentDraft((current) => ({
+      ...current,
+      [field]: nextHhmm,
+    }));
+  }
+
+  function closeServiceCommitmentTimePicker() {
+    setServiceCommitmentTimePicker(null);
+  }
+
+  function confirmServiceCommitmentTimePicker() {
+    if (!serviceCommitmentTimePicker) {
+      return;
+    }
+    applyServiceCommitmentTimeToDraft(
+      serviceCommitmentTimePicker.field,
+      serviceCommitmentTimePicker.value,
+    );
+    closeServiceCommitmentTimePicker();
+  }
+
+  function openServiceCommitmentTimePicker(field: ServiceCommitmentTimeField) {
+    const initialValue = defaultServiceCommitmentTimeDate(field);
+
+    if (Platform.OS === "android") {
+      try {
+        DateTimePickerAndroid.open({
+          mode: "time",
+          is24Hour: false,
+          value: initialValue,
+          onChange: (event, selectedDate) => {
+            if (event.type === "set" && selectedDate) {
+              applyServiceCommitmentTimeToDraft(field, selectedDate);
+            }
+          },
+        });
+      } catch {
+        Alert.alert(
+          "Time picker unavailable",
+          "Use the latest app build if the native time picker cannot open on this device.",
+        );
+      }
+      return;
+    }
+
+    setServiceCommitmentTimePicker({
+      field,
+      value: initialValue,
+    });
+  }
+
+  function renderServiceCommitmentTimeField(
+    field: ServiceCommitmentTimeField,
+    label: string,
+    options?: { helperText?: string },
+  ) {
+    const rawValue = recurringServiceCommitmentDraft[field];
+    const displayValue = isValidHhmm(rawValue.trim())
+      ? formatHhmmForDisplay(rawValue.trim())
+      : "--";
+
+    return (
+      <>
+        <Text style={styles.label}>{label}</Text>
+        <Pressable
+          style={styles.timeFieldButton}
+          onPress={() => openServiceCommitmentTimePicker(field)}
+        >
+          <Text style={styles.timeFieldValue}>{displayValue}</Text>
           <Text style={styles.timeFieldHelper}>Tap to change</Text>
         </Pressable>
         {options?.helperText ? <Text style={styles.sectionMeta}>{options.helperText}</Text> : null}
@@ -12478,667 +14088,977 @@ export default function App() {
           {mode === "A" ? (
             <>
               {homeScreen === "SETUP" ? (
-                <GlassCard style={styles.card} strong>
-                  <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
-                  <Text style={styles.sectionMeta}>Step {setupStep} of 8</Text>
-                  {setupStep === 1 ? (
-                    <>
-                      <Text style={styles.label}>How are you using the app?</Text>
-                      <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardSupervisionMode === "INDEPENDENT" ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardSupervisionMode("INDEPENDENT")}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardSupervisionMode === "INDEPENDENT"
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            Personal recovery
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardSupervisionMode === "SOBER_HOUSE_RESIDENT"
-                              ? styles.chipSelected
-                              : null,
-                          ]}
-                          onPress={() => setWizardSupervisionMode("SOBER_HOUSE_RESIDENT")}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardSupervisionMode === "SOBER_HOUSE_RESIDENT"
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            Sober-house resident
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-                              ? styles.chipSelected
-                              : null,
-                          ]}
-                          onPress={() => setWizardSupervisionMode("SOBER_HOUSE_OWNER")}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardSupervisionMode === "SOBER_HOUSE_OWNER"
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            Sober-house organization admin
-                          </Text>
-                        </Pressable>
-                      </View>
-                      {wizardSupervisionMode === "SOBER_HOUSE_OWNER" ? (
+                showProtectedOrgAccessGate && protectedOrgAccessGateState ? (
+                  <ProtectedOrgAccessGateScreen
+                    gateState={protectedOrgAccessGateState}
+                    statusMessage={serverRoleCheckStatus}
+                    signedInAccountLabel={protectedOrgSignedInAccountLabel}
+                    currentUserId={protectedOrgCurrentUserId}
+                    currentTenantId={protectedOrgCurrentTenantId}
+                    currentEmail={protectedOrgCurrentEmail}
+                    backendRoles={protectedOrgBackendRoles}
+                    authModeLabel={protectedOrgAuthModeLabel}
+                    authModeDetail={protectedOrgAuthModeDetail}
+                    bootstrapSql={protectedOrgBootstrapSql}
+                    devIdentityDraft={devAuthIdentityDraft}
+                    signingIn={protectedOrgAccessChecking}
+                    onSignIn={() => void beginProtectedOrgAccessSignIn()}
+                    onSignOutOrSwitch={signOutProtectedOrgIdentity}
+                    onDevIdentityDraftChange={setDevAuthIdentityDraft}
+                    onApplyDevIdentity={switchProtectedOrgDevIdentity}
+                    onBack={previousSetupStep}
+                    onRequestAccess={requestProtectedOrgAccess}
+                  />
+                ) : (
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
+                    <Text style={styles.sectionMeta}>
+                      Step {setupVisibleStepNumber} of {setupFlowSteps.length}
+                    </Text>
+                    {setupStep === 1 ? (
+                      <>
+                        <Text style={styles.label}>What should Sober² help you with first?</Text>
                         <Text style={styles.sectionMeta}>
-                          Organization admins skip recovery-only setup and continue into
-                          organization bootstrap.
+                          Choose the path that best matches why you're here right now.
                         </Text>
-                      ) : wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ? (
-                        <Text style={styles.sectionMeta}>
-                          Resident setup continues into sober-house placement and inherited house
-                          requirements.
-                        </Text>
-                      ) : (
-                        <>
-                          <Text style={styles.label}>What is your sobriety date?</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={sobrietyDateInput}
-                            onChangeText={(value) =>
-                              setSobrietyDateInput(normalizeUsDateInput(value))
-                            }
-                            placeholder="MM-DD-YYYY"
-                            keyboardType="number-pad"
-                            maxLength={10}
-                          />
-                          <Text style={styles.label}>90-day meeting goal (any number)</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={ninetyDayGoalInput}
-                            onChangeText={(value) =>
-                              setNinetyDayGoalInput(normalizeGoalInput(value))
-                            }
-                            placeholder="90"
-                            keyboardType="number-pad"
-                            maxLength={4}
-                          />
-                        </>
-                      )}
-                    </>
-                  ) : null}
+                        <View style={styles.chipRow}>
+                          {ONBOARDING_PATH_OPTIONS.map((option) => (
+                            <Pressable
+                              key={option.value}
+                              style={[
+                                styles.chip,
+                                wizardOnboardingPath === option.value ? styles.chipSelected : null,
+                              ]}
+                              onPress={() => selectOnboardingPath(option.value)}
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  wizardOnboardingPath === option.value
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                {option.label}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                        {wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
+                          <Text style={styles.sectionMeta}>
+                            This only selects the intended flow. Organization setup stays locked
+                            until the account is signed in and verified by the backend.
+                          </Text>
+                        ) : wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
+                          <Text style={styles.sectionMeta}>
+                            Recovery stays first. Resident setup follows after your recovery
+                            foundation is complete.
+                          </Text>
+                        ) : wizardOnboardingPath === "COURT_PROGRAM" ? (
+                          <Text style={styles.sectionMeta}>
+                            Recovery stays first. Court or program setup is added after recovery is
+                            complete.
+                          </Text>
+                        ) : (
+                          <Text style={styles.sectionMeta}>
+                            Recovery setup stays focused on your daily program and recovery tools.
+                          </Text>
+                        )}
+                      </>
+                    ) : null}
 
-                  {setupStep === 2 ? (
-                    <>
-                      {wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ? (
-                        <>
-                          <Text style={styles.label}>Select your sober house</Text>
-                          <View style={styles.chipRow}>
-                            {soberHouseStore.houses.map((house) => (
+                    {setupStep === 2 ? (
+                      <>
+                        {wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
+                          <>
+                            <Text style={styles.sectionMeta}>
+                              Verified admin access is active for this account. Complete the
+                              organization bootstrap below.
+                            </Text>
+                            <Text style={styles.label}>Organization name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardOrganizationName}
+                              onChangeText={setWizardOrganizationName}
+                              placeholder="Serenity Homes"
+                            />
+                            <Text style={styles.label}>Primary contact name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardOrganizationPrimaryContactName}
+                              onChangeText={setWizardOrganizationPrimaryContactName}
+                              placeholder="Owner / operator"
+                            />
+                            <Text style={styles.label}>Primary phone</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardOrganizationPrimaryPhone}
+                              onChangeText={(value) =>
+                                setWizardOrganizationPrimaryPhone(normalizeUsPhoneInput(value))
+                              }
+                              placeholder="(555) 555-1234"
+                              keyboardType="phone-pad"
+                            />
+                            <Text style={styles.label}>Primary email</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardOrganizationPrimaryEmail}
+                              onChangeText={setWizardOrganizationPrimaryEmail}
+                              placeholder="owner@example.com"
+                              autoCapitalize="none"
+                              keyboardType="email-address"
+                            />
+                            <Text style={styles.label}>Notes</Text>
+                            <TextInput
+                              style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
+                              value={wizardOrganizationNotes}
+                              onChangeText={setWizardOrganizationNotes}
+                              placeholder="Optional organization notes"
+                              multiline
+                            />
+                          </>
+                        ) : (
+                          <>
+                            <Text style={styles.sectionMeta}>
+                              {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT"
+                                ? "Recovery is the foundation for sober-house residents. House-specific setup comes next."
+                                : wizardOnboardingPath === "COURT_PROGRAM"
+                                  ? "Recovery is the foundation for court and program participants. Program-specific setup comes next."
+                                  : "Recovery setup stays focused on your personal program."}
+                            </Text>
+                            <Text style={styles.label}>What is your sobriety date?</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={sobrietyDateInput}
+                              onChangeText={(value) =>
+                                setSobrietyDateInput(normalizeUsDateInput(value))
+                              }
+                              placeholder="MM-DD-YYYY"
+                              keyboardType="number-pad"
+                              maxLength={10}
+                            />
+                            <Text style={styles.label}>90-day meeting goal</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={ninetyDayGoalInput}
+                              onChangeText={(value) =>
+                                setNinetyDayGoalInput(normalizeGoalInput(value))
+                              }
+                              placeholder="90"
+                              keyboardType="number-pad"
+                              maxLength={4}
+                            />
+                            <Text style={styles.label}>
+                              Which substances are part of your recovery?
+                            </Text>
+                            <Text style={styles.sectionMeta}>
+                              Select all that apply so the Mental and Physical Recovery gauges can
+                              estimate healing trends over time.
+                            </Text>
+                            <View style={styles.chipRow}>
+                              {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
+                                const selected = wizardRecoverySubstances.includes(option.value);
+                                return (
+                                  <Pressable
+                                    key={option.value}
+                                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                                    onPress={() =>
+                                      toggleRecoverySubstanceSelection(option.value, "wizard")
+                                    }
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.chipText,
+                                        selected ? styles.chipTextSelected : null,
+                                      ]}
+                                    >
+                                      {option.label}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                            <Text style={styles.sectionMeta}>
+                              You can update this later in Recovery Settings.
+                            </Text>
+                          </>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 3 ? (
+                      <>
+                        <Text style={styles.label}>Do you have a sponsor?</Text>
+                        <View style={styles.chipRow}>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardHasSponsor === true ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setWizardHasSponsor(true)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardHasSponsor === true ? styles.chipTextSelected : null,
+                              ]}
+                            >
+                              Yes
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardHasSponsor === false ? styles.chipSelected : null,
+                              wizardRequiresSponsorDetails ? styles.modeChipDisabled : null,
+                            ]}
+                            onPress={() => {
+                              if (wizardRequiresSponsorDetails) {
+                                return;
+                              }
+                              setWizardHasSponsor(false);
+                            }}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardHasSponsor === false ? styles.chipTextSelected : null,
+                              ]}
+                            >
+                              No
+                            </Text>
+                          </Pressable>
+                        </View>
+                        {wizardRequiresSponsorDetails ? (
+                          <Text style={styles.sectionMeta}>
+                            Your sober house requires sponsor details, so this section is locked on.
+                          </Text>
+                        ) : null}
+                        {wizardHasSponsor ? (
+                          <>
+                            <Text style={styles.label}>Name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={sponsorName}
+                              onChangeText={setSponsorName}
+                              placeholder="Sponsor name"
+                            />
+                            <Text style={styles.label}>Phone #</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={formatUsPhoneDisplay(sponsorPhoneDigits)}
+                              onChangeText={(value) =>
+                                setSponsorPhoneDigits(
+                                  normalizePhoneDigits(normalizeUsPhoneInput(value)),
+                                )
+                              }
+                              keyboardType="phone-pad"
+                              placeholder="(555) 555-1234"
+                            />
+                          </>
+                        ) : null}
+                      </>
+                    ) : null}
+
+                    {setupStep === 4 ? (
+                      <>
+                        {wizardHasSponsor ? (
+                          <>
+                            <Text style={styles.label}>
+                              Does your sponsor suggest you pray on your knees?
+                            </Text>
+                            <View style={styles.chipRow}>
                               <Pressable
-                                key={house.id}
                                 style={[
                                   styles.chip,
-                                  wizardSoberHouseId === house.id ? styles.chipSelected : null,
+                                  wizardSponsorKneesSuggested === true ? styles.chipSelected : null,
                                 ]}
-                                onPress={() => setWizardSoberHouseId(house.id)}
+                                onPress={() => setWizardSponsorKneesSuggested(true)}
                               >
                                 <Text
                                   style={[
                                     styles.chipText,
-                                    wizardSoberHouseId === house.id
+                                    wizardSponsorKneesSuggested === true
                                       ? styles.chipTextSelected
                                       : null,
                                   ]}
                                 >
-                                  {house.name}
+                                  Yes
                                 </Text>
                               </Pressable>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardSponsorKneesSuggested === false
+                                    ? styles.chipSelected
+                                    : null,
+                                ]}
+                                onPress={() => setWizardSponsorKneesSuggested(false)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardSponsorKneesSuggested === false
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  No
+                                </Text>
+                              </Pressable>
+                            </View>
+                            <Text style={styles.sectionMeta}>
+                              This controls whether the On knees checklist toggle appears in daily
+                              reading flows.
+                            </Text>
+                          </>
+                        ) : (
+                          <Text style={styles.sectionMeta}>
+                            Sponsor is disabled for this setup.
+                          </Text>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 5 ? (
+                      <>
+                        {wizardHasSponsor ? (
+                          <>
+                            {renderSponsorTimeField({
+                              helperText:
+                                "Next step configures calendar notifications and alerts for this call time.",
+                            })}
+                          </>
+                        ) : (
+                          <Text style={styles.sectionMeta}>
+                            Sponsor is disabled for this setup.
+                          </Text>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 6 ? (
+                      <>
+                        {wizardHasSponsor ? (
+                          <>
+                            <Text style={styles.label}>
+                              Do you want calendar notifications and alerts for your sponsor call
+                              time?
+                            </Text>
+                            <View style={styles.chipRow}>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardWantsReminders === true ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => setWizardWantsReminders(true)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardWantsReminders === true ? styles.chipTextSelected : null,
+                                  ]}
+                                >
+                                  Yes
+                                </Text>
+                              </Pressable>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardWantsReminders === false ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => setWizardWantsReminders(false)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardWantsReminders === false ? styles.chipTextSelected : null,
+                                  ]}
+                                >
+                                  No
+                                </Text>
+                              </Pressable>
+                            </View>
+
+                            {wizardWantsReminders ? (
+                              <>
+                                <Text style={styles.label}>Frequency</Text>
+                                <View style={styles.chipRow}>
+                                  {SPONSOR_REPEAT_OPTIONS.map((option) => (
+                                    <Pressable
+                                      key={option.value}
+                                      style={[
+                                        styles.chip,
+                                        sponsorRepeatPreset === option.value
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
+                                      onPress={() => setSponsorRepeatPreset(option.value)}
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          sponsorRepeatPreset === option.value
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {option.label}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+
+                                {sponsorRepeatPreset !== "MONTHLY" ? (
+                                  <>
+                                    <Text style={styles.label}>Day of week</Text>
+                                    <View style={styles.chipRow}>
+                                      {WEEKDAY_OPTIONS.map((day) => (
+                                        <Pressable
+                                          key={day.code}
+                                          style={[
+                                            styles.chip,
+                                            sponsorRepeatDays.includes(day.code)
+                                              ? styles.chipSelected
+                                              : null,
+                                          ]}
+                                          onPress={() => toggleRepeatDay(day.code)}
+                                        >
+                                          <Text
+                                            style={[
+                                              styles.chipText,
+                                              sponsorRepeatDays.includes(day.code)
+                                                ? styles.chipTextSelected
+                                                : null,
+                                            ]}
+                                          >
+                                            {day.label}
+                                          </Text>
+                                        </Pressable>
+                                      ))}
+                                    </View>
+                                  </>
+                                ) : null}
+
+                                <Text style={styles.label}>Reminder option</Text>
+                                <View style={styles.chipRow}>
+                                  {SPONSOR_LEAD_OPTIONS.map((option) => (
+                                    <Pressable
+                                      key={option.value}
+                                      style={[
+                                        styles.chip,
+                                        sponsorLeadMinutes === option.value
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
+                                      onPress={() => setSponsorLeadMinutes(option.value)}
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          sponsorLeadMinutes === option.value
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {option.label}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+                              </>
+                            ) : null}
+                          </>
+                        ) : (
+                          <Text style={styles.sectionMeta}>
+                            Sponsor is disabled, so notifications and alerts are skipped.
+                          </Text>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 7 ? (
+                      <>
+                        <Text style={styles.label}>
+                          {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.title}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.description}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.helperText}
+                        </Text>
+                        {serviceCommitmentStatus ? (
+                          <Text style={styles.sectionMeta}>{serviceCommitmentStatus}</Text>
+                        ) : null}
+
+                        {recurringServiceCommitments.length > 0 ? (
+                          <View style={styles.setupRecurringCommitmentsList}>
+                            {recurringServiceCommitments.map((commitment) => (
+                              <View key={commitment.id} style={styles.setupRecurringCommitmentCard}>
+                                <Text style={styles.meetingName}>{commitment.name}</Text>
+                                <Text style={styles.sectionMeta}>
+                                  {buildRecurringServiceCommitmentSummary(commitment)}
+                                </Text>
+                                {commitment.includeInAttendanceExport ? (
+                                  <Text style={styles.sectionMeta}>
+                                    Included on AA/NA attendance sheet
+                                  </Text>
+                                ) : null}
+                                {commitment.notes ? (
+                                  <Text style={styles.sectionMeta}>{commitment.notes}</Text>
+                                ) : null}
+                                <View style={styles.buttonRow}>
+                                  <AppButton
+                                    title="Edit"
+                                    onPress={() => openRecurringServiceCommitmentEditor(commitment)}
+                                  />
+                                  <View style={styles.buttonSpacer} />
+                                  <AppButton
+                                    title="Delete"
+                                    onPress={() => deleteRecurringServiceCommitment(commitment.id)}
+                                  />
+                                </View>
+                              </View>
                             ))}
                           </View>
+                        ) : (
                           <Text style={styles.sectionMeta}>
-                            House requirements will be inherited into your recovery workflow and
-                            shown on the dashboard.
+                            No recurring commitments added yet. You can skip this step if you do not
+                            have any.
                           </Text>
-                          <Text style={styles.label}>Resident first name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentFirstName}
-                            onChangeText={setWizardResidentFirstName}
-                            placeholder="First name"
-                          />
-                          <Text style={styles.label}>Resident last name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentLastName}
-                            onChangeText={setWizardResidentLastName}
-                            placeholder="Last name"
-                          />
-                          <Text style={styles.label}>Move-in date</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentMoveInDate}
-                            onChangeText={(value) =>
-                              setWizardResidentMoveInDate(normalizeUsDateInput(value))
+                        )}
+
+                        {!recurringServiceCommitmentEditorVisible ? (
+                          <AppButton
+                            title={
+                              recurringServiceCommitments.length > 0
+                                ? "Add another commitment"
+                                : "Add commitment"
                             }
-                            placeholder="MM-DD-YYYY"
-                            autoCapitalize="none"
+                            onPress={() => openRecurringServiceCommitmentEditor()}
                           />
-                          <Text style={styles.label}>Room / bed</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentRoomOrBed}
-                            onChangeText={setWizardResidentRoomOrBed}
-                            placeholder="Room 2B"
-                          />
-                          <Text style={styles.label}>Emergency contact name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentEmergencyContactName}
-                            onChangeText={setWizardResidentEmergencyContactName}
-                            placeholder="Emergency contact"
-                          />
-                          <Text style={styles.label}>Emergency contact phone</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentEmergencyContactPhone}
-                            onChangeText={(value) =>
-                              setWizardResidentEmergencyContactPhone(normalizeUsPhoneInput(value))
-                            }
-                            placeholder="(555) 555-1234"
-                            keyboardType="phone-pad"
-                          />
-                          <Text style={styles.label}>Program phase on entry</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentProgramPhase}
-                            onChangeText={setWizardResidentProgramPhase}
-                            placeholder="Phase 1"
-                          />
-                          {wizardSelectedSoberHouseRules ? (
-                            <Text style={styles.sectionMeta}>
-                              Meetings:{" "}
-                              {wizardSelectedSoberHouseRules.meetings.meetingsRequired
-                                ? `${wizardSelectedSoberHouseRules.meetings.meetingsPerWeek}/week`
-                                : "not required"}{" "}
-                              • Sponsor contact:{" "}
-                              {wizardSelectedSoberHouseRules.sponsorContact.enabled
-                                ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek}/week`
-                                : "not required"}
+                        ) : (
+                          <>
+                            <Text style={styles.label}>
+                              {recurringServiceCommitmentDraft.id
+                                ? "Edit recurring commitment"
+                                : "New recurring commitment"}
                             </Text>
-                          ) : null}
-                        </>
-                      ) : wizardSupervisionMode === "SOBER_HOUSE_OWNER" ? (
-                        <>
-                          <Text style={styles.sectionMeta}>
-                            Owner/operators are routed into organization-scoped sober-house admin
-                            and only manage their own organization, groups, houses, and staff.
-                          </Text>
-                          <Text style={styles.label}>Organization name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardOrganizationName}
-                            onChangeText={setWizardOrganizationName}
-                            placeholder="Serenity Homes"
-                          />
-                          <Text style={styles.label}>Primary contact name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardOrganizationPrimaryContactName}
-                            onChangeText={setWizardOrganizationPrimaryContactName}
-                            placeholder="Owner / operator"
-                          />
-                          <Text style={styles.label}>Primary phone</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardOrganizationPrimaryPhone}
-                            onChangeText={(value) =>
-                              setWizardOrganizationPrimaryPhone(normalizeUsPhoneInput(value))
-                            }
-                            placeholder="(555) 555-1234"
-                            keyboardType="phone-pad"
-                          />
-                          <Text style={styles.label}>Primary email</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardOrganizationPrimaryEmail}
-                            onChangeText={setWizardOrganizationPrimaryEmail}
-                            placeholder="owner@example.com"
-                            autoCapitalize="none"
-                            keyboardType="email-address"
-                          />
-                          <Text style={styles.label}>Notes</Text>
-                          <TextInput
-                            style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
-                            value={wizardOrganizationNotes}
-                            onChangeText={setWizardOrganizationNotes}
-                            placeholder="Optional organization notes"
-                            multiline
-                          />
-                        </>
-                      ) : (
-                        <>
-                          <Text style={styles.sectionMeta}>
-                            Independent recovery mode keeps your personal recovery settings
-                            editable.
-                          </Text>
-                          <Text style={styles.label}>
-                            Which substances are part of your recovery?
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Select all that apply so the Mental and Physical Recovery gauges can
-                            estimate healing trends over time.
-                          </Text>
-                          <View style={styles.chipRow}>
-                            {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
-                              const selected = wizardRecoverySubstances.includes(option.value);
-                              return (
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.name}
+                            </Text>
+                            <TextInput
+                              style={styles.input}
+                              value={recurringServiceCommitmentDraft.name}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  name: value,
+                                }))
+                              }
+                              placeholder="Close Tuesday meeting"
+                            />
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.type}
+                            </Text>
+                            <View style={styles.chipRow}>
+                              {RECURRING_SERVICE_COMMITMENT_TYPE_OPTIONS.map((option) => (
                                 <Pressable
                                   key={option.value}
-                                  style={[styles.chip, selected ? styles.chipSelected : null]}
+                                  style={[
+                                    styles.chip,
+                                    recurringServiceCommitmentDraft.type === option.value
+                                      ? styles.chipSelected
+                                      : null,
+                                  ]}
                                   onPress={() =>
-                                    toggleRecoverySubstanceSelection(option.value, "wizard")
+                                    setRecurringServiceCommitmentDraft((current) => ({
+                                      ...current,
+                                      type: option.value,
+                                    }))
                                   }
                                 >
                                   <Text
                                     style={[
                                       styles.chipText,
-                                      selected ? styles.chipTextSelected : null,
+                                      recurringServiceCommitmentDraft.type === option.value
+                                        ? styles.chipTextSelected
+                                        : null,
                                     ]}
                                   >
                                     {option.label}
                                   </Text>
                                 </Pressable>
-                              );
-                            })}
-                          </View>
-                          <Text style={styles.sectionMeta}>
-                            You can update this later in Recovery Settings.
-                          </Text>
-                        </>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 3 ? (
-                    <>
-                      <Text style={styles.label}>Do you have a sponsor?</Text>
-                      <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardHasSponsor === true ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardHasSponsor(true)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardHasSponsor === true ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            Yes
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardHasSponsor === false ? styles.chipSelected : null,
-                            wizardRequiresSponsorDetails ? styles.modeChipDisabled : null,
-                          ]}
-                          onPress={() => {
-                            if (wizardRequiresSponsorDetails) {
-                              return;
-                            }
-                            setWizardHasSponsor(false);
-                          }}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardHasSponsor === false ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            No
-                          </Text>
-                        </Pressable>
-                      </View>
-                      {wizardRequiresSponsorDetails ? (
-                        <Text style={styles.sectionMeta}>
-                          Your sober house requires sponsor details, so this section is locked on.
-                        </Text>
-                      ) : null}
-                      {wizardHasSponsor ? (
-                        <>
-                          <Text style={styles.label}>Name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={sponsorName}
-                            onChangeText={setSponsorName}
-                            placeholder="Sponsor name"
-                          />
-                          <Text style={styles.label}>Phone #</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={formatUsPhoneDisplay(sponsorPhoneDigits)}
-                            onChangeText={(value) =>
-                              setSponsorPhoneDigits(
-                                normalizePhoneDigits(normalizeUsPhoneInput(value)),
-                              )
-                            }
-                            keyboardType="phone-pad"
-                            placeholder="(555) 555-1234"
-                          />
-                        </>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {setupStep === 4 ? (
-                    <>
-                      {wizardHasSponsor ? (
-                        <>
-                          <Text style={styles.label}>
-                            Does your sponsor suggest you pray on your knees?
-                          </Text>
-                          <View style={styles.chipRow}>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardSponsorKneesSuggested === true ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardSponsorKneesSuggested(true)}
-                            >
-                              <Text
+                              ))}
+                            </View>
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.location}
+                            </Text>
+                            <TextInput
+                              style={styles.input}
+                              value={recurringServiceCommitmentDraft.location}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  location: value,
+                                }))
+                              }
+                              placeholder="Clubhouse or hall"
+                            />
+                            {renderServiceCommitmentTimeField(
+                              "startsAtLocal",
+                              RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.startsAt,
+                              {
+                                helperText: "12-hour time. New commitments default to an AM time.",
+                              },
+                            )}
+                            {renderServiceCommitmentTimeField(
+                              "endsAtLocal",
+                              RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.endsAt,
+                              {
+                                helperText: "Optional. Uses the same native time picker.",
+                              },
+                            )}
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.arriveEarlyBy}
+                            </Text>
+                            <TextInput
+                              style={styles.input}
+                              value={recurringServiceCommitmentDraft.arriveEarlyMinutes}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  arriveEarlyMinutes: value.replace(/\D/g, "").slice(0, 3),
+                                }))
+                              }
+                              placeholder="15"
+                              keyboardType="number-pad"
+                            />
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.stayAfterBy}
+                            </Text>
+                            <TextInput
+                              style={styles.input}
+                              value={recurringServiceCommitmentDraft.stayAfterMinutes}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  stayAfterMinutes: value.replace(/\D/g, "").slice(0, 3),
+                                }))
+                              }
+                              placeholder="30"
+                              keyboardType="number-pad"
+                            />
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.repeats}
+                            </Text>
+                            <View style={styles.chipRow}>
+                              <Pressable
                                 style={[
-                                  styles.chipText,
-                                  wizardSponsorKneesSuggested === true
-                                    ? styles.chipTextSelected
+                                  styles.chip,
+                                  recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY"
+                                    ? styles.chipSelected
                                     : null,
                                 ]}
+                                onPress={() =>
+                                  setRecurringServiceCommitmentDraft((current) => ({
+                                    ...current,
+                                    recurrenceKind: "WEEKLY",
+                                  }))
+                                }
                               >
-                                Yes
-                              </Text>
-                            </Pressable>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardSponsorKneesSuggested === false ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardSponsorKneesSuggested(false)}
-                            >
-                              <Text
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY"
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  Weekly
+                                </Text>
+                              </Pressable>
+                              <Pressable
                                 style={[
-                                  styles.chipText,
-                                  wizardSponsorKneesSuggested === false
-                                    ? styles.chipTextSelected
+                                  styles.chip,
+                                  recurringServiceCommitmentDraft.recurrenceKind ===
+                                  "MONTHLY_ORDINAL"
+                                    ? styles.chipSelected
                                     : null,
                                 ]}
+                                onPress={() =>
+                                  setRecurringServiceCommitmentDraft((current) => ({
+                                    ...current,
+                                    recurrenceKind: "MONTHLY_ORDINAL",
+                                  }))
+                                }
                               >
-                                No
-                              </Text>
-                            </Pressable>
-                          </View>
-                          <Text style={styles.sectionMeta}>
-                            This controls whether the On knees checklist toggle appears in daily
-                            reading flows.
-                          </Text>
-                        </>
-                      ) : (
-                        <Text style={styles.sectionMeta}>Sponsor is disabled for this setup.</Text>
-                      )}
-                    </>
-                  ) : null}
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    recurringServiceCommitmentDraft.recurrenceKind ===
+                                    "MONTHLY_ORDINAL"
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  Monthly ordinal
+                                </Text>
+                              </Pressable>
+                            </View>
 
-                  {setupStep === 5 ? (
-                    <>
-                      {wizardHasSponsor ? (
-                        <>
-                          {renderSponsorTimeField({
-                            helperText:
-                              "Next step configures calendar notifications and alerts for this call time.",
-                          })}
-                        </>
-                      ) : (
-                        <Text style={styles.sectionMeta}>Sponsor is disabled for this setup.</Text>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 6 ? (
-                    <>
-                      {wizardHasSponsor ? (
-                        <>
-                          <Text style={styles.label}>
-                            Do you want calendar notifications and alerts for your sponsor call
-                            time?
-                          </Text>
-                          <View style={styles.chipRow}>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardWantsReminders === true ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardWantsReminders(true)}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardWantsReminders === true ? styles.chipTextSelected : null,
-                                ]}
-                              >
-                                Yes
-                              </Text>
-                            </Pressable>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardWantsReminders === false ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardWantsReminders(false)}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardWantsReminders === false ? styles.chipTextSelected : null,
-                                ]}
-                              >
-                                No
-                              </Text>
-                            </Pressable>
-                          </View>
-
-                          {wizardWantsReminders ? (
-                            <>
-                              <Text style={styles.label}>Frequency</Text>
-                              <View style={styles.chipRow}>
-                                {SPONSOR_REPEAT_OPTIONS.map((option) => (
-                                  <Pressable
-                                    key={option.value}
-                                    style={[
-                                      styles.chip,
-                                      sponsorRepeatPreset === option.value
-                                        ? styles.chipSelected
-                                        : null,
-                                    ]}
-                                    onPress={() => setSponsorRepeatPreset(option.value)}
-                                  >
-                                    <Text
-                                      style={[
-                                        styles.chipText,
-                                        sponsorRepeatPreset === option.value
-                                          ? styles.chipTextSelected
-                                          : null,
-                                      ]}
-                                    >
-                                      {option.label}
-                                    </Text>
-                                  </Pressable>
-                                ))}
-                              </View>
-
-                              {sponsorRepeatPreset !== "MONTHLY" ? (
-                                <>
-                                  <Text style={styles.label}>Day of week</Text>
-                                  <View style={styles.chipRow}>
-                                    {WEEKDAY_OPTIONS.map((day) => (
+                            {recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY" ? (
+                              <>
+                                <Text style={styles.label}>Weekly days</Text>
+                                <View style={styles.chipRow}>
+                                  {WEEKDAY_OPTIONS.map((day) => {
+                                    const selected =
+                                      recurringServiceCommitmentDraft.weeklyDays.includes(day.code);
+                                    return (
                                       <Pressable
-                                        key={day.code}
-                                        style={[
-                                          styles.chip,
-                                          sponsorRepeatDays.includes(day.code)
-                                            ? styles.chipSelected
-                                            : null,
-                                        ]}
-                                        onPress={() => toggleRepeatDay(day.code)}
+                                        key={`service-weekly-${day.code}`}
+                                        style={[styles.chip, selected ? styles.chipSelected : null]}
+                                        onPress={() =>
+                                          setRecurringServiceCommitmentDraft((current) => {
+                                            const nextDays = current.weeklyDays.includes(day.code)
+                                              ? current.weeklyDays.filter(
+                                                  (entry) => entry !== day.code,
+                                                )
+                                              : [...current.weeklyDays, day.code];
+                                            return {
+                                              ...current,
+                                              weeklyDays: nextDays,
+                                            };
+                                          })
+                                        }
                                       >
                                         <Text
                                           style={[
                                             styles.chipText,
-                                            sponsorRepeatDays.includes(day.code)
-                                              ? styles.chipTextSelected
-                                              : null,
+                                            selected ? styles.chipTextSelected : null,
                                           ]}
                                         >
                                           {day.label}
                                         </Text>
                                       </Pressable>
-                                    ))}
-                                  </View>
-                                </>
-                              ) : null}
-
-                              <Text style={styles.label}>Reminder option</Text>
-                              <View style={styles.chipRow}>
-                                {SPONSOR_LEAD_OPTIONS.map((option) => (
-                                  <Pressable
-                                    key={option.value}
-                                    style={[
-                                      styles.chip,
-                                      sponsorLeadMinutes === option.value
-                                        ? styles.chipSelected
-                                        : null,
-                                    ]}
-                                    onPress={() => setSponsorLeadMinutes(option.value)}
-                                  >
-                                    <Text
+                                    );
+                                  })}
+                                </View>
+                              </>
+                            ) : (
+                              <>
+                                <Text style={styles.label}>Ordinal</Text>
+                                <View style={styles.chipRow}>
+                                  {RECURRING_SERVICE_COMMITMENT_ORDINAL_OPTIONS.map((option) => (
+                                    <Pressable
+                                      key={`service-ordinal-${option.label}`}
                                       style={[
-                                        styles.chipText,
-                                        sponsorLeadMinutes === option.value
-                                          ? styles.chipTextSelected
+                                        styles.chip,
+                                        recurringServiceCommitmentDraft.monthlyOrdinal ===
+                                        option.value
+                                          ? styles.chipSelected
                                           : null,
                                       ]}
-                                    >
-                                      {option.label}
-                                    </Text>
-                                  </Pressable>
-                                ))}
-                              </View>
-                            </>
-                          ) : null}
-                        </>
-                      ) : (
-                        <Text style={styles.sectionMeta}>
-                          Sponsor is disabled, so notifications and alerts are skipped.
-                        </Text>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 7 ? (
-                    <>
-                      <Text style={styles.label}>Do you have a home group meeting?</Text>
-                      <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardHasHomeGroup === true ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardHasHomeGroup(true)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardHasHomeGroup === true ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            Yes
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardHasHomeGroup === false ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardHasHomeGroup(false)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardHasHomeGroup === false ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            No
-                          </Text>
-                        </Pressable>
-                      </View>
-
-                      {wizardHasHomeGroup ? (
-                        <>
-                          <Text style={styles.sectionMeta}>
-                            Choose one group from meetings in your area over the next 7 days.
-                          </Text>
-                          {homeGroupWeekOptions.length === 0 ? (
-                            <Text style={styles.sectionMeta}>
-                              No meetings are available in your area for the next week yet.
-                            </Text>
-                          ) : (
-                            <ScrollView
-                              style={styles.setupMeetingListScroll}
-                              contentContainerStyle={styles.setupMeetingListContent}
-                              nestedScrollEnabled
-                              showsVerticalScrollIndicator
-                              keyboardShouldPersistTaps="handled"
-                            >
-                              {homeGroupWeekOptions.map((option) => {
-                                const selected = selectedHomeGroupOption?.key === option.key;
-                                const nextMeeting = option.nextMeeting;
-                                const nextMeetingDayLabel =
-                                  nextMeeting === null
-                                    ? "Later this week"
-                                    : nextMeeting.dayOfWeek === new Date(clockTickMs).getDay()
-                                      ? "Today"
-                                      : (WEEKDAY_SHORT_LABELS[nextMeeting.dayOfWeek] ?? "Next");
-                                return (
-                                  <Pressable
-                                    key={option.key}
-                                    style={[
-                                      styles.meetingCard,
-                                      selected ? styles.homeGroupSelectedCard : null,
-                                    ]}
-                                    onPress={() => {
-                                      if (selected) {
-                                        void clearHomeGroupSelection();
-                                        return;
+                                      onPress={() =>
+                                        setRecurringServiceCommitmentDraft((current) => ({
+                                          ...current,
+                                          monthlyOrdinal: option.value,
+                                        }))
                                       }
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          recurringServiceCommitmentDraft.monthlyOrdinal ===
+                                          option.value
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {option.label}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+                                <Text style={styles.label}>Day</Text>
+                                <View style={styles.chipRow}>
+                                  {WEEKDAY_OPTIONS.map((day) => (
+                                    <Pressable
+                                      key={`service-monthly-${day.code}`}
+                                      style={[
+                                        styles.chip,
+                                        recurringServiceCommitmentDraft.monthlyDay === day.code
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
+                                      onPress={() =>
+                                        setRecurringServiceCommitmentDraft((current) => ({
+                                          ...current,
+                                          monthlyDay: day.code,
+                                        }))
+                                      }
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          recurringServiceCommitmentDraft.monthlyDay === day.code
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {day.label}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+                              </>
+                            )}
 
-                                      openHomeGroupBirthdayPrompt(
-                                        {
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.notes}
+                            </Text>
+                            <TextInput
+                              style={[styles.input, styles.multilineInput]}
+                              value={recurringServiceCommitmentDraft.notes}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  notes: value,
+                                }))
+                              }
+                              placeholder="Optional notes"
+                              multiline
+                            />
+                            <Pressable
+                              style={styles.checkboxRow}
+                              onPress={() =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  includeInAttendanceExport: !current.includeInAttendanceExport,
+                                }))
+                              }
+                            >
+                              <View
+                                style={[
+                                  styles.checkbox,
+                                  recurringServiceCommitmentDraft.includeInAttendanceExport
+                                    ? styles.checkboxChecked
+                                    : null,
+                                ]}
+                              >
+                                {recurringServiceCommitmentDraft.includeInAttendanceExport ? (
+                                  <Text style={styles.checkboxTick}>✓</Text>
+                                ) : null}
+                              </View>
+                              <View style={styles.checkboxBody}>
+                                <Text style={styles.label}>
+                                  {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.exportInclusion}
+                                </Text>
+                                <Text style={styles.sectionMeta}>
+                                  Include this recurring service commitment in attendance slip
+                                  export when you need proof of service or added attendance context.
+                                </Text>
+                              </View>
+                            </Pressable>
+                            <View style={styles.buttonRow}>
+                              <AppButton
+                                title={
+                                  recurringServiceCommitmentDraft.id
+                                    ? "Save changes"
+                                    : "Save commitment"
+                                }
+                                onPress={saveRecurringServiceCommitment}
+                              />
+                              <View style={styles.buttonSpacer} />
+                              <AppButton
+                                title="Cancel"
+                                onPress={cancelRecurringServiceCommitmentEditor}
+                              />
+                            </View>
+                          </>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 8 ? (
+                      <>
+                        <Text style={styles.label}>Do you have a home group meeting?</Text>
+                        <View style={styles.chipRow}>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardHasHomeGroup === true ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setWizardHasHomeGroup(true)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardHasHomeGroup === true ? styles.chipTextSelected : null,
+                              ]}
+                            >
+                              Yes
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardHasHomeGroup === false ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setWizardHasHomeGroup(false)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardHasHomeGroup === false ? styles.chipTextSelected : null,
+                              ]}
+                            >
+                              No
+                            </Text>
+                          </Pressable>
+                        </View>
+
+                        {wizardHasHomeGroup ? (
+                          <>
+                            <Text style={styles.sectionMeta}>
+                              Choose one group from meetings in your area over the next 7 days.
+                            </Text>
+                            {homeGroupWeekOptions.length === 0 ? (
+                              <Text style={styles.sectionMeta}>
+                                No meetings are available in your area for the next week yet.
+                              </Text>
+                            ) : (
+                              <ScrollView
+                                style={styles.setupMeetingListScroll}
+                                contentContainerStyle={styles.setupMeetingListContent}
+                                nestedScrollEnabled
+                                showsVerticalScrollIndicator
+                                keyboardShouldPersistTaps="handled"
+                              >
+                                {homeGroupWeekOptions.map((option) => {
+                                  const selected = selectedHomeGroupOption?.key === option.key;
+                                  const nextMeeting = option.nextMeeting;
+                                  const nextMeetingDayLabel =
+                                    nextMeeting === null
+                                      ? "Later this week"
+                                      : nextMeeting.dayOfWeek === new Date(clockTickMs).getDay()
+                                        ? "Today"
+                                        : (WEEKDAY_SHORT_LABELS[nextMeeting.dayOfWeek] ?? "Next");
+                                  return (
+                                    <Pressable
+                                      key={option.key}
+                                      style={[
+                                        styles.meetingCard,
+                                        selected ? styles.homeGroupSelectedCard : null,
+                                      ]}
+                                      onPress={() => {
+                                        if (selected) {
+                                          void clearHomeGroupSelection();
+                                          return;
+                                        }
+
+                                        openHomeGroupBirthdayPrompt({
                                           key: option.key,
                                           name: option.name,
                                           meetingIds: option.meetings.map((meeting) => meeting.id),
@@ -13146,292 +15066,333 @@ export default function App() {
                                             option.nextMeeting?.id ??
                                             option.meetings[0]?.id ??
                                             null,
-                                        },
-                                        "wizard",
-                                      );
-                                    }}
-                                  >
-                                    <Text style={styles.meetingName}>{option.name}</Text>
-                                    <Text style={styles.sectionMeta}>
-                                      {option.occurrenceCount} meeting
-                                      {option.occurrenceCount === 1 ? "" : "s"} this week •{" "}
-                                      {option.formatSummary}
-                                    </Text>
-                                    <Text style={styles.sectionMeta}>
-                                      Next: {nextMeetingDayLabel}
-                                      {nextMeeting
-                                        ? ` ${formatHhmmForDisplay(nextMeeting.startsAtLocal)}`
-                                        : ""}{" "}
-                                      • {option.areaSummary}
-                                    </Text>
-                                    <Text style={styles.sectionMeta}>
-                                      {meetingDistanceLabel(
-                                        nextMeeting ?? option.meetings[0],
-                                        option.distanceMeters,
-                                        locationPermission,
-                                        locationIssue,
-                                      )}
-                                    </Text>
-                                    <Text style={styles.sectionMeta}>
-                                      {selected
-                                        ? "Selected as home group"
-                                        : "Tap to set as home group"}
-                                    </Text>
-                                  </Pressable>
-                                );
-                              })}
-                            </ScrollView>
-                          )}
-                        </>
-                      ) : null}
-
-                      <Text style={styles.label}>
-                        Are you required to obtain a signature at meetings?
-                      </Text>
-                      <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardMeetingSignatureRequired === true ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardMeetingSignatureRequired(true)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardMeetingSignatureRequired === true
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            Yes
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardMeetingSignatureRequired === false ? styles.chipSelected : null,
-                            wizardMeetingProofLockedByHouse ? styles.modeChipDisabled : null,
-                          ]}
-                          onPress={() => {
-                            if (wizardMeetingProofLockedByHouse) {
-                              return;
-                            }
-                            setWizardMeetingSignatureRequired(false);
-                          }}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardMeetingSignatureRequired === false
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            No
-                          </Text>
-                        </Pressable>
-                      </View>
-                      {wizardMeetingProofLockedByHouse ? (
-                        <Text style={styles.sectionMeta}>
-                          Your sober house requires signature-backed meeting proof, so this stays
-                          locked on.
-                        </Text>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {setupStep === 8 ? (
-                    <>
-                      {wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" ? (
-                        <>
-                          <Text style={styles.label}>Next step</Text>
-                          <Text style={styles.sectionMeta}>
-                            Recovery setup is complete. You will continue into the sober-house
-                            resident wizard for role, requirement, and consent steps.
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Selected house: {wizardSelectedSoberHouse?.name ?? "Not selected"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Resident: {wizardResidentFirstName || "Not set"}{" "}
-                            {wizardResidentLastName || ""}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Move-in: {wizardResidentMoveInDate || "Not set"} • Room/Bed:{" "}
-                            {wizardResidentRoomOrBed || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Emergency contact: {wizardResidentEmergencyContactName || "Not set"} •{" "}
-                            {formatUsPhoneDisplay(wizardResidentEmergencyContactPhone) || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Program phase: {wizardResidentProgramPhase || "Not set"}
-                          </Text>
-                        </>
-                      ) : wizardSupervisionMode === "SOBER_HOUSE_OWNER" ? (
-                        <>
-                          <Text style={styles.label}>Organization admin review</Text>
-                          <Text style={styles.sectionMeta}>
-                            Organization: {wizardOrganizationName || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Primary contact: {wizardOrganizationPrimaryContactName || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Phone:{" "}
-                            {formatUsPhoneDisplay(wizardOrganizationPrimaryPhone) || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Email: {wizardOrganizationPrimaryEmail || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            After finish, sober-house settings will open in organization admin scope
-                            so you can manage your groups, houses, managers, and rules.
-                          </Text>
-                        </>
-                      ) : (
-                        <>
-                          <Text style={styles.label}>
-                            Are you in Drug Court or Probation / Parole supervision?
-                          </Text>
-                          <View style={styles.chipRow}>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardJusticeTrack === "NONE" ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardJusticeTrack("NONE")}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardJusticeTrack === "NONE" ? styles.chipTextSelected : null,
-                                ]}
-                              >
-                                No
-                              </Text>
-                            </Pressable>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardJusticeTrack === "DRUG_COURT" ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardJusticeTrack("DRUG_COURT")}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardJusticeTrack === "DRUG_COURT"
-                                    ? styles.chipTextSelected
-                                    : null,
-                                ]}
-                              >
-                                Drug Court
-                              </Text>
-                            </Pressable>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardJusticeTrack === "PROBATION_PAROLE"
-                                  ? styles.chipSelected
-                                  : null,
-                              ]}
-                              onPress={() => setWizardJusticeTrack("PROBATION_PAROLE")}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardJusticeTrack === "PROBATION_PAROLE"
-                                    ? styles.chipTextSelected
-                                    : null,
-                                ]}
-                              >
-                                Probation / Parole
-                              </Text>
-                            </Pressable>
-                          </View>
-                          <Text style={styles.label}>Review</Text>
-                          <Text style={styles.sectionMeta}>
-                            Sobriety date: {sobrietyDateInput || "Not set"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>90-day goal: {ninetyDayGoalTarget}</Text>
-                          <Text style={styles.sectionMeta}>Supervision: Independent recovery</Text>
-                          <Text style={styles.sectionMeta}>
-                            Recovery profile:{" "}
-                            {wizardRecoverySubstances.length > 0
-                              ? wizardRecoverySubstances
-                                  .map(
-                                    (value) =>
-                                      RECOVERY_SUBSTANCE_OPTIONS.find(
-                                        (option) => option.value === value,
-                                      )?.label ?? value,
-                                  )
-                                  .join(", ")
-                              : "Not personalized yet"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Justice track:{" "}
-                            {wizardJusticeTrack === "NONE"
-                              ? "None"
-                              : wizardJusticeTrack === "DRUG_COURT"
-                                ? "Drug Court"
-                                : "Probation / Parole"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Sponsor: {wizardHasSponsor ? "Enabled" : "Not enabled"}
-                          </Text>
-                          {wizardHasSponsor ? (
-                            <Text style={styles.sectionMeta}>
-                              Sponsor suggests knees prayer:{" "}
-                              {wizardSponsorKneesSuggested === false ? "No" : "Yes"}
-                            </Text>
-                          ) : null}
-                          <Text style={styles.sectionMeta}>
-                            Calendar notifications and alerts:{" "}
-                            {wizardWantsReminders ? "Enabled" : "Disabled"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Home group:{" "}
-                            {homeGroupMeetingIds.length > 0 || homeGroupSeriesKey
-                              ? (selectedHomeGroupOption?.name ??
-                                homeGroupName ??
-                                allMeetings.find((meeting) => meeting.id === homeGroupMeetingIds[0])
-                                  ?.name ??
-                                "Selected")
-                              : "Not selected"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Signature required: {wizardMeetingSignatureRequired ? "Yes" : "No"}
-                          </Text>
-                        </>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupError ? <Text style={styles.errorText}>{setupError}</Text> : null}
-
-                  <View style={styles.buttonRow}>
-                    {setupStep > 1 ? (
-                      <>
-                        <AppButton title="Back" onPress={previousSetupStep} />
-                        <View style={styles.buttonSpacer} />
+                                        });
+                                      }}
+                                    >
+                                      <Text style={styles.meetingName}>{option.name}</Text>
+                                      <Text style={styles.sectionMeta}>
+                                        {option.occurrenceCount} meeting
+                                        {option.occurrenceCount === 1 ? "" : "s"} this week •{" "}
+                                        {option.formatSummary}
+                                      </Text>
+                                      <Text style={styles.sectionMeta}>
+                                        Next: {nextMeetingDayLabel}
+                                        {nextMeeting
+                                          ? ` ${formatHhmmForDisplay(nextMeeting.startsAtLocal)}`
+                                          : ""}{" "}
+                                        • {option.areaSummary}
+                                      </Text>
+                                      <Text style={styles.sectionMeta}>
+                                        {meetingDistanceLabel(
+                                          nextMeeting ?? option.meetings[0],
+                                          option.distanceMeters,
+                                          locationPermission,
+                                          locationIssue,
+                                        )}
+                                      </Text>
+                                      <Text style={styles.sectionMeta}>
+                                        {selected
+                                          ? "Selected as home group"
+                                          : "Tap to set as home group"}
+                                      </Text>
+                                    </Pressable>
+                                  );
+                                })}
+                              </ScrollView>
+                            )}
+                          </>
+                        ) : null}
                       </>
                     ) : null}
-                    {setupStep < 8 ? (
-                      <AppButton title="Next" onPress={() => void nextSetupStep()} />
-                    ) : (
-                      <AppButton
-                        title={setupFinishing ? "Saving..." : "Save & Finish"}
-                        onPress={() => void finishSetup()}
-                        disabled={setupFinishing}
-                      />
-                    )}
-                  </View>
-                </GlassCard>
+
+                    {setupStep === 9 ? (
+                      <>
+                        <Text style={styles.sectionTitle}>Meeting Verification</Text>
+                        <Text style={styles.label}>
+                          Are you required to obtain a signature at meetings?
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          This enables signature capture during meeting attendance when required by
+                          your program, sponsor, court, or house rules.
+                        </Text>
+                        <View style={styles.chipRow}>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardMeetingSignatureRequired === true ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setWizardMeetingSignatureRequired(true)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardMeetingSignatureRequired === true
+                                  ? styles.chipTextSelected
+                                  : null,
+                              ]}
+                            >
+                              Yes
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardMeetingSignatureRequired === false ? styles.chipSelected : null,
+                              wizardMeetingProofLockedByHouse ? styles.modeChipDisabled : null,
+                            ]}
+                            onPress={() => {
+                              if (wizardMeetingProofLockedByHouse) {
+                                return;
+                              }
+                              setWizardMeetingSignatureRequired(false);
+                            }}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardMeetingSignatureRequired === false
+                                  ? styles.chipTextSelected
+                                  : null,
+                              ]}
+                            >
+                              No
+                            </Text>
+                          </Pressable>
+                        </View>
+                        {wizardMeetingProofLockedByHouse ? (
+                          <Text style={styles.sectionMeta}>
+                            Your sober house requires signature-backed meeting proof, so this stays
+                            locked on.
+                          </Text>
+                        ) : null}
+                      </>
+                    ) : null}
+
+                    {setupStep === 10 ? (
+                      <>
+                        {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
+                          <>
+                            <Text style={styles.label}>Select your sober house</Text>
+                            <View style={styles.chipRow}>
+                              {soberHouseStore.houses.map((house) => (
+                                <Pressable
+                                  key={house.id}
+                                  style={[
+                                    styles.chip,
+                                    wizardSoberHouseId === house.id ? styles.chipSelected : null,
+                                  ]}
+                                  onPress={() => setWizardSoberHouseId(house.id)}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.chipText,
+                                      wizardSoberHouseId === house.id
+                                        ? styles.chipTextSelected
+                                        : null,
+                                    ]}
+                                  >
+                                    {house.name}
+                                  </Text>
+                                </Pressable>
+                              ))}
+                            </View>
+                            <Text style={styles.sectionMeta}>
+                              This resident setup only collects participant-facing details and house
+                              requirements.
+                            </Text>
+                            <Text style={styles.label}>Resident first name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentFirstName}
+                              onChangeText={setWizardResidentFirstName}
+                              placeholder="First name"
+                            />
+                            <Text style={styles.label}>Resident last name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentLastName}
+                              onChangeText={setWizardResidentLastName}
+                              placeholder="Last name"
+                            />
+                            <Text style={styles.label}>Move-in date</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentMoveInDate}
+                              onChangeText={(value) =>
+                                setWizardResidentMoveInDate(normalizeUsDateInput(value))
+                              }
+                              placeholder="MM-DD-YYYY"
+                              autoCapitalize="none"
+                            />
+                            <Text style={styles.label}>Room / bed</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentRoomOrBed}
+                              onChangeText={setWizardResidentRoomOrBed}
+                              placeholder="Room 2B"
+                            />
+                            <Text style={styles.label}>Emergency contact name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentEmergencyContactName}
+                              onChangeText={setWizardResidentEmergencyContactName}
+                              placeholder="Emergency contact"
+                            />
+                            <Text style={styles.label}>Emergency contact phone</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentEmergencyContactPhone}
+                              onChangeText={(value) =>
+                                setWizardResidentEmergencyContactPhone(normalizeUsPhoneInput(value))
+                              }
+                              placeholder="(555) 555-1234"
+                              keyboardType="phone-pad"
+                            />
+                            <Text style={styles.label}>Program phase on entry</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentProgramPhase}
+                              onChangeText={setWizardResidentProgramPhase}
+                              placeholder="Phase 1"
+                            />
+                            {wizardSelectedSoberHouseRules ? (
+                              <Text style={styles.sectionMeta}>
+                                Meetings:{" "}
+                                {wizardSelectedSoberHouseRules.meetings.meetingsRequired
+                                  ? `${wizardSelectedSoberHouseRules.meetings.meetingsPerWeek}/week`
+                                  : "not required"}{" "}
+                                • Sponsor contact:{" "}
+                                {wizardSelectedSoberHouseRules.sponsorContact.enabled
+                                  ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek}/week`
+                                  : "not required"}
+                              </Text>
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            <Text style={styles.label}>Select your court or program track</Text>
+                            <Text style={styles.sectionMeta}>
+                              This track selection shapes only the participant-facing setup that
+                              comes next. It does not grant supervision or configuration access.
+                            </Text>
+                            <View style={styles.chipRow}>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardJusticeTrack === "DRUG_COURT" ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => setWizardJusticeTrack("DRUG_COURT")}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardJusticeTrack === "DRUG_COURT"
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  Drug Court
+                                </Text>
+                              </Pressable>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardJusticeTrack === "PROBATION_PAROLE"
+                                    ? styles.chipSelected
+                                    : null,
+                                ]}
+                                onPress={() => setWizardJusticeTrack("PROBATION_PAROLE")}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardJusticeTrack === "PROBATION_PAROLE"
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  Probation / Parole
+                                </Text>
+                              </Pressable>
+                            </View>
+                            <Text style={styles.sectionMeta}>
+                              Selected track:{" "}
+                              {wizardJusticeTrack === "DRUG_COURT"
+                                ? "Drug Court"
+                                : wizardJusticeTrack === "PROBATION_PAROLE"
+                                  ? "Probation / Parole"
+                                  : "Not selected"}
+                            </Text>
+                          </>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 11 ? (
+                      <>
+                        <Text style={styles.label}>Court or program name</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={wizardCourtProgramName}
+                          onChangeText={setWizardCourtProgramName}
+                          placeholder="Program or court name"
+                        />
+                        <Text style={styles.label}>Supervising contact</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={wizardCourtSupervisorName}
+                          onChangeText={setWizardCourtSupervisorName}
+                          placeholder="Officer, case manager, or coordinator"
+                        />
+                        <Text style={styles.label}>Your current requirements</Text>
+                        <TextInput
+                          style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
+                          value={wizardCourtRequirementsSummary}
+                          onChangeText={setWizardCourtRequirementsSummary}
+                          placeholder="Meetings, check-ins, proof requirements, deadlines, or actions to track"
+                          multiline
+                        />
+                        <Text style={styles.label}>Upcoming deadline or check-in notes</Text>
+                        <TextInput
+                          style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
+                          value={wizardCourtDeadlineSummary}
+                          onChangeText={setWizardCourtDeadlineSummary}
+                          placeholder="Next court date, reporting deadline, or weekly focus"
+                          multiline
+                        />
+                        <Text style={styles.sectionMeta}>
+                          This wizard stays participant-facing. Court hierarchy, templates, and
+                          supervisory settings remain restricted to authorized backend-verified
+                          roles.
+                        </Text>
+                      </>
+                    ) : null}
+
+                    {setupError ? <Text style={styles.errorText}>{setupError}</Text> : null}
+
+                    <View style={styles.buttonRow}>
+                      {setupVisibleStepNumber > 1 ? (
+                        <>
+                          <AppButton title="Back" onPress={previousSetupStep} />
+                          <View style={styles.buttonSpacer} />
+                        </>
+                      ) : null}
+                      {setupStep < setupLastStep ? (
+                        <AppButton title="Next" onPress={() => void nextSetupStep()} />
+                      ) : (
+                        <AppButton
+                          title={setupFinishing ? "Saving..." : "Save & Finish"}
+                          onPress={() => void finishSetup()}
+                          disabled={setupFinishing}
+                        />
+                      )}
+                    </View>
+                  </GlassCard>
+                )
               ) : null}
 
               {homeScreen === "DASHBOARD" ? (
+                canManageSoberHouseHierarchy(appAccessRole) &&
                 soberHouseAccessProfile?.role === "OWNER_OPERATOR" ? (
                   <SoberHouseOwnerDashboard
                     store={soberHouseStore}
@@ -13592,6 +15553,22 @@ export default function App() {
                                 : "Required and tracking job search"
                               : "Not required"}
                           </Text>
+                          <Text style={styles.sectionMeta}>
+                            Backend obligations: {backendParticipantObligations.length}
+                          </Text>
+                          <Text style={styles.sectionMeta}>
+                            Open backend violations:{" "}
+                            {
+                              backendParticipantViolations.filter(
+                                (violation) =>
+                                  violation.status === "OPEN" ||
+                                  violation.status === "UNDER_REVIEW",
+                              ).length
+                            }
+                          </Text>
+                          {participantSyncStatus ? (
+                            <Text style={styles.sectionMeta}>{participantSyncStatus}</Text>
+                          ) : null}
                           {soberHouseComplianceSummary?.evaluations.map((evaluation) => (
                             <Text
                               key={evaluation.ruleType}
@@ -13616,7 +15593,7 @@ export default function App() {
                           ))}
                           <View style={styles.buttonRow}>
                             <AppButton
-                              title="Open sober-house profile"
+                              title="View sober-house profile"
                               variant="secondary"
                               onPress={openSoberHousingSettings}
                             />
@@ -13627,7 +15604,11 @@ export default function App() {
                     onOpenAttendance={() => openAttendanceHub("dashboard")}
                     onOpenAttendanceToday={() => openAttendanceHub("dashboard")}
                     onOpenTools={openToolsHub}
+                    soberHousingEntryVisible={canOpenSoberHouseEntry}
+                    soberHousingEntryLabel={soberHouseEntryLabel(appAccessRole)}
                     onOpenSoberHousingSettings={openSoberHousingSettings}
+                    courtEntryVisible={canOpenCourtEntry}
+                    courtEntryLabel={courtEntryLabel(appAccessRole)}
                     onOpenProbationParoleSettings={openProbationParoleSettings}
                     onRefresh={() => {
                       void (async () => {
@@ -13739,7 +15720,8 @@ export default function App() {
 
               {homeScreen === "CHAT" ? (
                 soberHouseAccessProfile?.role === "HOUSE_RESIDENT" ||
-                soberHouseAccessProfile?.role === "OWNER_OPERATOR" ? (
+                (soberHouseAccessProfile?.role === "OWNER_OPERATOR" &&
+                  canManageSoberHouseHierarchy(appAccessRole)) ? (
                   <>
                     <GlassCard style={styles.card} strong>
                       <Text style={styles.sectionTitle}>
@@ -15337,8 +17319,12 @@ export default function App() {
                   <GlassCard style={styles.card} strong>
                     <Text style={styles.sectionTitle}>Home Group Birthdays</Text>
                     <Text style={styles.sectionMeta}>
-                      Celebrate sobriety birthdays with the people who selected the same home group.
-                      Names shown to others stay first-name only.
+                      Get notified when someone in your home group is celebrating a sobriety
+                      birthday. Only users who selected this same home group can receive these
+                      announcements.
+                    </Text>
+                    <Text style={styles.sectionMeta}>
+                      Your name will appear to others exactly as you enter it here.
                     </Text>
                     <Text style={styles.sectionMeta}>
                       Home group:{" "}
@@ -15369,26 +17355,28 @@ export default function App() {
                             onValueChange={setHomeGroupBirthdayOptIn}
                           />
                         </View>
+                        <Text style={styles.label}>First name</Text>
                         <TextInput
                           style={styles.input}
                           value={homeGroupBirthdayFirstName}
                           onChangeText={setHomeGroupBirthdayFirstName}
-                          placeholder="First name"
+                          placeholder="Jason"
                           maxLength={80}
                         />
+                        <Text style={styles.label}>Last initial or last name (optional)</Text>
                         <TextInput
                           style={styles.input}
                           value={homeGroupBirthdayLastName}
                           onChangeText={setHomeGroupBirthdayLastName}
-                          placeholder="Last name (optional)"
+                          placeholder="L or Lehman"
                           maxLength={80}
                         />
                         <Text style={styles.sectionMeta}>
                           {homeGroupBirthdayOptIn
                             ? sobrietyDateIso
-                              ? `Your sobriety date for birthday recognition: ${formatIsoToUsDate(sobrietyDateIso)}`
-                              : "Add a sobriety date above before turning birthday recognition on."
-                            : "You can keep your home group without joining birthday announcements."}
+                              ? `Using sobriety date ${formatIsoToUsDate(sobrietyDateIso)} for birthday recognition.`
+                              : "Add your sobriety date above before turning on birthday recognition."
+                            : "You can keep your home group without joining birthday recognition."}
                         </Text>
                         {homeGroupBirthdayStatus ? (
                           <Text style={styles.sectionMeta}>{homeGroupBirthdayStatus}</Text>
@@ -16040,7 +18028,17 @@ export default function App() {
 
           {mode !== "A" && homeScreen === "SETTINGS" ? (
             mode === "B" ? (
-              shouldShowSoberHouseLock ? (
+              !canOpenSoberHouseEntry ? (
+                <GlassCard style={styles.card} strong>
+                  <Text style={styles.sectionTitle}>Sober House Profile</Text>
+                  <Text style={styles.sectionMeta}>
+                    This area is limited to sober-house residents and authorized admins.
+                  </Text>
+                  <View style={styles.buttonRow}>
+                    <AppButton title="Back to Dashboard" onPress={() => handleModeSelect("A")} />
+                  </View>
+                </GlassCard>
+              ) : shouldShowSoberHouseLock ? (
                 <GlassCard style={styles.card} strong>
                   <Text style={styles.sectionTitle}>Unlock Sober House</Text>
                   <Text style={styles.sectionMeta}>
@@ -16072,29 +18070,76 @@ export default function App() {
                   userId={devAuthUserId}
                   actorId={devAuthUserId}
                   actorName={devUserDisplayName}
+                  viewerRole={appAccessRole}
                   onBack={() => handleModeSelect("A")}
                 />
               )
             ) : (
               <>
                 <GlassCard style={styles.card} strong>
-                  <Text style={styles.sectionTitle}>Drug Court / Probation Settings</Text>
-                  <Text style={styles.sectionMeta}>
-                    Continue supervision setup here for drug court, probation, or parole
-                    requirements.
+                  <Text style={styles.sectionTitle}>
+                    {protectedCourtConfigAuthorized
+                      ? "Court Configuration"
+                      : "Court / Program Requirements"}
                   </Text>
+                  <Text style={styles.sectionMeta}>
+                    {protectedCourtConfigAuthorized
+                      ? "Authenticated supervisory access is required for court or program configuration."
+                      : "Participant-facing court and program requirements are shown here. Supervisory hierarchy and configuration stay restricted."}
+                  </Text>
+                  {canOpenCourtEntry && !protectedCourtConfigAuthorized ? (
+                    <>
+                      <Text style={styles.sectionMeta}>
+                        Track:{" "}
+                        {wizardJusticeTrack === "DRUG_COURT"
+                          ? "Drug Court"
+                          : wizardJusticeTrack === "PROBATION_PAROLE"
+                            ? "Probation / Parole"
+                            : "Not selected"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Program: {wizardCourtProgramName || "Not set"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Supervising contact: {wizardCourtSupervisorName || "Not set"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Requirements: {wizardCourtRequirementsSummary || "Not set"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Upcoming: {wizardCourtDeadlineSummary || "Not set"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Backend obligations: {backendParticipantObligations.length}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Open backend violations:{" "}
+                        {
+                          backendParticipantViolations.filter(
+                            (violation) =>
+                              violation.status === "OPEN" || violation.status === "UNDER_REVIEW",
+                          ).length
+                        }
+                      </Text>
+                      {participantSyncStatus ? (
+                        <Text style={styles.sectionMeta}>{participantSyncStatus}</Text>
+                      ) : null}
+                    </>
+                  ) : null}
                   <View style={styles.buttonRow}>
                     <AppButton title="Back to Dashboard" onPress={() => handleModeSelect("A")} />
                   </View>
                 </GlassCard>
 
-                <GlassCard style={styles.card} strong>
-                  <Text style={styles.sectionTitle}>Status</Text>
-                  <Text style={styles.sectionMeta}>
-                    This settings page is active from the dashboard hamburger menu and reserved for
-                    mode-specific configuration.
-                  </Text>
-                </GlassCard>
+                {!canOpenCourtEntry ? (
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.sectionTitle}>Access Restricted</Text>
+                    <Text style={styles.sectionMeta}>
+                      Court and probation configuration requires authenticated, backend-authorized
+                      supervisory access.
+                    </Text>
+                  </GlassCard>
+                ) : null}
               </>
             )
           ) : null}
@@ -16199,73 +18244,134 @@ export default function App() {
           visible={showHomeGroupBirthdayPrompt}
           transparent
           animationType="fade"
+          presentationStyle="overFullScreen"
+          statusBarTranslucent
           onRequestClose={() => {
             void skipHomeGroupBirthdayPrompt();
           }}
         >
-          <View style={styles.recoveryCelebrationBackdrop}>
-            <GlassCard
-              strong
-              blurIntensity={18}
-              darken
-              gradientDark
-              style={styles.recoveryCelebrationCard}
+          <View style={styles.homeGroupBirthdayPromptModalRoot}>
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.homeGroupBirthdayPromptBackdropLayer,
+                { opacity: homeGroupBirthdayPromptBackdropOpacity },
+              ]}
             >
-              <Text style={styles.recoveryCelebrationEyebrow}>Home Group Birthdays</Text>
-              <Text style={styles.recoveryCelebrationTitle}>
-                {homeGroupBirthdayPromptSource === "meeting-detail"
-                  ? "Join birthday recognition for this home group?"
-                  : "Want to join home group birthday recognition?"}
-              </Text>
-              <Text style={styles.recoveryCelebrationBody}>
-                When someone else in this same home group has a sobriety birthday, the app can let
-                you know when you open it. Names shown to others stay first-name only.
-              </Text>
-              <View style={styles.inlineRow}>
-                <Text style={styles.label}>Join birthday recognition</Text>
-                <Switch
-                  value={homeGroupBirthdayPromptOptIn}
-                  onValueChange={setHomeGroupBirthdayPromptOptIn}
-                />
-              </View>
-              <TextInput
-                style={styles.input}
-                value={homeGroupBirthdayPromptFirstName}
-                onChangeText={setHomeGroupBirthdayPromptFirstName}
-                placeholder="First name"
-                maxLength={80}
+              <View
+                style={[
+                  styles.homeGroupBirthdayPromptScrim,
+                  shouldUseHomeGroupBirthdayPromptBlur
+                    ? styles.homeGroupBirthdayPromptScrimWithBlur
+                    : null,
+                ]}
               />
-              <TextInput
-                style={styles.input}
-                value={homeGroupBirthdayPromptLastName}
-                onChangeText={setHomeGroupBirthdayPromptLastName}
-                placeholder="Last name (optional)"
-                maxLength={80}
-              />
-              <Text style={styles.recoveryCelebrationSupportText}>
-                {homeGroupBirthdayPromptOptIn
-                  ? sobrietyDateIso
-                    ? `Using sobriety date ${formatIsoToUsDate(sobrietyDateIso)} for birthday recognition.`
-                    : "Add your sobriety date before turning this on."
-                  : "You can keep your home group without joining birthday announcements."}
-              </Text>
-              {homeGroupBirthdayStatus ? (
-                <Text style={styles.recoveryCelebrationSupportText}>{homeGroupBirthdayStatus}</Text>
+              {shouldUseHomeGroupBirthdayPromptBlur ? (
+                <BlurView intensity={54} tint="dark" style={styles.homeGroupBirthdayPromptBlur} />
               ) : null}
-              <View style={styles.buttonRow}>
-                <AppButton
-                  title="Not now"
-                  variant="secondary"
-                  onPress={() => void skipHomeGroupBirthdayPrompt()}
-                />
-                <View style={styles.buttonSpacer} />
-                <AppButton
-                  title={homeGroupBirthdaySaving ? "Saving..." : "Save"}
-                  onPress={() => void saveHomeGroupBirthdayPrompt()}
-                  disabled={homeGroupBirthdaySaving}
-                />
-              </View>
-            </GlassCard>
+            </Animated.View>
+            <KeyboardAvoidingView
+              behavior={Platform.OS === "ios" ? "padding" : undefined}
+              style={styles.homeGroupBirthdayPromptModalContainer}
+            >
+              <Animated.View
+                accessibilityViewIsModal
+                style={[
+                  styles.homeGroupBirthdayPromptCard,
+                  {
+                    maxHeight: homeGroupBirthdayPromptCardMaxHeight,
+                    opacity: homeGroupBirthdayPromptCardOpacity,
+                    transform: [{ scale: homeGroupBirthdayPromptCardScale }],
+                  },
+                ]}
+              >
+                <ScrollView
+                  style={styles.homeGroupBirthdayPromptScroll}
+                  contentContainerStyle={styles.homeGroupBirthdayPromptScrollContent}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                  bounces={false}
+                >
+                  <Text style={styles.homeGroupBirthdayPromptEyebrow}>HOME GROUP BIRTHDAYS</Text>
+                  <Text style={styles.homeGroupBirthdayPromptTitle}>
+                    Want to join home group birthday recognition?
+                  </Text>
+                  <Text style={styles.homeGroupBirthdayPromptBody}>
+                    When someone in your home group reaches a sobriety birthday, Sober² can let you
+                    know when you open the app. Others will only see your first name.
+                  </Text>
+                  <View style={styles.homeGroupBirthdayPromptToggleRow}>
+                    <View style={styles.homeGroupBirthdayPromptToggleLabelBlock}>
+                      <Text style={styles.homeGroupBirthdayPromptToggleTitle}>
+                        Join birthday recognition
+                      </Text>
+                    </View>
+                    <Switch
+                      accessibilityLabel="Join home group birthday recognition"
+                      value={homeGroupBirthdayPromptOptIn}
+                      onValueChange={setHomeGroupBirthdayPromptOptIn}
+                    />
+                  </View>
+                  {homeGroupBirthdayPromptOptIn ? (
+                    <View style={styles.homeGroupBirthdayPromptFieldBlock}>
+                      <Text style={styles.homeGroupBirthdayPromptFieldLabel}>Display name</Text>
+                      <TextInput
+                        accessibilityLabel="Display name for birthday recognition"
+                        style={styles.homeGroupBirthdayPromptInput}
+                        value={homeGroupBirthdayPromptFirstName}
+                        onChangeText={setHomeGroupBirthdayPromptFirstName}
+                        placeholder="First name and last initial or last name"
+                        placeholderTextColor="rgba(255,255,255,0.38)"
+                        selectionColor="rgba(179, 120, 255, 0.85)"
+                        maxLength={80}
+                      />
+                    </View>
+                  ) : null}
+                  <Text style={styles.homeGroupBirthdayPromptHelper}>
+                    You can stay in your home group without joining birthday announcements.
+                  </Text>
+                  {homeGroupBirthdayPromptStatusCopy ? (
+                    <View style={styles.homeGroupBirthdayPromptStatusBox}>
+                      <Text style={styles.homeGroupBirthdayPromptStatusTitle}>
+                        {homeGroupBirthdayPromptStatusCopy.primary}
+                      </Text>
+                      {homeGroupBirthdayPromptStatusCopy.secondary ? (
+                        <Text style={styles.homeGroupBirthdayPromptStatusBody}>
+                          {homeGroupBirthdayPromptStatusCopy.secondary}
+                        </Text>
+                      ) : null}
+                      {homeGroupBirthdayPromptStatusCopy.technical ? (
+                        <Text style={styles.homeGroupBirthdayPromptStatusTechnical}>
+                          {homeGroupBirthdayPromptStatusCopy.technical}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
+                </ScrollView>
+                <View style={styles.homeGroupBirthdayPromptFooterRow}>
+                  <Pressable
+                    accessibilityLabel="Not now"
+                    onPress={() => void skipHomeGroupBirthdayPrompt()}
+                    style={styles.homeGroupBirthdayPromptSecondaryButton}
+                  >
+                    <Text style={styles.homeGroupBirthdayPromptSecondaryButtonText}>Not now</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel="Save birthday recognition preference"
+                    onPress={() => void saveHomeGroupBirthdayPrompt()}
+                    disabled={homeGroupBirthdaySaving}
+                    style={[
+                      styles.homeGroupBirthdayPromptPrimaryButton,
+                      homeGroupBirthdaySaving ? styles.homeGroupBirthdayPromptButtonDisabled : null,
+                    ]}
+                  >
+                    <Text style={styles.homeGroupBirthdayPromptPrimaryButtonText}>
+                      {homeGroupBirthdaySaving ? "Saving..." : "Save"}
+                    </Text>
+                  </Pressable>
+                </View>
+              </Animated.View>
+            </KeyboardAvoidingView>
           </View>
         </Modal>
 
@@ -16345,6 +18451,52 @@ export default function App() {
         </Modal>
 
         <Modal
+          visible={Platform.OS === "ios" && serviceCommitmentTimePicker !== null}
+          transparent
+          animationType="slide"
+          onRequestClose={closeServiceCommitmentTimePicker}
+        >
+          <View style={styles.timePickerModalRoot}>
+            <Pressable
+              style={styles.timePickerBackdrop}
+              onPress={closeServiceCommitmentTimePicker}
+            />
+            <View style={styles.timePickerSheet}>
+              <View style={styles.timePickerSheetHeader}>
+                <Pressable onPress={closeServiceCommitmentTimePicker}>
+                  <Text style={styles.timePickerSheetAction}>Cancel</Text>
+                </Pressable>
+                <Text style={styles.timePickerSheetTitle}>
+                  {serviceCommitmentTimePicker?.field === "endsAtLocal" ? "Ends at" : "Starts at"}
+                </Text>
+                <Pressable onPress={confirmServiceCommitmentTimePicker}>
+                  <Text style={styles.timePickerSheetAction}>Done</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.timePickerSheetMeta}>Choose a 12-hour time.</Text>
+              {serviceCommitmentTimePicker ? (
+                <DateTimePicker
+                  value={serviceCommitmentTimePicker.value}
+                  mode="time"
+                  display="spinner"
+                  is24Hour={false}
+                  themeVariant="dark"
+                  textColor="#FFFFFF"
+                  onChange={(_, selectedDate) => {
+                    if (!selectedDate) {
+                      return;
+                    }
+                    setServiceCommitmentTimePicker((current) =>
+                      current ? { ...current, value: selectedDate } : current,
+                    );
+                  }}
+                />
+              ) : null}
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
           visible={isSponsorTimePickerVisible}
           transparent
           animationType="slide"
@@ -16362,119 +18514,23 @@ export default function App() {
                   <Text style={styles.timePickerSheetAction}>Done</Text>
                 </Pressable>
               </View>
-              <Text style={styles.timePickerSheetMeta}>Select a sponsor call time.</Text>
-              <View style={styles.timePickerSheetColumns}>
-                <View style={styles.timePickerSheetColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>Hour</Text>
-                  <ScrollView
-                    style={styles.timePickerSheetOptions}
-                    contentContainerStyle={styles.timePickerSheetOptionsContent}
-                    showsVerticalScrollIndicator={false}
-                  >
-                    {SPONSOR_TIME_HOUR_OPTIONS.map((hour) => (
-                      <Pressable
-                        key={`sponsor-hour-${hour}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.hour12 === hour
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: hour,
-                            minute: current?.minute ?? sponsorMinute,
-                            meridiem: current?.meridiem ?? sponsorMeridiem,
-                          }))
-                        }
-                      >
-                        <Text
-                          style={[
-                            styles.timePickerSheetOptionText,
-                            sponsorTimeDraftValue.hour12 === hour
-                              ? styles.timePickerSheetOptionTextSelected
-                              : null,
-                          ]}
-                        >
-                          {hour}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                </View>
-                <View style={styles.timePickerSheetColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>Minute</Text>
-                  <ScrollView
-                    style={styles.timePickerSheetOptions}
-                    contentContainerStyle={styles.timePickerSheetOptionsContent}
-                    showsVerticalScrollIndicator={false}
-                  >
-                    {SPONSOR_TIME_MINUTE_OPTIONS.map((minute) => (
-                      <Pressable
-                        key={`sponsor-minute-${minute}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.minute === minute
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: current?.hour12 ?? sponsorHour12,
-                            minute,
-                            meridiem: current?.meridiem ?? sponsorMeridiem,
-                          }))
-                        }
-                      >
-                        <Text
-                          style={[
-                            styles.timePickerSheetOptionText,
-                            sponsorTimeDraftValue.minute === minute
-                              ? styles.timePickerSheetOptionTextSelected
-                              : null,
-                          ]}
-                        >
-                          {String(minute).padStart(2, "0")}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </ScrollView>
-                </View>
-                <View style={styles.timePickerSheetMeridiemColumn}>
-                  <Text style={styles.timePickerSheetColumnLabel}>AM/PM</Text>
-                  <View style={styles.timePickerSheetMeridiemOptions}>
-                    {SPONSOR_TIME_MERIDIEM_OPTIONS.map((meridiem) => (
-                      <Pressable
-                        key={`sponsor-meridiem-${meridiem}`}
-                        style={[
-                          styles.timePickerSheetOption,
-                          sponsorTimeDraftValue.meridiem === meridiem
-                            ? styles.timePickerSheetOptionSelected
-                            : null,
-                        ]}
-                        onPress={() =>
-                          setSponsorTimeDraft((current) => ({
-                            hour12: current?.hour12 ?? sponsorHour12,
-                            minute: current?.minute ?? sponsorMinute,
-                            meridiem,
-                          }))
-                        }
-                      >
-                        <Text
-                          style={[
-                            styles.timePickerSheetOptionText,
-                            sponsorTimeDraftValue.meridiem === meridiem
-                              ? styles.timePickerSheetOptionTextSelected
-                              : null,
-                          ]}
-                        >
-                          {meridiem}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
-              </View>
+              <Text style={styles.timePickerSheetMeta}>Choose a 12-hour time.</Text>
+              {sponsorTimeDraft ? (
+                <DateTimePicker
+                  value={sponsorTimeDraft}
+                  mode="time"
+                  display="spinner"
+                  is24Hour={false}
+                  themeVariant="dark"
+                  textColor="#FFFFFF"
+                  onChange={(_, selectedDate) => {
+                    if (!selectedDate) {
+                      return;
+                    }
+                    setSponsorTimeDraft(selectedDate);
+                  }}
+                />
+              ) : null}
             </View>
           </View>
         </Modal>
@@ -16937,6 +18993,190 @@ const styles = StyleSheet.create({
     textAlign: "center",
     color: "rgba(218,230,255,0.9)",
   },
+  homeGroupBirthdayPromptModalRoot: {
+    flex: 1,
+  },
+  homeGroupBirthdayPromptBackdropLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  homeGroupBirthdayPromptScrim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(10, 6, 18, 0.78)",
+  },
+  homeGroupBirthdayPromptScrimWithBlur: {
+    backgroundColor: "rgba(10, 6, 18, 0.64)",
+  },
+  homeGroupBirthdayPromptBlur: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  homeGroupBirthdayPromptModalContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 24,
+  },
+  homeGroupBirthdayPromptCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 24,
+    paddingTop: 20,
+    paddingHorizontal: 20,
+    paddingBottom: 18,
+    backgroundColor: "rgba(28, 18, 46, 0.94)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    shadowColor: "#000",
+    shadowOpacity: 0.35,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 16,
+  },
+  homeGroupBirthdayPromptScroll: {
+    flexGrow: 0,
+  },
+  homeGroupBirthdayPromptScrollContent: {
+    paddingBottom: 4,
+  },
+  homeGroupBirthdayPromptEyebrow: {
+    fontSize: 12,
+    lineHeight: 16,
+    letterSpacing: 1.2,
+    fontWeight: "700",
+    color: "rgba(165, 230, 255, 0.95)",
+    textTransform: "uppercase",
+    marginBottom: 8,
+  },
+  homeGroupBirthdayPromptTitle: {
+    maxWidth: "92%",
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: "800",
+    color: "#FFFFFF",
+    textAlign: "left",
+    marginBottom: 12,
+  },
+  homeGroupBirthdayPromptBody: {
+    fontSize: 17,
+    lineHeight: 25,
+    fontWeight: "500",
+    color: "rgba(255,255,255,0.86)",
+    marginBottom: 20,
+  },
+  homeGroupBirthdayPromptToggleRow: {
+    minHeight: 64,
+    borderRadius: 18,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  homeGroupBirthdayPromptToggleLabelBlock: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  homeGroupBirthdayPromptToggleTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#FFFFFF",
+  },
+  homeGroupBirthdayPromptFieldBlock: {
+    marginTop: 14,
+  },
+  homeGroupBirthdayPromptFieldLabel: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: "rgba(255,255,255,0.70)",
+    marginBottom: 8,
+  },
+  homeGroupBirthdayPromptInput: {
+    height: 52,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    backgroundColor: "rgba(255,255,255,0.07)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    color: "#FFFFFF",
+    fontSize: 17,
+  },
+  homeGroupBirthdayPromptHelper: {
+    marginTop: 10,
+    fontSize: 14,
+    lineHeight: 20,
+    color: "rgba(255,255,255,0.66)",
+  },
+  homeGroupBirthdayPromptStatusBox: {
+    marginTop: 14,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: "rgba(255, 179, 71, 0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 179, 71, 0.24)",
+  },
+  homeGroupBirthdayPromptStatusTitle: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.90)",
+  },
+  homeGroupBirthdayPromptStatusBody: {
+    marginTop: 4,
+    fontSize: 13,
+    lineHeight: 18,
+    color: "rgba(255,255,255,0.62)",
+  },
+  homeGroupBirthdayPromptStatusTechnical: {
+    marginTop: 6,
+    fontSize: 12,
+    color: "rgba(255,255,255,0.42)",
+  },
+  homeGroupBirthdayPromptFooterRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginTop: 20,
+  },
+  homeGroupBirthdayPromptSecondaryButton: {
+    flex: 1,
+    minHeight: 52,
+    borderRadius: 18,
+    paddingHorizontal: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  homeGroupBirthdayPromptSecondaryButtonText: {
+    color: "rgba(255,255,255,0.88)",
+    fontSize: 17,
+    fontWeight: "700",
+  },
+  homeGroupBirthdayPromptPrimaryButton: {
+    flex: 1,
+    minHeight: 52,
+    borderRadius: 18,
+    paddingHorizontal: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#A855F7",
+    shadowColor: "#000",
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
+  },
+  homeGroupBirthdayPromptPrimaryButtonText: {
+    color: "#FFFFFF",
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  homeGroupBirthdayPromptButtonDisabled: {
+    opacity: 0.58,
+  },
   recoveryRoadmapList: {
     marginTop: 14,
     gap: 10,
@@ -17222,6 +19462,10 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     color: colors.textPrimary,
   },
+  multilineInput: {
+    minHeight: 96,
+    textAlignVertical: "top",
+  },
   smallInput: {
     minWidth: 64,
     borderWidth: 1,
@@ -17373,6 +19617,17 @@ const styles = StyleSheet.create({
   chipTextSelected: {
     color: colors.textPrimary,
     fontWeight: "700",
+  },
+  setupRecurringCommitmentsList: {
+    gap: 10,
+  },
+  setupRecurringCommitmentCard: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
   meetingsFiltersWrap: {
     gap: 8,
@@ -17590,6 +19845,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     marginTop: 4,
+  },
+  checkboxBody: {
+    flex: 1,
   },
   checkbox: {
     width: 20,

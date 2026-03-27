@@ -40,10 +40,19 @@ export type AttendanceSlipRecord = {
   };
 };
 
+export type AttendanceSlipServiceCommitment = {
+  name: string;
+  scheduleLabel: string;
+  location?: string | null;
+  arriveEarlyMinutes?: number | null;
+  stayAfterMinutes?: number | null;
+};
+
 export type AttendanceSlipUserProfile = {
   participantName: string;
   officerName?: string | null;
   tenantLabel?: string | null;
+  serviceCommitments?: AttendanceSlipServiceCommitment[];
 };
 
 export type AttendanceSlipExportProgress = {
@@ -459,6 +468,29 @@ function buildAttendanceRow(record: PreparedRecord): string {
   </tr>`;
 }
 
+function buildServiceCommitmentLine(commitment: AttendanceSlipServiceCommitment): string {
+  const detailParts = [commitment.scheduleLabel];
+  if (commitment.location && commitment.location.trim().length > 0) {
+    detailParts.push(commitment.location.trim());
+  }
+  if (
+    typeof commitment.arriveEarlyMinutes === "number" &&
+    Number.isFinite(commitment.arriveEarlyMinutes) &&
+    commitment.arriveEarlyMinutes > 0
+  ) {
+    detailParts.push(`Arrive ${commitment.arriveEarlyMinutes} min early`);
+  }
+  if (
+    typeof commitment.stayAfterMinutes === "number" &&
+    Number.isFinite(commitment.stayAfterMinutes) &&
+    commitment.stayAfterMinutes > 0
+  ) {
+    detailParts.push(`Stay ${commitment.stayAfterMinutes} min after`);
+  }
+
+  return `<li><strong>${escapeHtml(asSafeText(commitment.name, "Service commitment"))}</strong> — ${escapeHtml(detailParts.join(" • "))}</li>`;
+}
+
 function buildAttendanceHtml(
   records: PreparedRecord[],
   profile: AttendanceSlipUserProfile,
@@ -466,8 +498,20 @@ function buildAttendanceHtml(
   const participantName = escapeHtml(asSafeText(profile.participantName, ""));
   const officerName = escapeHtml(asSafeText(profile.officerName, ""));
   const generatedAt = escapeHtml(formatDateTimeLocal(new Date()));
+  const serviceCommitments = Array.isArray(profile.serviceCommitments)
+    ? profile.serviceCommitments
+    : [];
 
   const rows = records.map((entry) => buildAttendanceRow(entry)).join("\n");
+  const serviceCommitmentSection =
+    serviceCommitments.length > 0
+      ? `<div class="service-commitments">
+      <div class="service-commitments-title">Recurring service commitments included by participant</div>
+      <ul>
+        ${serviceCommitments.map((entry) => buildServiceCommitmentLine(entry)).join("\n")}
+      </ul>
+    </div>`
+      : "";
 
   return `<!doctype html>
 <html>
@@ -494,6 +538,10 @@ function buildAttendanceHtml(
       .sig-image { display: block; max-width: 100%; max-height: 52px; object-fit: contain; transform: rotate(${SIGNATURE_ROTATION_DEGREES}deg) scale(0.92); transform-origin: center center; }
       .sig-svg svg { display: block; max-width: 100%; max-height: 52px; }
       .sig-text { color: #444; font-size: 10px; }
+      .service-commitments { margin-top: 10px; font-size: 10px; }
+      .service-commitments-title { font-weight: 700; margin-bottom: 4px; }
+      .service-commitments ul { margin: 4px 0 0 16px; padding: 0; }
+      .service-commitments li { margin-bottom: 3px; }
       .meta { margin-top: 8px; color: #555; font-size: 10px; text-align: right; }
     </style>
   </head>
@@ -523,6 +571,8 @@ function buildAttendanceHtml(
         ${rows}
       </tbody>
     </table>
+
+    ${serviceCommitmentSection}
 
     <div class="meta">Generated ${generatedAt}</div>
   </body>
@@ -1046,7 +1096,18 @@ export function buildAttendanceSlipHtmlForTest(records: AttendanceSlipRecord[]):
     signatureBytes: 0,
     signatureCapBytes: MAX_SIGNATURE_PNG_BYTES,
   }));
-  return buildAttendanceHtml(prepared, { participantName: "Test Participant" });
+  return buildAttendanceHtml(prepared, {
+    participantName: "Test Participant",
+    serviceCommitments: [
+      {
+        name: "Greeter",
+        scheduleLabel: "Every Thursday • 6:30 PM",
+        location: "Clubhouse",
+        arriveEarlyMinutes: 10,
+        stayAfterMinutes: 15,
+      },
+    ],
+  });
 }
 
 export const __attendanceSlipPdfTestUtils = {

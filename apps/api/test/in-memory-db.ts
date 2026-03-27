@@ -1,4 +1,21 @@
-import type { ComplianceEventType, IncidentStatus, IncidentType } from "@recovery/shared-types";
+import type {
+  ComplianceEventType,
+  IncidentStatus,
+  IncidentType,
+  ObligationPriority,
+  ObligationSourceTrack,
+  ObligationStatus,
+  ObligationType,
+  ParticipantComplianceEventStatus,
+  ParticipantComplianceEventType,
+  ParticipantProfileStatus,
+  ParticipantType,
+  ProofType,
+  VerificationStatus,
+  ViolationSeverity,
+  ViolationStatus,
+  ViolationType,
+} from "@recovery/shared-types";
 import type { DbPool, DbQueryResult } from "../src/db/client";
 import type { AttendanceStatus } from "../src/db/repositories";
 
@@ -12,14 +29,45 @@ type User = {
   tenant_id: string;
   email: string;
   display_name: string;
+  created_at: string;
   supervision_enabled: boolean;
   supervision_end_date: string | null;
 };
 
 type UserRole = {
+  id?: number;
   tenant_id: string;
   user_id: string;
   role: string;
+  organization_id?: string | null;
+  court_program_id?: string | null;
+  is_active?: boolean;
+  granted_by_user_id?: string | null;
+  granted_at?: string;
+  revoked_at?: string | null;
+};
+
+type Organization = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  created_at: string;
+};
+
+type CourtProgram = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  jurisdiction: string | null;
+  created_at: string;
+};
+
+type House = {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  name: string;
+  created_at: string;
 };
 
 type SupervisorAssignment = {
@@ -144,9 +192,84 @@ type ComplianceEvent = {
   id: string;
   tenant_id: string;
   user_id: string;
-  event_type: ComplianceEventType;
+  obligation_id: string | null;
+  organization_id: string | null;
+  house_id: string | null;
+  court_program_id: string | null;
+  event_type: ComplianceEventType | ParticipantComplianceEventType;
+  event_status: ParticipantComplianceEventStatus | null;
   occurred_at: string;
   metadata_json: unknown;
+  proof_uri: string | null;
+  proof_metadata_json: unknown;
+  signature_present: boolean;
+  proof_type: ProofType | null;
+  verification_status: VerificationStatus | null;
+  verified_by_role: string | null;
+  verified_at: string | null;
+  created_by_role: string | null;
+  source_track: ObligationSourceTrack | null;
+  external_event_id: string | null;
+  created_at: string;
+};
+
+type ParticipantProfile = {
+  user_id: string;
+  tenant_id: string;
+  display_name: string | null;
+  participant_type: ParticipantType;
+  organization_id: string | null;
+  house_id: string | null;
+  court_program_id: string | null;
+  status: ParticipantProfileStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+type Obligation = {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  obligation_type: ObligationType;
+  source_track: ObligationSourceTrack;
+  title: string;
+  description: string | null;
+  organization_id: string | null;
+  house_id: string | null;
+  court_program_id: string | null;
+  due_at: string | null;
+  recurrence_json: unknown;
+  priority: ObligationPriority | null;
+  requires_proof: boolean;
+  requires_signature: boolean;
+  proof_type: ProofType | null;
+  verification_status: VerificationStatus;
+  status: ObligationStatus;
+  sync_source: string | null;
+  sync_key: string | null;
+  created_by_user_id: string | null;
+  created_by_role: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type Violation = {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  obligation_id: string | null;
+  organization_id: string | null;
+  house_id: string | null;
+  court_program_id: string | null;
+  violation_type: ViolationType;
+  severity: ViolationSeverity;
+  status: ViolationStatus;
+  detected_at: string;
+  resolved_at: string | null;
+  notes: string | null;
+  detected_from_event_id: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 type SponsorConfig = {
@@ -217,6 +340,9 @@ export class InMemoryDb implements DbPool {
   private tenants: Tenant[] = [];
   private users: User[] = [];
   private userRoles: UserRole[] = [];
+  private organizations: Organization[] = [];
+  private courtPrograms: CourtProgram[] = [];
+  private houses: House[] = [];
   private supervisorAssignments: SupervisorAssignment[] = [];
   private tenantConfigs: TenantConfig[] = [];
   private auditLogs: AuditLog[] = [];
@@ -229,10 +355,14 @@ export class InMemoryDb implements DbPool {
   private notificationEvents: NotificationEvent[] = [];
   private lastKnownLocations: LastKnownLocation[] = [];
   private complianceEvents: ComplianceEvent[] = [];
+  private participantProfiles: ParticipantProfile[] = [];
+  private obligations: Obligation[] = [];
+  private violations: Violation[] = [];
   private sponsorConfigs: SponsorConfig[] = [];
   private meetingFeeds: MeetingFeed[] = [];
   private meetingGuideMeetings: MeetingGuideMeeting[] = [];
   private supervisorAssignmentId = 1;
+  private userRoleId = 1;
   private tenantConfigId = 1;
   private auditId = 1;
 
@@ -241,12 +371,14 @@ export class InMemoryDb implements DbPool {
   }
 
   addUser(
-    record: Omit<User, "supervision_enabled" | "supervision_end_date"> & {
+    record: Omit<User, "created_at" | "supervision_enabled" | "supervision_end_date"> & {
+      created_at?: string;
       supervision_enabled?: boolean;
       supervision_end_date?: string | null;
     },
   ) {
     this.users.push({
+      created_at: record.created_at ?? new Date().toISOString(),
       supervision_enabled: record.supervision_enabled ?? false,
       supervision_end_date: record.supervision_end_date ?? null,
       ...record,
@@ -254,7 +386,94 @@ export class InMemoryDb implements DbPool {
   }
 
   addUserRole(record: UserRole) {
-    this.userRoles.push(record);
+    this.userRoles.push({
+      id: record.id ?? this.userRoleId++,
+      organization_id: record.organization_id ?? null,
+      court_program_id: record.court_program_id ?? null,
+      is_active: record.is_active ?? true,
+      granted_by_user_id: record.granted_by_user_id ?? null,
+      granted_at: record.granted_at ?? new Date().toISOString(),
+      revoked_at: record.revoked_at ?? null,
+      ...record,
+    });
+  }
+
+  addOrganization(record: Omit<Organization, "created_at"> & { created_at?: string }) {
+    this.organizations.push({
+      created_at: record.created_at ?? new Date().toISOString(),
+      ...record,
+    });
+  }
+
+  addCourtProgram(record: Omit<CourtProgram, "created_at"> & { created_at?: string }) {
+    this.courtPrograms.push({
+      created_at: record.created_at ?? new Date().toISOString(),
+      ...record,
+    });
+  }
+
+  addHouse(record: Omit<House, "created_at"> & { created_at?: string }) {
+    this.houses.push({
+      created_at: record.created_at ?? new Date().toISOString(),
+      ...record,
+    });
+  }
+
+  addParticipantProfile(
+    record: Omit<ParticipantProfile, "created_at" | "updated_at" | "display_name"> & {
+      display_name?: string | null;
+      created_at?: string;
+      updated_at?: string;
+    },
+  ) {
+    const nowIso = new Date().toISOString();
+    this.participantProfiles = [
+      {
+        created_at: record.created_at ?? nowIso,
+        display_name: record.display_name ?? null,
+        updated_at: record.updated_at ?? nowIso,
+        ...record,
+      },
+      ...this.participantProfiles.filter((entry) => entry.user_id !== record.user_id),
+    ];
+  }
+
+  addObligation(
+    record: Omit<Obligation, "created_at" | "updated_at" | "proof_type" | "verification_status"> & {
+      proof_type?: ProofType | null;
+      verification_status?: VerificationStatus;
+      created_at?: string;
+      updated_at?: string;
+    },
+  ) {
+    const nowIso = new Date().toISOString();
+    this.obligations = [
+      {
+        created_at: record.created_at ?? nowIso,
+        proof_type: record.proof_type ?? null,
+        verification_status: record.verification_status ?? "NOT_REQUIRED",
+        updated_at: record.updated_at ?? nowIso,
+        ...record,
+      },
+      ...this.obligations.filter((entry) => entry.id !== record.id),
+    ];
+  }
+
+  addViolation(
+    record: Omit<Violation, "created_at" | "updated_at"> & {
+      created_at?: string;
+      updated_at?: string;
+    },
+  ) {
+    const nowIso = new Date().toISOString();
+    this.violations = [
+      {
+        created_at: record.created_at ?? nowIso,
+        updated_at: record.updated_at ?? nowIso,
+        ...record,
+      },
+      ...this.violations.filter((entry) => entry.id !== record.id),
+    ];
   }
 
   addSupervisorAssignment(record: Omit<SupervisorAssignment, "id">) {
@@ -325,11 +544,333 @@ export class InMemoryDb implements DbPool {
       };
     }
 
-    if (normalized.includes("select role from user_roles where tenant_id = $1 and user_id = $2")) {
+    if (
+      normalized.includes("select id, tenant_id, email, display_name, created_at") &&
+      normalized.includes("from users") &&
+      normalized.includes("where id = $1")
+    ) {
+      const [userId] = params as [string];
+      const user = this.users.find((entry) => entry.id === userId);
+      return {
+        rowCount: user ? 1 : 0,
+        rows: user
+          ? ([
+              {
+                id: user.id,
+                tenant_id: user.tenant_id,
+                email: user.email,
+                display_name: user.display_name,
+                created_at: user.created_at,
+              },
+            ] as Row[])
+          : [],
+      };
+    }
+
+    if (normalized.includes("select role from user_roles")) {
       const [tenantId, userId] = params as [string, string];
       const rows = this.userRoles
-        .filter((entry) => entry.tenant_id === tenantId && entry.user_id === userId)
+        .filter(
+          (entry) =>
+            entry.tenant_id === tenantId &&
+            entry.user_id === userId &&
+            entry.is_active !== false &&
+            entry.revoked_at === null,
+        )
         .map((entry) => ({ role: entry.role })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("from user_roles ur") &&
+      normalized.includes("left join organizations org") &&
+      normalized.includes("left join court_programs cp")
+    ) {
+      const [tenantId, userId] = params as [string, string];
+      const rows = this.userRoles
+        .filter(
+          (entry) =>
+            entry.tenant_id === tenantId &&
+            entry.user_id === userId &&
+            entry.is_active !== false &&
+            entry.revoked_at === null,
+        )
+        .sort((left, right) => {
+          const grantedAtCompare = (right.granted_at ?? "").localeCompare(left.granted_at ?? "");
+          if (grantedAtCompare !== 0) {
+            return grantedAtCompare;
+          }
+          return (right.id ?? 0) - (left.id ?? 0);
+        })
+        .map((entry) => {
+          const organization =
+            entry.organization_id === null
+              ? null
+              : (this.organizations.find(
+                  (item) => item.id === entry.organization_id && item.tenant_id === entry.tenant_id,
+                ) ?? null);
+          const courtProgram =
+            entry.court_program_id === null
+              ? null
+              : (this.courtPrograms.find(
+                  (item) =>
+                    item.id === entry.court_program_id && item.tenant_id === entry.tenant_id,
+                ) ?? null);
+          return {
+            id: entry.id ?? 0,
+            role: entry.role,
+            organization_id: entry.organization_id ?? null,
+            organization_name: organization?.name ?? null,
+            court_program_id: entry.court_program_id ?? null,
+            court_program_name: courtProgram?.name ?? null,
+            court_program_jurisdiction: courtProgram?.jurisdiction ?? null,
+            granted_at: entry.granted_at ?? new Date().toISOString(),
+            revoked_at: entry.revoked_at ?? null,
+          };
+        }) as Row[];
+
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (normalized.includes("insert into participant_profiles")) {
+      const [
+        userId,
+        tenantId,
+        displayName,
+        participantType,
+        organizationId,
+        houseId,
+        courtProgramId,
+        status,
+      ] = params as [
+        string,
+        string,
+        string | null,
+        ParticipantType,
+        string | null,
+        string | null,
+        string | null,
+        ParticipantProfileStatus,
+      ];
+      const nowIso = new Date().toISOString();
+      const existingIndex = this.participantProfiles.findIndex(
+        (entry) => entry.user_id === userId && entry.tenant_id === tenantId,
+      );
+      const row: ParticipantProfile = {
+        user_id: userId,
+        tenant_id: tenantId,
+        display_name:
+          displayName ??
+          this.users.find((entry) => entry.tenant_id === tenantId && entry.id === userId)
+            ?.display_name ??
+          null,
+        participant_type: participantType,
+        organization_id: organizationId,
+        house_id: houseId,
+        court_program_id: courtProgramId,
+        status,
+        created_at:
+          existingIndex >= 0 ? this.participantProfiles[existingIndex].created_at : nowIso,
+        updated_at: nowIso,
+      };
+      if (existingIndex >= 0) {
+        this.participantProfiles[existingIndex] = row;
+      } else {
+        this.participantProfiles.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from participant_profiles") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("and user_id = $2")
+    ) {
+      const [tenantId, userId] = params as [string, string];
+      const row = this.participantProfiles.find(
+        (entry) => entry.tenant_id === tenantId && entry.user_id === userId,
+      );
+      return {
+        rowCount: row ? 1 : 0,
+        rows: row ? ([{ ...row }] as Row[]) : [],
+      };
+    }
+
+    if (
+      normalized.includes("from participant_profiles") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by updated_at desc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.participantProfiles
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("from obligations") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("and user_id = $2") &&
+      normalized.includes("and sync_source = $3")
+    ) {
+      const [tenantId, userId, syncSource] = params as [string, string, string];
+      const rows = this.obligations
+        .filter(
+          (entry) =>
+            entry.tenant_id === tenantId &&
+            entry.user_id === userId &&
+            entry.sync_source === syncSource,
+        )
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (normalized.includes("insert into obligations")) {
+      const [
+        id,
+        tenantId,
+        userId,
+        obligationType,
+        sourceTrack,
+        title,
+        description,
+        organizationId,
+        houseId,
+        courtProgramId,
+        dueAt,
+        recurrenceJson,
+        priority,
+        requiresProof,
+        requiresSignature,
+        proofType,
+        verificationStatus,
+        status,
+        syncSource,
+        syncKey,
+        createdByUserId,
+        createdByRole,
+      ] = params as [
+        string,
+        string,
+        string,
+        ObligationType,
+        ObligationSourceTrack,
+        string,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string,
+        ObligationPriority | null,
+        boolean,
+        boolean,
+        ProofType | null,
+        VerificationStatus,
+        ObligationStatus,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+      ];
+      const nowIso = new Date().toISOString();
+      const existingIndex = this.obligations.findIndex(
+        (entry) =>
+          entry.tenant_id === tenantId &&
+          entry.user_id === userId &&
+          entry.sync_source === syncSource &&
+          entry.sync_key === syncKey,
+      );
+      const existing = existingIndex >= 0 ? this.obligations[existingIndex] : null;
+      const row: Obligation = {
+        id: existing?.id ?? id,
+        tenant_id: tenantId,
+        user_id: userId,
+        obligation_type: obligationType,
+        source_track: sourceTrack,
+        title,
+        description,
+        organization_id: organizationId,
+        house_id: houseId,
+        court_program_id: courtProgramId,
+        due_at: dueAt,
+        recurrence_json: JSON.parse(recurrenceJson) as unknown,
+        priority,
+        requires_proof: requiresProof,
+        requires_signature: requiresSignature,
+        proof_type: proofType,
+        verification_status: verificationStatus,
+        status,
+        sync_source: syncSource,
+        sync_key: syncKey,
+        created_by_user_id: createdByUserId,
+        created_by_role: createdByRole,
+        created_at: existing?.created_at ?? nowIso,
+        updated_at: nowIso,
+      };
+      if (existingIndex >= 0) {
+        this.obligations[existingIndex] = row;
+      } else {
+        this.obligations.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("update obligations") &&
+      normalized.includes("set status = 'canceled'")
+    ) {
+      const [tenantId, userId, obligationId] = params as [string, string, string];
+      const row = this.obligations.find(
+        (entry) =>
+          entry.tenant_id === tenantId && entry.user_id === userId && entry.id === obligationId,
+      );
+      if (!row) {
+        return { rowCount: 0, rows: [] };
+      }
+      row.status = "CANCELED";
+      row.updated_at = new Date().toISOString();
+      return { rowCount: 1, rows: [] };
+    }
+
+    if (
+      normalized.includes("from obligations") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by coalesce(due_at, updated_at) asc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.obligations
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const leftOrder = left.due_at ?? left.updated_at;
+          const rightOrder = right.due_at ?? right.updated_at;
+          const dueCompare = leftOrder.localeCompare(rightOrder);
+          if (dueCompare !== 0) {
+            return dueCompare;
+          }
+          return right.created_at.localeCompare(left.created_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
       return {
         rowCount: rows.length,
         rows,
@@ -350,6 +891,7 @@ export class InMemoryDb implements DbPool {
             tenant_id: user.tenant_id,
             email: user.email,
             display_name: user.display_name,
+            created_at: user.created_at,
           } as Row,
         ],
       };
@@ -1469,27 +2011,272 @@ export class InMemoryDb implements DbPool {
       };
     }
 
-    if (normalized.includes("insert into compliance_events")) {
-      const [id, tenantId, userId, eventType, occurredAt, metadataJson] = params as [
-        string,
-        string,
-        string,
-        ComplianceEventType,
-        string,
-        string,
-      ];
-      const row: ComplianceEvent = {
-        id,
-        tenant_id: tenantId,
-        user_id: userId,
-        event_type: eventType,
-        occurred_at: occurredAt,
-        metadata_json: JSON.parse(metadataJson) as unknown,
+    if (
+      normalized.includes("from compliance_events") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("and user_id = $2") &&
+      normalized.includes("and external_event_id = $3")
+    ) {
+      const [tenantId, userId, externalEventId] = params as [string, string, string];
+      const row = this.complianceEvents.find(
+        (entry) =>
+          entry.tenant_id === tenantId &&
+          entry.user_id === userId &&
+          entry.external_event_id === externalEventId,
+      );
+      return {
+        rowCount: row ? 1 : 0,
+        rows: row ? ([{ ...row }] as Row[]) : [],
       };
-      this.complianceEvents.push(row);
+    }
+
+    if (normalized.includes("insert into compliance_events")) {
+      const [
+        id,
+        tenantId,
+        userId,
+        firstMaybeObligationId,
+        secondMaybeOrganizationId,
+        thirdMaybeHouseOrOccurredAt,
+        fourthMaybeCourtOrMetadata,
+        fifthMaybeEventType,
+        sixthMaybeEventStatus,
+        seventhMaybeOccurredAt,
+        eighthMaybeMetadataJson,
+        ninthMaybeProofUri,
+        tenthMaybeProofMetadataJson,
+        eleventhMaybeSignaturePresent,
+        twelfthMaybeProofType,
+        thirteenthMaybeVerificationStatus,
+        fourteenthMaybeVerifiedByRole,
+        fifteenthMaybeVerifiedAt,
+        sixteenthMaybeCreatedByRole,
+        seventeenthMaybeSourceTrack,
+        eighteenthMaybeExternalEventId,
+      ] = params as unknown[];
+
+      const isDetailedInsert = params.length >= 18;
+      const isSystemInsert = params.length >= 17 && params.length < 18;
+      if (!isDetailedInsert && !isSystemInsert) {
+        const row: ComplianceEvent = {
+          id: id as string,
+          tenant_id: tenantId as string,
+          user_id: userId as string,
+          obligation_id: null,
+          organization_id: null,
+          house_id: null,
+          court_program_id: null,
+          event_type: firstMaybeObligationId as ComplianceEventType,
+          event_status: null,
+          occurred_at: secondMaybeOrganizationId as string,
+          metadata_json: JSON.parse(thirdMaybeHouseOrOccurredAt as string) as unknown,
+          proof_uri: null,
+          proof_metadata_json: null,
+          signature_present: false,
+          proof_type: null,
+          verification_status: null,
+          verified_by_role: null,
+          verified_at: null,
+          created_by_role: "SYSTEM",
+          source_track: null,
+          external_event_id: null,
+          created_at: new Date().toISOString(),
+        };
+        this.complianceEvents.push(row);
+        return {
+          rowCount: 1,
+          rows: [{ ...row } as Row],
+        };
+      }
+
+      if (isSystemInsert) {
+        const row: ComplianceEvent = {
+          id: id as string,
+          tenant_id: tenantId as string,
+          user_id: userId as string,
+          obligation_id: null,
+          organization_id: null,
+          house_id: null,
+          court_program_id: null,
+          event_type: firstMaybeObligationId as ComplianceEventType,
+          event_status: null,
+          occurred_at: secondMaybeOrganizationId as string,
+          metadata_json: JSON.parse(thirdMaybeHouseOrOccurredAt as string) as unknown,
+          proof_uri: null,
+          proof_metadata_json: null,
+          signature_present: false,
+          proof_type: null,
+          verification_status: null,
+          verified_by_role: null,
+          verified_at: null,
+          created_by_role: "SYSTEM",
+          source_track: null,
+          external_event_id: null,
+          created_at: new Date().toISOString(),
+        };
+        this.complianceEvents.push(row);
+        return {
+          rowCount: 1,
+          rows: [{ ...row } as Row],
+        };
+      }
+
+      const nowIso = new Date().toISOString();
+      const externalEventId = eighteenthMaybeExternalEventId as string | null;
+      const existingIndex =
+        externalEventId === null
+          ? -1
+          : this.complianceEvents.findIndex(
+              (entry) =>
+                entry.tenant_id === (tenantId as string) &&
+                entry.user_id === (userId as string) &&
+                entry.external_event_id === externalEventId,
+            );
+      const existing = existingIndex >= 0 ? this.complianceEvents[existingIndex] : null;
+      const row: ComplianceEvent = {
+        id: existing?.id ?? (id as string),
+        tenant_id: tenantId as string,
+        user_id: userId as string,
+        obligation_id: firstMaybeObligationId as string | null,
+        organization_id: secondMaybeOrganizationId as string | null,
+        house_id: thirdMaybeHouseOrOccurredAt as string | null,
+        court_program_id: fourthMaybeCourtOrMetadata as string | null,
+        event_type: fifthMaybeEventType as ParticipantComplianceEventType,
+        event_status: sixthMaybeEventStatus as ParticipantComplianceEventStatus,
+        occurred_at: seventhMaybeOccurredAt as string,
+        metadata_json: JSON.parse(eighthMaybeMetadataJson as string) as unknown,
+        proof_uri: ninthMaybeProofUri as string | null,
+        proof_metadata_json:
+          tenthMaybeProofMetadataJson === null
+            ? null
+            : JSON.parse(tenthMaybeProofMetadataJson as string),
+        signature_present: eleventhMaybeSignaturePresent as boolean,
+        proof_type: twelfthMaybeProofType as ProofType | null,
+        verification_status: thirteenthMaybeVerificationStatus as VerificationStatus | null,
+        verified_by_role: fourteenthMaybeVerifiedByRole as string | null,
+        verified_at: fifteenthMaybeVerifiedAt as string | null,
+        created_by_role: sixteenthMaybeCreatedByRole as string | null,
+        source_track: seventeenthMaybeSourceTrack as ObligationSourceTrack | null,
+        external_event_id: externalEventId,
+        created_at: existing?.created_at ?? nowIso,
+      };
+      if (existingIndex >= 0) {
+        this.complianceEvents[existingIndex] = row;
+      } else {
+        this.complianceEvents.push(row);
+      }
       return {
         rowCount: 1,
         rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from compliance_events") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by occurred_at desc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.complianceEvents
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const occurredCompare = right.occurred_at.localeCompare(left.occurred_at);
+          if (occurredCompare !== 0) {
+            return occurredCompare;
+          }
+          return right.created_at.localeCompare(left.created_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (normalized.includes("insert into violations")) {
+      const [
+        id,
+        tenantId,
+        userId,
+        obligationId,
+        organizationId,
+        houseId,
+        courtProgramId,
+        violationType,
+        severity,
+        detectedAt,
+        notes,
+        detectedFromEventId,
+      ] = params as [
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        ViolationType,
+        ViolationSeverity,
+        string,
+        string | null,
+        string | null,
+      ];
+      const nowIso = new Date().toISOString();
+      const existingIndex =
+        detectedFromEventId === null
+          ? -1
+          : this.violations.findIndex(
+              (entry) => entry.detected_from_event_id === detectedFromEventId,
+            );
+      const existing = existingIndex >= 0 ? this.violations[existingIndex] : null;
+      const row: Violation = {
+        id: existing?.id ?? id,
+        tenant_id: tenantId,
+        user_id: userId,
+        obligation_id: obligationId,
+        organization_id: organizationId,
+        house_id: houseId,
+        court_program_id: courtProgramId,
+        violation_type: violationType,
+        severity,
+        status: "OPEN",
+        detected_at: detectedAt,
+        resolved_at: null,
+        notes,
+        detected_from_event_id: detectedFromEventId,
+        created_at: existing?.created_at ?? nowIso,
+        updated_at: nowIso,
+      };
+      if (existingIndex >= 0) {
+        this.violations[existingIndex] = row;
+      } else {
+        this.violations.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from violations") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by detected_at desc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.violations
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const detectedCompare = right.detected_at.localeCompare(left.detected_at);
+          if (detectedCompare !== 0) {
+            return detectedCompare;
+          }
+          return right.created_at.localeCompare(left.created_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
       };
     }
 

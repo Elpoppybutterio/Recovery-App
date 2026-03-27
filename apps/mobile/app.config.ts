@@ -1,14 +1,53 @@
 type ConfigContext = import("expo/config").ConfigContext;
 type ExpoConfig = import("expo/config").ExpoConfig;
-type AppEnv = "development" | "preview" | "production";
 type JsEngine = "hermes" | "jsc";
+type AppEnv = "development" | "preview" | "production";
+type ApiBackendSelection = "render_default" | "local_override";
 
 const DEFAULT_PROD_BUNDLE_ID = "com.rabbithole.soberai";
 const DEFAULT_RENDER_API_URL = "https://sober-ai-api.onrender.com";
+const DEFAULT_LOCAL_API_URL = "http://127.0.0.1:3031";
 const APP_SCHEME = "soberai";
-const APP_VERSION = "0.1.32";
+const APP_VERSION = "0.1.33";
 const IOS_BUILD_NUMBER = "57";
 const ANDROID_VERSION_CODE = 57;
+
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function normalizeApiUrl(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return trimTrailingSlashes(fallback);
+  }
+  return trimTrailingSlashes(trimmed);
+}
+
+function resolveMobileApiEnvironment(input: {
+  appEnv: AppEnv;
+  apiBackendOverride?: string;
+  localApiUrlOverride?: string;
+}): {
+  apiUrl: string;
+  selection: ApiBackendSelection;
+  localOverrideActive: boolean;
+} {
+  const backendOverride = input.apiBackendOverride?.trim().toLowerCase();
+  if (backendOverride === "local" && input.appEnv === "development") {
+    return {
+      apiUrl: normalizeApiUrl(input.localApiUrlOverride, DEFAULT_LOCAL_API_URL),
+      selection: "local_override",
+      localOverrideActive: true,
+    };
+  }
+
+  return {
+    apiUrl: DEFAULT_RENDER_API_URL,
+    selection: "render_default",
+    localOverrideActive: false,
+  };
+}
 
 function resolveProdBundleIdentifier() {
   const envValue = process.env.APP_BUNDLE_ID?.trim();
@@ -66,19 +105,6 @@ function resolveAndroidVersionCode(appEnv: AppEnv): number {
   return 1;
 }
 
-function resolveApiUrl(appEnv: AppEnv): string {
-  const envValue = process.env.EXPO_PUBLIC_API_URL?.trim();
-  if (envValue) {
-    return envValue.replace(/\/+$/, "");
-  }
-
-  if (appEnv === "preview" || appEnv === "production") {
-    return DEFAULT_RENDER_API_URL;
-  }
-
-  return "";
-}
-
 function resolveJsEngine(): JsEngine {
   const raw = process.env.EXPO_JS_ENGINE?.trim().toLowerCase();
   if (raw === "jsc") return "jsc";
@@ -95,7 +121,11 @@ module.exports = ({ config }: ConfigContext): ExpoConfig => {
   const bundleIdentifier = resolveBundleIdentifier(appEnv);
   const iosBuildNumber = resolveIosBuildNumber(appEnv);
   const androidVersionCode = resolveAndroidVersionCode(appEnv);
-  const apiUrl = resolveApiUrl(appEnv);
+  const apiEnvironment = resolveMobileApiEnvironment({
+    appEnv,
+    apiBackendOverride: process.env.EXPO_PUBLIC_API_BACKEND,
+    localApiUrlOverride: process.env.EXPO_PUBLIC_LOCAL_API_URL,
+  });
   const jsEngine = resolveJsEngine();
   const newArchEnabled = resolveNewArchEnabled();
   const runtimeVersion = APP_VERSION;
@@ -136,6 +166,12 @@ module.exports = ({ config }: ConfigContext): ExpoConfig => {
           "SoberAI uses your calendar to add recovery meetings, sober house obligations, and accountability appointments you choose to save.",
         NSCalendarsWriteOnlyAccessUsageDescription:
           "SoberAI uses calendar access to create recovery meetings, sober house obligations, and accountability appointments at your request.",
+        NSCalendarsFullAccessUsageDescription:
+          "SoberAI uses calendar access to create and update recovery meetings, service commitments, sober house obligations, and accountability appointments you choose to save.",
+        NSRemindersUsageDescription:
+          "SoberAI uses reminders access only when needed to support recovery calendar items you choose to save.",
+        NSRemindersFullAccessUsageDescription:
+          "SoberAI uses reminders access only when needed to support recovery calendar items you choose to save.",
         NSLocationWhenInUseUsageDescription:
           "Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.",
         UIBackgroundModes: ["fetch", "remote-notification"],
@@ -161,7 +197,9 @@ module.exports = ({ config }: ConfigContext): ExpoConfig => {
     updates: updatesConfig,
     extra: {
       ...config.extra,
-      apiUrl,
+      apiUrl: apiEnvironment.apiUrl,
+      apiBackendSelection: apiEnvironment.selection,
+      localApiOverrideActive: apiEnvironment.localOverrideActive,
       devAuthUserId: appEnv === "development" ? "enduser-a1" : "",
       devUserDisplayName: appEnv === "development" ? "DEV User" : "",
       meetingFeedUrl: "",

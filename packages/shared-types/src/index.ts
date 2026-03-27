@@ -8,6 +8,152 @@ export enum Role {
   ADMIN = "ADMIN",
 }
 
+export const accessGrantRoleSchema = z.enum([
+  "recovery_user",
+  "resident_user",
+  "court_participant",
+  "org_admin",
+  "house_manager",
+  "probation_officer",
+  "parole_officer",
+  "court_supervisor",
+  "platform_owner",
+]);
+
+export type AccessGrantRole = z.infer<typeof accessGrantRoleSchema>;
+
+export const participantTypeSchema = z.enum([
+  "recovery_user",
+  "resident_user",
+  "court_participant",
+]);
+
+export const participantProfileStatusSchema = z.enum(["PENDING", "ACTIVE", "PAUSED", "INACTIVE"]);
+
+export const obligationTypeSchema = z.enum([
+  "meeting_attendance",
+  "sponsor_contact",
+  "treatment_session",
+  "court_appearance",
+  "drug_test",
+  "chore",
+  "curfew",
+  "service_commitment",
+  "proof_submission",
+  "other",
+]);
+
+export const obligationSourceTrackSchema = z.enum([
+  "recovery",
+  "resident",
+  "court",
+  "service",
+  "treatment",
+  "sponsor",
+  "operations",
+  "other",
+]);
+
+export const obligationPrioritySchema = z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+export const obligationStatusSchema = z.enum([
+  "ACTIVE",
+  "COMPLETED",
+  "MISSED",
+  "CANCELED",
+  "WAIVED",
+]);
+export const proofTypeSchema = z.enum([
+  "signature",
+  "photo",
+  "selfie",
+  "geofence",
+  "qr_or_code",
+  "officer_verification",
+  "staff_verification",
+  "document_upload",
+]);
+export const verificationStatusSchema = z.enum([
+  "NOT_REQUIRED",
+  "PENDING",
+  "SUBMITTED",
+  "VERIFIED",
+  "REJECTED",
+  "WAIVED",
+]);
+
+export const participantComplianceEventTypeSchema = z.enum([
+  "MEETING_ATTENDED",
+  "MEETING_MISSED",
+  "SPONSOR_CONTACT_COMPLETED",
+  "SPONSOR_CONTACT_MISSED",
+  "TREATMENT_SESSION_ATTENDED",
+  "TREATMENT_SESSION_MISSED",
+  "COURT_APPEARANCE_ATTENDED",
+  "COURT_APPEARANCE_MISSED",
+  "DRUG_TEST_COMPLETED",
+  "DRUG_TEST_MISSED",
+  "CHORE_COMPLETED",
+  "CHORE_MISSED",
+  "CURFEW_CHECK_PASSED",
+  "CURFEW_VIOLATION_DETECTED",
+  "SERVICE_COMMITMENT_COMPLETED",
+  "PROOF_UPLOADED",
+  "SIGNATURE_CAPTURED",
+  "GEOFENCE_ENTERED",
+  "GEOFENCE_EXITED",
+  "OBLIGATION_ACKNOWLEDGED",
+  "OBLIGATION_MISSED",
+  "ADMIN_NOTE_ADDED",
+  "OBLIGATION_SYNCED",
+]);
+
+export const participantComplianceEventStatusSchema = z.enum([
+  "COMPLETED",
+  "MISSED",
+  "PASSED",
+  "FAILED",
+  "UPLOADED",
+  "CAPTURED",
+  "ENTERED",
+  "EXITED",
+  "ACKNOWLEDGED",
+  "VERIFIED",
+  "REJECTED",
+  "NOTED",
+]);
+
+export const violationTypeSchema = z.enum([
+  "missed_meeting",
+  "missed_treatment",
+  "missed_test",
+  "missed_sponsor_contact",
+  "missed_chore",
+  "missed_curfew",
+  "missing_signature",
+  "missing_proof",
+  "failed_identity_verification",
+  "other",
+]);
+
+export const violationSeveritySchema = z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+export const violationStatusSchema = z.enum(["OPEN", "UNDER_REVIEW", "RESOLVED", "DISMISSED"]);
+
+export type ParticipantType = z.infer<typeof participantTypeSchema>;
+export type ParticipantProfileStatus = z.infer<typeof participantProfileStatusSchema>;
+export type ObligationType = z.infer<typeof obligationTypeSchema>;
+export type ObligationSourceTrack = z.infer<typeof obligationSourceTrackSchema>;
+export type ObligationPriority = z.infer<typeof obligationPrioritySchema>;
+export type ObligationStatus = z.infer<typeof obligationStatusSchema>;
+export type ProofType = z.infer<typeof proofTypeSchema>;
+export type VerificationStatus = z.infer<typeof verificationStatusSchema>;
+export type ParticipantComplianceEventType = z.infer<typeof participantComplianceEventTypeSchema>;
+export type ParticipantComplianceEventStatus = z.infer<
+  typeof participantComplianceEventStatusSchema
+>;
+export type ViolationType = z.infer<typeof violationTypeSchema>;
+export type ViolationSeverity = z.infer<typeof violationSeveritySchema>;
+export type ViolationStatus = z.infer<typeof violationStatusSchema>;
+
 export enum Permission {
   RECORD_ATTENDANCE = "RECORD_ATTENDANCE",
   VERIFY_ATTENDANCE = "VERIFY_ATTENDANCE",
@@ -276,6 +422,117 @@ export const homeGroupBirthdayConfigSchema = z
     }
   });
 
+export const userProfileSchema = z.object({
+  userId: z.string().min(1),
+  tenantId: z.string().min(1),
+  email: z.string().email(),
+  displayName: z.string().min(1),
+  createdAt: z.string().datetime(),
+});
+
+export const accessGrantSchema = z.object({
+  id: z.string().min(1),
+  role: accessGrantRoleSchema,
+  organizationId: z.string().min(1).nullable(),
+  organizationName: z.string().min(1).nullable(),
+  courtProgramId: z.string().min(1).nullable(),
+  courtProgramName: z.string().min(1).nullable(),
+  courtProgramJurisdiction: z.string().min(1).nullable(),
+  grantedAt: z.string().datetime(),
+  revokedAt: z.string().datetime().nullable(),
+});
+
+export const accessCapabilitiesSchema = z.object({
+  participantRoles: z.array(accessGrantRoleSchema),
+  protectedRoles: z.array(accessGrantRoleSchema),
+  canManageOrganizations: z.boolean(),
+  canManageCourtPrograms: z.boolean(),
+  isPlatformOwner: z.boolean(),
+});
+
+export const accessContextResponseSchema = z.object({
+  user: userProfileSchema,
+  grants: z.array(accessGrantSchema),
+  capabilities: accessCapabilitiesSchema,
+});
+
+export const participantProfileSchema = z.object({
+  userId: z.string().min(1),
+  displayName: z.string().min(1).nullable(),
+  participantType: participantTypeSchema,
+  organizationId: z.string().min(1).nullable(),
+  houseId: z.string().min(1).nullable(),
+  courtProgramId: z.string().min(1).nullable(),
+  status: participantProfileStatusSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+
+export const obligationSchema = z.object({
+  id: z.string().min(1),
+  userId: z.string().min(1),
+  obligationType: obligationTypeSchema,
+  sourceTrack: obligationSourceTrackSchema,
+  title: z.string().min(1),
+  description: z.string().nullable(),
+  organizationId: z.string().min(1).nullable(),
+  houseId: z.string().min(1).nullable(),
+  courtProgramId: z.string().min(1).nullable(),
+  dueAt: z.string().datetime().nullable(),
+  recurrence: z.record(z.unknown()).nullable(),
+  priority: obligationPrioritySchema.nullable(),
+  requiresProof: z.boolean(),
+  requiresSignature: z.boolean(),
+  proofType: proofTypeSchema.nullable(),
+  verificationStatus: verificationStatusSchema,
+  status: obligationStatusSchema,
+  syncSource: z.string().min(1).nullable(),
+  syncKey: z.string().min(1).nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+
+export const participantComplianceEventSchema = z.object({
+  id: z.string().min(1),
+  userId: z.string().min(1),
+  obligationId: z.string().min(1).nullable(),
+  organizationId: z.string().min(1).nullable(),
+  houseId: z.string().min(1).nullable(),
+  courtProgramId: z.string().min(1).nullable(),
+  eventType: participantComplianceEventTypeSchema,
+  eventStatus: participantComplianceEventStatusSchema,
+  occurredAt: z.string().datetime(),
+  metadata: z.record(z.unknown()),
+  proofUri: z.string().nullable(),
+  proofMetadata: z.record(z.unknown()).nullable(),
+  signaturePresent: z.boolean(),
+  proofType: proofTypeSchema.nullable(),
+  verificationStatus: verificationStatusSchema.nullable(),
+  verifiedByRole: z.string().nullable(),
+  verifiedAt: z.string().datetime().nullable(),
+  createdByRole: z.string().nullable(),
+  sourceTrack: obligationSourceTrackSchema.nullable(),
+  externalEventId: z.string().nullable(),
+  createdAt: z.string().datetime(),
+});
+
+export const participantViolationSchema = z.object({
+  id: z.string().min(1),
+  userId: z.string().min(1),
+  obligationId: z.string().min(1).nullable(),
+  organizationId: z.string().min(1).nullable(),
+  houseId: z.string().min(1).nullable(),
+  courtProgramId: z.string().min(1).nullable(),
+  violationType: violationTypeSchema,
+  severity: violationSeveritySchema,
+  status: violationStatusSchema,
+  detectedAt: z.string().datetime(),
+  resolvedAt: z.string().datetime().nullable(),
+  notes: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+
 export type AttendanceRecord = z.infer<typeof attendanceRecordSchema>;
 export type ExclusionZone = z.infer<typeof exclusionZoneSchema>;
 export type UserZoneRule = z.infer<typeof userZoneRuleSchema>;
@@ -286,3 +543,11 @@ export type LastKnownLocation = z.infer<typeof lastKnownLocationSchema>;
 export type ComplianceEvent = z.infer<typeof complianceEventSchema>;
 export type SponsorConfig = z.infer<typeof sponsorConfigSchema>;
 export type HomeGroupBirthdayConfig = z.infer<typeof homeGroupBirthdayConfigSchema>;
+export type UserProfile = z.infer<typeof userProfileSchema>;
+export type AccessGrant = z.infer<typeof accessGrantSchema>;
+export type AccessCapabilities = z.infer<typeof accessCapabilitiesSchema>;
+export type AccessContextResponse = z.infer<typeof accessContextResponseSchema>;
+export type ParticipantProfile = z.infer<typeof participantProfileSchema>;
+export type Obligation = z.infer<typeof obligationSchema>;
+export type ParticipantComplianceEvent = z.infer<typeof participantComplianceEventSchema>;
+export type ParticipantViolation = z.infer<typeof participantViolationSchema>;

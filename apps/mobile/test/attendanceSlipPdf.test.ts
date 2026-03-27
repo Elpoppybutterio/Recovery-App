@@ -28,5 +28,8 @@ describe("attendance slip html", () => {
     expect(html).toContain("Signature");
     expect(html).toContain("Recovery Group");
     expect(html).toContain("45 min");
+    expect(html).toContain("Recurring service commitments included by participant");
+    expect(html).toContain("Greeter");
+    expect(html).toContain("Arrive 10 min early");
   });
 });

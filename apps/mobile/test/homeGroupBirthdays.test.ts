@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildHomeGroupBirthdayAnnouncementKey,
   buildHomeGroupBirthdayAnnouncementMessage,
+  buildHomeGroupBirthdayDisplayName,
   getSobrietyBirthdayYears,
   isSobrietyBirthdayOnDate,
 } from "../lib/homeGroupBirthdays";
@@ -22,23 +23,33 @@ describe("home group birthdays", () => {
       buildHomeGroupBirthdayAnnouncementKey({
         homeGroupKey: "group-1",
         todayIso: "2026-03-23",
-        celebrantUserIds: ["user-b", "user-a"],
+        celebrantTokens: ["token-b", "token-a"],
       }),
-    ).toBe("home-group-birthday:group-1:2026-03-23:user-a,user-b");
+    ).toBe("home-group-birthday:group-1:2026-03-23:token-a,token-b");
   });
 
-  it("formats first-name-only birthday messages", () => {
+  it("builds the display name exactly from the entered first and optional last value", () => {
+    expect(buildHomeGroupBirthdayDisplayName({ firstName: "Jason", lastName: null })).toBe("Jason");
+    expect(buildHomeGroupBirthdayDisplayName({ firstName: "Jason", lastName: "L" })).toBe(
+      "Jason L",
+    );
+    expect(buildHomeGroupBirthdayDisplayName({ firstName: "Jason", lastName: "Lehman" })).toBe(
+      "Jason Lehman",
+    );
+  });
+
+  it("formats birthday messages using the saved display name", () => {
     expect(
       buildHomeGroupBirthdayAnnouncementMessage([
-        { userId: "u1", firstName: "John", anniversaryYears: 7 },
+        { dedupeToken: "u1", displayName: "John", anniversaryYears: 7 },
       ]),
     ).toBe("John in your home group is celebrating 7 years sober today.");
 
     expect(
       buildHomeGroupBirthdayAnnouncementMessage([
-        { userId: "u1", firstName: "John", anniversaryYears: 7 },
-        { userId: "u2", firstName: "Maria", anniversaryYears: 3 },
+        { dedupeToken: "u1", displayName: "John L", anniversaryYears: 7 },
+        { dedupeToken: "u2", displayName: "Maria Garcia", anniversaryYears: 3 },
       ]),
-    ).toBe("John and Maria in your home group are celebrating sobriety birthdays today.");
+    ).toBe("John L and Maria Garcia in your home group are celebrating sobriety birthdays today.");
   });
 });
