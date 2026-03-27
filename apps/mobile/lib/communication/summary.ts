@@ -68,7 +68,7 @@ export function buildCommunicationNotificationSummary(
       mode: input.mode,
       badgeCount: 0,
       title: "Messages & Alerts",
-      subtitle: "Direct justice communications and reminders will appear here.",
+      subtitle: "Current accountability reminders and alerts for this profile.",
       items,
     };
   }
