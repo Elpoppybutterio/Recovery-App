@@ -32,6 +32,13 @@ type CourtProgramSeed = {
   jurisdiction: string | null;
 };
 
+type HouseSeed = {
+  id: string;
+  tenantId: string;
+  organizationId: string;
+  name: string;
+};
+
 type AccessGrantSeed = {
   tenantId: string;
   userId: string;
@@ -56,6 +63,15 @@ const COURT_PROGRAMS: CourtProgramSeed[] = [
     tenantId: "tenant-a",
     name: "Boulder Recovery Court",
     jurisdiction: "Boulder County",
+  },
+];
+
+const HOUSES: HouseSeed[] = [
+  {
+    id: "house-alpine-1",
+    tenantId: "tenant-a",
+    organizationId: "org-alpine",
+    name: "Alpine House 1",
   },
 ];
 
@@ -182,7 +198,7 @@ export async function seedDevUsers(env: ApiEnv = loadApiEnv()): Promise<void> {
           `
           INSERT INTO user_roles (tenant_id, user_id, role)
           VALUES ($1, $2, $3)
-          ON CONFLICT (tenant_id, user_id, role) DO NOTHING
+          ON CONFLICT DO NOTHING
         `,
           [user.tenantId, user.id, role],
         );
@@ -194,7 +210,7 @@ export async function seedDevUsers(env: ApiEnv = loadApiEnv()): Promise<void> {
         `
         INSERT INTO organizations (id, tenant_id, name)
         VALUES ($1, $2, $3)
-        ON CONFLICT (id) DO UPDATE
+        ON CONFLICT (tenant_id, id) DO UPDATE
         SET tenant_id = EXCLUDED.tenant_id,
             name = EXCLUDED.name
       `,
@@ -207,12 +223,26 @@ export async function seedDevUsers(env: ApiEnv = loadApiEnv()): Promise<void> {
         `
         INSERT INTO court_programs (id, tenant_id, name, jurisdiction)
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (id) DO UPDATE
+        ON CONFLICT (tenant_id, id) DO UPDATE
         SET tenant_id = EXCLUDED.tenant_id,
             name = EXCLUDED.name,
             jurisdiction = EXCLUDED.jurisdiction
       `,
         [courtProgram.id, courtProgram.tenantId, courtProgram.name, courtProgram.jurisdiction],
+      );
+    }
+
+    for (const house of HOUSES) {
+      await db.query(
+        `
+        INSERT INTO houses (id, tenant_id, organization_id, name)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (tenant_id, id) DO UPDATE
+        SET tenant_id = EXCLUDED.tenant_id,
+            organization_id = EXCLUDED.organization_id,
+            name = EXCLUDED.name
+      `,
+        [house.id, house.tenantId, house.organizationId, house.name],
       );
     }
 
@@ -241,6 +271,30 @@ export async function seedDevUsers(env: ApiEnv = loadApiEnv()): Promise<void> {
         ],
       );
     }
+
+    await db.query(
+      `
+      INSERT INTO participant_profiles (
+        user_id,
+        tenant_id,
+        participant_type,
+        organization_id,
+        house_id,
+        court_program_id,
+        status
+      )
+      VALUES
+        ('enduser-a1', 'tenant-a', 'resident_user', 'org-alpine', 'house-alpine-1', NULL, 'ACTIVE'),
+        ('enduser-a2', 'tenant-a', 'court_participant', NULL, NULL, 'court-boulder', 'ACTIVE')
+      ON CONFLICT (user_id) DO UPDATE
+      SET participant_type = EXCLUDED.participant_type,
+          organization_id = EXCLUDED.organization_id,
+          house_id = EXCLUDED.house_id,
+          court_program_id = EXCLUDED.court_program_id,
+          status = EXCLUDED.status,
+          updated_at = NOW()
+    `,
+    );
 
     await db.query(
       `

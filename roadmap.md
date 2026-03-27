@@ -80,6 +80,7 @@ Deliver a privacy-safe, tenant-isolated recovery accountability platform that re
 - Dashboard: Wisdom tile uses server-driven daily rotation (`/api/wisdom/daily`) with one quote per day, pronoun normalization (`I/you -> we`), plus local cache and deterministic fallback.
 - Mobile dev correctness: API URL alignment (`localhost:3031`), no hardcoded SF map origin defaults, nearby-meetings request diagnostics, and map search-origin visibility.
 - Build readiness: Development Build workflow implemented (EAS `development` / `preview` / `production` profiles, environment-driven bundle identifiers, stable deep-link scheme, and dev-client runbook in `docs/DEV_BUILD.md`).
+- Deterministic mobile API environment selection: Render is now the explicit default backend for normal use, localhost requires an intentional development override, runtime localhost inference is removed, and Diagnostics now shows the active API base URL, backend selection, auth mode, identity, tenant, and loaded backend roles.
 - Preview pipeline: internal preview build profile + TestFlight-ready store preview profile documented and validated in `docs/PREVIEW_BUILD.md`.
 - API dev tooling: DEV-auth-gated meeting ingest trigger (`POST /v1/dev/meetings/refresh`) with cooldown guard for local workflows.
 - API endpoints: `GET /v1/me/sponsor`, `PUT /v1/me/sponsor`, `POST /v1/dev/meetings/refresh`.

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPlatformOwnerGrantSql,
   canManageCourtHierarchy,
   canManageSoberHouseHierarchy,
   canViewCourtParticipantExperience,
   canViewSoberHouseResidentExperience,
+  deriveProtectedOrgAccessGateState,
   deriveAppAccessRole,
   parseAccessContextResponse,
 } from "../lib/access";
@@ -217,5 +219,62 @@ describe("protected access gating", () => {
 
     expect(canManageSoberHouseHierarchy(role)).toBe(true);
     expect(canManageCourtHierarchy(role)).toBe(true);
+  });
+
+  it("keeps the protected org gate in auth-required mode until sign-in proves the account is unauthorized", () => {
+    expect(
+      deriveProtectedOrgAccessGateState({
+        authorized: false,
+        outcome: "idle",
+      }),
+    ).toBe("AUTH_REQUIRED");
+    expect(
+      deriveProtectedOrgAccessGateState({
+        authorized: false,
+        outcome: "unauthenticated",
+      }),
+    ).toBe("AUTH_REQUIRED");
+    expect(
+      deriveProtectedOrgAccessGateState({
+        authorized: false,
+        outcome: "unauthorized",
+      }),
+    ).toBe("ACCESS_DENIED");
+  });
+
+  it("removes the protected org gate once backend authorization is present", () => {
+    expect(
+      deriveProtectedOrgAccessGateState({
+        authorized: true,
+        outcome: "unauthorized",
+      }),
+    ).toBeNull();
+  });
+
+  it("builds exact bootstrap SQL for the current signed-in user id", () => {
+    expect(
+      buildPlatformOwnerGrantSql({
+        tenantId: "tenant-a",
+        userId: "enduser-a1",
+      }),
+    ).toBe(
+      [
+        "INSERT INTO user_roles (",
+        "  tenant_id,",
+        "  user_id,",
+        "  role,",
+        "  is_active,",
+        "  granted_by_user_id",
+        ")",
+        "VALUES (",
+        "  'tenant-a',",
+        "  'enduser-a1',",
+        "  'platform_owner',",
+        "  TRUE,",
+        "  'enduser-a1'",
+        ")",
+        "ON CONFLICT DO NOTHING;",
+      ].join("\n"),
+    );
   });
 });

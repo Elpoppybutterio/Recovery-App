@@ -20,7 +20,6 @@ import {
   KeyboardAvoidingView,
   Linking,
   Modal,
-  NativeModules,
   Platform,
   Pressable,
   Share,
@@ -39,6 +38,7 @@ import {
   buildHomeGroupWeekOptions,
   type HomeGroupWeekOption,
 } from "./lib/meetings/discovery";
+import { resolveRuntimeApiBaseUrl, type ApiBackendSelection } from "./lib/apiEnvironment";
 import {
   createMeetingsSource,
   MeetingRecord,
@@ -104,15 +104,18 @@ import {
 } from "./lib/homeGroupBirthdays";
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import {
+  buildPlatformOwnerGrantSql,
   canManageCourtHierarchy,
   canManageSoberHouseHierarchy,
   canViewCourtParticipantExperience,
+  deriveProtectedOrgAccessGateState,
   canViewSoberHouseResidentExperience,
   courtEntryLabel,
   deriveAppAccessRole,
   parseAccessContextResponse,
   soberHouseEntryLabel,
   type AccessContext,
+  type ProtectedOrgAccessGateOutcome,
 } from "./lib/access";
 import {
   type BackendObligationRecord,
@@ -175,6 +178,7 @@ import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
 import { SoberHouseSettingsScreen } from "./screens/SoberHouseSettingsScreen";
+import { ProtectedOrgAccessGateScreen } from "./screens/ProtectedOrgAccessGateScreen";
 import { SoberHouseChatSection } from "./components/SoberHouseChatSection";
 import { SoberHouseOwnerDashboard } from "./components/SoberHouseOwnerDashboard";
 import {
@@ -531,7 +535,6 @@ type DiagnosticsLocationSnapshot = {
 
 const DASHBOARD_FOOTER_NAV_HEIGHT = Platform.OS === "ios" ? 74 : 66;
 const DASHBOARD_SCROLL_FADE_HEIGHT = 34;
-const DEFAULT_REMOTE_API_URL = "https://sober-ai-api.onrender.com";
 
 type SponsorCallLog = {
   id: string;
@@ -1897,66 +1900,13 @@ const notificationsModule =
 const Notifications: any = notificationsModule;
 const notificationsModuleAvailable = Boolean(notificationsModuleRaw);
 
-function trimTrailingSlashes(value: string): string {
-  return value.replace(/\/+$/, "");
-}
-
-function isLocalNetworkHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  if (["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(normalized)) {
-    return true;
-  }
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized)) {
-    const [a, b] = normalized.split(".").map((part) => Number(part));
-    if (a === 10) {
-      return true;
-    }
-    if (a === 127) {
-      return true;
-    }
-    if (a === 192 && b === 168) {
-      return true;
-    }
-    if (a === 172 && b >= 16 && b <= 31) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function resolveApiBaseUrl(fromEnv: string, fromConfig: string): string {
-  const preferred = fromEnv || fromConfig;
-  if (preferred) {
-    return trimTrailingSlashes(preferred);
-  }
-
-  const scriptUrl = (NativeModules as { SourceCode?: { scriptURL?: string } }).SourceCode
-    ?.scriptURL;
-  if (typeof scriptUrl === "string" && scriptUrl.length > 0) {
-    try {
-      const parsed = new URL(scriptUrl);
-      const host = parsed.hostname;
-      if (host && isLocalNetworkHost(host)) {
-        return `http://${host}:3031`;
-      }
-    } catch {
-      // fall through to localhost default
-    }
-  }
-
-  return DEFAULT_REMOTE_API_URL;
+function resolveApiBaseUrl(fromConfig: string): string {
+  return resolveRuntimeApiBaseUrl(fromConfig);
 }
 
 function resolveFallbackApiUrls(primaryApiUrl: string): string[] {
-  const normalizedPrimary = trimTrailingSlashes(primaryApiUrl.trim());
-  const fallback = trimTrailingSlashes(DEFAULT_REMOTE_API_URL);
-  if (!normalizedPrimary || normalizedPrimary === fallback) {
-    return [];
-  }
-  return [fallback];
+  void primaryApiUrl;
+  return [];
 }
 
 function buildSponsorEventFingerprint(input: {
@@ -2168,15 +2118,11 @@ export default function App() {
     }),
     [calendarRuntimeEnabled],
   );
-  const apiUrlFromEnv =
-    typeof process.env.EXPO_PUBLIC_API_URL === "string"
-      ? process.env.EXPO_PUBLIC_API_URL.trim()
-      : "";
   const apiUrlFromConfig = typeof extra.apiUrl === "string" ? extra.apiUrl.trim() : "";
-  const apiUrl = useMemo(
-    () => resolveApiBaseUrl(apiUrlFromEnv, apiUrlFromConfig),
-    [apiUrlFromConfig, apiUrlFromEnv],
-  );
+  const configuredApiBackendSelection =
+    extra.apiBackendSelection === "local_override" ? "local_override" : "render_default";
+  const localApiOverrideActive = extra.localApiOverrideActive === true;
+  const apiUrl = useMemo(() => resolveApiBaseUrl(apiUrlFromConfig), [apiUrlFromConfig]);
   const appVersion =
     typeof runtimeExpoConfig.version === "string"
       ? runtimeExpoConfig.version
@@ -2196,6 +2142,9 @@ export default function App() {
   const configuredDevAuthUserId =
     typeof extra.devAuthUserId === "string" ? extra.devAuthUserId.trim() : "";
   const devAuthUserId = configuredDevAuthUserId || "enduser-a1";
+  const [devAuthIdentityDraft, setDevAuthIdentityDraft] = useState(devAuthUserId);
+  const [devAuthOverrideUserId, setDevAuthOverrideUserId] = useState<string | null>(null);
+  const [devAuthSignedOut, setDevAuthSignedOut] = useState(false);
   const devUserDisplayName =
     typeof extra.devUserDisplayName === "string" && extra.devUserDisplayName.trim().length > 0
       ? extra.devUserDisplayName.trim()
@@ -2210,23 +2159,42 @@ export default function App() {
     typeof extra.meetingRadiusMiles === "number" && Number.isFinite(extra.meetingRadiusMiles)
       ? extra.meetingRadiusMiles
       : 50;
+  const currentDevAuthUserId =
+    devAuthSignedOut === true ? "" : (devAuthOverrideUserId?.trim() || devAuthUserId).trim();
+  const usesDevAuthShim = true;
 
   const authHeader = useMemo(() => {
-    // Until the mobile app ships a real session provider, keep the meetings/home-group API
-    // on the existing DEV_<userId> contract across simulator and device builds.
-    const fallbackUserId =
-      configuredDevAuthUserId.length > 0 ? configuredDevAuthUserId : devAuthUserId;
-    if (!fallbackUserId) {
+    // Until the mobile app ships a real session provider, keep API access on the existing
+    // DEV_<userId> contract across simulator and device builds.
+    if (!currentDevAuthUserId) {
       return null;
     }
-    return `Bearer DEV_${fallbackUserId}`;
-  }, [configuredDevAuthUserId, devAuthUserId]);
+    return `Bearer DEV_${currentDevAuthUserId}`;
+  }, [currentDevAuthUserId]);
   const authHeaders = useMemo(
     () => (authHeader ? ({ Authorization: authHeader } as Record<string, string>) : undefined),
     [authHeader],
   );
+  const authModeLabel = currentDevAuthUserId
+    ? `DEV shim (Bearer DEV_${currentDevAuthUserId})`
+    : "DEV shim signed out";
   const [serverAccessContext, setServerAccessContext] = useState<AccessContext | null>(null);
   const [serverRoleCheckStatus, setServerRoleCheckStatus] = useState<string | null>(null);
+  const [protectedOrgAccessGateOutcome, setProtectedOrgAccessGateOutcome] =
+    useState<ProtectedOrgAccessGateOutcome>("idle");
+  const [protectedOrgAccessChecking, setProtectedOrgAccessChecking] = useState(false);
+  const currentAccessUserId = serverAccessContext?.user.userId ?? (currentDevAuthUserId || "");
+  const currentAccessTenantId = serverAccessContext?.user.tenantId ?? "";
+  const currentAccessEmail = serverAccessContext?.user.email ?? "";
+  const currentAccessIdentityLabel = serverAccessContext
+    ? `${serverAccessContext.user.displayName} (${serverAccessContext.user.email})`
+    : currentDevAuthUserId
+      ? `${devUserDisplayName} (DEV_${currentDevAuthUserId})`
+      : "Signed out";
+  const currentAccessRoles = useMemo(
+    () => serverAccessContext?.grants.map((grant) => grant.role) ?? [],
+    [serverAccessContext],
+  );
   const enableHomeGroupBirthdayApiSync = Boolean(apiUrl && authHeader);
   const [clockTickMs, setClockTickMs] = useState(Date.now());
   const [meetingRadiusMiles, setMeetingRadiusMiles] = useState(defaultMeetingRadiusMiles);
@@ -2885,7 +2853,33 @@ export default function App() {
   const showProtectedOrgAccessGate =
     homeScreen === "SETUP" &&
     wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" &&
+    setupStep === 2 &&
     !protectedOrgSetupAuthorized;
+  const protectedOrgAccessGateState = deriveProtectedOrgAccessGateState({
+    authorized: protectedOrgSetupAuthorized,
+    outcome: protectedOrgAccessGateOutcome,
+  });
+  const protectedOrgCurrentUserId = currentAccessUserId || null;
+  const protectedOrgCurrentTenantId = currentAccessTenantId || null;
+  const protectedOrgCurrentEmail = currentAccessEmail || null;
+  const protectedOrgSignedInAccountLabel = currentAccessIdentityLabel;
+  const protectedOrgBackendRoles = currentAccessRoles;
+  const protectedOrgAuthModeLabel = usesDevAuthShim
+    ? "Development auth shim active"
+    : "Authenticated account";
+  const protectedOrgAuthModeDetail = usesDevAuthShim
+    ? "This build still uses Authorization: Bearer DEV_<userId>. There is no normal sign-in screen yet, so switch account uses development identities."
+    : null;
+  const protectedOrgBootstrapSql = useMemo(
+    () =>
+      protectedOrgCurrentUserId && protectedOrgCurrentTenantId
+        ? buildPlatformOwnerGrantSql({
+            tenantId: protectedOrgCurrentTenantId,
+            userId: protectedOrgCurrentUserId,
+          })
+        : null,
+    [protectedOrgCurrentTenantId, protectedOrgCurrentUserId],
+  );
   const shouldShowSoberHouseLock =
     mode === "B" &&
     homeScreen === "SETTINGS" &&
@@ -6336,6 +6330,48 @@ export default function App() {
   }, [homeScreen, isDiagnosticsEnabled]);
 
   useEffect(() => {
+    if (!devAuthIdentityDraft.trim()) {
+      setDevAuthIdentityDraft(devAuthUserId);
+    }
+  }, [devAuthIdentityDraft, devAuthUserId]);
+
+  const refreshServerAccessContext = useCallback(async () => {
+    if (!apiUrl || !authHeaders) {
+      setServerAccessContext(null);
+      setServerRoleCheckStatus("Sign in to continue.");
+      return "unauthenticated" as const;
+    }
+
+    try {
+      const response = await fetch(`${apiUrl}/v1/me/access-context`, { headers: authHeaders });
+      if (!response.ok) {
+        setServerAccessContext(null);
+        setServerRoleCheckStatus(
+          response.status === 401
+            ? "Sign in to continue."
+            : "Organization setup is available only to authorized admins.",
+        );
+        return response.status === 401 ? ("unauthenticated" as const) : ("unauthorized" as const);
+      }
+
+      const payload = parseAccessContextResponse(await response.json());
+      if (!payload) {
+        setServerAccessContext(null);
+        setServerRoleCheckStatus("Organization setup is available only to authorized admins.");
+        return "unauthorized" as const;
+      }
+
+      setServerAccessContext(payload);
+      setServerRoleCheckStatus(null);
+      return "authorized" as const;
+    } catch {
+      setServerAccessContext(null);
+      setServerRoleCheckStatus("Organization setup is available only to authorized admins.");
+      return "unauthorized" as const;
+    }
+  }, [apiUrl, authHeaders]);
+
+  useEffect(() => {
     let active = true;
 
     if (!apiUrl || !authHeaders) {
@@ -6347,47 +6383,16 @@ export default function App() {
     }
 
     void (async () => {
-      try {
-        const response = await fetch(`${apiUrl}/v1/me/access-context`, { headers: authHeaders });
-        if (!active) {
-          return;
-        }
-        if (!response.ok) {
-          setServerAccessContext(null);
-          setServerRoleCheckStatus(
-            response.status === 401
-              ? "Sign in to continue."
-              : "Organization and supervision setup is available only to authorized admins.",
-          );
-          return;
-        }
-
-        const payload = parseAccessContextResponse(await response.json());
-        if (!payload) {
-          setServerAccessContext(null);
-          setServerRoleCheckStatus(
-            "Organization and supervision setup is available only to authorized admins.",
-          );
-          return;
-        }
-
-        setServerAccessContext(payload);
-        setServerRoleCheckStatus(null);
-      } catch {
-        if (!active) {
-          return;
-        }
-        setServerAccessContext(null);
-        setServerRoleCheckStatus(
-          "Organization and supervision setup is available only to authorized admins.",
-        );
+      if (!active) {
+        return;
       }
+      await refreshServerAccessContext();
     })();
 
     return () => {
       active = false;
     };
-  }, [apiUrl, authHeaders]);
+  }, [apiUrl, authHeaders, refreshServerAccessContext]);
 
   useEffect(() => {
     let active = true;
@@ -7585,6 +7590,75 @@ export default function App() {
     }
     setSetupStep(setupFlowSteps[currentIndex - 1] ?? 1);
   }, [setupFlowSteps, setupStep]);
+
+  useEffect(() => {
+    if (!showProtectedOrgAccessGate || protectedOrgSetupAuthorized) {
+      setProtectedOrgAccessGateOutcome("idle");
+      setProtectedOrgAccessChecking(false);
+    }
+  }, [protectedOrgSetupAuthorized, showProtectedOrgAccessGate]);
+
+  const beginProtectedOrgAccessSignIn = useCallback(async () => {
+    setSetupError(null);
+    if (usesDevAuthShim && devAuthSignedOut) {
+      const nextUserId = devAuthIdentityDraft.trim() || devAuthUserId;
+      setDevAuthOverrideUserId(nextUserId);
+      setDevAuthSignedOut(false);
+      setProtectedOrgAccessGateOutcome("idle");
+      setServerRoleCheckStatus(`Checking access for DEV_${nextUserId}...`);
+      return;
+    }
+    setProtectedOrgAccessChecking(true);
+    const result = await refreshServerAccessContext();
+    setProtectedOrgAccessGateOutcome(
+      result === "authorized"
+        ? "idle"
+        : result === "unauthorized"
+          ? "unauthorized"
+          : "unauthenticated",
+    );
+    setProtectedOrgAccessChecking(false);
+  }, [
+    devAuthIdentityDraft,
+    devAuthSignedOut,
+    devAuthUserId,
+    refreshServerAccessContext,
+    usesDevAuthShim,
+  ]);
+
+  const switchProtectedOrgDevIdentity = useCallback(() => {
+    const nextUserId = devAuthIdentityDraft.trim();
+    if (!nextUserId) {
+      setSetupError("Enter a development user id to switch accounts.");
+      return;
+    }
+
+    setSetupError(null);
+    setProtectedOrgAccessGateOutcome("idle");
+    setServerAccessContext(null);
+    setServerRoleCheckStatus(`Checking access for DEV_${nextUserId}...`);
+    setDevAuthOverrideUserId(nextUserId);
+    setDevAuthSignedOut(false);
+  }, [devAuthIdentityDraft]);
+
+  const signOutProtectedOrgIdentity = useCallback(() => {
+    setSetupError(null);
+    setProtectedOrgAccessGateOutcome("unauthenticated");
+    setDevAuthSignedOut(true);
+    setServerAccessContext(null);
+    setServerRoleCheckStatus(
+      usesDevAuthShim
+        ? "Signed out of the DEV auth shim. Enter a DEV user id to switch accounts."
+        : "Signed out. Sign in with an authorized account to continue.",
+    );
+  }, [usesDevAuthShim]);
+
+  const requestProtectedOrgAccess = useCallback(() => {
+    Alert.alert(
+      "Request access",
+      "Organization setup is limited to authorized admins. Ask your organization or the platform owner to grant an organization-admin or house-manager role to your account.",
+    );
+  }, []);
 
   const onMapRegionChangeComplete = useCallback(
     (nextRegion: Region) => {
@@ -10569,19 +10643,33 @@ export default function App() {
     () => ({
       appEnv: resolvedAppEnv,
       apiUrl,
+      apiBackendSelection: configuredApiBackendSelection as ApiBackendSelection,
+      localApiOverrideActive,
       appVersion,
       buildNumber,
       timeZone: deviceTimeZone,
       devAuthUserId: configuredDevAuthUserId,
       hasAuthHeader: Boolean(authHeader),
+      authMode: authModeLabel,
+      currentUserId: currentAccessUserId,
+      currentIdentity: currentAccessIdentityLabel,
+      currentTenantId: currentAccessTenantId,
+      backendRoles: currentAccessRoles,
     }),
     [
       apiUrl,
+      authModeLabel,
       appVersion,
       authHeader,
       buildNumber,
+      configuredApiBackendSelection,
       configuredDevAuthUserId,
+      currentAccessIdentityLabel,
+      currentAccessRoles,
+      currentAccessTenantId,
+      currentAccessUserId,
       deviceTimeZone,
+      localApiOverrideActive,
       resolvedAppEnv,
     ],
   );
@@ -10598,6 +10686,15 @@ export default function App() {
     }),
     [lastMeetingsApiEvent],
   );
+
+  useEffect(() => {
+    console.log("[startup] api environment", {
+      apiUrl,
+      apiBackendSelection: configuredApiBackendSelection,
+      localApiOverrideActive,
+      authMode: authModeLabel,
+    });
+  }, [apiUrl, authModeLabel, configuredApiBackendSelection, localApiOverrideActive]);
 
   const diagnosticsLocationStatus = useMemo<DiagnosticsLocationStatus>(
     () => ({
@@ -13991,1286 +14088,1307 @@ export default function App() {
           {mode === "A" ? (
             <>
               {homeScreen === "SETUP" ? (
-                <GlassCard style={styles.card} strong>
-                  <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
-                  <Text style={styles.sectionMeta}>
-                    Step {setupVisibleStepNumber} of {setupFlowSteps.length}
-                  </Text>
-                  {setupStep === 1 ? (
-                    <>
-                      <Text style={styles.label}>What should Sober² help you with first?</Text>
-                      <Text style={styles.sectionMeta}>
-                        Choose the path that best matches why you're here right now.
-                      </Text>
-                      <View style={styles.chipRow}>
-                        {ONBOARDING_PATH_OPTIONS.map((option) => (
+                showProtectedOrgAccessGate && protectedOrgAccessGateState ? (
+                  <ProtectedOrgAccessGateScreen
+                    gateState={protectedOrgAccessGateState}
+                    statusMessage={serverRoleCheckStatus}
+                    signedInAccountLabel={protectedOrgSignedInAccountLabel}
+                    currentUserId={protectedOrgCurrentUserId}
+                    currentTenantId={protectedOrgCurrentTenantId}
+                    currentEmail={protectedOrgCurrentEmail}
+                    backendRoles={protectedOrgBackendRoles}
+                    authModeLabel={protectedOrgAuthModeLabel}
+                    authModeDetail={protectedOrgAuthModeDetail}
+                    bootstrapSql={protectedOrgBootstrapSql}
+                    devIdentityDraft={devAuthIdentityDraft}
+                    signingIn={protectedOrgAccessChecking}
+                    onSignIn={() => void beginProtectedOrgAccessSignIn()}
+                    onSignOutOrSwitch={signOutProtectedOrgIdentity}
+                    onDevIdentityDraftChange={setDevAuthIdentityDraft}
+                    onApplyDevIdentity={switchProtectedOrgDevIdentity}
+                    onBack={previousSetupStep}
+                    onRequestAccess={requestProtectedOrgAccess}
+                  />
+                ) : (
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
+                    <Text style={styles.sectionMeta}>
+                      Step {setupVisibleStepNumber} of {setupFlowSteps.length}
+                    </Text>
+                    {setupStep === 1 ? (
+                      <>
+                        <Text style={styles.label}>What should Sober² help you with first?</Text>
+                        <Text style={styles.sectionMeta}>
+                          Choose the path that best matches why you're here right now.
+                        </Text>
+                        <View style={styles.chipRow}>
+                          {ONBOARDING_PATH_OPTIONS.map((option) => (
+                            <Pressable
+                              key={option.value}
+                              style={[
+                                styles.chip,
+                                wizardOnboardingPath === option.value ? styles.chipSelected : null,
+                              ]}
+                              onPress={() => selectOnboardingPath(option.value)}
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  wizardOnboardingPath === option.value
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                {option.label}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                        {wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
+                          <Text style={styles.sectionMeta}>
+                            This only selects the intended flow. Organization setup stays locked
+                            until the account is signed in and verified by the backend.
+                          </Text>
+                        ) : wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
+                          <Text style={styles.sectionMeta}>
+                            Recovery stays first. Resident setup follows after your recovery
+                            foundation is complete.
+                          </Text>
+                        ) : wizardOnboardingPath === "COURT_PROGRAM" ? (
+                          <Text style={styles.sectionMeta}>
+                            Recovery stays first. Court or program setup is added after recovery is
+                            complete.
+                          </Text>
+                        ) : (
+                          <Text style={styles.sectionMeta}>
+                            Recovery setup stays focused on your daily program and recovery tools.
+                          </Text>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 2 ? (
+                      <>
+                        {wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
+                          <>
+                            <Text style={styles.sectionMeta}>
+                              Verified admin access is active for this account. Complete the
+                              organization bootstrap below.
+                            </Text>
+                            <Text style={styles.label}>Organization name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardOrganizationName}
+                              onChangeText={setWizardOrganizationName}
+                              placeholder="Serenity Homes"
+                            />
+                            <Text style={styles.label}>Primary contact name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardOrganizationPrimaryContactName}
+                              onChangeText={setWizardOrganizationPrimaryContactName}
+                              placeholder="Owner / operator"
+                            />
+                            <Text style={styles.label}>Primary phone</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardOrganizationPrimaryPhone}
+                              onChangeText={(value) =>
+                                setWizardOrganizationPrimaryPhone(normalizeUsPhoneInput(value))
+                              }
+                              placeholder="(555) 555-1234"
+                              keyboardType="phone-pad"
+                            />
+                            <Text style={styles.label}>Primary email</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardOrganizationPrimaryEmail}
+                              onChangeText={setWizardOrganizationPrimaryEmail}
+                              placeholder="owner@example.com"
+                              autoCapitalize="none"
+                              keyboardType="email-address"
+                            />
+                            <Text style={styles.label}>Notes</Text>
+                            <TextInput
+                              style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
+                              value={wizardOrganizationNotes}
+                              onChangeText={setWizardOrganizationNotes}
+                              placeholder="Optional organization notes"
+                              multiline
+                            />
+                          </>
+                        ) : (
+                          <>
+                            <Text style={styles.sectionMeta}>
+                              {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT"
+                                ? "Recovery is the foundation for sober-house residents. House-specific setup comes next."
+                                : wizardOnboardingPath === "COURT_PROGRAM"
+                                  ? "Recovery is the foundation for court and program participants. Program-specific setup comes next."
+                                  : "Recovery setup stays focused on your personal program."}
+                            </Text>
+                            <Text style={styles.label}>What is your sobriety date?</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={sobrietyDateInput}
+                              onChangeText={(value) =>
+                                setSobrietyDateInput(normalizeUsDateInput(value))
+                              }
+                              placeholder="MM-DD-YYYY"
+                              keyboardType="number-pad"
+                              maxLength={10}
+                            />
+                            <Text style={styles.label}>90-day meeting goal</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={ninetyDayGoalInput}
+                              onChangeText={(value) =>
+                                setNinetyDayGoalInput(normalizeGoalInput(value))
+                              }
+                              placeholder="90"
+                              keyboardType="number-pad"
+                              maxLength={4}
+                            />
+                            <Text style={styles.label}>
+                              Which substances are part of your recovery?
+                            </Text>
+                            <Text style={styles.sectionMeta}>
+                              Select all that apply so the Mental and Physical Recovery gauges can
+                              estimate healing trends over time.
+                            </Text>
+                            <View style={styles.chipRow}>
+                              {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
+                                const selected = wizardRecoverySubstances.includes(option.value);
+                                return (
+                                  <Pressable
+                                    key={option.value}
+                                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                                    onPress={() =>
+                                      toggleRecoverySubstanceSelection(option.value, "wizard")
+                                    }
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.chipText,
+                                        selected ? styles.chipTextSelected : null,
+                                      ]}
+                                    >
+                                      {option.label}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                            <Text style={styles.sectionMeta}>
+                              You can update this later in Recovery Settings.
+                            </Text>
+                          </>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 3 ? (
+                      <>
+                        <Text style={styles.label}>Do you have a sponsor?</Text>
+                        <View style={styles.chipRow}>
                           <Pressable
-                            key={option.value}
                             style={[
                               styles.chip,
-                              wizardOnboardingPath === option.value ? styles.chipSelected : null,
+                              wizardHasSponsor === true ? styles.chipSelected : null,
                             ]}
-                            onPress={() => selectOnboardingPath(option.value)}
+                            onPress={() => setWizardHasSponsor(true)}
                           >
                             <Text
                               style={[
                                 styles.chipText,
-                                wizardOnboardingPath === option.value
-                                  ? styles.chipTextSelected
-                                  : null,
+                                wizardHasSponsor === true ? styles.chipTextSelected : null,
                               ]}
                             >
-                              {option.label}
+                              Yes
                             </Text>
                           </Pressable>
-                        ))}
-                      </View>
-                      {wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
-                        <Text style={styles.sectionMeta}>
-                          This only selects the intended flow. Organization setup stays locked until
-                          the account is signed in and verified by the backend.
-                        </Text>
-                      ) : wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
-                        <Text style={styles.sectionMeta}>
-                          Recovery stays first. Resident setup follows after your recovery
-                          foundation is complete.
-                        </Text>
-                      ) : wizardOnboardingPath === "COURT_PROGRAM" ? (
-                        <Text style={styles.sectionMeta}>
-                          Recovery stays first. Court or program setup is added after recovery is
-                          complete.
-                        </Text>
-                      ) : (
-                        <Text style={styles.sectionMeta}>
-                          Recovery setup stays focused on your daily program and recovery tools.
-                        </Text>
-                      )}
-                    </>
-                  ) : null}
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardHasSponsor === false ? styles.chipSelected : null,
+                              wizardRequiresSponsorDetails ? styles.modeChipDisabled : null,
+                            ]}
+                            onPress={() => {
+                              if (wizardRequiresSponsorDetails) {
+                                return;
+                              }
+                              setWizardHasSponsor(false);
+                            }}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardHasSponsor === false ? styles.chipTextSelected : null,
+                              ]}
+                            >
+                              No
+                            </Text>
+                          </Pressable>
+                        </View>
+                        {wizardRequiresSponsorDetails ? (
+                          <Text style={styles.sectionMeta}>
+                            Your sober house requires sponsor details, so this section is locked on.
+                          </Text>
+                        ) : null}
+                        {wizardHasSponsor ? (
+                          <>
+                            <Text style={styles.label}>Name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={sponsorName}
+                              onChangeText={setSponsorName}
+                              placeholder="Sponsor name"
+                            />
+                            <Text style={styles.label}>Phone #</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={formatUsPhoneDisplay(sponsorPhoneDigits)}
+                              onChangeText={(value) =>
+                                setSponsorPhoneDigits(
+                                  normalizePhoneDigits(normalizeUsPhoneInput(value)),
+                                )
+                              }
+                              keyboardType="phone-pad"
+                              placeholder="(555) 555-1234"
+                            />
+                          </>
+                        ) : null}
+                      </>
+                    ) : null}
 
-                  {setupStep === 2 ? (
-                    <>
-                      {showProtectedOrgAccessGate ? (
-                        <>
-                          <Text style={styles.sectionMeta}>Sign in to continue.</Text>
-                          <Text style={styles.label}>
-                            Organization and supervision setup is available only to authorized
-                            admins.
-                          </Text>
+                    {setupStep === 4 ? (
+                      <>
+                        {wizardHasSponsor ? (
+                          <>
+                            <Text style={styles.label}>
+                              Does your sponsor suggest you pray on your knees?
+                            </Text>
+                            <View style={styles.chipRow}>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardSponsorKneesSuggested === true ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => setWizardSponsorKneesSuggested(true)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardSponsorKneesSuggested === true
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  Yes
+                                </Text>
+                              </Pressable>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardSponsorKneesSuggested === false
+                                    ? styles.chipSelected
+                                    : null,
+                                ]}
+                                onPress={() => setWizardSponsorKneesSuggested(false)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardSponsorKneesSuggested === false
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  No
+                                </Text>
+                              </Pressable>
+                            </View>
+                            <Text style={styles.sectionMeta}>
+                              This controls whether the On knees checklist toggle appears in daily
+                              reading flows.
+                            </Text>
+                          </>
+                        ) : (
                           <Text style={styles.sectionMeta}>
-                            {serverRoleCheckStatus ??
-                              "Sign in with an authorized account to continue into organization setup."}
+                            Sponsor is disabled for this setup.
                           </Text>
-                        </>
-                      ) : wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
-                        <>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 5 ? (
+                      <>
+                        {wizardHasSponsor ? (
+                          <>
+                            {renderSponsorTimeField({
+                              helperText:
+                                "Next step configures calendar notifications and alerts for this call time.",
+                            })}
+                          </>
+                        ) : (
                           <Text style={styles.sectionMeta}>
-                            Verified admin access is active for this account. Complete the
-                            organization bootstrap below.
+                            Sponsor is disabled for this setup.
                           </Text>
-                          <Text style={styles.label}>Organization name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardOrganizationName}
-                            onChangeText={setWizardOrganizationName}
-                            placeholder="Serenity Homes"
-                          />
-                          <Text style={styles.label}>Primary contact name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardOrganizationPrimaryContactName}
-                            onChangeText={setWizardOrganizationPrimaryContactName}
-                            placeholder="Owner / operator"
-                          />
-                          <Text style={styles.label}>Primary phone</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardOrganizationPrimaryPhone}
-                            onChangeText={(value) =>
-                              setWizardOrganizationPrimaryPhone(normalizeUsPhoneInput(value))
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 6 ? (
+                      <>
+                        {wizardHasSponsor ? (
+                          <>
+                            <Text style={styles.label}>
+                              Do you want calendar notifications and alerts for your sponsor call
+                              time?
+                            </Text>
+                            <View style={styles.chipRow}>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardWantsReminders === true ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => setWizardWantsReminders(true)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardWantsReminders === true ? styles.chipTextSelected : null,
+                                  ]}
+                                >
+                                  Yes
+                                </Text>
+                              </Pressable>
+                              <Pressable
+                                style={[
+                                  styles.chip,
+                                  wizardWantsReminders === false ? styles.chipSelected : null,
+                                ]}
+                                onPress={() => setWizardWantsReminders(false)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardWantsReminders === false ? styles.chipTextSelected : null,
+                                  ]}
+                                >
+                                  No
+                                </Text>
+                              </Pressable>
+                            </View>
+
+                            {wizardWantsReminders ? (
+                              <>
+                                <Text style={styles.label}>Frequency</Text>
+                                <View style={styles.chipRow}>
+                                  {SPONSOR_REPEAT_OPTIONS.map((option) => (
+                                    <Pressable
+                                      key={option.value}
+                                      style={[
+                                        styles.chip,
+                                        sponsorRepeatPreset === option.value
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
+                                      onPress={() => setSponsorRepeatPreset(option.value)}
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          sponsorRepeatPreset === option.value
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {option.label}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+
+                                {sponsorRepeatPreset !== "MONTHLY" ? (
+                                  <>
+                                    <Text style={styles.label}>Day of week</Text>
+                                    <View style={styles.chipRow}>
+                                      {WEEKDAY_OPTIONS.map((day) => (
+                                        <Pressable
+                                          key={day.code}
+                                          style={[
+                                            styles.chip,
+                                            sponsorRepeatDays.includes(day.code)
+                                              ? styles.chipSelected
+                                              : null,
+                                          ]}
+                                          onPress={() => toggleRepeatDay(day.code)}
+                                        >
+                                          <Text
+                                            style={[
+                                              styles.chipText,
+                                              sponsorRepeatDays.includes(day.code)
+                                                ? styles.chipTextSelected
+                                                : null,
+                                            ]}
+                                          >
+                                            {day.label}
+                                          </Text>
+                                        </Pressable>
+                                      ))}
+                                    </View>
+                                  </>
+                                ) : null}
+
+                                <Text style={styles.label}>Reminder option</Text>
+                                <View style={styles.chipRow}>
+                                  {SPONSOR_LEAD_OPTIONS.map((option) => (
+                                    <Pressable
+                                      key={option.value}
+                                      style={[
+                                        styles.chip,
+                                        sponsorLeadMinutes === option.value
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
+                                      onPress={() => setSponsorLeadMinutes(option.value)}
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          sponsorLeadMinutes === option.value
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {option.label}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+                              </>
+                            ) : null}
+                          </>
+                        ) : (
+                          <Text style={styles.sectionMeta}>
+                            Sponsor is disabled, so notifications and alerts are skipped.
+                          </Text>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 7 ? (
+                      <>
+                        <Text style={styles.label}>
+                          {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.title}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.description}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.helperText}
+                        </Text>
+                        {serviceCommitmentStatus ? (
+                          <Text style={styles.sectionMeta}>{serviceCommitmentStatus}</Text>
+                        ) : null}
+
+                        {recurringServiceCommitments.length > 0 ? (
+                          <View style={styles.setupRecurringCommitmentsList}>
+                            {recurringServiceCommitments.map((commitment) => (
+                              <View key={commitment.id} style={styles.setupRecurringCommitmentCard}>
+                                <Text style={styles.meetingName}>{commitment.name}</Text>
+                                <Text style={styles.sectionMeta}>
+                                  {buildRecurringServiceCommitmentSummary(commitment)}
+                                </Text>
+                                {commitment.includeInAttendanceExport ? (
+                                  <Text style={styles.sectionMeta}>
+                                    Included on AA/NA attendance sheet
+                                  </Text>
+                                ) : null}
+                                {commitment.notes ? (
+                                  <Text style={styles.sectionMeta}>{commitment.notes}</Text>
+                                ) : null}
+                                <View style={styles.buttonRow}>
+                                  <AppButton
+                                    title="Edit"
+                                    onPress={() => openRecurringServiceCommitmentEditor(commitment)}
+                                  />
+                                  <View style={styles.buttonSpacer} />
+                                  <AppButton
+                                    title="Delete"
+                                    onPress={() => deleteRecurringServiceCommitment(commitment.id)}
+                                  />
+                                </View>
+                              </View>
+                            ))}
+                          </View>
+                        ) : (
+                          <Text style={styles.sectionMeta}>
+                            No recurring commitments added yet. You can skip this step if you do not
+                            have any.
+                          </Text>
+                        )}
+
+                        {!recurringServiceCommitmentEditorVisible ? (
+                          <AppButton
+                            title={
+                              recurringServiceCommitments.length > 0
+                                ? "Add another commitment"
+                                : "Add commitment"
                             }
-                            placeholder="(555) 555-1234"
-                            keyboardType="phone-pad"
+                            onPress={() => openRecurringServiceCommitmentEditor()}
                           />
-                          <Text style={styles.label}>Primary email</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardOrganizationPrimaryEmail}
-                            onChangeText={setWizardOrganizationPrimaryEmail}
-                            placeholder="owner@example.com"
-                            autoCapitalize="none"
-                            keyboardType="email-address"
-                          />
-                          <Text style={styles.label}>Notes</Text>
-                          <TextInput
-                            style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
-                            value={wizardOrganizationNotes}
-                            onChangeText={setWizardOrganizationNotes}
-                            placeholder="Optional organization notes"
-                            multiline
-                          />
-                        </>
-                      ) : (
-                        <>
-                          <Text style={styles.sectionMeta}>
-                            {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT"
-                              ? "Recovery is the foundation for sober-house residents. House-specific setup comes next."
-                              : wizardOnboardingPath === "COURT_PROGRAM"
-                                ? "Recovery is the foundation for court and program participants. Program-specific setup comes next."
-                                : "Recovery setup stays focused on your personal program."}
-                          </Text>
-                          <Text style={styles.label}>What is your sobriety date?</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={sobrietyDateInput}
-                            onChangeText={(value) =>
-                              setSobrietyDateInput(normalizeUsDateInput(value))
-                            }
-                            placeholder="MM-DD-YYYY"
-                            keyboardType="number-pad"
-                            maxLength={10}
-                          />
-                          <Text style={styles.label}>90-day meeting goal</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={ninetyDayGoalInput}
-                            onChangeText={(value) =>
-                              setNinetyDayGoalInput(normalizeGoalInput(value))
-                            }
-                            placeholder="90"
-                            keyboardType="number-pad"
-                            maxLength={4}
-                          />
-                          <Text style={styles.label}>
-                            Which substances are part of your recovery?
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Select all that apply so the Mental and Physical Recovery gauges can
-                            estimate healing trends over time.
-                          </Text>
-                          <View style={styles.chipRow}>
-                            {RECOVERY_SUBSTANCE_OPTIONS.map((option) => {
-                              const selected = wizardRecoverySubstances.includes(option.value);
-                              return (
+                        ) : (
+                          <>
+                            <Text style={styles.label}>
+                              {recurringServiceCommitmentDraft.id
+                                ? "Edit recurring commitment"
+                                : "New recurring commitment"}
+                            </Text>
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.name}
+                            </Text>
+                            <TextInput
+                              style={styles.input}
+                              value={recurringServiceCommitmentDraft.name}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  name: value,
+                                }))
+                              }
+                              placeholder="Close Tuesday meeting"
+                            />
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.type}
+                            </Text>
+                            <View style={styles.chipRow}>
+                              {RECURRING_SERVICE_COMMITMENT_TYPE_OPTIONS.map((option) => (
                                 <Pressable
                                   key={option.value}
-                                  style={[styles.chip, selected ? styles.chipSelected : null]}
+                                  style={[
+                                    styles.chip,
+                                    recurringServiceCommitmentDraft.type === option.value
+                                      ? styles.chipSelected
+                                      : null,
+                                  ]}
                                   onPress={() =>
-                                    toggleRecoverySubstanceSelection(option.value, "wizard")
+                                    setRecurringServiceCommitmentDraft((current) => ({
+                                      ...current,
+                                      type: option.value,
+                                    }))
                                   }
                                 >
                                   <Text
                                     style={[
                                       styles.chipText,
-                                      selected ? styles.chipTextSelected : null,
+                                      recurringServiceCommitmentDraft.type === option.value
+                                        ? styles.chipTextSelected
+                                        : null,
                                     ]}
                                   >
                                     {option.label}
                                   </Text>
                                 </Pressable>
-                              );
-                            })}
-                          </View>
-                          <Text style={styles.sectionMeta}>
-                            You can update this later in Recovery Settings.
-                          </Text>
-                        </>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 3 ? (
-                    <>
-                      <Text style={styles.label}>Do you have a sponsor?</Text>
-                      <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardHasSponsor === true ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardHasSponsor(true)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardHasSponsor === true ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            Yes
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardHasSponsor === false ? styles.chipSelected : null,
-                            wizardRequiresSponsorDetails ? styles.modeChipDisabled : null,
-                          ]}
-                          onPress={() => {
-                            if (wizardRequiresSponsorDetails) {
-                              return;
-                            }
-                            setWizardHasSponsor(false);
-                          }}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardHasSponsor === false ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            No
-                          </Text>
-                        </Pressable>
-                      </View>
-                      {wizardRequiresSponsorDetails ? (
-                        <Text style={styles.sectionMeta}>
-                          Your sober house requires sponsor details, so this section is locked on.
-                        </Text>
-                      ) : null}
-                      {wizardHasSponsor ? (
-                        <>
-                          <Text style={styles.label}>Name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={sponsorName}
-                            onChangeText={setSponsorName}
-                            placeholder="Sponsor name"
-                          />
-                          <Text style={styles.label}>Phone #</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={formatUsPhoneDisplay(sponsorPhoneDigits)}
-                            onChangeText={(value) =>
-                              setSponsorPhoneDigits(
-                                normalizePhoneDigits(normalizeUsPhoneInput(value)),
-                              )
-                            }
-                            keyboardType="phone-pad"
-                            placeholder="(555) 555-1234"
-                          />
-                        </>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {setupStep === 4 ? (
-                    <>
-                      {wizardHasSponsor ? (
-                        <>
-                          <Text style={styles.label}>
-                            Does your sponsor suggest you pray on your knees?
-                          </Text>
-                          <View style={styles.chipRow}>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardSponsorKneesSuggested === true ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardSponsorKneesSuggested(true)}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardSponsorKneesSuggested === true
-                                    ? styles.chipTextSelected
-                                    : null,
-                                ]}
-                              >
-                                Yes
-                              </Text>
-                            </Pressable>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardSponsorKneesSuggested === false ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardSponsorKneesSuggested(false)}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardSponsorKneesSuggested === false
-                                    ? styles.chipTextSelected
-                                    : null,
-                                ]}
-                              >
-                                No
-                              </Text>
-                            </Pressable>
-                          </View>
-                          <Text style={styles.sectionMeta}>
-                            This controls whether the On knees checklist toggle appears in daily
-                            reading flows.
-                          </Text>
-                        </>
-                      ) : (
-                        <Text style={styles.sectionMeta}>Sponsor is disabled for this setup.</Text>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 5 ? (
-                    <>
-                      {wizardHasSponsor ? (
-                        <>
-                          {renderSponsorTimeField({
-                            helperText:
-                              "Next step configures calendar notifications and alerts for this call time.",
-                          })}
-                        </>
-                      ) : (
-                        <Text style={styles.sectionMeta}>Sponsor is disabled for this setup.</Text>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 6 ? (
-                    <>
-                      {wizardHasSponsor ? (
-                        <>
-                          <Text style={styles.label}>
-                            Do you want calendar notifications and alerts for your sponsor call
-                            time?
-                          </Text>
-                          <View style={styles.chipRow}>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardWantsReminders === true ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardWantsReminders(true)}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardWantsReminders === true ? styles.chipTextSelected : null,
-                                ]}
-                              >
-                                Yes
-                              </Text>
-                            </Pressable>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardWantsReminders === false ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardWantsReminders(false)}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
-                                  wizardWantsReminders === false ? styles.chipTextSelected : null,
-                                ]}
-                              >
-                                No
-                              </Text>
-                            </Pressable>
-                          </View>
-
-                          {wizardWantsReminders ? (
-                            <>
-                              <Text style={styles.label}>Frequency</Text>
-                              <View style={styles.chipRow}>
-                                {SPONSOR_REPEAT_OPTIONS.map((option) => (
-                                  <Pressable
-                                    key={option.value}
-                                    style={[
-                                      styles.chip,
-                                      sponsorRepeatPreset === option.value
-                                        ? styles.chipSelected
-                                        : null,
-                                    ]}
-                                    onPress={() => setSponsorRepeatPreset(option.value)}
-                                  >
-                                    <Text
-                                      style={[
-                                        styles.chipText,
-                                        sponsorRepeatPreset === option.value
-                                          ? styles.chipTextSelected
-                                          : null,
-                                      ]}
-                                    >
-                                      {option.label}
-                                    </Text>
-                                  </Pressable>
-                                ))}
-                              </View>
-
-                              {sponsorRepeatPreset !== "MONTHLY" ? (
-                                <>
-                                  <Text style={styles.label}>Day of week</Text>
-                                  <View style={styles.chipRow}>
-                                    {WEEKDAY_OPTIONS.map((day) => (
-                                      <Pressable
-                                        key={day.code}
-                                        style={[
-                                          styles.chip,
-                                          sponsorRepeatDays.includes(day.code)
-                                            ? styles.chipSelected
-                                            : null,
-                                        ]}
-                                        onPress={() => toggleRepeatDay(day.code)}
-                                      >
-                                        <Text
-                                          style={[
-                                            styles.chipText,
-                                            sponsorRepeatDays.includes(day.code)
-                                              ? styles.chipTextSelected
-                                              : null,
-                                          ]}
-                                        >
-                                          {day.label}
-                                        </Text>
-                                      </Pressable>
-                                    ))}
-                                  </View>
-                                </>
-                              ) : null}
-
-                              <Text style={styles.label}>Reminder option</Text>
-                              <View style={styles.chipRow}>
-                                {SPONSOR_LEAD_OPTIONS.map((option) => (
-                                  <Pressable
-                                    key={option.value}
-                                    style={[
-                                      styles.chip,
-                                      sponsorLeadMinutes === option.value
-                                        ? styles.chipSelected
-                                        : null,
-                                    ]}
-                                    onPress={() => setSponsorLeadMinutes(option.value)}
-                                  >
-                                    <Text
-                                      style={[
-                                        styles.chipText,
-                                        sponsorLeadMinutes === option.value
-                                          ? styles.chipTextSelected
-                                          : null,
-                                      ]}
-                                    >
-                                      {option.label}
-                                    </Text>
-                                  </Pressable>
-                                ))}
-                              </View>
-                            </>
-                          ) : null}
-                        </>
-                      ) : (
-                        <Text style={styles.sectionMeta}>
-                          Sponsor is disabled, so notifications and alerts are skipped.
-                        </Text>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 7 ? (
-                    <>
-                      <Text style={styles.label}>
-                        {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.title}
-                      </Text>
-                      <Text style={styles.sectionMeta}>
-                        {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.description}
-                      </Text>
-                      <Text style={styles.sectionMeta}>
-                        {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.helperText}
-                      </Text>
-                      {serviceCommitmentStatus ? (
-                        <Text style={styles.sectionMeta}>{serviceCommitmentStatus}</Text>
-                      ) : null}
-
-                      {recurringServiceCommitments.length > 0 ? (
-                        <View style={styles.setupRecurringCommitmentsList}>
-                          {recurringServiceCommitments.map((commitment) => (
-                            <View key={commitment.id} style={styles.setupRecurringCommitmentCard}>
-                              <Text style={styles.meetingName}>{commitment.name}</Text>
-                              <Text style={styles.sectionMeta}>
-                                {buildRecurringServiceCommitmentSummary(commitment)}
-                              </Text>
-                              {commitment.includeInAttendanceExport ? (
-                                <Text style={styles.sectionMeta}>
-                                  Included on AA/NA attendance sheet
-                                </Text>
-                              ) : null}
-                              {commitment.notes ? (
-                                <Text style={styles.sectionMeta}>{commitment.notes}</Text>
-                              ) : null}
-                              <View style={styles.buttonRow}>
-                                <AppButton
-                                  title="Edit"
-                                  onPress={() => openRecurringServiceCommitmentEditor(commitment)}
-                                />
-                                <View style={styles.buttonSpacer} />
-                                <AppButton
-                                  title="Delete"
-                                  onPress={() => deleteRecurringServiceCommitment(commitment.id)}
-                                />
-                              </View>
+                              ))}
                             </View>
-                          ))}
-                        </View>
-                      ) : (
-                        <Text style={styles.sectionMeta}>
-                          No recurring commitments added yet. You can skip this step if you do not
-                          have any.
-                        </Text>
-                      )}
-
-                      {!recurringServiceCommitmentEditorVisible ? (
-                        <AppButton
-                          title={
-                            recurringServiceCommitments.length > 0
-                              ? "Add another commitment"
-                              : "Add commitment"
-                          }
-                          onPress={() => openRecurringServiceCommitmentEditor()}
-                        />
-                      ) : (
-                        <>
-                          <Text style={styles.label}>
-                            {recurringServiceCommitmentDraft.id
-                              ? "Edit recurring commitment"
-                              : "New recurring commitment"}
-                          </Text>
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.name}
-                          </Text>
-                          <TextInput
-                            style={styles.input}
-                            value={recurringServiceCommitmentDraft.name}
-                            onChangeText={(value) =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                name: value,
-                              }))
-                            }
-                            placeholder="Close Tuesday meeting"
-                          />
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.type}
-                          </Text>
-                          <View style={styles.chipRow}>
-                            {RECURRING_SERVICE_COMMITMENT_TYPE_OPTIONS.map((option) => (
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.location}
+                            </Text>
+                            <TextInput
+                              style={styles.input}
+                              value={recurringServiceCommitmentDraft.location}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  location: value,
+                                }))
+                              }
+                              placeholder="Clubhouse or hall"
+                            />
+                            {renderServiceCommitmentTimeField(
+                              "startsAtLocal",
+                              RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.startsAt,
+                              {
+                                helperText: "12-hour time. New commitments default to an AM time.",
+                              },
+                            )}
+                            {renderServiceCommitmentTimeField(
+                              "endsAtLocal",
+                              RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.endsAt,
+                              {
+                                helperText: "Optional. Uses the same native time picker.",
+                              },
+                            )}
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.arriveEarlyBy}
+                            </Text>
+                            <TextInput
+                              style={styles.input}
+                              value={recurringServiceCommitmentDraft.arriveEarlyMinutes}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  arriveEarlyMinutes: value.replace(/\D/g, "").slice(0, 3),
+                                }))
+                              }
+                              placeholder="15"
+                              keyboardType="number-pad"
+                            />
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.stayAfterBy}
+                            </Text>
+                            <TextInput
+                              style={styles.input}
+                              value={recurringServiceCommitmentDraft.stayAfterMinutes}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  stayAfterMinutes: value.replace(/\D/g, "").slice(0, 3),
+                                }))
+                              }
+                              placeholder="30"
+                              keyboardType="number-pad"
+                            />
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.repeats}
+                            </Text>
+                            <View style={styles.chipRow}>
                               <Pressable
-                                key={option.value}
                                 style={[
                                   styles.chip,
-                                  recurringServiceCommitmentDraft.type === option.value
+                                  recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY"
                                     ? styles.chipSelected
                                     : null,
                                 ]}
                                 onPress={() =>
                                   setRecurringServiceCommitmentDraft((current) => ({
                                     ...current,
-                                    type: option.value,
+                                    recurrenceKind: "WEEKLY",
                                   }))
                                 }
                               >
                                 <Text
                                   style={[
                                     styles.chipText,
-                                    recurringServiceCommitmentDraft.type === option.value
+                                    recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY"
                                       ? styles.chipTextSelected
                                       : null,
                                   ]}
                                 >
-                                  {option.label}
+                                  Weekly
                                 </Text>
                               </Pressable>
-                            ))}
-                          </View>
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.location}
-                          </Text>
-                          <TextInput
-                            style={styles.input}
-                            value={recurringServiceCommitmentDraft.location}
-                            onChangeText={(value) =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                location: value,
-                              }))
-                            }
-                            placeholder="Clubhouse or hall"
-                          />
-                          {renderServiceCommitmentTimeField(
-                            "startsAtLocal",
-                            RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.startsAt,
-                            {
-                              helperText: "12-hour time. New commitments default to an AM time.",
-                            },
-                          )}
-                          {renderServiceCommitmentTimeField(
-                            "endsAtLocal",
-                            RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.endsAt,
-                            {
-                              helperText: "Optional. Uses the same native time picker.",
-                            },
-                          )}
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.arriveEarlyBy}
-                          </Text>
-                          <TextInput
-                            style={styles.input}
-                            value={recurringServiceCommitmentDraft.arriveEarlyMinutes}
-                            onChangeText={(value) =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                arriveEarlyMinutes: value.replace(/\D/g, "").slice(0, 3),
-                              }))
-                            }
-                            placeholder="15"
-                            keyboardType="number-pad"
-                          />
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.stayAfterBy}
-                          </Text>
-                          <TextInput
-                            style={styles.input}
-                            value={recurringServiceCommitmentDraft.stayAfterMinutes}
-                            onChangeText={(value) =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                stayAfterMinutes: value.replace(/\D/g, "").slice(0, 3),
-                              }))
-                            }
-                            placeholder="30"
-                            keyboardType="number-pad"
-                          />
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.repeats}
-                          </Text>
-                          <View style={styles.chipRow}>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY"
-                                  ? styles.chipSelected
-                                  : null,
-                              ]}
-                              onPress={() =>
-                                setRecurringServiceCommitmentDraft((current) => ({
-                                  ...current,
-                                  recurrenceKind: "WEEKLY",
-                                }))
-                              }
-                            >
-                              <Text
+                              <Pressable
                                 style={[
-                                  styles.chipText,
-                                  recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY"
-                                    ? styles.chipTextSelected
-                                    : null,
-                                ]}
-                              >
-                                Weekly
-                              </Text>
-                            </Pressable>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                recurringServiceCommitmentDraft.recurrenceKind === "MONTHLY_ORDINAL"
-                                  ? styles.chipSelected
-                                  : null,
-                              ]}
-                              onPress={() =>
-                                setRecurringServiceCommitmentDraft((current) => ({
-                                  ...current,
-                                  recurrenceKind: "MONTHLY_ORDINAL",
-                                }))
-                              }
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
+                                  styles.chip,
                                   recurringServiceCommitmentDraft.recurrenceKind ===
                                   "MONTHLY_ORDINAL"
-                                    ? styles.chipTextSelected
+                                    ? styles.chipSelected
                                     : null,
                                 ]}
+                                onPress={() =>
+                                  setRecurringServiceCommitmentDraft((current) => ({
+                                    ...current,
+                                    recurrenceKind: "MONTHLY_ORDINAL",
+                                  }))
+                                }
                               >
-                                Monthly ordinal
-                              </Text>
-                            </Pressable>
-                          </View>
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    recurringServiceCommitmentDraft.recurrenceKind ===
+                                    "MONTHLY_ORDINAL"
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  Monthly ordinal
+                                </Text>
+                              </Pressable>
+                            </View>
 
-                          {recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY" ? (
-                            <>
-                              <Text style={styles.label}>Weekly days</Text>
-                              <View style={styles.chipRow}>
-                                {WEEKDAY_OPTIONS.map((day) => {
-                                  const selected =
-                                    recurringServiceCommitmentDraft.weeklyDays.includes(day.code);
-                                  return (
+                            {recurringServiceCommitmentDraft.recurrenceKind === "WEEKLY" ? (
+                              <>
+                                <Text style={styles.label}>Weekly days</Text>
+                                <View style={styles.chipRow}>
+                                  {WEEKDAY_OPTIONS.map((day) => {
+                                    const selected =
+                                      recurringServiceCommitmentDraft.weeklyDays.includes(day.code);
+                                    return (
+                                      <Pressable
+                                        key={`service-weekly-${day.code}`}
+                                        style={[styles.chip, selected ? styles.chipSelected : null]}
+                                        onPress={() =>
+                                          setRecurringServiceCommitmentDraft((current) => {
+                                            const nextDays = current.weeklyDays.includes(day.code)
+                                              ? current.weeklyDays.filter(
+                                                  (entry) => entry !== day.code,
+                                                )
+                                              : [...current.weeklyDays, day.code];
+                                            return {
+                                              ...current,
+                                              weeklyDays: nextDays,
+                                            };
+                                          })
+                                        }
+                                      >
+                                        <Text
+                                          style={[
+                                            styles.chipText,
+                                            selected ? styles.chipTextSelected : null,
+                                          ]}
+                                        >
+                                          {day.label}
+                                        </Text>
+                                      </Pressable>
+                                    );
+                                  })}
+                                </View>
+                              </>
+                            ) : (
+                              <>
+                                <Text style={styles.label}>Ordinal</Text>
+                                <View style={styles.chipRow}>
+                                  {RECURRING_SERVICE_COMMITMENT_ORDINAL_OPTIONS.map((option) => (
                                     <Pressable
-                                      key={`service-weekly-${day.code}`}
-                                      style={[styles.chip, selected ? styles.chipSelected : null]}
+                                      key={`service-ordinal-${option.label}`}
+                                      style={[
+                                        styles.chip,
+                                        recurringServiceCommitmentDraft.monthlyOrdinal ===
+                                        option.value
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
                                       onPress={() =>
-                                        setRecurringServiceCommitmentDraft((current) => {
-                                          const nextDays = current.weeklyDays.includes(day.code)
-                                            ? current.weeklyDays.filter(
-                                                (entry) => entry !== day.code,
-                                              )
-                                            : [...current.weeklyDays, day.code];
-                                          return {
-                                            ...current,
-                                            weeklyDays: nextDays,
-                                          };
-                                        })
+                                        setRecurringServiceCommitmentDraft((current) => ({
+                                          ...current,
+                                          monthlyOrdinal: option.value,
+                                        }))
                                       }
                                     >
                                       <Text
                                         style={[
                                           styles.chipText,
-                                          selected ? styles.chipTextSelected : null,
+                                          recurringServiceCommitmentDraft.monthlyOrdinal ===
+                                          option.value
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {option.label}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+                                <Text style={styles.label}>Day</Text>
+                                <View style={styles.chipRow}>
+                                  {WEEKDAY_OPTIONS.map((day) => (
+                                    <Pressable
+                                      key={`service-monthly-${day.code}`}
+                                      style={[
+                                        styles.chip,
+                                        recurringServiceCommitmentDraft.monthlyDay === day.code
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
+                                      onPress={() =>
+                                        setRecurringServiceCommitmentDraft((current) => ({
+                                          ...current,
+                                          monthlyDay: day.code,
+                                        }))
+                                      }
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          recurringServiceCommitmentDraft.monthlyDay === day.code
+                                            ? styles.chipTextSelected
+                                            : null,
                                         ]}
                                       >
                                         {day.label}
                                       </Text>
                                     </Pressable>
+                                  ))}
+                                </View>
+                              </>
+                            )}
+
+                            <Text style={styles.label}>
+                              {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.notes}
+                            </Text>
+                            <TextInput
+                              style={[styles.input, styles.multilineInput]}
+                              value={recurringServiceCommitmentDraft.notes}
+                              onChangeText={(value) =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  notes: value,
+                                }))
+                              }
+                              placeholder="Optional notes"
+                              multiline
+                            />
+                            <Pressable
+                              style={styles.checkboxRow}
+                              onPress={() =>
+                                setRecurringServiceCommitmentDraft((current) => ({
+                                  ...current,
+                                  includeInAttendanceExport: !current.includeInAttendanceExport,
+                                }))
+                              }
+                            >
+                              <View
+                                style={[
+                                  styles.checkbox,
+                                  recurringServiceCommitmentDraft.includeInAttendanceExport
+                                    ? styles.checkboxChecked
+                                    : null,
+                                ]}
+                              >
+                                {recurringServiceCommitmentDraft.includeInAttendanceExport ? (
+                                  <Text style={styles.checkboxTick}>✓</Text>
+                                ) : null}
+                              </View>
+                              <View style={styles.checkboxBody}>
+                                <Text style={styles.label}>
+                                  {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.exportInclusion}
+                                </Text>
+                                <Text style={styles.sectionMeta}>
+                                  Include this recurring service commitment in attendance slip
+                                  export when you need proof of service or added attendance context.
+                                </Text>
+                              </View>
+                            </Pressable>
+                            <View style={styles.buttonRow}>
+                              <AppButton
+                                title={
+                                  recurringServiceCommitmentDraft.id
+                                    ? "Save changes"
+                                    : "Save commitment"
+                                }
+                                onPress={saveRecurringServiceCommitment}
+                              />
+                              <View style={styles.buttonSpacer} />
+                              <AppButton
+                                title="Cancel"
+                                onPress={cancelRecurringServiceCommitmentEditor}
+                              />
+                            </View>
+                          </>
+                        )}
+                      </>
+                    ) : null}
+
+                    {setupStep === 8 ? (
+                      <>
+                        <Text style={styles.label}>Do you have a home group meeting?</Text>
+                        <View style={styles.chipRow}>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardHasHomeGroup === true ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setWizardHasHomeGroup(true)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardHasHomeGroup === true ? styles.chipTextSelected : null,
+                              ]}
+                            >
+                              Yes
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardHasHomeGroup === false ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setWizardHasHomeGroup(false)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardHasHomeGroup === false ? styles.chipTextSelected : null,
+                              ]}
+                            >
+                              No
+                            </Text>
+                          </Pressable>
+                        </View>
+
+                        {wizardHasHomeGroup ? (
+                          <>
+                            <Text style={styles.sectionMeta}>
+                              Choose one group from meetings in your area over the next 7 days.
+                            </Text>
+                            {homeGroupWeekOptions.length === 0 ? (
+                              <Text style={styles.sectionMeta}>
+                                No meetings are available in your area for the next week yet.
+                              </Text>
+                            ) : (
+                              <ScrollView
+                                style={styles.setupMeetingListScroll}
+                                contentContainerStyle={styles.setupMeetingListContent}
+                                nestedScrollEnabled
+                                showsVerticalScrollIndicator
+                                keyboardShouldPersistTaps="handled"
+                              >
+                                {homeGroupWeekOptions.map((option) => {
+                                  const selected = selectedHomeGroupOption?.key === option.key;
+                                  const nextMeeting = option.nextMeeting;
+                                  const nextMeetingDayLabel =
+                                    nextMeeting === null
+                                      ? "Later this week"
+                                      : nextMeeting.dayOfWeek === new Date(clockTickMs).getDay()
+                                        ? "Today"
+                                        : (WEEKDAY_SHORT_LABELS[nextMeeting.dayOfWeek] ?? "Next");
+                                  return (
+                                    <Pressable
+                                      key={option.key}
+                                      style={[
+                                        styles.meetingCard,
+                                        selected ? styles.homeGroupSelectedCard : null,
+                                      ]}
+                                      onPress={() => {
+                                        if (selected) {
+                                          void clearHomeGroupSelection();
+                                          return;
+                                        }
+
+                                        openHomeGroupBirthdayPrompt({
+                                          key: option.key,
+                                          name: option.name,
+                                          meetingIds: option.meetings.map((meeting) => meeting.id),
+                                          primaryMeetingId:
+                                            option.nextMeeting?.id ??
+                                            option.meetings[0]?.id ??
+                                            null,
+                                        });
+                                      }}
+                                    >
+                                      <Text style={styles.meetingName}>{option.name}</Text>
+                                      <Text style={styles.sectionMeta}>
+                                        {option.occurrenceCount} meeting
+                                        {option.occurrenceCount === 1 ? "" : "s"} this week •{" "}
+                                        {option.formatSummary}
+                                      </Text>
+                                      <Text style={styles.sectionMeta}>
+                                        Next: {nextMeetingDayLabel}
+                                        {nextMeeting
+                                          ? ` ${formatHhmmForDisplay(nextMeeting.startsAtLocal)}`
+                                          : ""}{" "}
+                                        • {option.areaSummary}
+                                      </Text>
+                                      <Text style={styles.sectionMeta}>
+                                        {meetingDistanceLabel(
+                                          nextMeeting ?? option.meetings[0],
+                                          option.distanceMeters,
+                                          locationPermission,
+                                          locationIssue,
+                                        )}
+                                      </Text>
+                                      <Text style={styles.sectionMeta}>
+                                        {selected
+                                          ? "Selected as home group"
+                                          : "Tap to set as home group"}
+                                      </Text>
+                                    </Pressable>
                                   );
                                 })}
-                              </View>
-                            </>
-                          ) : (
-                            <>
-                              <Text style={styles.label}>Ordinal</Text>
-                              <View style={styles.chipRow}>
-                                {RECURRING_SERVICE_COMMITMENT_ORDINAL_OPTIONS.map((option) => (
-                                  <Pressable
-                                    key={`service-ordinal-${option.label}`}
-                                    style={[
-                                      styles.chip,
-                                      recurringServiceCommitmentDraft.monthlyOrdinal ===
-                                      option.value
-                                        ? styles.chipSelected
-                                        : null,
-                                    ]}
-                                    onPress={() =>
-                                      setRecurringServiceCommitmentDraft((current) => ({
-                                        ...current,
-                                        monthlyOrdinal: option.value,
-                                      }))
-                                    }
-                                  >
-                                    <Text
-                                      style={[
-                                        styles.chipText,
-                                        recurringServiceCommitmentDraft.monthlyOrdinal ===
-                                        option.value
-                                          ? styles.chipTextSelected
-                                          : null,
-                                      ]}
-                                    >
-                                      {option.label}
-                                    </Text>
-                                  </Pressable>
-                                ))}
-                              </View>
-                              <Text style={styles.label}>Day</Text>
-                              <View style={styles.chipRow}>
-                                {WEEKDAY_OPTIONS.map((day) => (
-                                  <Pressable
-                                    key={`service-monthly-${day.code}`}
-                                    style={[
-                                      styles.chip,
-                                      recurringServiceCommitmentDraft.monthlyDay === day.code
-                                        ? styles.chipSelected
-                                        : null,
-                                    ]}
-                                    onPress={() =>
-                                      setRecurringServiceCommitmentDraft((current) => ({
-                                        ...current,
-                                        monthlyDay: day.code,
-                                      }))
-                                    }
-                                  >
-                                    <Text
-                                      style={[
-                                        styles.chipText,
-                                        recurringServiceCommitmentDraft.monthlyDay === day.code
-                                          ? styles.chipTextSelected
-                                          : null,
-                                      ]}
-                                    >
-                                      {day.label}
-                                    </Text>
-                                  </Pressable>
-                                ))}
-                              </View>
-                            </>
-                          )}
+                              </ScrollView>
+                            )}
+                          </>
+                        ) : null}
+                      </>
+                    ) : null}
 
-                          <Text style={styles.label}>
-                            {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.notes}
-                          </Text>
-                          <TextInput
-                            style={[styles.input, styles.multilineInput]}
-                            value={recurringServiceCommitmentDraft.notes}
-                            onChangeText={(value) =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                notes: value,
-                              }))
-                            }
-                            placeholder="Optional notes"
-                            multiline
-                          />
+                    {setupStep === 9 ? (
+                      <>
+                        <Text style={styles.sectionTitle}>Meeting Verification</Text>
+                        <Text style={styles.label}>
+                          Are you required to obtain a signature at meetings?
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          This enables signature capture during meeting attendance when required by
+                          your program, sponsor, court, or house rules.
+                        </Text>
+                        <View style={styles.chipRow}>
                           <Pressable
-                            style={styles.checkboxRow}
-                            onPress={() =>
-                              setRecurringServiceCommitmentDraft((current) => ({
-                                ...current,
-                                includeInAttendanceExport: !current.includeInAttendanceExport,
-                              }))
-                            }
+                            style={[
+                              styles.chip,
+                              wizardMeetingSignatureRequired === true ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => setWizardMeetingSignatureRequired(true)}
                           >
-                            <View
+                            <Text
                               style={[
-                                styles.checkbox,
-                                recurringServiceCommitmentDraft.includeInAttendanceExport
-                                  ? styles.checkboxChecked
+                                styles.chipText,
+                                wizardMeetingSignatureRequired === true
+                                  ? styles.chipTextSelected
                                   : null,
                               ]}
                             >
-                              {recurringServiceCommitmentDraft.includeInAttendanceExport ? (
-                                <Text style={styles.checkboxTick}>✓</Text>
-                              ) : null}
-                            </View>
-                            <View style={styles.checkboxBody}>
-                              <Text style={styles.label}>
-                                {RECURRING_SERVICE_COMMITMENTS_STEP_COPY.labels.exportInclusion}
-                              </Text>
-                              <Text style={styles.sectionMeta}>
-                                Include this recurring service commitment in attendance slip export
-                                when you need proof of service or added attendance context.
-                              </Text>
-                            </View>
-                          </Pressable>
-                          <View style={styles.buttonRow}>
-                            <AppButton
-                              title={
-                                recurringServiceCommitmentDraft.id
-                                  ? "Save changes"
-                                  : "Save commitment"
-                              }
-                              onPress={saveRecurringServiceCommitment}
-                            />
-                            <View style={styles.buttonSpacer} />
-                            <AppButton
-                              title="Cancel"
-                              onPress={cancelRecurringServiceCommitmentEditor}
-                            />
-                          </View>
-                        </>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 8 ? (
-                    <>
-                      <Text style={styles.label}>Do you have a home group meeting?</Text>
-                      <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardHasHomeGroup === true ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardHasHomeGroup(true)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardHasHomeGroup === true ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            Yes
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardHasHomeGroup === false ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardHasHomeGroup(false)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardHasHomeGroup === false ? styles.chipTextSelected : null,
-                            ]}
-                          >
-                            No
-                          </Text>
-                        </Pressable>
-                      </View>
-
-                      {wizardHasHomeGroup ? (
-                        <>
-                          <Text style={styles.sectionMeta}>
-                            Choose one group from meetings in your area over the next 7 days.
-                          </Text>
-                          {homeGroupWeekOptions.length === 0 ? (
-                            <Text style={styles.sectionMeta}>
-                              No meetings are available in your area for the next week yet.
+                              Yes
                             </Text>
-                          ) : (
-                            <ScrollView
-                              style={styles.setupMeetingListScroll}
-                              contentContainerStyle={styles.setupMeetingListContent}
-                              nestedScrollEnabled
-                              showsVerticalScrollIndicator
-                              keyboardShouldPersistTaps="handled"
+                          </Pressable>
+                          <Pressable
+                            style={[
+                              styles.chip,
+                              wizardMeetingSignatureRequired === false ? styles.chipSelected : null,
+                              wizardMeetingProofLockedByHouse ? styles.modeChipDisabled : null,
+                            ]}
+                            onPress={() => {
+                              if (wizardMeetingProofLockedByHouse) {
+                                return;
+                              }
+                              setWizardMeetingSignatureRequired(false);
+                            }}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                wizardMeetingSignatureRequired === false
+                                  ? styles.chipTextSelected
+                                  : null,
+                              ]}
                             >
-                              {homeGroupWeekOptions.map((option) => {
-                                const selected = selectedHomeGroupOption?.key === option.key;
-                                const nextMeeting = option.nextMeeting;
-                                const nextMeetingDayLabel =
-                                  nextMeeting === null
-                                    ? "Later this week"
-                                    : nextMeeting.dayOfWeek === new Date(clockTickMs).getDay()
-                                      ? "Today"
-                                      : (WEEKDAY_SHORT_LABELS[nextMeeting.dayOfWeek] ?? "Next");
-                                return (
-                                  <Pressable
-                                    key={option.key}
+                              No
+                            </Text>
+                          </Pressable>
+                        </View>
+                        {wizardMeetingProofLockedByHouse ? (
+                          <Text style={styles.sectionMeta}>
+                            Your sober house requires signature-backed meeting proof, so this stays
+                            locked on.
+                          </Text>
+                        ) : null}
+                      </>
+                    ) : null}
+
+                    {setupStep === 10 ? (
+                      <>
+                        {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
+                          <>
+                            <Text style={styles.label}>Select your sober house</Text>
+                            <View style={styles.chipRow}>
+                              {soberHouseStore.houses.map((house) => (
+                                <Pressable
+                                  key={house.id}
+                                  style={[
+                                    styles.chip,
+                                    wizardSoberHouseId === house.id ? styles.chipSelected : null,
+                                  ]}
+                                  onPress={() => setWizardSoberHouseId(house.id)}
+                                >
+                                  <Text
                                     style={[
-                                      styles.meetingCard,
-                                      selected ? styles.homeGroupSelectedCard : null,
+                                      styles.chipText,
+                                      wizardSoberHouseId === house.id
+                                        ? styles.chipTextSelected
+                                        : null,
                                     ]}
-                                    onPress={() => {
-                                      if (selected) {
-                                        void clearHomeGroupSelection();
-                                        return;
-                                      }
-
-                                      openHomeGroupBirthdayPrompt({
-                                        key: option.key,
-                                        name: option.name,
-                                        meetingIds: option.meetings.map((meeting) => meeting.id),
-                                        primaryMeetingId:
-                                          option.nextMeeting?.id ?? option.meetings[0]?.id ?? null,
-                                      });
-                                    }}
                                   >
-                                    <Text style={styles.meetingName}>{option.name}</Text>
-                                    <Text style={styles.sectionMeta}>
-                                      {option.occurrenceCount} meeting
-                                      {option.occurrenceCount === 1 ? "" : "s"} this week •{" "}
-                                      {option.formatSummary}
-                                    </Text>
-                                    <Text style={styles.sectionMeta}>
-                                      Next: {nextMeetingDayLabel}
-                                      {nextMeeting
-                                        ? ` ${formatHhmmForDisplay(nextMeeting.startsAtLocal)}`
-                                        : ""}{" "}
-                                      • {option.areaSummary}
-                                    </Text>
-                                    <Text style={styles.sectionMeta}>
-                                      {meetingDistanceLabel(
-                                        nextMeeting ?? option.meetings[0],
-                                        option.distanceMeters,
-                                        locationPermission,
-                                        locationIssue,
-                                      )}
-                                    </Text>
-                                    <Text style={styles.sectionMeta}>
-                                      {selected
-                                        ? "Selected as home group"
-                                        : "Tap to set as home group"}
-                                    </Text>
-                                  </Pressable>
-                                );
-                              })}
-                            </ScrollView>
-                          )}
-                        </>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {setupStep === 9 ? (
-                    <>
-                      <Text style={styles.sectionTitle}>Meeting Verification</Text>
-                      <Text style={styles.label}>
-                        Are you required to obtain a signature at meetings?
-                      </Text>
-                      <Text style={styles.sectionMeta}>
-                        This enables signature capture during meeting attendance when required by
-                        your program, sponsor, court, or house rules.
-                      </Text>
-                      <View style={styles.chipRow}>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardMeetingSignatureRequired === true ? styles.chipSelected : null,
-                          ]}
-                          onPress={() => setWizardMeetingSignatureRequired(true)}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardMeetingSignatureRequired === true
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            Yes
-                          </Text>
-                        </Pressable>
-                        <Pressable
-                          style={[
-                            styles.chip,
-                            wizardMeetingSignatureRequired === false ? styles.chipSelected : null,
-                            wizardMeetingProofLockedByHouse ? styles.modeChipDisabled : null,
-                          ]}
-                          onPress={() => {
-                            if (wizardMeetingProofLockedByHouse) {
-                              return;
-                            }
-                            setWizardMeetingSignatureRequired(false);
-                          }}
-                        >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              wizardMeetingSignatureRequired === false
-                                ? styles.chipTextSelected
-                                : null,
-                            ]}
-                          >
-                            No
-                          </Text>
-                        </Pressable>
-                      </View>
-                      {wizardMeetingProofLockedByHouse ? (
-                        <Text style={styles.sectionMeta}>
-                          Your sober house requires signature-backed meeting proof, so this stays
-                          locked on.
-                        </Text>
-                      ) : null}
-                    </>
-                  ) : null}
-
-                  {setupStep === 10 ? (
-                    <>
-                      {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
-                        <>
-                          <Text style={styles.label}>Select your sober house</Text>
-                          <View style={styles.chipRow}>
-                            {soberHouseStore.houses.map((house) => (
+                                    {house.name}
+                                  </Text>
+                                </Pressable>
+                              ))}
+                            </View>
+                            <Text style={styles.sectionMeta}>
+                              This resident setup only collects participant-facing details and house
+                              requirements.
+                            </Text>
+                            <Text style={styles.label}>Resident first name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentFirstName}
+                              onChangeText={setWizardResidentFirstName}
+                              placeholder="First name"
+                            />
+                            <Text style={styles.label}>Resident last name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentLastName}
+                              onChangeText={setWizardResidentLastName}
+                              placeholder="Last name"
+                            />
+                            <Text style={styles.label}>Move-in date</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentMoveInDate}
+                              onChangeText={(value) =>
+                                setWizardResidentMoveInDate(normalizeUsDateInput(value))
+                              }
+                              placeholder="MM-DD-YYYY"
+                              autoCapitalize="none"
+                            />
+                            <Text style={styles.label}>Room / bed</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentRoomOrBed}
+                              onChangeText={setWizardResidentRoomOrBed}
+                              placeholder="Room 2B"
+                            />
+                            <Text style={styles.label}>Emergency contact name</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentEmergencyContactName}
+                              onChangeText={setWizardResidentEmergencyContactName}
+                              placeholder="Emergency contact"
+                            />
+                            <Text style={styles.label}>Emergency contact phone</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentEmergencyContactPhone}
+                              onChangeText={(value) =>
+                                setWizardResidentEmergencyContactPhone(normalizeUsPhoneInput(value))
+                              }
+                              placeholder="(555) 555-1234"
+                              keyboardType="phone-pad"
+                            />
+                            <Text style={styles.label}>Program phase on entry</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={wizardResidentProgramPhase}
+                              onChangeText={setWizardResidentProgramPhase}
+                              placeholder="Phase 1"
+                            />
+                            {wizardSelectedSoberHouseRules ? (
+                              <Text style={styles.sectionMeta}>
+                                Meetings:{" "}
+                                {wizardSelectedSoberHouseRules.meetings.meetingsRequired
+                                  ? `${wizardSelectedSoberHouseRules.meetings.meetingsPerWeek}/week`
+                                  : "not required"}{" "}
+                                • Sponsor contact:{" "}
+                                {wizardSelectedSoberHouseRules.sponsorContact.enabled
+                                  ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek}/week`
+                                  : "not required"}
+                              </Text>
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            <Text style={styles.label}>Select your court or program track</Text>
+                            <Text style={styles.sectionMeta}>
+                              This track selection shapes only the participant-facing setup that
+                              comes next. It does not grant supervision or configuration access.
+                            </Text>
+                            <View style={styles.chipRow}>
                               <Pressable
-                                key={house.id}
                                 style={[
                                   styles.chip,
-                                  wizardSoberHouseId === house.id ? styles.chipSelected : null,
+                                  wizardJusticeTrack === "DRUG_COURT" ? styles.chipSelected : null,
                                 ]}
-                                onPress={() => setWizardSoberHouseId(house.id)}
+                                onPress={() => setWizardJusticeTrack("DRUG_COURT")}
                               >
                                 <Text
                                   style={[
                                     styles.chipText,
-                                    wizardSoberHouseId === house.id
+                                    wizardJusticeTrack === "DRUG_COURT"
                                       ? styles.chipTextSelected
                                       : null,
                                   ]}
                                 >
-                                  {house.name}
+                                  Drug Court
                                 </Text>
                               </Pressable>
-                            ))}
-                          </View>
-                          <Text style={styles.sectionMeta}>
-                            This resident setup only collects participant-facing details and house
-                            requirements.
-                          </Text>
-                          <Text style={styles.label}>Resident first name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentFirstName}
-                            onChangeText={setWizardResidentFirstName}
-                            placeholder="First name"
-                          />
-                          <Text style={styles.label}>Resident last name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentLastName}
-                            onChangeText={setWizardResidentLastName}
-                            placeholder="Last name"
-                          />
-                          <Text style={styles.label}>Move-in date</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentMoveInDate}
-                            onChangeText={(value) =>
-                              setWizardResidentMoveInDate(normalizeUsDateInput(value))
-                            }
-                            placeholder="MM-DD-YYYY"
-                            autoCapitalize="none"
-                          />
-                          <Text style={styles.label}>Room / bed</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentRoomOrBed}
-                            onChangeText={setWizardResidentRoomOrBed}
-                            placeholder="Room 2B"
-                          />
-                          <Text style={styles.label}>Emergency contact name</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentEmergencyContactName}
-                            onChangeText={setWizardResidentEmergencyContactName}
-                            placeholder="Emergency contact"
-                          />
-                          <Text style={styles.label}>Emergency contact phone</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentEmergencyContactPhone}
-                            onChangeText={(value) =>
-                              setWizardResidentEmergencyContactPhone(normalizeUsPhoneInput(value))
-                            }
-                            placeholder="(555) 555-1234"
-                            keyboardType="phone-pad"
-                          />
-                          <Text style={styles.label}>Program phase on entry</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={wizardResidentProgramPhase}
-                            onChangeText={setWizardResidentProgramPhase}
-                            placeholder="Phase 1"
-                          />
-                          {wizardSelectedSoberHouseRules ? (
-                            <Text style={styles.sectionMeta}>
-                              Meetings:{" "}
-                              {wizardSelectedSoberHouseRules.meetings.meetingsRequired
-                                ? `${wizardSelectedSoberHouseRules.meetings.meetingsPerWeek}/week`
-                                : "not required"}{" "}
-                              • Sponsor contact:{" "}
-                              {wizardSelectedSoberHouseRules.sponsorContact.enabled
-                                ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek}/week`
-                                : "not required"}
-                            </Text>
-                          ) : null}
-                        </>
-                      ) : (
-                        <>
-                          <Text style={styles.label}>Select your court or program track</Text>
-                          <Text style={styles.sectionMeta}>
-                            This track selection shapes only the participant-facing setup that comes
-                            next. It does not grant supervision or configuration access.
-                          </Text>
-                          <View style={styles.chipRow}>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardJusticeTrack === "DRUG_COURT" ? styles.chipSelected : null,
-                              ]}
-                              onPress={() => setWizardJusticeTrack("DRUG_COURT")}
-                            >
-                              <Text
+                              <Pressable
                                 style={[
-                                  styles.chipText,
-                                  wizardJusticeTrack === "DRUG_COURT"
-                                    ? styles.chipTextSelected
-                                    : null,
-                                ]}
-                              >
-                                Drug Court
-                              </Text>
-                            </Pressable>
-                            <Pressable
-                              style={[
-                                styles.chip,
-                                wizardJusticeTrack === "PROBATION_PAROLE"
-                                  ? styles.chipSelected
-                                  : null,
-                              ]}
-                              onPress={() => setWizardJusticeTrack("PROBATION_PAROLE")}
-                            >
-                              <Text
-                                style={[
-                                  styles.chipText,
+                                  styles.chip,
                                   wizardJusticeTrack === "PROBATION_PAROLE"
-                                    ? styles.chipTextSelected
+                                    ? styles.chipSelected
                                     : null,
                                 ]}
+                                onPress={() => setWizardJusticeTrack("PROBATION_PAROLE")}
                               >
-                                Probation / Parole
-                              </Text>
-                            </Pressable>
-                          </View>
-                          <Text style={styles.sectionMeta}>
-                            Selected track:{" "}
-                            {wizardJusticeTrack === "DRUG_COURT"
-                              ? "Drug Court"
-                              : wizardJusticeTrack === "PROBATION_PAROLE"
-                                ? "Probation / Parole"
-                                : "Not selected"}
-                          </Text>
-                        </>
-                      )}
-                    </>
-                  ) : null}
-
-                  {setupStep === 11 ? (
-                    <>
-                      <Text style={styles.label}>Court or program name</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={wizardCourtProgramName}
-                        onChangeText={setWizardCourtProgramName}
-                        placeholder="Program or court name"
-                      />
-                      <Text style={styles.label}>Supervising contact</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={wizardCourtSupervisorName}
-                        onChangeText={setWizardCourtSupervisorName}
-                        placeholder="Officer, case manager, or coordinator"
-                      />
-                      <Text style={styles.label}>Your current requirements</Text>
-                      <TextInput
-                        style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
-                        value={wizardCourtRequirementsSummary}
-                        onChangeText={setWizardCourtRequirementsSummary}
-                        placeholder="Meetings, check-ins, proof requirements, deadlines, or actions to track"
-                        multiline
-                      />
-                      <Text style={styles.label}>Upcoming deadline or check-in notes</Text>
-                      <TextInput
-                        style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
-                        value={wizardCourtDeadlineSummary}
-                        onChangeText={setWizardCourtDeadlineSummary}
-                        placeholder="Next court date, reporting deadline, or weekly focus"
-                        multiline
-                      />
-                      <Text style={styles.sectionMeta}>
-                        This wizard stays participant-facing. Court hierarchy, templates, and
-                        supervisory settings remain restricted to authorized backend-verified roles.
-                      </Text>
-                    </>
-                  ) : null}
-
-                  {setupError ? <Text style={styles.errorText}>{setupError}</Text> : null}
-
-                  <View style={styles.buttonRow}>
-                    {setupVisibleStepNumber > 1 ? (
-                      <>
-                        <AppButton title="Back" onPress={previousSetupStep} />
-                        <View style={styles.buttonSpacer} />
+                                <Text
+                                  style={[
+                                    styles.chipText,
+                                    wizardJusticeTrack === "PROBATION_PAROLE"
+                                      ? styles.chipTextSelected
+                                      : null,
+                                  ]}
+                                >
+                                  Probation / Parole
+                                </Text>
+                              </Pressable>
+                            </View>
+                            <Text style={styles.sectionMeta}>
+                              Selected track:{" "}
+                              {wizardJusticeTrack === "DRUG_COURT"
+                                ? "Drug Court"
+                                : wizardJusticeTrack === "PROBATION_PAROLE"
+                                  ? "Probation / Parole"
+                                  : "Not selected"}
+                            </Text>
+                          </>
+                        )}
                       </>
                     ) : null}
-                    {setupStep < setupLastStep ? (
-                      <AppButton title="Next" onPress={() => void nextSetupStep()} />
-                    ) : (
-                      <AppButton
-                        title={setupFinishing ? "Saving..." : "Save & Finish"}
-                        onPress={() => void finishSetup()}
-                        disabled={setupFinishing || showProtectedOrgAccessGate}
-                      />
-                    )}
-                  </View>
-                </GlassCard>
+
+                    {setupStep === 11 ? (
+                      <>
+                        <Text style={styles.label}>Court or program name</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={wizardCourtProgramName}
+                          onChangeText={setWizardCourtProgramName}
+                          placeholder="Program or court name"
+                        />
+                        <Text style={styles.label}>Supervising contact</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={wizardCourtSupervisorName}
+                          onChangeText={setWizardCourtSupervisorName}
+                          placeholder="Officer, case manager, or coordinator"
+                        />
+                        <Text style={styles.label}>Your current requirements</Text>
+                        <TextInput
+                          style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
+                          value={wizardCourtRequirementsSummary}
+                          onChangeText={setWizardCourtRequirementsSummary}
+                          placeholder="Meetings, check-ins, proof requirements, deadlines, or actions to track"
+                          multiline
+                        />
+                        <Text style={styles.label}>Upcoming deadline or check-in notes</Text>
+                        <TextInput
+                          style={[styles.input, { minHeight: 96, textAlignVertical: "top" }]}
+                          value={wizardCourtDeadlineSummary}
+                          onChangeText={setWizardCourtDeadlineSummary}
+                          placeholder="Next court date, reporting deadline, or weekly focus"
+                          multiline
+                        />
+                        <Text style={styles.sectionMeta}>
+                          This wizard stays participant-facing. Court hierarchy, templates, and
+                          supervisory settings remain restricted to authorized backend-verified
+                          roles.
+                        </Text>
+                      </>
+                    ) : null}
+
+                    {setupError ? <Text style={styles.errorText}>{setupError}</Text> : null}
+
+                    <View style={styles.buttonRow}>
+                      {setupVisibleStepNumber > 1 ? (
+                        <>
+                          <AppButton title="Back" onPress={previousSetupStep} />
+                          <View style={styles.buttonSpacer} />
+                        </>
+                      ) : null}
+                      {setupStep < setupLastStep ? (
+                        <AppButton title="Next" onPress={() => void nextSetupStep()} />
+                      ) : (
+                        <AppButton
+                          title={setupFinishing ? "Saving..." : "Save & Finish"}
+                          onPress={() => void finishSetup()}
+                          disabled={setupFinishing}
+                        />
+                      )}
+                    </View>
+                  </GlassCard>
+                )
               ) : null}
 
               {homeScreen === "DASHBOARD" ? (

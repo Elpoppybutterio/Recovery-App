@@ -51,6 +51,9 @@ export type AppAccessRole =
   | "DUAL_TRACK_ADMIN"
   | "PLATFORM_ADMIN";
 
+export type ProtectedOrgAccessGateOutcome = "idle" | "unauthenticated" | "unauthorized";
+export type ProtectedOrgAccessGateState = "AUTH_REQUIRED" | "ACCESS_DENIED";
+
 const accessGrantRoles: AccessGrantRole[] = [
   "recovery_user",
   "resident_user",
@@ -189,6 +192,49 @@ export function canManageSoberHouseHierarchy(role: AppAccessRole): boolean {
   return (
     role === "SOBER_HOUSE_ORG_ADMIN" || role === "DUAL_TRACK_ADMIN" || role === "PLATFORM_ADMIN"
   );
+}
+
+export function deriveProtectedOrgAccessGateState(input: {
+  authorized: boolean;
+  outcome: ProtectedOrgAccessGateOutcome;
+}): ProtectedOrgAccessGateState | null {
+  if (input.authorized) {
+    return null;
+  }
+
+  return input.outcome === "unauthorized" ? "ACCESS_DENIED" : "AUTH_REQUIRED";
+}
+
+export function buildPlatformOwnerGrantSql(input: {
+  tenantId: string;
+  userId: string;
+}): string | null {
+  const tenantId = input.tenantId.trim();
+  const userId = input.userId.trim();
+  if (!tenantId || !userId) {
+    return null;
+  }
+
+  const escapedTenantId = tenantId.replaceAll("'", "''");
+  const escapedUserId = userId.replaceAll("'", "''");
+
+  return [
+    "INSERT INTO user_roles (",
+    "  tenant_id,",
+    "  user_id,",
+    "  role,",
+    "  is_active,",
+    "  granted_by_user_id",
+    ")",
+    "VALUES (",
+    `  '${escapedTenantId}',`,
+    `  '${escapedUserId}',`,
+    "  'platform_owner',",
+    "  TRUE,",
+    `  '${escapedUserId}'`,
+    ")",
+    "ON CONFLICT DO NOTHING;",
+  ].join("\n");
 }
 
 export function canViewSoberHouseResidentExperience(role: AppAccessRole): boolean {
