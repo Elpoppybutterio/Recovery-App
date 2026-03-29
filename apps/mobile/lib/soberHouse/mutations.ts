@@ -11,6 +11,7 @@ import {
   createDefaultEvidenceItem,
   createDefaultHouse,
   createDefaultHouseAlertAnnouncement,
+  createDefaultHouseMeetingAttendanceRecord,
   createDefaultHouseChore,
   createDefaultHouseGroup,
   createDefaultHouseMeeting,
@@ -42,6 +43,7 @@ import type {
   HouseGroup,
   HouseMeeting,
   HouseRuleSet,
+  HouseMeetingAttendanceRecord,
   JobApplicationRecord,
   MonthlyReport,
   OneOnOneSession,
@@ -844,6 +846,49 @@ export function upsertChoreCompletionRecord(
     (draftStore) => ({
       ...draftStore,
       choreCompletionRecords: replaceById(draftStore.choreCompletionRecords, nextValue),
+    }),
+    timestamp,
+  );
+}
+
+export function upsertHouseMeetingAttendanceRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<HouseMeetingAttendanceRecord, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous =
+    store.houseMeetingAttendanceRecords.find((record) => record.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultHouseMeetingAttendanceRecord(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: HouseMeetingAttendanceRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "houseMeetingAttendanceRecord",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      houseMeetingAttendanceRecords: replaceById(
+        draftStore.houseMeetingAttendanceRecords,
+        nextValue,
+      ),
     }),
     timestamp,
   );

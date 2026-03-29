@@ -135,7 +135,36 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
       ? candidate.residentHouseMemberships
       : [],
     recurringObligations: Array.isArray(candidate.recurringObligations)
-      ? candidate.recurringObligations
+      ? candidate.recurringObligations.map((obligation) => ({
+          ...obligation,
+          scopeType:
+            obligation.scopeType ??
+            (obligation.houseId
+              ? "HOUSE"
+              : obligation.houseGroupId
+                ? "HOUSE_GROUP"
+                : "ORGANIZATION"),
+          houseGroupId: obligation.houseGroupId ?? null,
+          locationLabel: obligation.locationLabel ?? "",
+          weekdayList: Array.isArray(obligation.weekdayList)
+            ? obligation.weekdayList
+            : obligation.weekday
+              ? [obligation.weekday]
+              : [],
+          monthlyOrdinal:
+            obligation.monthlyOrdinal === 1 ||
+            obligation.monthlyOrdinal === 2 ||
+            obligation.monthlyOrdinal === 3 ||
+            obligation.monthlyOrdinal === 4 ||
+            obligation.monthlyOrdinal === 5
+              ? obligation.monthlyOrdinal
+              : null,
+          durationMinutes:
+            typeof obligation.durationMinutes === "number" &&
+            Number.isFinite(obligation.durationMinutes)
+              ? obligation.durationMinutes
+              : 60,
+        }))
       : [],
     houseMeetings: Array.isArray(candidate.houseMeetings) ? candidate.houseMeetings : [],
     oneOnOneSessions: Array.isArray(candidate.oneOnOneSessions) ? candidate.oneOnOneSessions : [],
@@ -177,6 +206,12 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     residentRequirementProfile: candidate.residentRequirementProfile
       ? {
           ...candidate.residentRequirementProfile,
+          workplaceGeofenceLat: candidate.residentRequirementProfile.workplaceGeofenceLat ?? null,
+          workplaceGeofenceLng: candidate.residentRequirementProfile.workplaceGeofenceLng ?? null,
+          workplaceGeofenceRadiusFeet:
+            candidate.residentRequirementProfile.workplaceGeofenceRadiusFeet ?? null,
+          workplaceGeofenceResolvedAt:
+            candidate.residentRequirementProfile.workplaceGeofenceResolvedAt ?? null,
           oneOnOneRequired: candidate.residentRequirementProfile.oneOnOneRequired ?? false,
           oneOnOneAssignedStaffAssignmentId:
             candidate.residentRequirementProfile.oneOnOneAssignedStaffAssignmentId ?? null,
@@ -217,6 +252,9 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
           oneOnOneReminderEnabled: candidate.residentWizardDraft.oneOnOneReminderEnabled ?? false,
         }
       : null,
+    houseMeetingAttendanceRecords: Array.isArray(candidate.houseMeetingAttendanceRecords)
+      ? candidate.houseMeetingAttendanceRecords
+      : [],
     choreCompletionRecords: Array.isArray(candidate.choreCompletionRecords)
       ? candidate.choreCompletionRecords.map((record) => ({
           ...record,
@@ -228,7 +266,10 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
         }))
       : [],
     jobApplicationRecords: Array.isArray(candidate.jobApplicationRecords)
-      ? candidate.jobApplicationRecords
+      ? candidate.jobApplicationRecords.map((record) => ({
+          ...record,
+          proofReference: record.proofReference ?? null,
+        }))
       : [],
     workVerificationRecords: Array.isArray(candidate.workVerificationRecords)
       ? candidate.workVerificationRecords

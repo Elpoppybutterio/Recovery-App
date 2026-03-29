@@ -390,7 +390,7 @@ export function computeResidentMonthlyKpis({
   });
   const employmentComplianceRate =
     requirements.workRequired && requirements.currentlyEmployed
-      ? requirements.employerName && requirements.employerAddress && requirements.employerPhone
+      ? requirements.employerName && requirements.employerAddress
         ? toRateMetric(
             "weeks verified",
             workWeekResults.filter((week) => week.met).length,
@@ -401,7 +401,9 @@ export function computeResidentMonthlyKpis({
 
   const jobApplications = store.jobApplicationRecords.filter(
     (record) =>
-      record.residentId === resident.residentId && isTimestampInWindow(record.appliedAt, window),
+      record.residentId === resident.residentId &&
+      isTimestampInWindow(record.appliedAt, window) &&
+      (!rules?.jobSearch.proofRequired || record.proofProvided || Boolean(record.proofReference)),
   );
   const jobSearchWeekResults = enumerateMonthWeeks(window).map((week) => {
     const required =
