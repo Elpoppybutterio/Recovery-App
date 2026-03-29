@@ -1,7 +1,11 @@
 import type { AccessContext, AppAccessRole } from "./access";
 import type { OnboardingPath } from "./onboarding";
 import type { RecurringServiceCommitment } from "./recurringServiceCommitments";
-import type { SoberHouseAccessRole } from "./soberHouse/types";
+import type {
+  ChoreCompletionRecord,
+  RecurringObligation,
+  SoberHouseAccessRole,
+} from "./soberHouse/types";
 
 export type ParticipantProfileSyncPayload = {
   displayName: string | null;
@@ -60,7 +64,7 @@ export type ObligationSnapshotPayload = {
 
 export type ComplianceEventPayload = {
   obligationId: string | null;
-  eventType: "MEETING_ATTENDED" | "SPONSOR_CONTACT_COMPLETED";
+  eventType: "MEETING_ATTENDED" | "SPONSOR_CONTACT_COMPLETED" | "CHORE_COMPLETED";
   eventStatus: "COMPLETED";
   occurredAt: string;
   metadata: Record<string, unknown>;
@@ -156,6 +160,7 @@ type SyncInputs = {
   sponsor: SponsorInputs;
   court: CourtInputs;
   recurringServiceCommitments: RecurringServiceCommitment[];
+  residentHouseMeetings: RecurringObligation[];
   residentRules: ResidentRulesInputs | null;
 };
 
@@ -486,6 +491,40 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
         status: "ACTIVE",
       });
     }
+
+    for (const houseMeeting of input.residentHouseMeetings) {
+      obligations.push({
+        syncKey: `resident-house-meeting:${houseMeeting.id}`,
+        obligationType: "other",
+        sourceTrack: "resident",
+        title: houseMeeting.title,
+        description:
+          [
+            houseMeeting.locationLabel || null,
+            houseMeeting.detail.trim() || null,
+            `${houseMeeting.durationMinutes} minutes`,
+          ]
+            .filter((entry): entry is string => Boolean(entry))
+            .join(" • ") || null,
+        organizationId: profile.organizationId,
+        houseId: profile.houseId,
+        courtProgramId: null,
+        dueAt: normalizeHhmmToIso(houseMeeting.timeLocalHhmm),
+        recurrence: {
+          frequency: houseMeeting.frequency,
+          weekday: houseMeeting.weekday,
+          weekdayList: houseMeeting.weekdayList,
+          monthlyOrdinal: houseMeeting.monthlyOrdinal,
+          durationMinutes: houseMeeting.durationMinutes,
+        },
+        priority: houseMeeting.required ? "HIGH" : "LOW",
+        requiresProof: false,
+        requiresSignature: false,
+        proofType: null,
+        verificationStatus: "NOT_REQUIRED",
+        status: "ACTIVE",
+      });
+    }
   }
 
   return obligations;
@@ -494,6 +533,9 @@ export function buildObligationSnapshotPayloads(input: SyncInputs): ObligationSn
 export function buildComplianceEventPayloads(input: {
   sponsorCallLogs: SponsorCallLog[];
   meetingAttendanceLogs: MeetingAttendanceLog[];
+  choreCompletionRecords: Array<
+    Pick<ChoreCompletionRecord, "id" | "completedAt" | "notes" | "proofReference" | "proofProvided">
+  >;
   obligations: BackendObligationRecord[];
 }): ComplianceEventPayload[] {
   const sponsorObligation =
@@ -502,6 +544,8 @@ export function buildComplianceEventPayloads(input: {
   const meetingObligation =
     input.obligations.find((obligation) => obligation.syncKey === "resident-meetings-weekly") ??
     null;
+  const choreObligation =
+    input.obligations.find((obligation) => obligation.syncKey === "resident-chores") ?? null;
 
   const sponsorEvents = input.sponsorCallLogs
     .filter((entry) => entry.success)
@@ -547,7 +591,27 @@ export function buildComplianceEventPayloads(input: {
     externalEventId: `meeting-attendance:${entry.id}`,
   }));
 
-  return [...sponsorEvents, ...meetingEvents];
+  const choreEvents = input.choreCompletionRecords.map<ComplianceEventPayload>((entry) => ({
+    obligationId: choreObligation?.id ?? null,
+    eventType: "CHORE_COMPLETED",
+    eventStatus: "COMPLETED",
+    occurredAt: entry.completedAt,
+    metadata: {
+      notes: entry.notes,
+      proofProvided: entry.proofProvided,
+    },
+    proofUri: entry.proofReference ?? null,
+    proofType:
+      (choreObligation?.proofType as ComplianceEventPayload["proofType"]) ??
+      (entry.proofReference ? "photo" : null),
+    verificationStatus:
+      (choreObligation?.verificationStatus as ComplianceEventPayload["verificationStatus"]) ??
+      (entry.proofReference ? "SUBMITTED" : "NOT_REQUIRED"),
+    sourceTrack: "resident",
+    externalEventId: `chore:${entry.id}`,
+  }));
+
+  return [...sponsorEvents, ...meetingEvents, ...choreEvents];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

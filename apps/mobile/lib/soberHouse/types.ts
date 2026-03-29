@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 11 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 12 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -28,7 +28,7 @@ export type MeetingProofMethod =
   | "SIGNATURE"
   | "MANAGER_CONFIRMATION";
 export type SponsorProofType = "CALL_LOG" | "TEXT_CONFIRMATION" | "MANAGER_CONFIRMATION";
-export type ScheduledFrequency = "ONCE" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+export type ScheduledFrequency = "ONCE" | "DAILY" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 export type ScheduledWeekdayCode = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
 export type AlertDeliveryMethod = "EMAIL" | "SMS" | "BOTH";
 export type AlertScope = "ORGANIZATION" | "HOUSE";
@@ -64,6 +64,7 @@ export type SoberHouseEntityType =
   | "residentHousingProfile"
   | "residentRequirementProfile"
   | "residentConsentRecord"
+  | "houseMeetingAttendanceRecord"
   | "choreCompletionRecord"
   | "jobApplicationRecord"
   | "workVerificationRecord"
@@ -560,16 +561,22 @@ export type ResidentHouseMembership = {
 export type RecurringObligation = {
   id: string;
   organizationId: string | null;
+  scopeType: HouseRuleScopeType;
   houseId: string | null;
+  houseGroupId: string | null;
   residentId: string | null;
   linkedUserId: string | null;
   obligationType: RecurringObligationType;
   title: string;
   detail: string;
+  locationLabel: string;
   frequency: ScheduledFrequency;
   weekday: ScheduledWeekdayCode | null;
+  weekdayList: ScheduledWeekdayCode[];
+  monthlyOrdinal: 1 | 2 | 3 | 4 | 5 | null;
   scheduledDate: string | null;
   timeLocalHhmm: string;
+  durationMinutes: number;
   required: boolean;
   reminderLeadMinutes: number;
   inAppReminderEnabled: boolean;
@@ -679,6 +686,10 @@ export type ResidentRequirementProfile = {
   employerName: string;
   employerAddress: string;
   employerPhone: string;
+  workplaceGeofenceLat: number | null;
+  workplaceGeofenceLng: number | null;
+  workplaceGeofenceRadiusFeet: number | null;
+  workplaceGeofenceResolvedAt: string | null;
   expectedWorkScheduleNotes: string;
   jobApplicationsRequiredPerWeek: number;
   meetingsRequiredWeekly: boolean;
@@ -749,6 +760,21 @@ export type ChoreCompletionRecord = {
   updatedAt: string;
 };
 
+export type HouseMeetingAttendanceRecord = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  organizationId: string | null;
+  houseId: string | null;
+  houseMeetingId: string | null;
+  recurringObligationId: string | null;
+  scheduledStartAt: string;
+  attendedAt: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type JobApplicationRecord = {
   id: string;
   residentId: string;
@@ -758,6 +784,7 @@ export type JobApplicationRecord = {
   employerName: string;
   appliedAt: string;
   proofProvided: boolean;
+  proofReference: string | null;
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -1131,6 +1158,7 @@ export type SoberHouseSettingsStore = {
   residentRequirementProfile: ResidentRequirementProfile | null;
   residentConsentRecord: ResidentConsentRecord | null;
   residentWizardDraft: ResidentWizardDraft | null;
+  houseMeetingAttendanceRecords: HouseMeetingAttendanceRecord[];
   choreCompletionRecords: ChoreCompletionRecord[];
   jobApplicationRecords: JobApplicationRecord[];
   workVerificationRecords: WorkVerificationRecord[];

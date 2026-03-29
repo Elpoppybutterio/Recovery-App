@@ -174,6 +174,10 @@ module.exports = ({ config }: ConfigContext): ExpoConfig => {
           "SoberAI uses reminders access only when needed to support recovery calendar items you choose to save.",
         NSLocationWhenInUseUsageDescription:
           "Sober AI uses your location while the app is open to show nearby meetings, estimate distance, and confirm arrival when you start attendance.",
+        NSPhotoLibraryUsageDescription:
+          "SoberAI uses your photo library only when you choose to attach chore proof or other accountability evidence.",
+        NSPhotoLibraryAddUsageDescription:
+          "SoberAI saves accountability proof references when you choose to attach resident evidence.",
         UIBackgroundModes: ["fetch", "remote-notification"],
       },
     },

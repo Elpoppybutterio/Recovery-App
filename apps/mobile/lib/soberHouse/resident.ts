@@ -6,10 +6,17 @@ import { getRuleSetForHouse } from "./selectors";
 import type {
   ResidentConsentRecord,
   ResidentHousingProfile,
+  ResidentOnboardingStep,
   ResidentRequirementProfile,
   ResidentWizardDraft,
   SoberHouseSettingsStore,
 } from "./types";
+
+export type ResidentSetupState = {
+  complete: boolean;
+  missingItems: string[];
+  nextStep: ResidentOnboardingStep;
+};
 
 export function createDefaultResidentWizardDraft(linkedUserId: string): ResidentWizardDraft {
   return {
@@ -221,6 +228,11 @@ export function createResidentRequirementProfileFromDraft(
   linkedUserId: string,
   draft: ResidentWizardDraft,
   now: string,
+  workplaceGeofence?: {
+    lat: number;
+    lng: number;
+    radiusFeet: number;
+  } | null,
 ): ResidentRequirementProfile {
   const existing = store.residentRequirementProfile;
   const residentId =
@@ -241,6 +253,20 @@ export function createResidentRequirementProfileFromDraft(
     employerName: draft.currentlyEmployed ? draft.employerName.trim() : "",
     employerAddress: draft.currentlyEmployed ? draft.employerAddress.trim() : "",
     employerPhone: draft.currentlyEmployed ? formatUsPhoneDisplay(draft.employerPhone) : "",
+    workplaceGeofenceLat: draft.currentlyEmployed
+      ? (workplaceGeofence?.lat ?? existing?.workplaceGeofenceLat ?? null)
+      : null,
+    workplaceGeofenceLng: draft.currentlyEmployed
+      ? (workplaceGeofence?.lng ?? existing?.workplaceGeofenceLng ?? null)
+      : null,
+    workplaceGeofenceRadiusFeet: draft.currentlyEmployed
+      ? (workplaceGeofence?.radiusFeet ?? existing?.workplaceGeofenceRadiusFeet ?? null)
+      : null,
+    workplaceGeofenceResolvedAt: draft.currentlyEmployed
+      ? workplaceGeofence
+        ? now
+        : (existing?.workplaceGeofenceResolvedAt ?? null)
+      : null,
     expectedWorkScheduleNotes: draft.currentlyEmployed
       ? draft.expectedWorkScheduleNotes.trim()
       : "",
@@ -283,6 +309,105 @@ export function createResidentRequirementProfileFromDraft(
     oneOnOneNotificationIds: existing?.oneOnOneNotificationIds ?? [],
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
+  };
+}
+
+export function getResidentSetupState(
+  store: SoberHouseSettingsStore,
+  linkedUserId: string,
+): ResidentSetupState {
+  const housing = store.residentHousingProfile;
+  const requirements = store.residentRequirementProfile;
+  const consent = store.residentConsentRecord;
+  const draft =
+    store.residentWizardDraft?.linkedUserId === linkedUserId ? store.residentWizardDraft : null;
+  const now = new Date().toISOString();
+  const houseId = housing?.houseId ?? draft?.assignedHouseId ?? null;
+  const rules = houseId ? getRuleSetForHouse(store, houseId, now) : null;
+  const missingItems: string[] = [];
+  let nextStep: ResidentOnboardingStep = 1;
+
+  const markMissing = (label: string, step: ResidentOnboardingStep) => {
+    missingItems.push(label);
+    if (step < nextStep || missingItems.length === 1) {
+      nextStep = step;
+    }
+  };
+
+  if (!housing?.firstName.trim() || !housing?.lastName.trim()) {
+    markMissing("resident name", 1);
+  }
+  if (!housing?.houseId) {
+    markMissing("assigned house", 1);
+  }
+  if (!housing?.moveInDate) {
+    markMissing("move-in date", 1);
+  }
+  const hasEmergencyName = Boolean(housing?.emergencyContactName.trim());
+  const hasEmergencyPhone = Boolean(housing?.emergencyContactPhone.trim());
+  if ((hasEmergencyName || hasEmergencyPhone) && !(hasEmergencyName && hasEmergencyPhone)) {
+    markMissing("complete emergency contact", 1);
+  }
+
+  const employmentRequired =
+    (requirements?.workRequired ?? false) || (rules?.employment.employmentRequired ?? false);
+  if (!requirements) {
+    markMissing("resident requirements", 3);
+  } else if (employmentRequired) {
+    if (requirements.currentlyEmployed) {
+      if (!requirements.employerName.trim() || !requirements.employerAddress.trim()) {
+        markMissing("employer and work location", 3);
+      }
+    } else {
+      const jobTarget = Math.max(
+        requirements.jobApplicationsRequiredPerWeek,
+        rules?.jobSearch.applicationsRequiredPerWeek ?? 0,
+      );
+      if (jobTarget <= 0) {
+        markMissing("job application requirement", 3);
+      }
+    }
+  }
+
+  const meetingsRequired =
+    (requirements?.meetingsRequiredWeekly ?? false) || (rules?.meetings.meetingsRequired ?? false);
+  const meetingsTarget = Math.max(
+    requirements?.meetingsRequiredCount ?? 0,
+    rules?.meetings.meetingsPerWeek ?? 0,
+  );
+  if (meetingsRequired && meetingsTarget <= 0) {
+    markMissing("weekly meeting target", 4);
+  }
+
+  const sponsorRequired = rules?.sponsorContact.enabled ?? false;
+  if (sponsorRequired) {
+    if (!requirements?.sponsorPresent) {
+      markMissing("sponsor details", 5);
+    } else if (
+      !requirements.sponsorName.trim() ||
+      !requirements.sponsorPhone.trim() ||
+      !requirements.sponsorContactFrequency.trim()
+    ) {
+      markMissing("complete sponsor details", 5);
+    }
+  }
+
+  if (
+    !consent ||
+    !consent.signatureRef ||
+    !consent.signedAt ||
+    !consent.consentToHouseRules ||
+    !consent.consentToLocationVerification ||
+    !consent.consentToComplianceDocumentation
+  ) {
+    markMissing("signed resident consent", 8);
+  }
+
+  return {
+    complete:
+      missingItems.length === 0 && housing !== null && requirements !== null && consent !== null,
+    missingItems,
+    nextStep,
   };
 }
 

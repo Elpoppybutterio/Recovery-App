@@ -12,6 +12,7 @@ import type {
   HouseChore,
   HouseGroup,
   HouseMeeting,
+  HouseMeetingAttendanceRecord,
   JobApplicationRecord,
   HouseRuleSet,
   MonthlyReport,
@@ -59,6 +60,7 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     residentRequirementProfile: null,
     residentConsentRecord: null,
     residentWizardDraft: null,
+    houseMeetingAttendanceRecords: [],
     choreCompletionRecords: [],
     jobApplicationRecords: [],
     workVerificationRecords: [],
@@ -321,16 +323,22 @@ export function createDefaultRecurringObligation(
   return {
     id,
     organizationId,
+    scopeType: houseId ? "HOUSE" : "ORGANIZATION",
     houseId,
+    houseGroupId: null,
     residentId,
     linkedUserId,
     obligationType: "HOUSE_MEETING",
     title: "",
     detail: "",
+    locationLabel: "",
     frequency: "WEEKLY",
     weekday: "MON",
+    weekdayList: ["MON"],
+    monthlyOrdinal: null,
     scheduledDate: null,
     timeLocalHhmm: "18:00",
+    durationMinutes: 60,
     required: false,
     reminderLeadMinutes: 30,
     inAppReminderEnabled: false,
@@ -485,6 +493,30 @@ export function createDefaultChoreCompletionRecord(
   };
 }
 
+export function createDefaultHouseMeetingAttendanceRecord(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("house-meeting-attendance"),
+): HouseMeetingAttendanceRecord {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    organizationId,
+    houseId,
+    houseMeetingId: null,
+    recurringObligationId: null,
+    scheduledStartAt: now,
+    attendedAt: now,
+    notes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export function createDefaultJobApplicationRecord(
   now: string,
   residentId: string,
@@ -502,6 +534,7 @@ export function createDefaultJobApplicationRecord(
     employerName: "",
     appliedAt: now,
     proofProvided: false,
+    proofReference: null,
     notes: "",
     createdAt: now,
     updatedAt: now,
@@ -815,6 +848,9 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
             : null,
         }
       : null,
+    houseMeetingAttendanceRecords: store.houseMeetingAttendanceRecords.map((record) => ({
+      ...record,
+    })),
     choreCompletionRecords: store.choreCompletionRecords.map((record) => ({
       ...record,
       proofRequirement: [...record.proofRequirement],

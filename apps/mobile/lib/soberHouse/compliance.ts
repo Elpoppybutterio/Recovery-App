@@ -624,18 +624,14 @@ export function evaluateResidentCompliance({
       }),
     );
   } else if (requirements.currentlyEmployed) {
-    if (
-      !requirements.employerName.trim() ||
-      !requirements.employerAddress.trim() ||
-      !requirements.employerPhone.trim()
-    ) {
+    if (!requirements.employerName.trim() || !requirements.employerAddress.trim()) {
       evaluations.push(
         buildEvaluation({
           ruleType: "work",
           residentId,
           houseId,
           status: "incomplete_setup",
-          statusReason: "Employer name, address, and phone are required for employed residents.",
+          statusReason: "Employer name and work location are required for employed residents.",
           effectiveTargetValue: true,
           actualValue: false,
           dueAt: null,
@@ -764,7 +760,8 @@ export function evaluateResidentCompliance({
         record.residentId === residentId &&
         appliedAt !== null &&
         appliedAt >= weekStart &&
-        appliedAt < weekEnd
+        appliedAt < weekEnd &&
+        (!rules.jobSearch.proofRequired || record.proofProvided || Boolean(record.proofReference))
       );
     });
     const completed = applicationsThisWeek.length;

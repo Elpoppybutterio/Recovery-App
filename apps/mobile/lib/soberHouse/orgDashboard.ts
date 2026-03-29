@@ -3,6 +3,7 @@ import type {
   House,
   HouseGroup,
   SoberHouseSettingsStore,
+  Violation,
   ViolationStatus,
 } from "./types";
 
@@ -29,6 +30,7 @@ export type SoberHouseOwnerDashboardKpiTile = {
 
 export type SoberHouseOwnerHouseRow = {
   houseId: string;
+  houseGroupId: string | null;
   houseName: string;
   groupName: string;
   status: House["status"];
@@ -43,6 +45,41 @@ export type SoberHouseOwnerConcernRow = {
   title: string;
   detail: string;
   tone: "green" | "yellow" | "red" | "gray";
+};
+
+export type SoberHouseOwnerHouseViolationRow = {
+  violationId: string;
+  houseId: string;
+  houseName: string;
+  groupName: string;
+  status: ViolationStatus;
+  severity: Violation["severity"];
+  reasonSummary: string;
+  triggeredAt: string;
+  correctiveActionsOpen: number;
+};
+
+export type SoberHouseOwnerHouseDetail = {
+  houseId: string;
+  houseName: string;
+  groupName: string;
+  address: string;
+  phone: string;
+  status: House["status"];
+  houseTypesLabel: string;
+  geofenceRadiusFeetDefault: number;
+  geofenceResolved: boolean;
+  bedCount: number;
+  notes: string;
+  activeResidents: number;
+  assignedStaffCount: number;
+  activeViolations: number;
+  underReviewViolations: number;
+  openCorrectiveActions: number;
+  currentReports: number;
+  activeChatThreads: number;
+  alertPreferenceCount: number;
+  violations: SoberHouseOwnerHouseViolationRow[];
 };
 
 export type SoberHouseOwnerDashboardSummary = {
@@ -71,6 +108,21 @@ const OPEN_CORRECTIVE_ACTION_STATUSES: CorrectiveActionStatus[] = ["OPEN", "OVER
 
 function intersectingHouseIdsFromGroups(groups: HouseGroup[]): string[] {
   return Array.from(new Set(groups.flatMap((group) => group.houseIds)));
+}
+
+function labelForHouseTypes(houseTypes: House["houseTypes"]): string {
+  if (houseTypes.length === 0) {
+    return "No type";
+  }
+  return houseTypes
+    .map((houseType) =>
+      houseType
+        .toLowerCase()
+        .split("_")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" "),
+    )
+    .join(" / ");
 }
 
 function toneForCount(
@@ -143,6 +195,7 @@ export function buildSoberHouseOwnerDashboardSummary(
       input.store.houseGroups.find((group) => group.id === house.houseGroupId)?.name ?? "No group";
     return {
       houseId: house.id,
+      houseGroupId: house.houseGroupId ?? null,
       houseName: house.name,
       groupName,
       status: house.status,
@@ -251,5 +304,99 @@ export function buildSoberHouseOwnerDashboardSummary(
     ],
     houseRows,
     concerns,
+  };
+}
+
+export function buildSoberHouseOwnerHouseViolationRows(
+  store: SoberHouseSettingsStore,
+  houseId: string,
+): SoberHouseOwnerHouseViolationRow[] {
+  const house = store.houses.find((entry) => entry.id === houseId);
+  if (!house) {
+    return [];
+  }
+
+  const groupName =
+    store.houseGroups.find((group) => group.id === house.houseGroupId)?.name ?? "No group";
+
+  return store.violations
+    .filter((violation) => violation.houseId === houseId)
+    .sort((left, right) => right.triggeredAt.localeCompare(left.triggeredAt))
+    .map((violation) => ({
+      violationId: violation.id,
+      houseId,
+      houseName: house.name,
+      groupName,
+      status: violation.status,
+      severity: violation.severity,
+      reasonSummary: violation.reasonSummary,
+      triggeredAt: violation.triggeredAt,
+      correctiveActionsOpen: store.correctiveActions.filter(
+        (action) =>
+          action.violationId === violation.id &&
+          OPEN_CORRECTIVE_ACTION_STATUSES.includes(action.status),
+      ).length,
+    }));
+}
+
+export function buildSoberHouseOwnerHouseDetail(
+  store: SoberHouseSettingsStore,
+  houseId: string,
+): SoberHouseOwnerHouseDetail | null {
+  const house = store.houses.find((entry) => entry.id === houseId);
+  if (!house) {
+    return null;
+  }
+
+  const groupName =
+    store.houseGroups.find((group) => group.id === house.houseGroupId)?.name ?? "No group";
+  const violations = buildSoberHouseOwnerHouseViolationRows(store, houseId);
+
+  return {
+    houseId: house.id,
+    houseName: house.name,
+    groupName,
+    address: house.address,
+    phone: house.phone,
+    status: house.status,
+    houseTypesLabel: labelForHouseTypes(house.houseTypes),
+    geofenceRadiusFeetDefault: house.geofenceRadiusFeetDefault,
+    geofenceResolved:
+      typeof house.geofenceCenterLat === "number" &&
+      Number.isFinite(house.geofenceCenterLat) &&
+      typeof house.geofenceCenterLng === "number" &&
+      Number.isFinite(house.geofenceCenterLng),
+    bedCount: house.bedCount,
+    notes: house.notes,
+    activeResidents: store.residentHouseMemberships.filter(
+      (membership) =>
+        membership.houseId === houseId &&
+        membership.status === "ACTIVE" &&
+        membership.moveOutDate === null,
+    ).length,
+    assignedStaffCount: store.staffAssignments.filter(
+      (assignment) =>
+        assignment.status === "ACTIVE" &&
+        (assignment.role === "OWNER" || assignment.assignedHouseIds.includes(houseId)),
+    ).length,
+    activeViolations: violations.filter((violation) =>
+      ACTIVE_VIOLATION_STATUSES.includes(violation.status),
+    ).length,
+    underReviewViolations: violations.filter((violation) => violation.status === "UNDER_REVIEW")
+      .length,
+    openCorrectiveActions: store.correctiveActions.filter(
+      (action) =>
+        action.houseId === houseId && OPEN_CORRECTIVE_ACTION_STATUSES.includes(action.status),
+    ).length,
+    currentReports: store.monthlyReports.filter(
+      (report) => report.houseId === houseId && report.isCurrentVersion,
+    ).length,
+    activeChatThreads: store.chatThreads.filter(
+      (thread) => thread.houseId === houseId && thread.active,
+    ).length,
+    alertPreferenceCount: store.alertPreferences.filter(
+      (preference) => preference.houseId === houseId && preference.status === "ACTIVE",
+    ).length,
+    violations,
   };
 }

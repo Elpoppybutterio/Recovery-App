@@ -4,6 +4,7 @@ import {
   getActiveHouseAlertAnnouncements,
   getChatReceiptForMessageAndUser,
   getHouseChoresForResident,
+  getHouseMeetingsInRange,
   getRuleSetForHouse,
   getUpcomingHouseMeetings,
   getUpcomingOneOnOneSessions,
@@ -22,6 +23,8 @@ export type SoberHouseDashboardTileTone = "green" | "yellow" | "red" | "gray";
 export type SoberHouseDashboardTileId =
   | "chores"
   | "weekly-meetings"
+  | "sponsor-calls"
+  | "job-applications"
   | "house-meetings"
   | "one-on-ones"
   | "house-alerts"
@@ -54,6 +57,8 @@ export type SoberHouseDashboardVisibility = {
   eligible: boolean;
   showChoreTile: boolean;
   showWeeklyMeetingTile: boolean;
+  showSponsorContactTile: boolean;
+  showJobApplicationsTile: boolean;
   showHouseMeetingsTile: boolean;
   showOneOnOneTile: boolean;
   showHouseAlertsTile: boolean;
@@ -65,6 +70,8 @@ export type SoberHouseResidentDashboardSummary = {
   visibility: SoberHouseDashboardVisibility;
   choreTile: SoberHouseDashboardTileSummary;
   weeklyMeetingTile: SoberHouseDashboardTileSummary;
+  sponsorContactTile: SoberHouseDashboardTileSummary;
+  jobApplicationsTile: SoberHouseDashboardTileSummary;
   houseMeetingsTile: SoberHouseDashboardTileSummary;
   oneOnOneTile: SoberHouseDashboardTileSummary;
   houseAlertsTile: SoberHouseDashboardTileSummary;
@@ -78,6 +85,7 @@ type SummaryContext = {
   nowIso: string;
   attendanceRecords: AttendanceRecordSummary[];
   meetingAttendanceLogs: MeetingAttendanceLogRecord[];
+  sponsorCallLogs: Array<{ id: string; atIso: string; success: boolean }>;
   complianceSummary: ResidentComplianceSummary | null;
   upcomingMeetings: SoberHouseDashboardMeetingPreview[];
 };
@@ -89,6 +97,9 @@ type ResidentContext = {
   moveInDate: string | null;
   assignedChoreNotes: string;
   standingExceptionNotes: string;
+  workRequired: boolean;
+  currentlyEmployed: boolean;
+  jobApplicationsRequiredPerWeek: number;
   meetingsRequiredCount: number;
   meetingsRequiredWeekly: boolean;
   houseName: string;
@@ -327,6 +338,9 @@ function resolveResidentContext(
     moveInDate: housing.moveInDate || null,
     assignedChoreNotes: requirements.assignedChoreNotes.trim(),
     standingExceptionNotes: requirements.standingExceptionNotes.trim(),
+    workRequired: requirements.workRequired,
+    currentlyEmployed: requirements.currentlyEmployed,
+    jobApplicationsRequiredPerWeek: requirements.jobApplicationsRequiredPerWeek,
     meetingsRequiredCount: requirements.meetingsRequiredCount,
     meetingsRequiredWeekly: requirements.meetingsRequiredWeekly,
     houseName: house?.name ?? "Assigned house",
@@ -351,6 +365,20 @@ function countMeetingsInRange(
   }
 
   return meetingAttendanceLogs.filter((entry) => {
+    const at = toTimestamp(entry.atIso);
+    return at !== null && at >= rangeStartMs && at < rangeEndMs;
+  }).length;
+}
+
+function countSponsorCallsInRange(
+  sponsorCallLogs: Array<{ id: string; atIso: string; success: boolean }>,
+  rangeStartMs: number,
+  rangeEndMs: number,
+): number {
+  return sponsorCallLogs.filter((entry) => {
+    if (!entry.success) {
+      return false;
+    }
     const at = toTimestamp(entry.atIso);
     return at !== null && at >= rangeStartMs && at < rangeEndMs;
   }).length;
@@ -541,20 +569,46 @@ function buildHouseMeetingsTileSummary({
   }
 
   const upcomingHouseMeetings = getUpcomingHouseMeetings(store, resident.houseId, nowIso);
+  const weekStartIso = startOfWeek(new Date(nowIso)).toISOString();
+  const weekEndIso = endOfWeekExclusive(new Date(nowIso)).toISOString();
+  const houseMeetingsThisWeek = getHouseMeetingsInRange(
+    store,
+    resident.houseId,
+    weekStartIso,
+    weekEndIso,
+  );
+  const completedKeys = new Set(
+    store.houseMeetingAttendanceRecords
+      .filter((record) => record.residentId === resident.residentId)
+      .map(
+        (record) =>
+          `${record.recurringObligationId ?? record.houseMeetingId ?? "manual"}:${record.scheduledStartAt}`,
+      ),
+  );
+  const attendedThisWeek = houseMeetingsThisWeek.filter((meeting) =>
+    completedKeys.has(`${meeting.recurringObligationId ?? meeting.id}:${meeting.startsAt}`),
+  ).length;
+  const remainingThisWeek = Math.max(0, houseMeetingsThisWeek.length - attendedThisWeek);
   const enabled =
     resident.rules.operations.houseMeetingsEnabled || upcomingHouseMeetings.length > 0;
   if (!enabled) {
-    return buildHiddenTile("house-meetings", "SOBER_HOUSE", "Upcoming House Meetings");
+    return buildHiddenTile("house-meetings", "SOBER_HOUSE", "House Meetings");
   }
 
   const nextMeeting = upcomingHouseMeetings[0] ?? null;
   if (!nextMeeting) {
     return {
       id: "house-meetings",
-      title: "Upcoming House Meetings",
-      value: "0",
-      subtitle: "No house meetings scheduled",
-      detail: "Your house manager has not posted an upcoming house meeting yet.",
+      title: "House Meetings",
+      value: `${attendedThisWeek}/${houseMeetingsThisWeek.length}`,
+      subtitle:
+        houseMeetingsThisWeek.length > 0
+          ? "No more house meetings scheduled this week"
+          : "No house meetings scheduled",
+      detail:
+        houseMeetingsThisWeek.length > 0
+          ? "All currently scheduled house meetings for this week are complete."
+          : "Your house manager has not posted an upcoming house meeting yet.",
       tone: "gray",
       visible: true,
       routeTarget: "SOBER_HOUSE",
@@ -566,13 +620,16 @@ function buildHouseMeetingsTileSummary({
   const timeUntilMs = startsAt.getTime() - new Date(nowIso).getTime();
   return {
     id: "house-meetings",
-    title: "Upcoming House Meetings",
-    value: formatDateTimeLabel(nextMeeting.startsAt),
+    title: "House Meetings",
+    value: `${attendedThisWeek}/${houseMeetingsThisWeek.length}`,
     subtitle: nextMeeting.title,
-    detail:
+    detail: `${remainingThisWeek} house meeting${remainingThisWeek === 1 ? "" : "s"} still due • ${formatDateTimeLabel(
+      nextMeeting.startsAt,
+    )} • ${
       nextMeeting.locationLabel ||
       nextMeeting.description ||
-      "Open sober-house details for the full meeting plan.",
+      "Open sober-house details for the full meeting plan."
+    }`,
     tone: timeUntilMs <= 12 * 60 * 60 * 1000 ? "yellow" : "gray",
     visible: true,
     routeTarget: "SOBER_HOUSE",
@@ -775,7 +832,14 @@ function buildWeeklyMeetingTileSummary({
   complianceSummary,
   upcomingMeetings,
   resident,
-}: Omit<SummaryContext, "store"> & { resident: ResidentContext | null }): MeetingSummary {
+}: {
+  nowIso: string;
+  attendanceRecords: AttendanceRecordSummary[];
+  meetingAttendanceLogs: MeetingAttendanceLogRecord[];
+  complianceSummary: ResidentComplianceSummary | null;
+  upcomingMeetings: SoberHouseDashboardMeetingPreview[];
+  resident: ResidentContext | null;
+}): MeetingSummary {
   if (
     !resident ||
     (!resident.meetingsRequiredWeekly && !resident.rules.meetings.meetingsRequired)
@@ -791,9 +855,9 @@ function buildWeeklyMeetingTileSummary({
   const weekStart = startOfWeek(now).getTime();
   const weekEnd = endOfWeekExclusive(now).getTime();
   const requiredCount =
-    resident.meetingsRequiredCount > 0
-      ? resident.meetingsRequiredCount
-      : resident.rules.meetings.meetingsPerWeek;
+    resident.rules.meetings.meetingsRequired && resident.rules.meetings.meetingsPerWeek > 0
+      ? resident.rules.meetings.meetingsPerWeek
+      : resident.meetingsRequiredCount;
   if (requiredCount <= 0) {
     return {
       ...buildHiddenTile("weekly-meetings", "MEETINGS", "Weekly Meeting Goal"),
@@ -840,6 +904,110 @@ function buildWeeklyMeetingTileSummary({
       remainingCount === 0 ? "On track" : behindPace ? "Behind pace" : `Req ${requiredCount}`,
     remainingCount,
     nextExpectedMeeting,
+  };
+}
+
+function buildSponsorContactTileSummary({
+  nowIso,
+  sponsorCallLogs,
+  resident,
+}: {
+  nowIso: string;
+  sponsorCallLogs: Array<{ id: string; atIso: string; success: boolean }>;
+  resident: ResidentContext | null;
+}): SoberHouseDashboardTileSummary {
+  if (!resident || !resident.rules.sponsorContact.enabled) {
+    return buildHiddenTile("sponsor-calls", "SOBER_HOUSE", "Sponsor Check-ins");
+  }
+
+  const requiredCount = resident.rules.sponsorContact.contactsRequiredPerWeek;
+  if (requiredCount <= 0) {
+    return buildHiddenTile("sponsor-calls", "SOBER_HOUSE", "Sponsor Check-ins");
+  }
+
+  const now = new Date(nowIso);
+  const weekStart = startOfWeek(now).getTime();
+  const weekEnd = endOfWeekExclusive(now).getTime();
+  const completedCount = countSponsorCallsInRange(sponsorCallLogs, weekStart, weekEnd);
+  const remainingCount = Math.max(0, requiredCount - completedCount);
+  const weekdayIndex = (now.getDay() + 6) % 7;
+  const expectedPace = Math.floor(((weekdayIndex + 1) / 7) * requiredCount);
+  const behindPace = remainingCount > 0 && completedCount < expectedPace;
+
+  return {
+    id: "sponsor-calls",
+    title: "Sponsor Check-ins",
+    value: `${completedCount}/${requiredCount}`,
+    subtitle:
+      remainingCount === 0
+        ? "Sponsor requirement met"
+        : `${remainingCount} sponsor call${remainingCount === 1 ? "" : "s"} left this week`,
+    detail: "Log sponsor calls from the recovery dashboard or the sober-house action flow.",
+    tone: remainingCount === 0 ? "green" : behindPace ? "yellow" : "gray",
+    visible: true,
+    routeTarget: "SOBER_HOUSE",
+    badgeLabel:
+      remainingCount === 0 ? "On track" : behindPace ? "Behind pace" : `Req ${requiredCount}`,
+  };
+}
+
+function buildJobApplicationsTileSummary({
+  store,
+  nowIso,
+  resident,
+}: {
+  store: SoberHouseSettingsStore;
+  nowIso: string;
+  resident: ResidentContext | null;
+}): SoberHouseDashboardTileSummary {
+  if (!resident) {
+    return buildHiddenTile("job-applications", "SOBER_HOUSE", "Job Applications");
+  }
+
+  const employmentRequired = resident.workRequired || resident.rules.employment.employmentRequired;
+  const requiredCount = resident.currentlyEmployed
+    ? 0
+    : Math.max(
+        resident.jobApplicationsRequiredPerWeek,
+        resident.rules.jobSearch.applicationsRequiredPerWeek,
+      );
+  if (!employmentRequired || resident.currentlyEmployed || requiredCount <= 0) {
+    return buildHiddenTile("job-applications", "SOBER_HOUSE", "Job Applications");
+  }
+
+  const weekStart = startOfWeek(new Date(nowIso)).getTime();
+  const weekEnd = endOfWeekExclusive(new Date(nowIso)).getTime();
+  const completedCount = store.jobApplicationRecords.filter((record) => {
+    if (record.residentId !== resident.residentId) {
+      return false;
+    }
+    const appliedAtMs = toTimestamp(record.appliedAt);
+    if (appliedAtMs === null || appliedAtMs < weekStart || appliedAtMs >= weekEnd) {
+      return false;
+    }
+    return (
+      !resident.rules.jobSearch.proofRequired ||
+      record.proofProvided ||
+      Boolean(record.proofReference)
+    );
+  }).length;
+  const remainingCount = Math.max(0, requiredCount - completedCount);
+
+  return {
+    id: "job-applications",
+    title: "Job Applications",
+    value: `${completedCount}/${requiredCount}`,
+    subtitle:
+      remainingCount === 0
+        ? "Weekly application target met"
+        : `${remainingCount} application${remainingCount === 1 ? "" : "s"} left this week`,
+    detail: resident.rules.jobSearch.proofRequired
+      ? "Attach photo proof when you submit each application."
+      : "Log submitted applications from the sober-house checklist.",
+    tone: remainingCount === 0 ? "green" : completedCount > 0 ? "yellow" : "gray",
+    visible: true,
+    routeTarget: "SOBER_HOUSE",
+    badgeLabel: remainingCount === 0 ? "On track" : `Req ${requiredCount}`,
   };
 }
 
@@ -1085,6 +1253,16 @@ export function buildSoberHouseResidentDashboardSummary(
     upcomingMeetings: context.upcomingMeetings,
     resident,
   });
+  const sponsorContactTile = buildSponsorContactTileSummary({
+    nowIso: context.nowIso,
+    sponsorCallLogs: context.sponsorCallLogs,
+    resident,
+  });
+  const jobApplicationsTile = buildJobApplicationsTileSummary({
+    store: context.store,
+    nowIso: context.nowIso,
+    resident,
+  });
   const houseScheduleTile = buildHouseScheduleTileSummary({
     store: context.store,
     nowIso: context.nowIso,
@@ -1126,11 +1304,12 @@ export function buildSoberHouseResidentDashboardSummary(
     complianceSummary: context.complianceSummary,
     resident,
   });
-
   const visibility: SoberHouseDashboardVisibility = {
     eligible: resident !== null,
     showChoreTile: choreTile.visible,
     showWeeklyMeetingTile: weeklyMeetingTile.visible,
+    showSponsorContactTile: sponsorContactTile.visible,
+    showJobApplicationsTile: jobApplicationsTile.visible,
     showHouseMeetingsTile: houseMeetingsTile.visible,
     showOneOnOneTile: oneOnOneTile.visible,
     showHouseAlertsTile: houseAlertsTile.visible,
@@ -1142,6 +1321,8 @@ export function buildSoberHouseResidentDashboardSummary(
     visibility,
     choreTile,
     weeklyMeetingTile,
+    sponsorContactTile,
+    jobApplicationsTile,
     houseMeetingsTile,
     oneOnOneTile,
     houseAlertsTile,
@@ -1150,6 +1331,8 @@ export function buildSoberHouseResidentDashboardSummary(
     tiles: [
       choreTile,
       weeklyMeetingTile,
+      sponsorContactTile,
+      jobApplicationsTile,
       houseMeetingsTile,
       oneOnOneTile,
       houseAlertsTile,

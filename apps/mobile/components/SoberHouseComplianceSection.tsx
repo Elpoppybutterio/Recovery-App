@@ -9,10 +9,15 @@ import {
 } from "../lib/soberHouse/compliance";
 import {
   upsertChoreCompletionRecord,
+  upsertHouseMeetingAttendanceRecord,
   upsertJobApplicationRecord,
   upsertWorkVerificationRecord,
 } from "../lib/soberHouse/mutations";
-import { getHouseById, getRuleSetForHouse } from "../lib/soberHouse/selectors";
+import {
+  getHouseById,
+  getHouseMeetingsInRange,
+  getRuleSetForHouse,
+} from "../lib/soberHouse/selectors";
 import type {
   AuditActor,
   ComplianceEvaluation,
@@ -21,6 +26,29 @@ import type {
 import { colors, radius, spacing, typography } from "../lib/theme/tokens";
 import { AppButton } from "../lib/ui/AppButton";
 import { GlassCard } from "../lib/ui/GlassCard";
+
+type OptionalImagePickerModule = {
+  requestMediaLibraryPermissionsAsync: () => Promise<{ granted: boolean }>;
+  launchImageLibraryAsync: (options: {
+    mediaTypes: unknown;
+    allowsEditing: boolean;
+    quality: number;
+  }) => Promise<{ canceled: boolean; assets?: Array<{ uri?: string | null }> }>;
+  MediaTypeOptions: {
+    Images: unknown;
+  };
+};
+
+let imagePickerModulePromise: Promise<OptionalImagePickerModule | null> | null = null;
+
+async function loadImagePickerModule(): Promise<OptionalImagePickerModule | null> {
+  if (!imagePickerModulePromise) {
+    imagePickerModulePromise = import("expo-image-picker")
+      .then((module) => module as OptionalImagePickerModule)
+      .catch(() => null);
+  }
+  return imagePickerModulePromise;
+}
 
 type PersistOptions = {
   showStatus?: boolean;
@@ -141,8 +169,10 @@ export function SoberHouseComplianceSection({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [choreNotes, setChoreNotes] = useState("");
   const [choreProofProvided, setChoreProofProvided] = useState(false);
+  const [choreProofUri, setChoreProofUri] = useState<string | null>(null);
   const [jobEmployerName, setJobEmployerName] = useState("");
   const [jobProofProvided, setJobProofProvided] = useState(false);
+  const [jobProofUri, setJobProofUri] = useState<string | null>(null);
   const [jobNotes, setJobNotes] = useState("");
   const [workVerificationNotes, setWorkVerificationNotes] = useState("");
 
@@ -192,11 +222,136 @@ export function SoberHouseComplianceSection({
     const houseId = store.residentHousingProfile?.houseId;
     return houseId ? getHouseById(store, houseId) : null;
   }, [store]);
+  const houseMeetingsThisWeek = useMemo(() => {
+    const housing = store.residentHousingProfile;
+    if (!housing?.houseId) {
+      return [];
+    }
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setHours(0, 0, 0, 0);
+    weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 7);
+    return getHouseMeetingsInRange(
+      store,
+      housing.houseId,
+      weekStart.toISOString(),
+      weekEnd.toISOString(),
+    );
+  }, [store]);
+  const attendedHouseMeetingKeys = useMemo(
+    () =>
+      new Set(
+        store.houseMeetingAttendanceRecords
+          .filter((record) => record.residentId === store.residentHousingProfile?.residentId)
+          .map(
+            (record) =>
+              `${record.recurringObligationId ?? record.houseMeetingId ?? "manual"}:${record.scheduledStartAt}`,
+          ),
+      ),
+    [store],
+  );
+  const jobApplicationsTarget = useMemo(() => {
+    const requirements = store.residentRequirementProfile;
+    if (!requirements || requirements.currentlyEmployed) {
+      return 0;
+    }
+    return Math.max(
+      requirements.jobApplicationsRequiredPerWeek,
+      ruleSet?.jobSearch.applicationsRequiredPerWeek ?? 0,
+    );
+  }, [ruleSet?.jobSearch.applicationsRequiredPerWeek, store.residentRequirementProfile]);
+  const completedJobApplicationsThisWeek = useMemo(() => {
+    const residentId = store.residentHousingProfile?.residentId;
+    if (!residentId) {
+      return 0;
+    }
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setHours(0, 0, 0, 0);
+    weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 7);
+    return store.jobApplicationRecords.filter((record) => {
+      if (record.residentId !== residentId) {
+        return false;
+      }
+      const appliedAt = new Date(record.appliedAt).getTime();
+      return (
+        Number.isFinite(appliedAt) &&
+        appliedAt >= weekStart.getTime() &&
+        appliedAt < weekEnd.getTime() &&
+        (!ruleSet?.jobSearch.proofRequired ||
+          record.proofProvided ||
+          Boolean(record.proofReference))
+      );
+    }).length;
+  }, [
+    ruleSet?.jobSearch.proofRequired,
+    store.jobApplicationRecords,
+    store.residentHousingProfile?.residentId,
+  ]);
+
+  const pickProofPhoto = useCallback(
+    async (onSelect: (uri: string) => void, unavailableMessage: string) => {
+      const imagePickerModule = await loadImagePickerModule();
+      if (!imagePickerModule) {
+        setStatusMessage(unavailableMessage);
+        return;
+      }
+      try {
+        const permission = await imagePickerModule.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          setStatusMessage("Photo access is required to attach chore proof.");
+          return;
+        }
+        const result = await imagePickerModule.launchImageLibraryAsync({
+          mediaTypes: imagePickerModule.MediaTypeOptions.Images,
+          allowsEditing: true,
+          quality: 0.7,
+        });
+        if (result.canceled) {
+          return;
+        }
+        const asset = result.assets?.[0];
+        if (!asset?.uri) {
+          setStatusMessage("Unable to attach the selected photo.");
+          return;
+        }
+        onSelect(asset.uri);
+      } catch {
+        setStatusMessage("Photo proof is unavailable on this device right now.");
+      }
+    },
+    [],
+  );
+
+  const pickChoreProof = useCallback(async () => {
+    await pickProofPhoto((uri) => {
+      setChoreProofUri(uri);
+      setChoreProofProvided(true);
+      setStatusMessage("Chore photo proof attached.");
+    }, "Photo proof needs the latest soberai dev build. Rebuild the app to enable photo attachments.");
+  }, [pickProofPhoto]);
+
+  const pickJobApplicationProof = useCallback(async () => {
+    await pickProofPhoto((uri) => {
+      setJobProofUri(uri);
+      setJobProofProvided(true);
+      setStatusMessage("Application photo proof attached.");
+    }, "Application proof needs the latest soberai dev build. Rebuild the app to enable photo attachments.");
+  }, [pickProofPhoto]);
 
   const logChoreCompletion = useCallback(async () => {
     const housing = store.residentHousingProfile;
     if (!housing || !ruleSet) {
       setStatusMessage("Set up a resident housing profile before logging chores.");
+      return;
+    }
+    const proofRequiresPhoto = ruleSet.chores.proofRequirement.includes("PHOTO");
+    if (proofRequiresPhoto && !choreProofUri) {
+      setStatusMessage("Attach a chore photo before marking this chore complete.");
       return;
     }
     const now = new Date().toISOString();
@@ -211,8 +366,8 @@ export function SoberHouseComplianceSection({
         houseChoreId: null,
         completedAt: now,
         proofRequirement: ruleSet.chores.proofRequirement,
-        proofProvided: choreProofProvided,
-        proofReference: null,
+        proofProvided: choreProofProvided || Boolean(choreProofUri),
+        proofReference: choreProofUri,
         notes: choreNotes.trim(),
       },
       now,
@@ -220,7 +375,39 @@ export function SoberHouseComplianceSection({
     await onPersist(result.store, "Chore completion logged.");
     setChoreNotes("");
     setChoreProofProvided(false);
-  }, [actor, choreNotes, choreProofProvided, onPersist, ruleSet, store]);
+    setChoreProofUri(null);
+  }, [actor, choreNotes, choreProofProvided, choreProofUri, onPersist, ruleSet, store]);
+
+  const logHouseMeetingAttendance = useCallback(
+    async (meetingId: string, recurringObligationId: string | null, scheduledStartAt: string) => {
+      const housing = store.residentHousingProfile;
+      if (!housing) {
+        setStatusMessage(
+          "Set up a resident housing profile before logging house meeting attendance.",
+        );
+        return;
+      }
+      const now = new Date().toISOString();
+      const result = upsertHouseMeetingAttendanceRecord(
+        store,
+        actor,
+        {
+          residentId: housing.residentId,
+          linkedUserId: housing.linkedUserId,
+          organizationId: housing.organizationId,
+          houseId: housing.houseId,
+          houseMeetingId: meetingId,
+          recurringObligationId,
+          scheduledStartAt,
+          attendedAt: now,
+          notes: "",
+        },
+        now,
+      );
+      await onPersist(result.store, "House meeting attendance logged.");
+    },
+    [actor, onPersist, store],
+  );
 
   const logJobApplication = useCallback(async () => {
     const housing = store.residentHousingProfile;
@@ -230,6 +417,10 @@ export function SoberHouseComplianceSection({
     }
     if (!jobEmployerName.trim()) {
       setStatusMessage("Employer name is required for a job application log.");
+      return;
+    }
+    if (ruleSet?.jobSearch.proofRequired && !jobProofUri) {
+      setStatusMessage("Attach application proof before marking this requirement complete.");
       return;
     }
     const now = new Date().toISOString();
@@ -243,7 +434,8 @@ export function SoberHouseComplianceSection({
         houseId: housing.houseId,
         employerName: jobEmployerName.trim(),
         appliedAt: now,
-        proofProvided: jobProofProvided,
+        proofProvided: jobProofProvided || Boolean(jobProofUri),
+        proofReference: jobProofUri,
         notes: jobNotes.trim(),
       },
       now,
@@ -252,7 +444,17 @@ export function SoberHouseComplianceSection({
     setJobEmployerName("");
     setJobNotes("");
     setJobProofProvided(false);
-  }, [actor, jobEmployerName, jobNotes, jobProofProvided, onPersist, store]);
+    setJobProofUri(null);
+  }, [
+    actor,
+    jobEmployerName,
+    jobNotes,
+    jobProofProvided,
+    jobProofUri,
+    onPersist,
+    ruleSet?.jobSearch.proofRequired,
+    store,
+  ]);
 
   const logWorkVerification = useCallback(async () => {
     const housing = store.residentHousingProfile;
@@ -328,10 +530,42 @@ export function SoberHouseComplianceSection({
           <Text style={styles.sectionMeta}>
             Proof requirement: {formatProofRequirementList(ruleSet.chores.proofRequirement)}
           </Text>
-          <View style={styles.toggleRow}>
-            <Text style={styles.label}>Proof provided</Text>
-            <Switch value={choreProofProvided} onValueChange={setChoreProofProvided} />
-          </View>
+          {ruleSet.chores.proofRequirement.includes("PHOTO") ? (
+            <>
+              <View style={styles.inlineActions}>
+                <AppButton
+                  title={choreProofUri ? "Replace photo proof" : "Attach photo proof"}
+                  variant="secondary"
+                  onPress={() => void pickChoreProof()}
+                  disabled={isSaving}
+                />
+                {choreProofUri ? (
+                  <>
+                    <View style={styles.buttonSpacer} />
+                    <AppButton
+                      title="Remove photo"
+                      variant="secondary"
+                      onPress={() => {
+                        setChoreProofUri(null);
+                        setChoreProofProvided(false);
+                      }}
+                      disabled={isSaving}
+                    />
+                  </>
+                ) : null}
+              </View>
+              <Text style={styles.sectionMeta}>
+                {choreProofUri
+                  ? `Photo attached: ${choreProofUri}`
+                  : "No chore proof photo attached yet."}
+              </Text>
+            </>
+          ) : (
+            <View style={styles.toggleRow}>
+              <Text style={styles.label}>Proof provided</Text>
+              <Switch value={choreProofProvided} onValueChange={setChoreProofProvided} />
+            </View>
+          )}
           <TextInput
             style={[styles.input, styles.multilineInput]}
             value={choreNotes}
@@ -348,11 +582,56 @@ export function SoberHouseComplianceSection({
         </GlassCard>
       ) : null}
 
+      {!readOnly && houseMeetingsThisWeek.length > 0 ? (
+        <GlassCard style={styles.card}>
+          <Text style={styles.subsectionTitle}>House meetings this week</Text>
+          <Text style={styles.sectionMeta}>
+            Mark scheduled house meetings complete as you attend them.
+          </Text>
+          {houseMeetingsThisWeek.map((meeting) => {
+            const attendanceKey = `${meeting.recurringObligationId ?? meeting.id}:${meeting.startsAt}`;
+            const attended = attendedHouseMeetingKeys.has(attendanceKey);
+            return (
+              <View key={attendanceKey} style={styles.attentionRow}>
+                <Text style={styles.attentionTitle}>{meeting.title}</Text>
+                <Text style={styles.complianceReason}>
+                  {new Date(meeting.startsAt).toLocaleString()} •{" "}
+                  {meeting.locationLabel || "House location"}
+                </Text>
+                <View style={styles.inlineActions}>
+                  <AppButton
+                    title={attended ? "Marked attended" : "Mark attended"}
+                    variant="secondary"
+                    onPress={() =>
+                      void logHouseMeetingAttendance(
+                        meeting.id,
+                        meeting.recurringObligationId,
+                        meeting.startsAt,
+                      )
+                    }
+                    disabled={isSaving || attended}
+                  />
+                </View>
+              </View>
+            );
+          })}
+        </GlassCard>
+      ) : null}
+
       {!readOnly &&
       store.residentRequirementProfile?.workRequired &&
       !store.residentRequirementProfile.currentlyEmployed ? (
         <GlassCard style={styles.card}>
-          <Text style={styles.subsectionTitle}>Log job application</Text>
+          <Text style={styles.subsectionTitle}>Job application checklist</Text>
+          <Text style={styles.sectionMeta}>
+            {completedJobApplicationsThisWeek}/{jobApplicationsTarget} applications logged this
+            week.
+          </Text>
+          <Text style={styles.sectionMeta}>
+            {ruleSet?.jobSearch.proofRequired
+              ? "Photo proof is required for each application."
+              : "Photo proof is optional for this house."}
+          </Text>
           <TextInput
             style={styles.input}
             value={jobEmployerName}
@@ -360,10 +639,42 @@ export function SoberHouseComplianceSection({
             placeholder="Employer name"
             placeholderTextColor="rgba(245,243,255,0.45)"
           />
-          <View style={styles.toggleRow}>
-            <Text style={styles.label}>Proof available</Text>
-            <Switch value={jobProofProvided} onValueChange={setJobProofProvided} />
-          </View>
+          {ruleSet?.jobSearch.proofRequired ? (
+            <>
+              <View style={styles.inlineActions}>
+                <AppButton
+                  title={jobProofUri ? "Replace application proof" : "Attach application proof"}
+                  variant="secondary"
+                  onPress={() => void pickJobApplicationProof()}
+                  disabled={isSaving}
+                />
+                {jobProofUri ? (
+                  <>
+                    <View style={styles.buttonSpacer} />
+                    <AppButton
+                      title="Remove photo"
+                      variant="secondary"
+                      onPress={() => {
+                        setJobProofUri(null);
+                        setJobProofProvided(false);
+                      }}
+                      disabled={isSaving}
+                    />
+                  </>
+                ) : null}
+              </View>
+              <Text style={styles.sectionMeta}>
+                {jobProofUri
+                  ? `Application proof attached: ${jobProofUri}`
+                  : "No application proof attached yet."}
+              </Text>
+            </>
+          ) : (
+            <View style={styles.toggleRow}>
+              <Text style={styles.label}>Proof available</Text>
+              <Switch value={jobProofProvided} onValueChange={setJobProofProvided} />
+            </View>
+          )}
           <TextInput
             style={[styles.input, styles.multilineInput]}
             value={jobNotes}
@@ -497,6 +808,14 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     gap: spacing.md,
+  },
+  inlineActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+  },
+  buttonSpacer: {
+    width: spacing.sm,
   },
   label: {
     color: colors.textPrimary,

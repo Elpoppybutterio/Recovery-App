@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { geocodeAsync } from "expo-location";
 import {
   Pressable,
   StyleSheet,
@@ -16,6 +17,7 @@ import {
   createResidentHousingProfileFromDraft,
   createResidentRequirementProfileFromDraft,
   createResidentWizardDraftFromProfiles,
+  getResidentSetupState,
   persistResidentConsentArtifact,
 } from "../lib/soberHouse/resident";
 import { isOneOnOneApplicable, SCHEDULED_WEEKDAY_OPTIONS } from "../lib/soberHouse/scheduling";
@@ -227,15 +229,21 @@ export function SoberHouseResidentManager({
   );
   const sponsorContactRequired = assignedHouseRuleSet?.sponsorContact.enabled ?? false;
   const oneOnOneSectionVisible = useMemo(() => isOneOnOneApplicable(store, draft), [draft, store]);
+  const residentSetupState = useMemo(
+    () => getResidentSetupState(store, linkedUserId),
+    [linkedUserId, store],
+  );
 
   const startWizard = useCallback(() => {
     const nextDraft = createResidentWizardDraftFromProfiles(linkedUserId, store);
     setDraft(nextDraft);
-    setWizardStep(nextDraft.currentStep);
+    setWizardStep(
+      residentSetupState.complete ? nextDraft.currentStep : residentSetupState.nextStep,
+    );
     setResidentStatus(null);
     setSignaturePoints([]);
     setIsEditing(true);
-  }, [linkedUserId, store]);
+  }, [linkedUserId, residentSetupState.complete, residentSetupState.nextStep, store]);
 
   const persistDraftAtStep = useCallback(
     async (nextDraft: ResidentWizardDraft, step: ResidentOnboardingStep) => {
@@ -446,11 +454,38 @@ export function SoberHouseResidentManager({
     const housingResult = upsertResidentHousingProfile(nextStore, actor, housingProfile, now);
     nextStore = housingResult.store;
 
+    let workplaceGeofence: {
+      lat: number;
+      lng: number;
+      radiusFeet: number;
+    } | null = null;
+    if (
+      draft.workRequired &&
+      draft.currentlyEmployed &&
+      draft.employerAddress.trim() &&
+      assignedHouseRuleSet
+    ) {
+      try {
+        const geocoded = await geocodeAsync(draft.employerAddress.trim());
+        const primary = geocoded[0] ?? null;
+        if (primary) {
+          workplaceGeofence = {
+            lat: primary.latitude,
+            lng: primary.longitude,
+            radiusFeet: assignedHouseRuleSet.employment.workplaceGeofenceRadiusDefault,
+          };
+        }
+      } catch {
+        workplaceGeofence = null;
+      }
+    }
+
     const requirementProfile = createResidentRequirementProfileFromDraft(
       nextStore,
       linkedUserId,
       draft,
       now,
+      workplaceGeofence,
     );
     const requirementResult = upsertResidentRequirementProfile(
       nextStore,
@@ -487,13 +522,24 @@ export function SoberHouseResidentManager({
     await onPersist(nextStore, "Resident sober-house profile saved.");
     setIsEditing(false);
     setSignaturePoints([]);
-    setResidentStatus("Resident sober-house profile saved.");
-  }, [actor, draft, linkedUserId, onPersist, persistSignatureFromCanvas, store]);
+    setResidentStatus(
+      workplaceGeofence
+        ? "Resident sober-house profile saved with work location on file."
+        : draft.workRequired && draft.currentlyEmployed
+          ? "Resident sober-house profile saved. Work location geofence will finish resolving when address lookup is available."
+          : "Resident sober-house profile saved.",
+    );
+  }, [
+    actor,
+    assignedHouseRuleSet,
+    draft,
+    linkedUserId,
+    onPersist,
+    persistSignatureFromCanvas,
+    store,
+  ]);
 
-  const residentComplete =
-    store.residentHousingProfile !== null &&
-    store.residentRequirementProfile !== null &&
-    store.residentConsentRecord !== null;
+  const residentComplete = residentSetupState.complete;
 
   useEffect(() => {
     if (store.userAccessProfile?.role !== "HOUSE_RESIDENT" || residentComplete || isEditing) {
@@ -501,11 +547,11 @@ export function SoberHouseResidentManager({
     }
     const nextDraft = createResidentWizardDraftFromProfiles(linkedUserId, store);
     setDraft(nextDraft);
-    setWizardStep(nextDraft.currentStep);
+    setWizardStep(residentSetupState.nextStep);
     setResidentStatus(null);
     setSignaturePoints([]);
     setIsEditing(true);
-  }, [isEditing, linkedUserId, residentComplete, store]);
+  }, [isEditing, linkedUserId, residentComplete, residentSetupState.nextStep, store]);
 
   return (
     <GlassCard style={styles.card} strong>
@@ -517,6 +563,9 @@ export function SoberHouseResidentManager({
 
       {!residentComplete && !isEditing ? (
         <View style={styles.buttonRow}>
+          <Text style={styles.inlineStatus}>
+            Missing: {residentSetupState.missingItems.join(" • ")}
+          </Text>
           <AppButton title="Start resident wizard" onPress={startWizard} />
         </View>
       ) : null}
@@ -555,6 +604,15 @@ export function SoberHouseResidentManager({
                   : `Required, ${store.residentRequirementProfile.jobApplicationsRequiredPerWeek} applications/week`
                 : "Not required"}
             </Text>
+            {store.residentRequirementProfile?.currentlyEmployed ? (
+              <Text style={styles.entityMeta}>
+                Work geofence:{" "}
+                {store.residentRequirementProfile.workplaceGeofenceLat !== null &&
+                store.residentRequirementProfile.workplaceGeofenceLng !== null
+                  ? `${store.residentRequirementProfile.workplaceGeofenceRadiusFeet ?? "Default"} ft radius saved`
+                  : "Pending address resolution"}
+              </Text>
+            ) : null}
             <Text style={styles.entityMeta}>
               Meetings:{" "}
               {store.residentRequirementProfile?.meetingsRequiredWeekly
@@ -1442,6 +1500,13 @@ const styles = StyleSheet.create({
   buttonRow: {
     flexDirection: "row",
     alignItems: "center",
+    flexWrap: "wrap",
+    gap: spacing.sm,
+  },
+  inlineStatus: {
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    lineHeight: 18,
   },
   buttonSpacer: {
     width: spacing.sm,

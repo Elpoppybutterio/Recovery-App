@@ -177,7 +177,10 @@ import { MessagesHubScreen } from "./screens/MessagesHubScreen";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
 import { RoutineReaderScreen } from "./screens/RoutineReaderScreen";
 import { ToolsRoutinesScreen } from "./screens/ToolsRoutinesScreen";
-import { SoberHouseSettingsScreen } from "./screens/SoberHouseSettingsScreen";
+import {
+  SoberHouseSettingsScreen,
+  type SoberHouseAdminLaunchContext,
+} from "./screens/SoberHouseSettingsScreen";
 import { ProtectedOrgAccessGateScreen } from "./screens/ProtectedOrgAccessGateScreen";
 import { SoberHouseChatSection } from "./components/SoberHouseChatSection";
 import { SoberHouseOwnerDashboard } from "./components/SoberHouseOwnerDashboard";
@@ -195,24 +198,34 @@ import { currentMonthKey } from "./lib/soberHouse/monthlyWindow";
 import {
   applyHouseDefaultsToResidentDraft,
   createDefaultResidentWizardDraft,
+  getResidentSetupState,
 } from "./lib/soberHouse/resident";
 import { generateHouseMonthlyReport } from "./lib/soberHouse/reports";
 import {
   saveResidentWizardDraft,
+  setHouseStatus,
+  setStaffAssignmentStatus,
   upsertOrganization,
   upsertResidentRequirementProfile,
   upsertStaffAssignment,
   upsertUserAccessProfile,
 } from "./lib/soberHouse/mutations";
 import { buildResidentViolationSummary } from "./lib/soberHouse/interventions";
-import { getRuleSetForHouse } from "./lib/soberHouse/selectors";
+import {
+  getEffectiveRecurringObligationsForHouse,
+  getRuleSetForHouse,
+} from "./lib/soberHouse/selectors";
 import {
   buildOneOnOneCalendarEventPlan,
   buildOneOnOneReminderPlans,
 } from "./lib/soberHouse/scheduling";
 import { loadSoberHouseSettingsStore, saveSoberHouseSettingsStore } from "./lib/soberHouse/storage";
 import type { SoberHouseSettingsStore } from "./lib/soberHouse/types";
-import { requiresSoberHouseDeviceUnlock } from "./lib/soberHouse/deviceAuth";
+import {
+  isSoberHouseProtectedSessionExpired,
+  requiresSoberHouseDeviceUnlock,
+  SOBER_HOUSE_PROTECTED_SESSION_TIMEOUT_MS,
+} from "./lib/soberHouse/deviceAuth";
 import {
   buildChatThreadSummaries,
   getChatViewerContexts,
@@ -2514,10 +2527,14 @@ export default function App() {
     violationId: string;
     correctiveActionId?: string | null;
   } | null>(null);
+  const [soberHouseAdminLaunchContext, setSoberHouseAdminLaunchContext] =
+    useState<SoberHouseAdminLaunchContext | null>(null);
   const [ownerDashboardStatus, setOwnerDashboardStatus] = useState<string | null>(null);
   const [soberHouseUnlocked, setSoberHouseUnlocked] = useState(false);
   const [soberHouseUnlocking, setSoberHouseUnlocking] = useState(false);
   const [soberHouseUnlockStatus, setSoberHouseUnlockStatus] = useState<string | null>(null);
+  const [soberHouseProtectedSessionLastActiveAtMs, setSoberHouseProtectedSessionLastActiveAtMs] =
+    useState<number | null>(null);
   const [debugTimeCompressionEnabled] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
 
@@ -2639,6 +2656,17 @@ export default function App() {
         new Date(clockTickMs).toISOString(),
       )
     : null;
+  const soberHouseEffectiveHouseMeetings = useMemo(
+    () =>
+      soberHouseAssignedHouse
+        ? getEffectiveRecurringObligationsForHouse(
+            soberHouseStore,
+            soberHouseAssignedHouse.id,
+            "HOUSE_MEETING",
+          )
+        : [],
+    [soberHouseAssignedHouse, soberHouseStore],
+  );
   const soberHouseControlledSponsorRequirement =
     soberHouseAccessProfile?.role === "HOUSE_RESIDENT" &&
     (soberHouseEffectiveRules?.sponsorContact.enabled ?? false);
@@ -2746,6 +2774,10 @@ export default function App() {
           wizardCourtDeadlineSummary,
         },
         recurringServiceCommitments,
+        residentHouseMeetings:
+          soberHouseAccessProfile?.role === "HOUSE_RESIDENT"
+            ? soberHouseEffectiveHouseMeetings
+            : [],
         residentRules:
           soberHouseAccessProfile?.role === "HOUSE_RESIDENT" && soberHouseEffectiveRules
             ? {
@@ -2776,6 +2808,7 @@ export default function App() {
       setupComplete,
       soberHouseAccessProfile?.houseId,
       soberHouseAccessProfile?.role,
+      soberHouseEffectiveHouseMeetings,
       soberHouseEffectiveRules,
       sponsorCallAvailable,
       sponsorCallTimeLocalHhmm,
@@ -2880,11 +2913,18 @@ export default function App() {
         : null,
     [protectedOrgCurrentTenantId, protectedOrgCurrentUserId],
   );
+  const lockSoberHouseAccess = useCallback((status: string | null = null) => {
+    setSoberHouseUnlocked(false);
+    setSoberHouseUnlockStatus(status);
+    setSoberHouseProtectedSessionLastActiveAtMs(null);
+    soberHouseUnlockPromptedRef.current = false;
+  }, []);
   const shouldShowSoberHouseLock =
-    mode === "B" &&
-    homeScreen === "SETTINGS" &&
-    soberHouseRequiresDeviceUnlock &&
-    !soberHouseUnlocked;
+    mode === "B" && soberHouseRequiresDeviceUnlock && !soberHouseUnlocked;
+  const soberHouseProtectedSessionMessage =
+    mode === "B" && soberHouseRequiresDeviceUnlock && soberHouseUnlocked
+      ? `Unlocked for this session. Sober-house records lock again when the app backgrounds, you switch accounts, tap Lock now, or after ${Math.round(SOBER_HOUSE_PROTECTED_SESSION_TIMEOUT_MS / 60000)} minutes of inactivity.`
+      : null;
   const isIosSimulator = Platform.OS === "ios" && Constants.isDevice === false;
   const canUseSimulatorSoberHouseUnlock = isIosSimulator;
   const loadLocalAuthenticationModule =
@@ -2915,6 +2955,7 @@ export default function App() {
     if (canUseSimulatorSoberHouseUnlock) {
       setSoberHouseUnlocked(true);
       setSoberHouseUnlockStatus(null);
+      setSoberHouseProtectedSessionLastActiveAtMs(Date.now());
       return;
     }
 
@@ -2955,6 +2996,7 @@ export default function App() {
       if (result.success) {
         setSoberHouseUnlocked(true);
         setSoberHouseUnlockStatus(null);
+        setSoberHouseProtectedSessionLastActiveAtMs(Date.now());
         return;
       }
 
@@ -3003,46 +3045,114 @@ export default function App() {
   }, [wizardMeetingProofLockedByHouse, wizardMeetingSignatureRequired]);
 
   useEffect(() => {
-    if (!soberHouseRequiresDeviceUnlock || mode !== "B" || homeScreen !== "SETTINGS") {
+    if (!soberHouseRequiresDeviceUnlock) {
+      lockSoberHouseAccess();
+      return;
+    }
+
+    if (mode !== "B") {
       soberHouseUnlockPromptedRef.current = false;
-      setSoberHouseUnlocked(false);
-      setSoberHouseUnlockStatus(null);
+      return;
+    }
+
+    if (soberHouseUnlocked) {
       return;
     }
 
     if (canUseSimulatorSoberHouseUnlock) {
       soberHouseUnlockPromptedRef.current = false;
-      setSoberHouseUnlockStatus("Simulator mode: tap Enter Code to open sober-house settings.");
+      setSoberHouseUnlockStatus(
+        "Simulator mode: tap Enter Code once to open sober-house records for this session.",
+      );
       return;
     }
 
-    if (soberHouseUnlocked || soberHouseUnlockPromptedRef.current) {
+    if (soberHouseUnlockPromptedRef.current) {
       return;
     }
 
     soberHouseUnlockPromptedRef.current = true;
     void unlockSoberHouseAccess();
   }, [
-    homeScreen,
-    mode,
     canUseSimulatorSoberHouseUnlock,
+    lockSoberHouseAccess,
+    mode,
     soberHouseRequiresDeviceUnlock,
     soberHouseUnlocked,
     unlockSoberHouseAccess,
   ]);
 
   useEffect(() => {
+    if (mode !== "B" || !soberHouseRequiresDeviceUnlock || !soberHouseUnlocked) {
+      return;
+    }
+
+    setSoberHouseProtectedSessionLastActiveAtMs(Date.now());
+  }, [homeScreen, mode, soberHouseRequiresDeviceUnlock, soberHouseUnlocked]);
+
+  useEffect(() => {
+    const sessionExpired = isSoberHouseProtectedSessionExpired(
+      soberHouseProtectedSessionLastActiveAtMs,
+      Date.now(),
+      SOBER_HOUSE_PROTECTED_SESSION_TIMEOUT_MS,
+    );
+
+    if (!soberHouseRequiresDeviceUnlock || !soberHouseUnlocked || sessionExpired) {
+      if (soberHouseRequiresDeviceUnlock && soberHouseUnlocked && sessionExpired) {
+        lockSoberHouseAccess(
+          "Protected session locked after inactivity. Unlock again to continue.",
+        );
+      }
+      return;
+    }
+
+    if (soberHouseProtectedSessionLastActiveAtMs === null) {
+      lockSoberHouseAccess("Protected session locked after inactivity. Unlock again to continue.");
+      return;
+    }
+
+    const protectedSessionLastActiveAtMs = soberHouseProtectedSessionLastActiveAtMs;
+    const timeoutId = setTimeout(
+      () => {
+        lockSoberHouseAccess(
+          "Protected session locked after inactivity. Unlock again to continue.",
+        );
+      },
+      Math.max(
+        0,
+        SOBER_HOUSE_PROTECTED_SESSION_TIMEOUT_MS - (Date.now() - protectedSessionLastActiveAtMs),
+      ),
+    );
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [
+    lockSoberHouseAccess,
+    soberHouseProtectedSessionLastActiveAtMs,
+    soberHouseRequiresDeviceUnlock,
+    soberHouseUnlocked,
+  ]);
+
+  useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "inactive" || nextState === "background") {
-        setSoberHouseUnlocked(false);
-        soberHouseUnlockPromptedRef.current = false;
+        lockSoberHouseAccess();
       }
     });
 
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [lockSoberHouseAccess]);
+
+  useEffect(() => {
+    if (!soberHouseUnlocked) {
+      return;
+    }
+
+    lockSoberHouseAccess();
+  }, [currentAccessUserId, devAuthSignedOut, lockSoberHouseAccess]);
   const sponsorAlertFingerprint = useMemo(
     () => buildSponsorAlertFingerprint(sponsorEventFingerprint, sponsorLeadMinutes),
     [sponsorEventFingerprint, sponsorLeadMinutes],
@@ -3976,6 +4086,7 @@ export default function App() {
         nowIso: new Date(clockTickMs).toISOString(),
         attendanceRecords,
         meetingAttendanceLogs,
+        sponsorCallLogs,
         complianceSummary: soberHouseComplianceSummary,
         upcomingMeetings: dashboardNextFiveMeetings,
       }),
@@ -3984,9 +4095,14 @@ export default function App() {
       clockTickMs,
       attendanceRecords,
       meetingAttendanceLogs,
+      sponsorCallLogs,
       soberHouseComplianceSummary,
       dashboardNextFiveMeetings,
     ],
+  );
+  const soberHouseResidentSetupState = useMemo(
+    () => getResidentSetupState(soberHouseStore, currentAccessUserId),
+    [currentAccessUserId, soberHouseStore],
   );
   const soberHousingConfigured = useMemo(
     () =>
@@ -4008,14 +4124,14 @@ export default function App() {
         sponsorActive,
         soberHouseSetupPending:
           soberHouseAccessProfile?.role === "HOUSE_RESIDENT" &&
-          !soberHouseResidentDashboardSummary.visibility.eligible,
+          !soberHouseResidentSetupState.complete,
         soberHouseChatSummaries: soberHouseResidentChatSummaries,
         soberHouseViolationSummary: soberHouseViolationTile,
       }),
     [
       communicationMode,
       soberHouseAccessProfile?.role,
-      soberHouseResidentDashboardSummary.visibility.eligible,
+      soberHouseResidentSetupState.complete,
       soberHouseResidentChatSummaries,
       soberHouseViolationTile,
       sponsorActive,
@@ -6486,6 +6602,7 @@ export default function App() {
     const pendingEvents = buildComplianceEventPayloads({
       sponsorCallLogs,
       meetingAttendanceLogs,
+      choreCompletionRecords: soberHouseStore.choreCompletionRecords,
       obligations: backendParticipantObligations,
     }).filter((event) => !syncedComplianceEventIdsRef.current.has(event.externalEventId));
 
@@ -6523,7 +6640,14 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [apiUrl, authHeaders, backendParticipantObligations, meetingAttendanceLogs, sponsorCallLogs]);
+  }, [
+    apiUrl,
+    authHeaders,
+    backendParticipantObligations,
+    meetingAttendanceLogs,
+    soberHouseStore.choreCompletionRecords,
+    sponsorCallLogs,
+  ]);
 
   const handleModeSelect = useCallback(
     (nextMode: RecoveryMode) => {
@@ -6722,16 +6846,33 @@ export default function App() {
   const attendanceBackA11yLabel =
     attendanceEntryPoint === "meetings" ? "Back to upcoming meetings" : "Back to dashboard";
 
-  const openSoberHousingSettings = useCallback(() => {
-    if (!canOpenSoberHouseEntry) {
-      return;
+  const openSoberHousingSettings = useCallback(
+    (launchContext: SoberHouseAdminLaunchContext | null = null) => {
+      if (!canOpenSoberHouseEntry) {
+        return;
+      }
+      setSoberHouseAdminLaunchContext(launchContext);
+      setMode("B");
+      setHomeScreen("SETTINGS");
+      setToolsScreen("HOME");
+      setScreen("LIST");
+      setSelectedMeeting(null);
+    },
+    [canOpenSoberHouseEntry],
+  );
+  const soberHouseSettingsScreenKey = useMemo(() => {
+    if (!soberHouseAdminLaunchContext) {
+      return "sober-house-settings-hub";
     }
-    setMode("B");
-    setHomeScreen("SETTINGS");
-    setToolsScreen("HOME");
-    setScreen("LIST");
-    setSelectedMeeting(null);
-  }, [canOpenSoberHouseEntry]);
+
+    return [
+      "sober-house-settings",
+      soberHouseAdminLaunchContext.module,
+      soberHouseAdminLaunchContext.mode ?? "view",
+      soberHouseAdminLaunchContext.houseId ?? "none",
+      soberHouseAdminLaunchContext.staffAssignmentId ?? "none",
+    ].join(":");
+  }, [soberHouseAdminLaunchContext]);
 
   const openProbationParoleSettings = useCallback(() => {
     if (!canOpenCourtEntry) {
@@ -6811,6 +6952,58 @@ export default function App() {
       openSoberHousingSettings();
     },
     [openSoberHousingSettings],
+  );
+  const openSoberHouseCreateHouse = useCallback(() => {
+    openSoberHousingSettings({ module: "HOUSES", mode: "create" });
+  }, [openSoberHousingSettings]);
+  const openSoberHouseEditHouse = useCallback(
+    (houseId: string) => {
+      openSoberHousingSettings({ module: "HOUSES", mode: "edit", houseId });
+    },
+    [openSoberHousingSettings],
+  );
+  const openSoberHouseCreateManager = useCallback(() => {
+    openSoberHousingSettings({ module: "MANAGERS", mode: "create" });
+  }, [openSoberHousingSettings]);
+  const openSoberHouseEditManager = useCallback(
+    (staffAssignmentId: string) => {
+      openSoberHousingSettings({ module: "MANAGERS", mode: "edit", staffAssignmentId });
+    },
+    [openSoberHousingSettings],
+  );
+  const updateOwnerDashboardHouseStatus = useCallback(
+    async (houseId: string, nextStatus: "ACTIVE" | "INACTIVE") => {
+      const timestamp = new Date().toISOString();
+      const result = setHouseStatus(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        houseId,
+        nextStatus,
+        timestamp,
+      );
+      await persistSoberHouseStore(result.store);
+      setOwnerDashboardStatus(
+        `House ${nextStatus === "ACTIVE" ? "reactivated" : "deactivated"} with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+      );
+    },
+    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+  );
+  const updateOwnerDashboardStaffStatus = useCallback(
+    async (staffAssignmentId: string, nextStatus: "ACTIVE" | "INACTIVE") => {
+      const timestamp = new Date().toISOString();
+      const result = setStaffAssignmentStatus(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        staffAssignmentId,
+        nextStatus,
+        timestamp,
+      );
+      await persistSoberHouseStore(result.store);
+      setOwnerDashboardStatus(
+        `Staff ${nextStatus === "ACTIVE" ? "reactivated" : "deactivated"} with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+      );
+    },
+    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
   );
 
   const searchMeetingsFromDashboard = useCallback(async () => {
@@ -15392,13 +15585,46 @@ export default function App() {
               ) : null}
 
               {homeScreen === "DASHBOARD" ? (
-                canManageSoberHouseHierarchy(appAccessRole) &&
-                soberHouseAccessProfile?.role === "OWNER_OPERATOR" ? (
+                shouldShowSoberHouseLock ? (
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.sectionTitle}>Unlock Sober House</Text>
+                    <Text style={styles.sectionMeta}>
+                      {canUseSimulatorSoberHouseUnlock
+                        ? "Simulator mode requires the sober-house test passcode before admin records can be opened."
+                        : "Protected sober-house records require Face ID, Touch ID, or your iPhone passcode before they can be opened."}
+                    </Text>
+                    {soberHouseUnlockStatus ? (
+                      <Text style={styles.sectionMeta}>{soberHouseUnlockStatus}</Text>
+                    ) : null}
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title={
+                          canUseSimulatorSoberHouseUnlock
+                            ? "Enter Code"
+                            : soberHouseUnlocking
+                              ? "Unlocking..."
+                              : "Unlock with Face ID / Passcode"
+                        }
+                        onPress={() => void unlockSoberHouseAccess()}
+                        disabled={soberHouseUnlocking}
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <AppButton title="Back to Recovery" onPress={() => handleModeSelect("A")} />
+                    </View>
+                  </GlassCard>
+                ) : canManageSoberHouseHierarchy(appAccessRole) &&
+                  soberHouseAccessProfile?.role === "OWNER_OPERATOR" ? (
                   <SoberHouseOwnerDashboard
                     store={soberHouseStore}
                     notificationSummary={communicationNotificationSummary}
                     onOpenNotifications={openNotificationsHub}
                     onOpenSettings={openSoberHousingSettings}
+                    onCreateHouse={openSoberHouseCreateHouse}
+                    onEditHouse={openSoberHouseEditHouse}
+                    onToggleHouseStatus={updateOwnerDashboardHouseStatus}
+                    onCreateManager={openSoberHouseCreateManager}
+                    onEditManager={openSoberHouseEditManager}
+                    onToggleManagerStatus={updateOwnerDashboardStaffStatus}
                     onOpenChat={openMessagesHub}
                     onCompileReportsNow={(houseIds) => {
                       void compileOwnerScopeReportsNow(houseIds);
@@ -15446,12 +15672,15 @@ export default function App() {
                     soberHouseResidentTiles={soberHouseResidentDashboardSummary.tiles}
                     soberHouseSetupPrompt={
                       soberHouseAccessProfile?.role === "HOUSE_RESIDENT" &&
-                      !soberHouseResidentDashboardSummary.visibility.eligible
+                      !soberHouseResidentSetupState.complete
                         ? {
                             visible: true,
                             title: "Finish Sober House Setup",
-                            detail:
-                              "Complete your sober-house resident profile to unlock house KPI tiles, requirements, and schedule tracking on the dashboard.",
+                            detail: `Complete your sober-house resident profile to unlock house KPI tiles, requirements, and schedule tracking on the dashboard.${
+                              soberHouseResidentSetupState.missingItems.length > 0
+                                ? ` Missing: ${soberHouseResidentSetupState.missingItems.join(", ")}.`
+                                : ""
+                            }`,
                             actionLabel: "Complete sober house setup",
                           }
                         : null
@@ -15536,7 +15765,7 @@ export default function App() {
                           <Text style={styles.sectionMeta}>
                             Meetings this week:{" "}
                             {soberHouseEffectiveRules?.meetings.meetingsRequired
-                              ? `${soberHouseStore.residentRequirementProfile?.meetingsRequiredCount ?? soberHouseEffectiveRules.meetings.meetingsPerWeek} required`
+                              ? `${soberHouseEffectiveRules.meetings.meetingsPerWeek} required`
                               : "No weekly requirement"}
                           </Text>
                           <Text style={styles.sectionMeta}>
@@ -18043,8 +18272,8 @@ export default function App() {
                   <Text style={styles.sectionTitle}>Unlock Sober House</Text>
                   <Text style={styles.sectionMeta}>
                     {canUseSimulatorSoberHouseUnlock
-                      ? "Simulator mode requires the sober-house test passcode before records can be opened."
-                      : "Owner/operator and resident sober-house records require Face ID, Touch ID, or your iPhone passcode before they can be opened."}
+                      ? "Simulator mode requires the sober-house test passcode before protected records can be opened."
+                      : "Protected sober-house records require Face ID, Touch ID, or your iPhone passcode before they can be opened."}
                   </Text>
                   {soberHouseUnlockStatus ? (
                     <Text style={styles.sectionMeta}>{soberHouseUnlockStatus}</Text>
@@ -18066,13 +18295,34 @@ export default function App() {
                   </View>
                 </GlassCard>
               ) : (
-                <SoberHouseSettingsScreen
-                  userId={devAuthUserId}
-                  actorId={devAuthUserId}
-                  actorName={devUserDisplayName}
-                  viewerRole={appAccessRole}
-                  onBack={() => handleModeSelect("A")}
-                />
+                <>
+                  {soberHouseProtectedSessionMessage ? (
+                    <GlassCard style={styles.card} strong>
+                      <Text style={styles.sectionTitle}>Protected Session Unlocked</Text>
+                      <Text style={styles.sectionMeta}>{soberHouseProtectedSessionMessage}</Text>
+                      <View style={styles.buttonRow}>
+                        <AppButton
+                          title="Lock now"
+                          onPress={() =>
+                            lockSoberHouseAccess(
+                              "Protected session locked. Unlock again to reopen sober-house records.",
+                            )
+                          }
+                          variant="secondary"
+                        />
+                      </View>
+                    </GlassCard>
+                  ) : null}
+                  <SoberHouseSettingsScreen
+                    key={soberHouseSettingsScreenKey}
+                    userId={devAuthUserId}
+                    actorId={devAuthUserId}
+                    actorName={devUserDisplayName}
+                    viewerRole={appAccessRole}
+                    adminLaunchContext={soberHouseAdminLaunchContext}
+                    onBack={() => handleModeSelect("A")}
+                  />
+                </>
               )
             ) : (
               <>
