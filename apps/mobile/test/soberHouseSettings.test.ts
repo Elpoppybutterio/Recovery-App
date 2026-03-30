@@ -30,6 +30,7 @@ import {
   createResidentConsentRecordFromDraft,
   createResidentHousingProfileFromDraft,
   createResidentRequirementProfileFromDraft,
+  createResidentWizardDraftFromProfiles,
   getResidentSetupState,
 } from "../lib/soberHouse/resident";
 import { evaluateResidentCompliance } from "../lib/soberHouse/compliance";
@@ -69,11 +70,16 @@ import {
 } from "../lib/soberHouse/deviceAuth";
 import { buildSoberHouseResidentDashboardSummary } from "../lib/soberHouse/dashboard";
 import {
+  attachSoberHouseRoutineProof,
+  buildSoberHouseRoutineSummary,
+} from "../lib/soberHouse/routine";
+import {
   buildSoberHouseOwnerDashboardSummary,
   buildSoberHouseOwnerHouseDetail,
   buildSoberHouseOwnerHouseViolationRows,
 } from "../lib/soberHouse/orgDashboard";
 import {
+  getEffectiveRuleSetForScope,
   getChatReceiptForMessageAndUser,
   getHouseMeetingsInRange,
   getRuleSetForHouse,
@@ -470,9 +476,9 @@ function buildReportingStore() {
 }
 
 describe("sober house settings mutations", () => {
-  it("requires device unlock for sober-house residents only", () => {
-    expect(requiresSoberHouseDeviceUnlock("OWNER_OPERATOR")).toBe(false);
-    expect(requiresSoberHouseDeviceUnlock("HOUSE_RESIDENT")).toBe(true);
+  it("requires device unlock only for protected sober-house admin access", () => {
+    expect(requiresSoberHouseDeviceUnlock("OWNER_OPERATOR")).toBe(true);
+    expect(requiresSoberHouseDeviceUnlock("HOUSE_RESIDENT")).toBe(false);
     expect(requiresSoberHouseDeviceUnlock("UNASSIGNED")).toBe(false);
     expect(requiresSoberHouseDeviceUnlock("DRUG_COURT_PARTICIPANT")).toBe(false);
     expect(requiresSoberHouseDeviceUnlock("PROBATION_PAROLE_PARTICIPANT")).toBe(false);
@@ -962,6 +968,187 @@ describe("sober house settings mutations", () => {
     expect(
       getRuleSetForHouse(store, houseId, "2026-03-08T11:28:00.000Z").meetings.meetingsPerWeek,
     ).toBe(7);
+  });
+
+  it("keeps organization defaults, house-group templates, and house overrides distinct by rule category", () => {
+    let store = createDefaultSoberHouseSettingsStore();
+    store = upsertOrganization(
+      store,
+      ACTOR,
+      {
+        name: "Bright Path Recovery",
+        primaryContactName: "",
+        primaryPhone: "",
+        primaryEmail: "",
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-08T11:29:00.000Z",
+    ).store;
+
+    store = upsertHouseGroup(
+      store,
+      ACTOR,
+      {
+        name: "North campus template",
+        houseIds: [],
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-08T11:30:00.000Z",
+    ).store;
+
+    const houseGroupId = store.houseGroups[0]!.id;
+    store = upsertHouse(
+      store,
+      ACTOR,
+      {
+        houseGroupId,
+        name: "Maple House",
+        address: "123 Main St",
+        phone: "",
+        geofenceRadiusFeetDefault: 200,
+        houseTypes: ["MEN"],
+        bedCount: 12,
+        notes: "",
+        status: "ACTIVE",
+      },
+      "2026-03-08T11:31:00.000Z",
+    ).store;
+
+    const houseId = store.houses[0]!.id;
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        scopeType: "ORGANIZATION",
+        houseId: null,
+        houseGroupId: null,
+        name: "Org defaults",
+        status: "ACTIVE",
+        curfew: {
+          enabled: true,
+          weekdayCurfew: "22:00",
+          fridayCurfew: "23:00",
+          saturdayCurfew: "23:00",
+          sundayCurfew: "22:00",
+          gracePeriodMinutes: 15,
+          preViolationAlertEnabled: true,
+          preViolationLeadTimeMinutes: 20,
+          alertBasis: "CLOCK_ONLY",
+        },
+        chores: {
+          enabled: true,
+          frequency: "WEEKLY",
+          dueTime: "18:00",
+          proofRequirement: ["CHECKLIST"],
+          gracePeriodMinutes: 15,
+          managerInstantNotificationEnabled: false,
+        },
+        employment: {
+          employmentRequired: true,
+          workplaceVerificationEnabled: true,
+          workplaceGeofenceRadiusDefault: 200,
+          managerVerificationRequired: false,
+        },
+        jobSearch: {
+          applicationsRequiredPerWeek: 2,
+          proofRequired: false,
+          managerApprovalRequired: false,
+        },
+        meetings: {
+          meetingsRequired: true,
+          meetingsPerWeek: 4,
+          allowedMeetingTypes: ["AA", "NA"],
+          proofMethod: "SIGNATURE",
+        },
+        sponsorContact: {
+          enabled: true,
+          contactsRequiredPerWeek: 1,
+          proofType: "CALL_LOG",
+        },
+      },
+      "2026-03-08T11:32:00.000Z",
+    ).store;
+
+    const orgEffective = getEffectiveRuleSetForScope(
+      store,
+      "ORGANIZATION",
+      null,
+      "2026-03-08T11:33:00.000Z",
+    ).ruleSet;
+
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        scopeType: "HOUSE_GROUP",
+        houseId: null,
+        houseGroupId,
+        name: "North campus template",
+        status: "ACTIVE",
+        curfew: orgEffective.curfew,
+        chores: orgEffective.chores,
+        employment: orgEffective.employment,
+        jobSearch: orgEffective.jobSearch,
+        meetings: orgEffective.meetings,
+        sponsorContact: {
+          ...orgEffective.sponsorContact,
+          contactsRequiredPerWeek: 3,
+        },
+        oneOnOne: orgEffective.oneOnOne,
+        operations: orgEffective.operations,
+        support: orgEffective.support,
+      },
+      "2026-03-08T11:34:00.000Z",
+    ).store;
+
+    const groupEffective = getEffectiveRuleSetForScope(
+      store,
+      "HOUSE_GROUP",
+      houseGroupId,
+      "2026-03-08T11:35:00.000Z",
+    ).ruleSet;
+
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        scopeType: "HOUSE",
+        houseId,
+        houseGroupId: null,
+        name: "Maple local override",
+        status: "ACTIVE",
+        curfew: groupEffective.curfew,
+        chores: {
+          ...groupEffective.chores,
+          proofRequirement: ["PHOTO"],
+        },
+        employment: groupEffective.employment,
+        jobSearch: groupEffective.jobSearch,
+        meetings: groupEffective.meetings,
+        sponsorContact: groupEffective.sponsorContact,
+        oneOnOne: groupEffective.oneOnOne,
+        operations: groupEffective.operations,
+        support: groupEffective.support,
+      },
+      "2026-03-08T11:36:00.000Z",
+    ).store;
+
+    const effective = getEffectiveRuleSetForScope(
+      store,
+      "HOUSE",
+      houseId,
+      "2026-03-08T11:37:00.000Z",
+    );
+    const houseRules = getRuleSetForHouse(store, houseId, "2026-03-08T11:37:00.000Z");
+
+    expect(houseRules.meetings.meetingsPerWeek).toBe(4);
+    expect(houseRules.sponsorContact.contactsRequiredPerWeek).toBe(3);
+    expect(houseRules.chores.proofRequirement).toEqual(["PHOTO"]);
+    expect(effective.sources.meetings).toBe("ORGANIZATION");
+    expect(effective.sources.sponsorContact).toBe("HOUSE_GROUP");
+    expect(effective.sources.chores).toBe("HOUSE");
   });
 
   it("uses organization defaults for houses unless an active house or group override exists", () => {
@@ -2422,6 +2609,7 @@ describe("sober house monthly reports", () => {
 
     expect(summary.visibility).toEqual({
       eligible: true,
+      showRequirementsTile: true,
       showChoreTile: true,
       showWeeklyMeetingTile: true,
       showSponsorContactTile: false,
@@ -2432,6 +2620,126 @@ describe("sober house monthly reports", () => {
       showComplianceSnapshotTile: true,
       showHouseScheduleTile: true,
     });
+    expect(summary.tiles.map((tile) => tile.id)).toEqual(
+      expect.arrayContaining(["sober-house-requirements"]),
+    );
+    expect(summary.requirementsTile.title).toBe("Sober House Routine");
+    expect(summary.requirementsTile.value).toBe("0%");
+    expect(summary.requirementsTile.subtitle).toContain("3 open");
+  });
+
+  it("builds a locked sober-house routine from effective resident rules", () => {
+    const base = buildResidentComplianceStore();
+    const residentStore = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-10T09:00:00-06:00",
+    ).store;
+
+    const routine = buildSoberHouseRoutineSummary({
+      store: residentStore,
+      nowIso: "2026-03-10T10:00:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      sponsorCallLogs: [],
+    });
+
+    expect(routine).not.toBeNull();
+    expect(routine?.percentComplete).toBe(0);
+    expect(routine?.openRequiredCount).toBe(3);
+    expect(routine?.overdueCount).toBe(0);
+    expect(routine?.tasks.map((task) => task.kind)).toEqual(
+      expect.arrayContaining(["meetings", "chores", "job_applications", "curfew"]),
+    );
+    expect(routine?.tasks.every((task) => task.locked)).toBe(true);
+    expect(routine?.tasks.find((task) => task.kind === "chores")).toMatchObject({
+      requiresProof: true,
+      actionLabel: "Complete with photo",
+      countsTowardProgress: true,
+    });
+    expect(routine?.tasks.find((task) => task.kind === "curfew")?.countsTowardProgress).toBe(false);
+  });
+
+  it("stores multiple sober-house routine proof photos as resident-linked evidence", () => {
+    const base = buildResidentComplianceStore();
+    const residentStore = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-10T09:00:00-06:00",
+    ).store;
+
+    const routine = buildSoberHouseRoutineSummary({
+      store: residentStore,
+      nowIso: "2026-03-10T10:00:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      sponsorCallLogs: [],
+    });
+    const choreTask = routine?.tasks.find((task) => task.kind === "chores");
+
+    expect(choreTask).toBeTruthy();
+
+    const nextStore = attachSoberHouseRoutineProof({
+      store: residentStore,
+      actor: ACTOR,
+      housingProfile: residentStore.residentHousingProfile!,
+      task: choreTask!,
+      proofUris: ["file:///proofs/chore-1.jpg", "file:///proofs/chore-2.jpg"],
+      timestamp: "2026-03-10T10:05:00-06:00",
+      completionRecordId: "chore-completion-test",
+      completionRecordType: "CHORE",
+    });
+
+    expect(nextStore.evidenceItems).toHaveLength(2);
+    expect(nextStore.evidenceItems[0]).toMatchObject({
+      residentId: residentStore.residentHousingProfile?.residentId,
+      linkedUserId: base.linkedUserId,
+      organizationId: base.store.organization?.id ?? null,
+      houseId: base.houseId,
+      evidenceType: "PHOTO",
+      assetReference: "file:///proofs/chore-2.jpg",
+    });
+    expect(nextStore.evidenceItems[0]?.metadata).toMatchObject({
+      completionRecordId: "chore-completion-test",
+      completionRecordType: "CHORE",
+      routineTaskKind: "chores",
+    });
+    expect(nextStore.evidenceItems[1]?.assetReference).toBe("file:///proofs/chore-1.jpg");
+  });
+
+  it("prefills the resident wizard from persisted profiles when an unrelated stale draft exists", () => {
+    const base = buildResidentComplianceStore();
+    const store = saveResidentWizardDraft(base.store, {
+      ...createDefaultResidentWizardDraft("someone-else"),
+      firstName: "Wrong",
+      lastName: "Resident",
+      assignedHouseId: null,
+      moveInDate: "2026-02-01",
+    });
+
+    const draft = createResidentWizardDraftFromProfiles(base.linkedUserId, store);
+
+    expect(draft.firstName).toBe("Taylor");
+    expect(draft.lastName).toBe("Brooks");
+    expect(draft.assignedHouseId).toBe(base.houseId);
+    expect(draft.emergencyContactName).toBe("Jamie Brooks");
+    expect(draft.programPhaseOnEntry).toBe("Phase 1");
   });
 
   it("marks resident setup incomplete until required sober-house fields are actually finished", () => {
@@ -2868,6 +3176,55 @@ describe("sober house monthly reports", () => {
     expect(summary.weeklyMeetingTile.detail).toContain("Thursday Night AA");
   });
 
+  it("shows sponsor setup needed when sponsor contact is required but not configured yet", () => {
+    const base = buildResidentComplianceStore();
+    let store = upsertUserAccessProfile(
+      base.store,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: base.store.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-12T08:00:00-06:00",
+    ).store;
+
+    store = upsertHouseRuleSet(
+      store,
+      ACTOR,
+      {
+        ...getRuleSetForHouse(store, base.houseId, "2026-03-12T08:00:00-06:00"),
+        scopeType: "HOUSE",
+        houseId: base.houseId,
+        houseGroupId: null,
+        sponsorContact: {
+          enabled: true,
+          contactsRequiredPerWeek: 3,
+          proofType: "CALL_LOG",
+        },
+      },
+      "2026-03-12T08:05:00-06:00",
+    ).store;
+
+    const summary = buildSoberHouseResidentDashboardSummary({
+      store,
+      nowIso: "2026-03-12T10:00:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      sponsorCallLogs: [],
+      complianceSummary: null,
+      upcomingMeetings: [],
+    });
+
+    expect(summary.sponsorContactTile.visible).toBe(true);
+    expect(summary.sponsorContactTile.value).toBe("Setup");
+    expect(summary.sponsorContactTile.badgeLabel).toBe("Setup needed");
+    expect(summary.sponsorContactTile.subtitle).toContain("Sponsor details");
+  });
+
   it("shows sponsor contact progress from effective sober-house rules", () => {
     const base = buildResidentComplianceStore();
     let store = upsertUserAccessProfile(
@@ -2899,6 +3256,18 @@ describe("sober house monthly reports", () => {
         },
       },
       "2026-03-12T08:05:00-06:00",
+    ).store;
+    store = upsertResidentRequirementProfile(
+      store,
+      ACTOR,
+      {
+        ...store.residentRequirementProfile!,
+        sponsorPresent: true,
+        sponsorName: "Sam Sponsor",
+        sponsorPhone: "(555) 555-3131",
+        sponsorContactFrequency: "3 per week",
+      },
+      "2026-03-12T08:06:00-06:00",
     ).store;
 
     const summary = buildSoberHouseResidentDashboardSummary({

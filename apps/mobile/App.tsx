@@ -197,6 +197,8 @@ import { buildSoberHouseResidentDashboardSummary } from "./lib/soberHouse/dashbo
 import { currentMonthKey } from "./lib/soberHouse/monthlyWindow";
 import {
   applyHouseDefaultsToResidentDraft,
+  createResidentHousingProfileFromDraft,
+  createResidentRequirementProfileFromDraft,
   createDefaultResidentWizardDraft,
   getResidentSetupState,
 } from "./lib/soberHouse/resident";
@@ -206,6 +208,7 @@ import {
   setHouseStatus,
   setStaffAssignmentStatus,
   upsertOrganization,
+  upsertResidentHousingProfile,
   upsertResidentRequirementProfile,
   upsertStaffAssignment,
   upsertUserAccessProfile,
@@ -6860,6 +6863,12 @@ export default function App() {
     },
     [canOpenSoberHouseEntry],
   );
+  const openResidentSoberHouseProfile = useCallback(
+    (residentView: "OVERVIEW" | "REQUIREMENTS" = "REQUIREMENTS") => {
+      openSoberHousingSettings({ module: "HUB", residentView });
+    },
+    [openSoberHousingSettings],
+  );
   const soberHouseSettingsScreenKey = useMemo(() => {
     if (!soberHouseAdminLaunchContext) {
       return "sober-house-settings-hub";
@@ -6871,6 +6880,7 @@ export default function App() {
       soberHouseAdminLaunchContext.mode ?? "view",
       soberHouseAdminLaunchContext.houseId ?? "none",
       soberHouseAdminLaunchContext.staffAssignmentId ?? "none",
+      soberHouseAdminLaunchContext.residentView ?? "overview",
     ].join(":");
   }, [soberHouseAdminLaunchContext]);
 
@@ -6948,8 +6958,21 @@ export default function App() {
   );
   const openSoberHouseDashboardDetail = useCallback(
     (kpiId: string) => {
-      void kpiId;
-      openSoberHousingSettings();
+      if (
+        kpiId === "sober-house-requirements" ||
+        kpiId === "chores" ||
+        kpiId === "sponsor-calls" ||
+        kpiId === "job-applications" ||
+        kpiId === "house-meetings" ||
+        kpiId === "one-on-ones" ||
+        kpiId === "house-alerts" ||
+        kpiId === "compliance-snapshot" ||
+        kpiId === "house-schedule"
+      ) {
+        openSoberHousingSettings({ module: "HUB", residentView: "REQUIREMENTS" });
+        return;
+      }
+      openSoberHousingSettings({ module: "HUB", residentView: "OVERVIEW" });
     },
     [openSoberHousingSettings],
   );
@@ -7033,6 +7056,10 @@ export default function App() {
 
   const restartSetup = useCallback(() => {
     const residentProfile = soberHouseStore.residentHousingProfile;
+    const residentDraft =
+      soberHouseStore.residentWizardDraft?.linkedUserId === devAuthUserId
+        ? soberHouseStore.residentWizardDraft
+        : null;
     const organization = soberHouseStore.organization;
     const recoveredOnboardingPath = inferOnboardingPath({
       onboardingPath: wizardOnboardingPath,
@@ -7064,15 +7091,25 @@ export default function App() {
     setWizardOrganizationPrimaryPhone(formatUsPhoneDisplay(organization?.primaryPhone ?? ""));
     setWizardOrganizationPrimaryEmail(organization?.primaryEmail ?? "");
     setWizardOrganizationNotes(organization?.notes ?? "");
-    setWizardResidentFirstName(residentProfile?.firstName ?? "");
-    setWizardResidentLastName(residentProfile?.lastName ?? "");
-    setWizardResidentMoveInDate(formatIsoToUsDate(residentProfile?.moveInDate ?? ""));
-    setWizardResidentRoomOrBed(residentProfile?.roomOrBed ?? "");
-    setWizardResidentEmergencyContactName(residentProfile?.emergencyContactName ?? "");
-    setWizardResidentEmergencyContactPhone(
-      formatUsPhoneDisplay(residentProfile?.emergencyContactPhone ?? ""),
+    setWizardResidentFirstName(residentProfile?.firstName ?? residentDraft?.firstName ?? "");
+    setWizardResidentLastName(residentProfile?.lastName ?? residentDraft?.lastName ?? "");
+    setWizardResidentMoveInDate(
+      residentProfile?.moveInDate
+        ? formatIsoToUsDate(residentProfile.moveInDate)
+        : (residentDraft?.moveInDate ?? ""),
     );
-    setWizardResidentProgramPhase(residentProfile?.programPhaseOnEntry ?? "");
+    setWizardResidentRoomOrBed(residentProfile?.roomOrBed ?? residentDraft?.roomOrBed ?? "");
+    setWizardResidentEmergencyContactName(
+      residentProfile?.emergencyContactName ?? residentDraft?.emergencyContactName ?? "",
+    );
+    setWizardResidentEmergencyContactPhone(
+      formatUsPhoneDisplay(
+        residentProfile?.emergencyContactPhone ?? residentDraft?.emergencyContactPhone ?? "",
+      ),
+    );
+    setWizardResidentProgramPhase(
+      residentProfile?.programPhaseOnEntry ?? residentDraft?.programPhaseOnEntry ?? "",
+    );
     setWizardJusticeTrack(wizardJusticeTrack);
     setWizardSponsorKneesSuggested(sponsorEnabled ? (sponsorKneesSuggested ?? true) : null);
     setWizardRecoverySubstances(recoverySubstances);
@@ -7086,9 +7123,11 @@ export default function App() {
     refreshMeetings,
     recurringServiceCommitments,
     soberHouseStore.residentHousingProfile,
+    soberHouseStore.residentWizardDraft,
     soberHouseStore.organization,
     soberHouseStore.userAccessProfile?.houseId,
     soberHouseStore.userAccessProfile?.role,
+    devAuthUserId,
     sponsorEnabled,
     sponsorKneesSuggested,
     recoverySubstances,
@@ -9488,9 +9527,9 @@ export default function App() {
           wizardSoberHouseId,
           createDefaultResidentWizardDraft(devAuthUserId),
         );
-        nextSoberHouseStore = saveResidentWizardDraft(nextSoberHouseStore, {
+        const residentDraft = {
           ...baseResidentDraft,
-          currentStep: 2,
+          currentStep: 2 as const,
           firstName: wizardResidentFirstName.trim(),
           lastName: wizardResidentLastName.trim(),
           moveInDate: parseUsDateToIso(wizardResidentMoveInDate) ?? wizardResidentMoveInDate,
@@ -9506,7 +9545,32 @@ export default function App() {
             ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek} per week`
             : baseResidentDraft.sponsorContactFrequency,
           updatedAt: soberHouseTimestamp,
-        });
+        };
+        const residentHousingProfile = createResidentHousingProfileFromDraft(
+          nextSoberHouseStore,
+          devAuthUserId,
+          residentDraft,
+          soberHouseTimestamp,
+        );
+        nextSoberHouseStore = upsertResidentHousingProfile(
+          nextSoberHouseStore,
+          actor,
+          residentHousingProfile,
+          soberHouseTimestamp,
+        ).store;
+        const residentRequirementProfile = createResidentRequirementProfileFromDraft(
+          nextSoberHouseStore,
+          devAuthUserId,
+          residentDraft,
+          soberHouseTimestamp,
+        );
+        nextSoberHouseStore = upsertResidentRequirementProfile(
+          nextSoberHouseStore,
+          actor,
+          residentRequirementProfile,
+          soberHouseTimestamp,
+        ).store;
+        nextSoberHouseStore = saveResidentWizardDraft(nextSoberHouseStore, null);
       } else if (wizardOnboardingPath === "COURT_PROGRAM") {
         nextSoberHouseStore = upsertUserAccessProfile(
           nextSoberHouseStore,
@@ -15824,7 +15888,7 @@ export default function App() {
                             <AppButton
                               title="View sober-house profile"
                               variant="secondary"
-                              onPress={openSoberHousingSettings}
+                              onPress={() => openResidentSoberHouseProfile("REQUIREMENTS")}
                             />
                           </View>
                         </GlassCard>
@@ -15834,8 +15898,16 @@ export default function App() {
                     onOpenAttendanceToday={() => openAttendanceHub("dashboard")}
                     onOpenTools={openToolsHub}
                     soberHousingEntryVisible={canOpenSoberHouseEntry}
-                    soberHousingEntryLabel={soberHouseEntryLabel(appAccessRole)}
-                    onOpenSoberHousingSettings={openSoberHousingSettings}
+                    soberHousingEntryLabel={
+                      soberHouseAccessProfile?.role === "HOUSE_RESIDENT"
+                        ? "Sober House Profile"
+                        : soberHouseEntryLabel(appAccessRole)
+                    }
+                    onOpenSoberHousingSettings={
+                      soberHouseAccessProfile?.role === "HOUSE_RESIDENT"
+                        ? () => openResidentSoberHouseProfile("REQUIREMENTS")
+                        : openSoberHousingSettings
+                    }
                     courtEntryVisible={canOpenCourtEntry}
                     courtEntryLabel={courtEntryLabel(appAccessRole)}
                     onOpenProbationParoleSettings={openProbationParoleSettings}
@@ -18319,6 +18391,7 @@ export default function App() {
                     actorId={devAuthUserId}
                     actorName={devUserDisplayName}
                     viewerRole={appAccessRole}
+                    sponsorCallLogs={sponsorCallLogs}
                     adminLaunchContext={soberHouseAdminLaunchContext}
                     onBack={() => handleModeSelect("A")}
                   />
