@@ -22,6 +22,7 @@ type ProtectedOrgAccessGateScreenProps = {
   onDevIdentityDraftChange?: (value: string) => void;
   onApplyDevIdentity?: () => void;
   onBack: () => void;
+  onExit?: () => void;
   onRequestAccess?: () => void;
 };
 
@@ -43,6 +44,7 @@ export function ProtectedOrgAccessGateScreen({
   onDevIdentityDraftChange,
   onApplyDevIdentity,
   onBack,
+  onExit,
   onRequestAccess,
 }: ProtectedOrgAccessGateScreenProps) {
   const title = gateState === "ACCESS_DENIED" ? "Access denied" : "Admin access required";
@@ -100,6 +102,12 @@ export function ProtectedOrgAccessGateScreen({
           </>
         ) : null}
         <AppButton title="Back" onPress={onBack} variant="secondary" />
+        {onExit ? (
+          <>
+            <View style={styles.buttonSpacer} />
+            <AppButton title="Exit" onPress={onExit} variant="secondary" />
+          </>
+        ) : null}
       </View>
       {onDevIdentityDraftChange && onApplyDevIdentity ? (
         <View style={styles.devPanel}>

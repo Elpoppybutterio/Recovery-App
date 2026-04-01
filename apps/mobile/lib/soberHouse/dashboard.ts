@@ -1,5 +1,6 @@
 import type { AttendanceRecordSummary, MeetingAttendanceLogRecord } from "../attendance/storage";
 import { statusToneForComplianceStatus } from "./compliance";
+import { isChoreCompletionVerified } from "./proof";
 import {
   getActiveHouseAlertAnnouncements,
   getChatReceiptForMessageAndUser,
@@ -240,10 +241,6 @@ function getChorePeriodBounds(
   return { start, endExclusive: end, dueBaseDate };
 }
 
-function hasRequiredProof(proofRequirement: string[]): boolean {
-  return proofRequirement.some((entry) => entry !== "NONE");
-}
-
 function sameCalendarDate(left: Date, right: Date): boolean {
   return (
     left.getFullYear() === right.getFullYear() &&
@@ -431,10 +428,7 @@ function buildChoreTileSummary({
           if (!sameCalendarDate(new Date(completedAtMs), now)) {
             return false;
           }
-          if (!hasRequiredProof(record.proofRequirement)) {
-            return true;
-          }
-          return record.proofProvided;
+          return isChoreCompletionVerified(record);
         })
         .map((record) => record.houseChoreId as string),
     );
@@ -506,10 +500,7 @@ function buildChoreTileSummary({
     if (completedAtMs < period.start.getTime() || completedAtMs >= period.endExclusive.getTime()) {
       return false;
     }
-    if (!hasRequiredProof(record.proofRequirement)) {
-      return true;
-    }
-    return record.proofProvided;
+    return isChoreCompletionVerified(record);
   });
 
   const dueAt = parseTimeOnDate(period.dueBaseDate, resident.rules.chores.dueTime);
@@ -1423,9 +1414,6 @@ export function buildSoberHouseResidentDashboardSummary(
       jobApplicationsTile,
       houseMeetingsTile,
       oneOnOneTile,
-      houseAlertsTile,
-      complianceSnapshotTile,
-      houseScheduleTile,
     ].filter((tile) => tile.visible),
   };
 }

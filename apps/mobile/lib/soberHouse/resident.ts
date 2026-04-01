@@ -79,7 +79,7 @@ export function createResidentWizardDraftFromProfiles(
   linkedUserId: string,
   store: SoberHouseSettingsStore,
 ): ResidentWizardDraft {
-  if (store.residentWizardDraft) {
+  if (store.residentWizardDraft?.linkedUserId === linkedUserId) {
     return {
       ...store.residentWizardDraft,
       consentSignatureRef: store.residentWizardDraft.consentSignatureRef

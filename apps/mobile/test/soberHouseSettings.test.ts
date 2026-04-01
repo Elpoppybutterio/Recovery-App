@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getSeededDevUser } from "../lib/devSeedUsers";
 import { createDefaultSoberHouseSettingsStore } from "../lib/soberHouse/defaults";
 import {
   saveResidentWizardDraft,
@@ -1297,6 +1298,32 @@ describe("sober house settings mutations", () => {
     ).toBe(4);
   });
 
+  it("builds the seeded resident user with visible organization, house-group, and house inheritance", () => {
+    const seededResident = getSeededDevUser("resident-user");
+    const store = seededResident?.soberHouseStore;
+    const houseId = store?.userAccessProfile?.houseId ?? null;
+
+    expect(store).not.toBeNull();
+    expect(houseId).not.toBeNull();
+
+    const effective = getEffectiveRuleSetForScope(
+      store!,
+      "HOUSE",
+      houseId,
+      "2026-03-08T11:40:00.000Z",
+    );
+
+    expect(effective.ruleSet.meetings.meetingsPerWeek).toBe(5);
+    expect(effective.ruleSet.sponsorContact.contactsRequiredPerWeek).toBe(3);
+    expect(effective.ruleSet.jobSearch.applicationsRequiredPerWeek).toBe(4);
+    expect(effective.ruleSet.chores.frequency).toBe("DAILY");
+    expect(effective.sources.meetings).toBe("HOUSE");
+    expect(effective.sources.sponsorContact).toBe("HOUSE_GROUP");
+    expect(effective.sources.jobSearch).toBe("ORGANIZATION");
+    expect(effective.sources.chores).toBe("HOUSE_GROUP");
+    expect(effective.sources.curfew).toBe("HOUSE");
+  });
+
   it("prefers the active scope rule set when loading organization defaults back into the editor", () => {
     let store = createDefaultSoberHouseSettingsStore();
     store = upsertOrganization(
@@ -1794,6 +1821,92 @@ describe("sober house compliance evaluation", () => {
       "violation",
     );
     expect(validSummary?.evaluations.find((entry) => entry.ruleType === "chores")?.status).toBe(
+      "compliant",
+    );
+  });
+
+  it("shows chore proof as awaiting manager confirmation until the manager confirms it", () => {
+    const base = buildResidentComplianceStore();
+    const configuredStore = upsertHouseRuleSet(
+      base.store,
+      ACTOR,
+      {
+        ...base.store.houseRuleSets[0]!,
+        chores: {
+          ...base.store.houseRuleSets[0]!.chores,
+          proofRequirement: ["PHOTO", "MANAGER_CONFIRMATION"],
+        },
+      },
+      "2026-03-09T17:00:00-06:00",
+    ).store;
+    const pendingStore = upsertChoreCompletionRecord(
+      configuredStore,
+      ACTOR,
+      {
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        organizationId: configuredStore.organization?.id ?? null,
+        houseId: configuredStore.residentHousingProfile?.houseId ?? null,
+        houseChoreId: null,
+        completedAt: "2026-03-09T17:30:00-06:00",
+        proofRequirement: ["PHOTO", "MANAGER_CONFIRMATION"],
+        proofProvided: true,
+        proofReference: "file:///documents/chore-proof.jpg",
+        managerConfirmationRequired: true,
+        managerConfirmationStatus: "PENDING",
+        managerConfirmationRequestedAt: "2026-03-09T17:31:00-06:00",
+        managerConfirmationRequestedVia: "SHARE_SHEET",
+        managerConfirmedAt: null,
+        notes: "Uploaded sink photo and shared with manager.",
+      },
+      "2026-03-09T17:31:00-06:00",
+    ).store;
+    const confirmedStore = upsertChoreCompletionRecord(
+      pendingStore,
+      ACTOR,
+      {
+        id: pendingStore.choreCompletionRecords[0]!.id,
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        organizationId: pendingStore.organization?.id ?? null,
+        houseId: pendingStore.residentHousingProfile?.houseId ?? null,
+        houseChoreId: null,
+        completedAt: "2026-03-09T17:30:00-06:00",
+        proofRequirement: ["PHOTO", "MANAGER_CONFIRMATION"],
+        proofProvided: true,
+        proofReference: "file:///documents/chore-proof.jpg",
+        managerConfirmationRequired: true,
+        managerConfirmationStatus: "CONFIRMED",
+        managerConfirmationRequestedAt: "2026-03-09T17:31:00-06:00",
+        managerConfirmationRequestedVia: "SHARE_SHEET",
+        managerConfirmedAt: "2026-03-09T17:45:00-06:00",
+        notes: "Manager confirmed completion.",
+      },
+      "2026-03-09T17:45:00-06:00",
+    ).store;
+
+    const pendingSummary = evaluateResidentCompliance({
+      store: pendingStore,
+      nowIso: "2026-03-09T17:50:00-06:00",
+      currentLocation: { lat: 45.7833, lng: -108.5007, accuracyM: 10 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+    const confirmedSummary = evaluateResidentCompliance({
+      store: confirmedStore,
+      nowIso: "2026-03-09T17:50:00-06:00",
+      currentLocation: { lat: 45.7833, lng: -108.5007, accuracyM: 10 },
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+    });
+
+    expect(pendingSummary?.evaluations.find((entry) => entry.ruleType === "chores")?.status).toBe(
+      "at_risk",
+    );
+    expect(
+      pendingSummary?.evaluations.find((entry) => entry.ruleType === "chores")?.statusReason,
+    ).toContain("awaiting manager confirmation");
+    expect(confirmedSummary?.evaluations.find((entry) => entry.ruleType === "chores")?.status).toBe(
       "compliant",
     );
   });
@@ -2723,6 +2836,76 @@ describe("sober house monthly reports", () => {
     expect(nextStore.evidenceItems[1]?.assetReference).toBe("file:///proofs/chore-1.jpg");
   });
 
+  it("keeps chore routine progress pending until manager confirmation is satisfied", () => {
+    const base = buildResidentComplianceStore();
+    const configuredStore = upsertHouseRuleSet(
+      base.store,
+      ACTOR,
+      {
+        ...base.store.houseRuleSets[0]!,
+        chores: {
+          ...base.store.houseRuleSets[0]!.chores,
+          proofRequirement: ["PHOTO", "MANAGER_CONFIRMATION"],
+        },
+      },
+      "2026-03-10T08:30:00-06:00",
+    ).store;
+    let residentStore = upsertUserAccessProfile(
+      configuredStore,
+      ACTOR,
+      {
+        linkedUserId: base.linkedUserId,
+        role: "HOUSE_RESIDENT",
+        organizationId: configuredStore.organization?.id ?? null,
+        houseId: base.houseId,
+        houseGroupId: null,
+        status: "ACTIVE",
+      },
+      "2026-03-10T09:00:00-06:00",
+    ).store;
+
+    residentStore = upsertChoreCompletionRecord(
+      residentStore,
+      ACTOR,
+      {
+        residentId: base.residentId,
+        linkedUserId: base.linkedUserId,
+        organizationId: residentStore.organization?.id ?? null,
+        houseId: base.houseId,
+        houseChoreId: null,
+        completedAt: "2026-03-10T10:05:00-06:00",
+        proofRequirement: ["PHOTO", "MANAGER_CONFIRMATION"],
+        proofProvided: true,
+        proofReference: "file:///proofs/chore-proof.jpg",
+        managerConfirmationRequired: true,
+        managerConfirmationStatus: "PENDING",
+        managerConfirmationRequestedAt: "2026-03-10T10:06:00-06:00",
+        managerConfirmationRequestedVia: "SHARE_SHEET",
+        managerConfirmedAt: null,
+        notes: "Kitchen cleanup submitted.",
+      },
+      "2026-03-10T10:06:00-06:00",
+    ).store;
+
+    const routine = buildSoberHouseRoutineSummary({
+      store: residentStore,
+      nowIso: "2026-03-10T10:10:00-06:00",
+      attendanceRecords: [],
+      meetingAttendanceLogs: [],
+      sponsorCallLogs: [],
+    });
+    const choreTask = routine?.tasks.find((task) => task.kind === "chores");
+
+    expect(choreTask).toMatchObject({
+      status: "pending",
+      statusLabel: "Awaiting manager",
+      proofMode: "PHOTO_MANAGER_CONFIRMATION",
+      managerConfirmationRequired: true,
+      completedCount: 0,
+    });
+    expect(routine?.completedRequiredCount).toBe(0);
+  });
+
   it("prefills the resident wizard from persisted profiles when an unrelated stale draft exists", () => {
     const base = buildResidentComplianceStore();
     const store = saveResidentWizardDraft(base.store, {
@@ -3121,13 +3304,15 @@ describe("sober house monthly reports", () => {
     expect(summary.complianceSnapshotTile.visible).toBe(true);
     expect(summary.tiles.map((tile) => tile.id)).toEqual(
       expect.arrayContaining([
+        "sober-house-requirements",
         "chores",
         "weekly-meetings",
         "house-meetings",
         "one-on-ones",
-        "house-alerts",
-        "compliance-snapshot",
       ]),
+    );
+    expect(summary.tiles.map((tile) => tile.id)).not.toEqual(
+      expect.arrayContaining(["house-alerts", "compliance-snapshot"]),
     );
   });
 

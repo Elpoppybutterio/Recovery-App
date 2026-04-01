@@ -1,6 +1,14 @@
 import type { AttendanceRecordSummary, MeetingAttendanceLogRecord } from "../attendance/storage";
 import { upsertEvidenceItem } from "./mutations";
 import {
+  choreRequiresManagerConfirmation,
+  choreRequiresPhotoProof,
+  formatChoreProofModeLabel,
+  isChoreCompletionVerified,
+  resolveChoreCompletionWorkflowStatus,
+  resolveChoreProofMode,
+} from "./proof";
+import {
   getHouseById,
   getHouseChoresForResident,
   getHouseMeetingsInRange,
@@ -9,13 +17,20 @@ import {
 import type {
   AuditActor,
   ChoreFrequency,
+  ChoreCompletionRecord,
   HouseChore,
   HouseRuleSet,
   ResidentHousingProfile,
   SoberHouseSettingsStore,
 } from "./types";
 
-export type SoberHouseRoutineTaskStatus = "due" | "completed" | "overdue" | "setup" | "info";
+export type SoberHouseRoutineTaskStatus =
+  | "due"
+  | "completed"
+  | "overdue"
+  | "setup"
+  | "info"
+  | "pending";
 export type SoberHouseRoutineTaskKind =
   | "meetings"
   | "sponsor_calls"
@@ -42,6 +57,9 @@ export type SoberHouseRoutineTask = {
   actionLabel: string | null;
   statusLabel: string;
   sourceLabel: string;
+  proofMode: ReturnType<typeof resolveChoreProofMode> | null;
+  workflowStatus: ReturnType<typeof resolveChoreCompletionWorkflowStatus> | null;
+  managerConfirmationRequired: boolean;
   houseChoreId: string | null;
   houseMeetingId: string | null;
   recurringObligationId: string | null;
@@ -229,10 +247,6 @@ function isExplicitChoreDueToday(chore: HouseChore, now: Date): boolean {
   return chore.frequency === "DAILY";
 }
 
-function hasRequiredProof(proofRequirement: string[]): boolean {
-  return proofRequirement.some((entry) => entry !== "NONE");
-}
-
 function formatTimeLabel(hhmm: string): string {
   if (!/^\d{2}:\d{2}$/.test(hhmm)) {
     return hhmm;
@@ -261,18 +275,98 @@ function formatDateLabel(timestamp: string): string {
   });
 }
 
-function choreProofLabel(ruleSet: HouseRuleSet): string | null {
-  if (ruleSet.chores.proofRequirement.includes("PHOTO")) {
-    return "Photo proof required";
-  }
-  if (hasRequiredProof(ruleSet.chores.proofRequirement)) {
-    return "Proof required";
-  }
-  return null;
-}
-
 function sourceLabel(_ruleSet: HouseRuleSet, label: string): string {
   return `${label} requirement`;
+}
+
+function latestCompletionForRecords(
+  records: ChoreCompletionRecord[],
+  predicate: (record: ChoreCompletionRecord) => boolean,
+): ChoreCompletionRecord | null {
+  return (
+    records
+      .filter(predicate)
+      .sort(
+        (left, right) =>
+          (toTimestamp(right.completedAt) ?? 0) - (toTimestamp(left.completedAt) ?? 0),
+      )[0] ?? null
+  );
+}
+
+function buildChoreTaskPresentation(input: {
+  proofRequirement: HouseChore["proofRequirement"];
+  latestCompletion: ChoreCompletionRecord | null;
+  overdue: boolean;
+  defaultDueLabel: string;
+}): Pick<
+  SoberHouseRoutineTask,
+  | "status"
+  | "completedCount"
+  | "requiresProof"
+  | "proofLabel"
+  | "actionLabel"
+  | "statusLabel"
+  | "proofMode"
+  | "workflowStatus"
+  | "managerConfirmationRequired"
+> {
+  const proofMode = resolveChoreProofMode(input.proofRequirement);
+  const workflowStatus = resolveChoreCompletionWorkflowStatus(input.latestCompletion);
+  const managerConfirmationRequired = choreRequiresManagerConfirmation(input.proofRequirement);
+  const requiresProof = choreRequiresPhotoProof(input.proofRequirement);
+  const verified = input.latestCompletion
+    ? isChoreCompletionVerified(input.latestCompletion)
+    : false;
+
+  if (verified) {
+    return {
+      status: "completed",
+      completedCount: 1,
+      requiresProof,
+      proofLabel: formatChoreProofModeLabel(input.proofRequirement),
+      actionLabel: null,
+      statusLabel: "Completed",
+      proofMode,
+      workflowStatus,
+      managerConfirmationRequired,
+    };
+  }
+
+  if (workflowStatus === "proof_attached" || workflowStatus === "awaiting_manager_confirmation") {
+    return {
+      status: "pending",
+      completedCount: 0,
+      requiresProof,
+      proofLabel: formatChoreProofModeLabel(input.proofRequirement),
+      actionLabel: null,
+      statusLabel: "Awaiting manager",
+      proofMode,
+      workflowStatus,
+      managerConfirmationRequired,
+    };
+  }
+
+  return {
+    status: input.overdue ? "overdue" : "due",
+    completedCount: 0,
+    requiresProof,
+    proofLabel: formatChoreProofModeLabel(input.proofRequirement),
+    actionLabel:
+      proofMode === "PHOTO" || proofMode === "PHOTO_MANAGER_CONFIRMATION"
+        ? "Complete with photo"
+        : proofMode === "MANAGER_CONFIRMATION"
+          ? "Submit for manager review"
+          : "Post completion",
+    statusLabel:
+      workflowStatus === "proof_required"
+        ? "Proof required"
+        : input.overdue
+          ? "Overdue"
+          : input.defaultDueLabel,
+    proofMode,
+    workflowStatus,
+    managerConfirmationRequired,
+  };
 }
 
 function resolveResidentContext(
@@ -446,6 +540,9 @@ export function buildSoberHouseRoutineSummary(
           ? "Completed"
           : `${remainingCount} meeting${remainingCount === 1 ? "" : "s"} left`,
       sourceLabel: sourceLabel(resident.rules, "Meeting"),
+      proofMode: null,
+      workflowStatus: null,
+      managerConfirmationRequired: false,
       houseChoreId: null,
       houseMeetingId: null,
       recurringObligationId: null,
@@ -484,6 +581,9 @@ export function buildSoberHouseRoutineSummary(
           ? "Completed"
           : `${remainingCount} sponsor call${remainingCount === 1 ? "" : "s"} left`,
       sourceLabel: sourceLabel(resident.rules, "Sponsor"),
+      proofMode: null,
+      workflowStatus: null,
+      managerConfirmationRequired: false,
       houseChoreId: null,
       houseMeetingId: null,
       recurringObligationId: null,
@@ -496,56 +596,51 @@ export function buildSoberHouseRoutineSummary(
       resident.residentId,
       resident.houseId,
     );
-    const validCompletionByChoreId = new Set(
-      context.store.choreCompletionRecords
-        .filter((record) => record.residentId === resident.residentId && record.houseChoreId)
-        .filter((record) => {
-          const completedAtMs = toTimestamp(record.completedAt);
-          if (completedAtMs === null) {
-            return false;
-          }
-          if (!sameCalendarDate(new Date(completedAtMs), now)) {
-            return false;
-          }
-          if (!hasRequiredProof(record.proofRequirement)) {
-            return true;
-          }
-          return record.proofProvided || Boolean(record.proofReference);
-        })
-        .map((record) => record.houseChoreId as string),
-    );
-
     const choresDueToday = explicitChores.filter((chore) => isExplicitChoreDueToday(chore, now));
     if (choresDueToday.length > 0) {
       for (const chore of choresDueToday) {
         const dueAt = parseTimeOnDate(now, chore.dueTimeLocalHhmm);
-        const completed = validCompletionByChoreId.has(chore.id);
-        const overdue = Boolean(dueAt && now.getTime() > dueAt.getTime() && !completed);
+        const latestCompletion = latestCompletionForRecords(
+          context.store.choreCompletionRecords,
+          (record) => {
+            if (record.residentId !== resident.residentId || record.houseChoreId !== chore.id) {
+              return false;
+            }
+            const completedAtMs = toTimestamp(record.completedAt);
+            return completedAtMs !== null && sameCalendarDate(new Date(completedAtMs), now);
+          },
+        );
+        const overdue = Boolean(
+          dueAt &&
+          now.getTime() > dueAt.getTime() &&
+          !(latestCompletion ? isChoreCompletionVerified(latestCompletion) : false),
+        );
+        const taskPresentation = buildChoreTaskPresentation({
+          proofRequirement: chore.proofRequirement,
+          latestCompletion,
+          overdue,
+          defaultDueLabel: "Due today",
+        });
         tasks.push({
           id: `routine-chore-${chore.id}`,
           kind: "chores",
           title: chore.title,
           detail: chore.summary || "Complete the assigned chore and post completion here.",
-          status: completed ? "completed" : overdue ? "overdue" : "due",
+          status: taskPresentation.status,
           locked: true,
           countsTowardProgress: true,
           requiredCount: 1,
-          completedCount: completed ? 1 : 0,
+          completedCount: taskPresentation.completedCount,
           dueLabel: dueAt ? formatTimeLabel(chore.dueTimeLocalHhmm) : "Today",
           dueAtIso: dueAt?.toISOString() ?? null,
-          requiresProof: chore.proofRequirement.includes("PHOTO"),
-          proofLabel: chore.proofRequirement.includes("PHOTO")
-            ? "Photo proof required"
-            : chore.proofRequirement.some((entry) => entry !== "NONE")
-              ? "Proof required"
-              : null,
-          actionLabel: completed
-            ? null
-            : chore.proofRequirement.includes("PHOTO")
-              ? "Complete with photo"
-              : "Post completion",
-          statusLabel: completed ? "Completed" : overdue ? "Overdue" : "Due today",
+          requiresProof: taskPresentation.requiresProof,
+          proofLabel: taskPresentation.proofLabel,
+          actionLabel: taskPresentation.actionLabel,
+          statusLabel: taskPresentation.statusLabel,
           sourceLabel: "Chore assignment",
+          proofMode: taskPresentation.proofMode,
+          workflowStatus: taskPresentation.workflowStatus,
+          managerConfirmationRequired: taskPresentation.managerConfirmationRequired,
           houseChoreId: chore.id,
           houseMeetingId: null,
           recurringObligationId: null,
@@ -557,28 +652,32 @@ export function buildSoberHouseRoutineSummary(
         resident.rules.chores.frequency,
         resident.moveInDate,
       );
-      const validCompletions = context.store.choreCompletionRecords.filter((record) => {
-        if (record.residentId !== resident.residentId) {
-          return false;
-        }
-        const completedAtMs = toTimestamp(record.completedAt);
-        if (completedAtMs === null) {
-          return false;
-        }
-        if (
-          completedAtMs < period.start.getTime() ||
-          completedAtMs >= period.endExclusive.getTime()
-        ) {
-          return false;
-        }
-        if (!hasRequiredProof(record.proofRequirement)) {
-          return true;
-        }
-        return record.proofProvided || Boolean(record.proofReference);
-      });
+      const latestCompletion = latestCompletionForRecords(
+        context.store.choreCompletionRecords,
+        (record) => {
+          if (record.residentId !== resident.residentId || record.houseChoreId !== null) {
+            return false;
+          }
+          const completedAtMs = toTimestamp(record.completedAt);
+          return (
+            completedAtMs !== null &&
+            completedAtMs >= period.start.getTime() &&
+            completedAtMs < period.endExclusive.getTime()
+          );
+        },
+      );
       const dueAt = parseTimeOnDate(period.dueBaseDate, resident.rules.chores.dueTime);
-      const completed = validCompletions.length > 0;
-      const overdue = Boolean(dueAt && now.getTime() > dueAt.getTime() && !completed);
+      const overdue = Boolean(
+        dueAt &&
+        now.getTime() > dueAt.getTime() &&
+        !(latestCompletion ? isChoreCompletionVerified(latestCompletion) : false),
+      );
+      const taskPresentation = buildChoreTaskPresentation({
+        proofRequirement: resident.rules.chores.proofRequirement,
+        latestCompletion,
+        overdue,
+        defaultDueLabel: "Required",
+      });
       tasks.push({
         id: "routine-generic-chore",
         kind: "chores",
@@ -586,22 +685,21 @@ export function buildSoberHouseRoutineSummary(
         detail:
           resident.assignedChoreNotes ||
           `Complete your ${resident.rules.chores.frequency.toLowerCase()} chore cycle here.`,
-        status: completed ? "completed" : overdue ? "overdue" : "due",
+        status: taskPresentation.status,
         locked: true,
         countsTowardProgress: true,
         requiredCount: 1,
-        completedCount: completed ? 1 : 0,
+        completedCount: taskPresentation.completedCount,
         dueLabel: dueAt ? formatDateLabel(dueAt.toISOString()) : resident.rules.chores.frequency,
         dueAtIso: dueAt?.toISOString() ?? null,
-        requiresProof: resident.rules.chores.proofRequirement.includes("PHOTO"),
-        proofLabel: choreProofLabel(resident.rules),
-        actionLabel: completed
-          ? null
-          : resident.rules.chores.proofRequirement.includes("PHOTO")
-            ? "Complete with photo"
-            : "Post completion",
-        statusLabel: completed ? "Completed" : overdue ? "Overdue" : "Required",
+        requiresProof: taskPresentation.requiresProof,
+        proofLabel: taskPresentation.proofLabel,
+        actionLabel: taskPresentation.actionLabel,
+        statusLabel: taskPresentation.statusLabel,
         sourceLabel: sourceLabel(resident.rules, "Chore"),
+        proofMode: taskPresentation.proofMode,
+        workflowStatus: taskPresentation.workflowStatus,
+        managerConfirmationRequired: taskPresentation.managerConfirmationRequired,
         houseChoreId: null,
         houseMeetingId: null,
         recurringObligationId: null,
@@ -657,6 +755,9 @@ export function buildSoberHouseRoutineSummary(
           ? "Completed"
           : `${remainingCount} application${remainingCount === 1 ? "" : "s"} left`,
       sourceLabel: sourceLabel(resident.rules, "Job application"),
+      proofMode: null,
+      workflowStatus: null,
+      managerConfirmationRequired: false,
       houseChoreId: null,
       houseMeetingId: null,
       recurringObligationId: null,
@@ -702,6 +803,9 @@ export function buildSoberHouseRoutineSummary(
           ? "Overdue"
           : "Scheduled",
       sourceLabel: "House meeting requirement",
+      proofMode: null,
+      workflowStatus: null,
+      managerConfirmationRequired: false,
       houseChoreId: null,
       houseMeetingId: meeting.id,
       recurringObligationId: meeting.recurringObligationId,
@@ -737,6 +841,9 @@ export function buildSoberHouseRoutineSummary(
       actionLabel: null,
       statusLabel: "Auto-tracked",
       sourceLabel: sourceLabel(resident.rules, "Curfew"),
+      proofMode: null,
+      workflowStatus: null,
+      managerConfirmationRequired: false,
       houseChoreId: null,
       houseMeetingId: null,
       recurringObligationId: null,
@@ -775,6 +882,9 @@ export function buildSoberHouseRoutineSummary(
       actionLabel: completedToday ? null : "Post completion",
       statusLabel: completedToday ? "Completed today" : "Available",
       sourceLabel: sourceLabel(resident.rules, "Work"),
+      proofMode: null,
+      workflowStatus: null,
+      managerConfirmationRequired: false,
       houseChoreId: null,
       houseMeetingId: null,
       recurringObligationId: null,

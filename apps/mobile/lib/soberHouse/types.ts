@@ -15,6 +15,8 @@ export type StaffRole = "OWNER" | "HOUSE_MANAGER" | "ASSISTANT_MANAGER" | "RESID
 export type CurfewAlertBasis = "CLOCK_ONLY" | "ESTIMATED_TRAVEL_TIME" | "BOTH";
 export type ChoreFrequency = "DAILY" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 export type ProofRequirement = "NONE" | "CHECKLIST" | "PHOTO" | "MANAGER_CONFIRMATION";
+export type ManagerConfirmationStatus = "NOT_REQUIRED" | "PENDING" | "CONFIRMED";
+export type ManagerConfirmationHandoffMethod = "SHARE_SHEET" | "TEXT_MESSAGE";
 export type MeetingType =
   | "AA"
   | "NA"
@@ -755,6 +757,11 @@ export type ChoreCompletionRecord = {
   proofRequirement: ProofRequirement[];
   proofProvided: boolean;
   proofReference: string | null;
+  managerConfirmationRequired?: boolean;
+  managerConfirmationStatus?: ManagerConfirmationStatus;
+  managerConfirmationRequestedAt?: string | null;
+  managerConfirmationRequestedVia?: ManagerConfirmationHandoffMethod | null;
+  managerConfirmedAt?: string | null;
   notes: string;
   createdAt: string;
   updatedAt: string;

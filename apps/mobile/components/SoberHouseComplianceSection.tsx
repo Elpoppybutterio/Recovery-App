@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable, Share, StyleSheet, Text, TextInput, View } from "react-native";
 import { loadAttendanceRecords, loadMeetingAttendanceLogs } from "../lib/attendance/storage";
 import { getCurrentLocation, type LocationReadResult } from "../lib/services/locationService";
 import {
@@ -20,6 +20,12 @@ import {
   type SoberHouseRoutineTask,
 } from "../lib/soberHouse/routine";
 import {
+  choreRequiresManagerConfirmation,
+  choreRequiresPhotoProof,
+  formatChoreProofModeLabel,
+  resolveChoreProofMode,
+} from "../lib/soberHouse/proof";
+import {
   getHouseById,
   getHouseChoresForResident,
   getRuleSetForHouse,
@@ -28,6 +34,7 @@ import type {
   AuditActor,
   ComplianceEvaluation,
   HouseChore,
+  ManagerConfirmationHandoffMethod,
   SoberHouseSettingsStore,
 } from "../lib/soberHouse/types";
 import { colors, radius, spacing, typography } from "../lib/theme/tokens";
@@ -68,6 +75,7 @@ type Props = {
   isSaving: boolean;
   sponsorCallLogs: Array<{ id: string; atIso: string; success: boolean }>;
   readOnly?: boolean;
+  onOpenSetupCompletion?: (ruleType: ComplianceEvaluation["ruleType"]) => void;
   onPersist: (
     nextStore: SoberHouseSettingsStore,
     successMessage: string,
@@ -98,6 +106,25 @@ function formatIso(value: string | null): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
+function formatEvaluationValue(value: ComplianceEvaluation["actualValue"]): string {
+  if (value === null || value === undefined) {
+    return "None";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  if (typeof value === "string") {
+    if (/^\d{4}-\d{2}-\d{2}T/.test(value)) {
+      return formatIso(value);
+    }
+    return value.replaceAll("_", " ");
+  }
+  return String(value);
+}
+
 function statusColors(status: ComplianceEvaluation["status"]) {
   const tone = statusToneForComplianceStatus(status);
   if (tone === "green") {
@@ -118,6 +145,32 @@ function labelForRule(ruleType: ComplianceEvaluation["ruleType"]): string {
       return "Job Search";
     default:
       return ruleType.charAt(0).toUpperCase() + ruleType.slice(1);
+  }
+}
+
+function choreSubmitLabel(task: SoberHouseRoutineTask): string {
+  switch (task.proofMode) {
+    case "PHOTO":
+      return "Complete with photo";
+    case "MANAGER_CONFIRMATION":
+      return "Submit for manager review";
+    case "PHOTO_MANAGER_CONFIRMATION":
+      return "Submit proof for manager review";
+    default:
+      return task.actionLabel ?? "Post completion";
+  }
+}
+
+function attentionToneLabel(status: ComplianceEvaluation["status"]): string {
+  switch (status) {
+    case "violation":
+      return "Violation";
+    case "at_risk":
+      return "At risk";
+    case "incomplete_setup":
+      return "Setup";
+    default:
+      return "Needs attention";
   }
 }
 
@@ -146,6 +199,14 @@ function routineStatusPalette(task: SoberHouseRoutineTask) {
       pillText: "#F8D47A",
     };
   }
+  if (task.status === "pending") {
+    return {
+      borderColor: "rgba(59, 130, 246, 0.35)",
+      backgroundColor: "rgba(59, 130, 246, 0.10)",
+      pillBackground: "rgba(59, 130, 246, 0.18)",
+      pillText: "#BFDBFE",
+    };
+  }
   return {
     borderColor: "rgba(148, 163, 184, 0.24)",
     backgroundColor: "rgba(255, 255, 255, 0.05)",
@@ -154,18 +215,23 @@ function routineStatusPalette(task: SoberHouseRoutineTask) {
   };
 }
 
-function ComplianceRow({ evaluation }: { evaluation: ComplianceEvaluation }) {
+function ComplianceRow({
+  evaluation,
+  onOpenSetupCompletion,
+}: {
+  evaluation: ComplianceEvaluation;
+  onOpenSetupCompletion?: (ruleType: ComplianceEvaluation["ruleType"]) => void;
+}) {
   const palette = statusColors(evaluation.status);
-  const metaBits: string[] = [];
-  if (evaluation.effectiveTargetValue !== null) {
-    metaBits.push(`Target: ${String(evaluation.effectiveTargetValue)}`);
-  }
-  if (evaluation.actualValue !== null) {
-    metaBits.push(`Actual: ${String(evaluation.actualValue)}`);
-  }
-  if (evaluation.dueAt) {
-    metaBits.push(`Due: ${formatIso(evaluation.dueAt)}`);
-  }
+  const metaRows = [
+    evaluation.effectiveTargetValue !== null
+      ? { label: "Target", value: formatEvaluationValue(evaluation.effectiveTargetValue) }
+      : null,
+    evaluation.actualValue !== null
+      ? { label: "Actual", value: formatEvaluationValue(evaluation.actualValue) }
+      : null,
+    evaluation.dueAt ? { label: "Due", value: formatIso(evaluation.dueAt) } : null,
+  ].filter((entry): entry is { label: string; value: string } => entry !== null);
 
   return (
     <View style={styles.complianceRow}>
@@ -178,8 +244,24 @@ function ComplianceRow({ evaluation }: { evaluation: ComplianceEvaluation }) {
         </View>
       </View>
       <Text style={styles.complianceReason}>{evaluation.statusReason}</Text>
-      {metaBits.length > 0 ? (
-        <Text style={styles.complianceMeta}>{metaBits.join(" • ")}</Text>
+      {metaRows.length > 0 ? (
+        <View style={styles.complianceMetaList}>
+          {metaRows.map((entry) => (
+            <View key={`${evaluation.ruleType}-${entry.label}`} style={styles.complianceMetaCard}>
+              <Text style={styles.complianceMetaLabel}>{entry.label}</Text>
+              <Text style={styles.complianceMetaValue}>{entry.value}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+      {evaluation.status === "incomplete_setup" && onOpenSetupCompletion ? (
+        <View style={styles.inlineActions}>
+          <AppButton
+            title="Complete setup"
+            variant="secondary"
+            onPress={() => onOpenSetupCompletion(evaluation.ruleType)}
+          />
+        </View>
       ) : null}
     </View>
   );
@@ -192,6 +274,7 @@ export function SoberHouseComplianceSection({
   isSaving,
   sponsorCallLogs,
   readOnly = false,
+  onOpenSetupCompletion,
   onPersist,
 }: Props) {
   const [attendanceRecords, setAttendanceRecords] = useState<
@@ -206,6 +289,8 @@ export function SoberHouseComplianceSection({
   const [composerNotes, setComposerNotes] = useState("");
   const [composerEmployerName, setComposerEmployerName] = useState("");
   const [composerProofUris, setComposerProofUris] = useState<string[]>([]);
+  const [composerManagerHandoffMethod, setComposerManagerHandoffMethod] =
+    useState<ManagerConfirmationHandoffMethod | null>(null);
 
   const refreshContext = useCallback(
     async (requestPermission: boolean) => {
@@ -230,6 +315,7 @@ export function SoberHouseComplianceSection({
     setComposerNotes("");
     setComposerEmployerName("");
     setComposerProofUris([]);
+    setComposerManagerHandoffMethod(null);
   }, [store]);
 
   const nowIso = useMemo(
@@ -295,6 +381,7 @@ export function SoberHouseComplianceSection({
     setComposerNotes("");
     setComposerEmployerName("");
     setComposerProofUris([]);
+    setComposerManagerHandoffMethod(null);
   }, []);
 
   const captureProofPhoto = useCallback(async () => {
@@ -331,18 +418,60 @@ export function SoberHouseComplianceSection({
     }
   }, []);
 
+  const shareTaskWithManager = useCallback(
+    async (task: SoberHouseRoutineTask) => {
+      if (!housingProfile) {
+        setStatusMessage("Resident housing must be configured before sharing with a manager.");
+        return;
+      }
+      const proofBits =
+        composerProofUris.length > 0
+          ? `Attached proof photos: ${composerProofUris.length}.`
+          : "No proof photos attached yet.";
+      const message = [
+        `${residentName} submitted a sober-house ${task.kind.replaceAll("_", " ")} update.`,
+        `Task: ${task.title}.`,
+        proofBits,
+        composerNotes.trim() ? `Notes: ${composerNotes.trim()}` : null,
+        house?.name ? `House: ${house.name}.` : null,
+        "Manager confirmation is still required.",
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      try {
+        const result = await Share.share({
+          title: `${task.title} manager handoff`,
+          message,
+        });
+        if (result.action === Share.dismissedAction) {
+          setStatusMessage("Manager handoff canceled.");
+          return;
+        }
+        setComposerManagerHandoffMethod("SHARE_SHEET");
+        setStatusMessage("Opened the manager handoff share sheet.");
+      } catch {
+        setStatusMessage("Manager handoff is unavailable on this device right now.");
+      }
+    },
+    [composerNotes, composerProofUris.length, house?.name, housingProfile, residentName],
+  );
+
   const persistChoreCompletion = useCallback(
     async (task: SoberHouseRoutineTask) => {
       if (!housingProfile || !ruleSet) {
         setStatusMessage("Set up a resident housing profile before logging chores.");
         return;
       }
-      if (task.requiresProof && composerProofUris.length === 0) {
+      const chore = task.houseChoreId ? (explicitChoreLookup.get(task.houseChoreId) ?? null) : null;
+      const proofRequirement = chore?.proofRequirement ?? ruleSet.chores.proofRequirement;
+      const requiresPhotoProof = choreRequiresPhotoProof(proofRequirement);
+      const requiresManagerConfirmation = choreRequiresManagerConfirmation(proofRequirement);
+      if (requiresPhotoProof && composerProofUris.length === 0) {
         setStatusMessage("Attach chore proof before marking this task complete.");
         return;
       }
       const now = new Date().toISOString();
-      const chore = task.houseChoreId ? (explicitChoreLookup.get(task.houseChoreId) ?? null) : null;
       const completionRecordId = createEntityId("chore-completion");
       const result = upsertChoreCompletionRecord(
         store,
@@ -355,9 +484,14 @@ export function SoberHouseComplianceSection({
           houseId: housingProfile.houseId,
           houseChoreId: task.houseChoreId,
           completedAt: now,
-          proofRequirement: chore?.proofRequirement ?? ruleSet.chores.proofRequirement,
+          proofRequirement,
           proofProvided: composerProofUris.length > 0,
           proofReference: composerProofUris[0] ?? null,
+          managerConfirmationRequired: requiresManagerConfirmation,
+          managerConfirmationStatus: requiresManagerConfirmation ? "PENDING" : "NOT_REQUIRED",
+          managerConfirmationRequestedAt: composerManagerHandoffMethod ? now : null,
+          managerConfirmationRequestedVia: composerManagerHandoffMethod,
+          managerConfirmedAt: null,
           notes: composerNotes.trim(),
         },
         now,
@@ -372,14 +506,24 @@ export function SoberHouseComplianceSection({
         completionRecordId,
         completionRecordType: "CHORE",
       });
-      await onPersist(nextStore, "Chore completion posted.");
+      await onPersist(
+        nextStore,
+        requiresManagerConfirmation
+          ? "Chore proof submitted. Awaiting manager confirmation."
+          : "Chore completion posted.",
+      );
       clearComposer();
-      setStatusMessage("Chore completion posted.");
+      setStatusMessage(
+        requiresManagerConfirmation
+          ? "Chore proof submitted and waiting on manager confirmation."
+          : "Chore completion posted.",
+      );
       await refreshContext(false);
     },
     [
       actor,
       clearComposer,
+      composerManagerHandoffMethod,
       composerNotes,
       composerProofUris,
       explicitChoreLookup,
@@ -522,6 +666,7 @@ export function SoberHouseComplianceSection({
         setComposerNotes("");
         setComposerEmployerName("");
         setComposerProofUris([]);
+        setComposerManagerHandoffMethod(null);
       }
     },
     [isSaving, persistHouseMeetingAttendance, readOnly],
@@ -597,6 +742,56 @@ export function SoberHouseComplianceSection({
         </Text>
       </GlassCard>
 
+      {!readOnly ? (
+        <GlassCard style={styles.card}>
+          <Text style={styles.sectionTitle}>Items Needing Attention</Text>
+          <Text style={styles.sectionMeta}>
+            Highlights the current sober-house items that still need action or setup.
+          </Text>
+          {attentionItems.length === 0 ? (
+            <Text style={styles.sectionMeta}>
+              No active at-risk, violation, or setup issues right now.
+            </Text>
+          ) : (
+            attentionItems.map((evaluation) => (
+              <View key={`attention-${evaluation.ruleType}`} style={styles.attentionRow}>
+                <View style={styles.attentionHeader}>
+                  <Text style={styles.attentionTitle}>{labelForRule(evaluation.ruleType)}</Text>
+                  <View
+                    style={[
+                      styles.statusPill,
+                      {
+                        backgroundColor: statusColors(evaluation.status).backgroundColor,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.statusPillText,
+                        { color: statusColors(evaluation.status).textColor },
+                      ]}
+                    >
+                      {attentionToneLabel(evaluation.status)}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.attentionMeta}>{residentName}</Text>
+                <Text style={styles.complianceReason}>{evaluation.statusReason}</Text>
+                {evaluation.status === "incomplete_setup" && onOpenSetupCompletion ? (
+                  <View style={styles.inlineActions}>
+                    <AppButton
+                      title="Complete setup"
+                      variant="secondary"
+                      onPress={() => onOpenSetupCompletion(evaluation.ruleType)}
+                    />
+                  </View>
+                ) : null}
+              </View>
+            ))
+          )}
+        </GlassCard>
+      ) : null}
+
       <GlassCard style={styles.card}>
         <Text style={styles.sectionTitle}>Checklist</Text>
         <Text style={styles.sectionMeta}>
@@ -634,6 +829,12 @@ export function SoberHouseComplianceSection({
                 {task.dueLabel ? <Text style={styles.routineMeta}>Due {task.dueLabel}</Text> : null}
                 {task.proofLabel ? <Text style={styles.routineMeta}>{task.proofLabel}</Text> : null}
               </View>
+              {task.kind === "chores" && task.status === "pending" ? (
+                <Text style={styles.sectionMeta}>
+                  Proof is on file, but this chore still needs manager confirmation before it counts
+                  as complete.
+                </Text>
+              ) : null}
               {task.countsTowardProgress ? (
                 <Text style={styles.routineProgressText}>
                   Progress {task.completedCount}/{task.requiredCount}
@@ -674,9 +875,14 @@ export function SoberHouseComplianceSection({
                   />
                   {task.requiresProof ? (
                     <>
+                      <Text style={styles.sectionMeta}>
+                        {composerProofUris.length > 0
+                          ? `${composerProofUris.length} proof photo${composerProofUris.length === 1 ? "" : "s"} attached.`
+                          : "Add proof photos to satisfy this house requirement."}
+                      </Text>
                       <View style={styles.inlineActions}>
                         <AppButton
-                          title={composerProofUris.length > 0 ? "Add another photo" : "Open camera"}
+                          title={composerProofUris.length > 0 ? "Add another photo" : "Take photo"}
                           variant="secondary"
                           onPress={() => void captureProofPhoto()}
                           disabled={isSaving}
@@ -707,9 +913,34 @@ export function SoberHouseComplianceSection({
                       )}
                     </>
                   ) : null}
+                  {task.kind === "chores" && task.managerConfirmationRequired ? (
+                    <>
+                      <Text style={styles.sectionMeta}>
+                        This chore stays pending until a manager confirms the submission.
+                      </Text>
+                      {!task.requiresProof || composerProofUris.length > 0 ? (
+                        <View style={styles.inlineActions}>
+                          <AppButton
+                            title={
+                              composerManagerHandoffMethod
+                                ? "Shared with manager"
+                                : "Text / share to manager"
+                            }
+                            variant="secondary"
+                            onPress={() => void shareTaskWithManager(task)}
+                            disabled={isSaving}
+                          />
+                        </View>
+                      ) : null}
+                    </>
+                  ) : null}
                   <View style={styles.buttonRow}>
                     <AppButton
-                      title={task.actionLabel ?? "Post completion"}
+                      title={
+                        task.kind === "chores"
+                          ? choreSubmitLabel(task)
+                          : (task.actionLabel ?? "Post completion")
+                      }
                       onPress={() => void handleComposerSubmit()}
                       disabled={isSaving}
                     />
@@ -730,41 +961,25 @@ export function SoberHouseComplianceSection({
 
       <GlassCard style={styles.card}>
         <Text style={styles.sectionTitle}>Requirement Status</Text>
-        <Text style={styles.sectionMeta}>
-          Evaluated {formatIso(summary.evaluatedAt)} • Location{" "}
-          {locationResult?.coords
-            ? `${locationResult.coords.lat.toFixed(4)}, ${locationResult.coords.lng.toFixed(4)}`
-            : locationResult?.failureReason === "permission_denied"
-              ? "permission denied"
-              : "unavailable"}
-        </Text>
+        <View style={styles.sectionMetaStack}>
+          <Text style={styles.sectionMeta}>Evaluated {formatIso(summary.evaluatedAt)}</Text>
+          <Text style={styles.sectionMeta}>
+            Location{" "}
+            {locationResult?.coords
+              ? `${locationResult.coords.lat.toFixed(4)}, ${locationResult.coords.lng.toFixed(4)}`
+              : locationResult?.failureReason === "permission_denied"
+                ? "permission denied"
+                : "unavailable"}
+          </Text>
+        </View>
         {summary.evaluations.map((evaluation) => (
-          <ComplianceRow key={evaluation.ruleType} evaluation={evaluation} />
+          <ComplianceRow
+            key={evaluation.ruleType}
+            evaluation={evaluation}
+            onOpenSetupCompletion={onOpenSetupCompletion}
+          />
         ))}
       </GlassCard>
-
-      {!readOnly ? (
-        <GlassCard style={styles.card}>
-          <Text style={styles.sectionTitle}>Items Needing Attention</Text>
-          <Text style={styles.sectionMeta}>
-            Highlights the current sober-house items that still need action or setup.
-          </Text>
-          {attentionItems.length === 0 ? (
-            <Text style={styles.sectionMeta}>
-              No active at-risk, violation, or setup issues right now.
-            </Text>
-          ) : (
-            attentionItems.map((evaluation) => (
-              <View key={`attention-${evaluation.ruleType}`} style={styles.attentionRow}>
-                <Text style={styles.attentionTitle}>
-                  {residentName} • {labelForRule(evaluation.ruleType)}
-                </Text>
-                <Text style={styles.complianceReason}>{evaluation.statusReason}</Text>
-              </View>
-            ))
-          )}
-        </GlassCard>
-      ) : null}
 
       {!readOnly && statusMessage ? <Text style={styles.inlineStatus}>{statusMessage}</Text> : null}
     </>
@@ -774,6 +989,8 @@ export function SoberHouseComplianceSection({
 const styles = StyleSheet.create({
   card: {
     gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
   },
   headerRow: {
     flexDirection: "row",
@@ -793,7 +1010,10 @@ const styles = StyleSheet.create({
   sectionMeta: {
     color: colors.textSecondary,
     fontSize: typography.small,
-    lineHeight: 18,
+    lineHeight: 20,
+  },
+  sectionMetaStack: {
+    gap: spacing.xs,
   },
   progressRow: {
     flexDirection: "row",
@@ -902,35 +1122,56 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   complianceRow: {
-    gap: spacing.xs,
-    paddingBottom: spacing.sm,
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(148,163,184,0.16)",
   },
   complianceRowHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: spacing.md,
   },
   complianceRuleTitle: {
     color: colors.textPrimary,
     fontSize: typography.body,
     fontWeight: "700",
+    flex: 1,
   },
   complianceReason: {
     color: colors.textSecondary,
     fontSize: typography.small,
-    lineHeight: 18,
+    lineHeight: 22,
   },
-  complianceMeta: {
+  complianceMetaList: {
+    gap: spacing.xs,
+  },
+  complianceMetaCard: {
+    gap: 4,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.lg,
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.14)",
+  },
+  complianceMetaLabel: {
     color: colors.textSecondary,
-    fontSize: 11,
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  complianceMetaValue: {
+    color: colors.textPrimary,
+    fontSize: typography.small,
     fontWeight: "600",
+    lineHeight: 20,
   },
   statusPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderRadius: radius.pill,
   },
   statusPillText: {
@@ -957,15 +1198,29 @@ const styles = StyleSheet.create({
     textAlignVertical: "top",
   },
   attentionRow: {
-    gap: spacing.xs,
-    paddingBottom: spacing.sm,
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(148,163,184,0.16)",
+  },
+  attentionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: spacing.md,
   },
   attentionTitle: {
     color: colors.textPrimary,
     fontSize: typography.body,
     fontWeight: "700",
+    flex: 1,
+  },
+  attentionMeta: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
   },
   buttonRow: {
     flexDirection: "row",

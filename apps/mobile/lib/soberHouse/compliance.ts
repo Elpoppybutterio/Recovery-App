@@ -1,6 +1,13 @@
 import { haversineDistanceMeters } from "../meetings/distance";
 import type { AttendanceRecordSummary, MeetingAttendanceLogRecord } from "../attendance/storage";
 import type { LocationCoords } from "../services/locationService";
+import {
+  choreRequiresManagerConfirmation,
+  formatChoreProofModeLabel,
+  isChoreCompletionVerified,
+  isChoreManagerConfirmationSatisfied,
+  isChoreProofSatisfied,
+} from "./proof";
 import { getHouseById, getRuleSetForHouse } from "./selectors";
 import type {
   ChoreFrequency,
@@ -189,10 +196,6 @@ function buildEvaluation(
 
 function isAttentionStatus(status: ComplianceStatus): boolean {
   return status === "at_risk" || status === "violation" || status === "incomplete_setup";
-}
-
-function hasRequiredChoreProof(proofRequirements: string[]): boolean {
-  return proofRequirements.some((requirement) => requirement !== "NONE");
 }
 
 function formatProofRequirements(proofRequirements: string[]): string {
@@ -490,8 +493,15 @@ export function evaluateResidentCompliance({
       })
       .sort((a, b) => (toTimestamp(b.completedAt) ?? 0) - (toTimestamp(a.completedAt) ?? 0));
     const latest = completions[0] ?? null;
-    const proofRequired = hasRequiredChoreProof(rules.chores.proofRequirement);
-    const hasValidCompletion = latest ? !proofRequired || latest.proofProvided : false;
+    const proofModeLabel =
+      formatChoreProofModeLabel(rules.chores.proofRequirement) ??
+      formatProofRequirements(rules.chores.proofRequirement);
+    const hasValidCompletion = latest ? isChoreCompletionVerified(latest) : false;
+    const proofSatisfied = latest ? isChoreProofSatisfied(latest) : false;
+    const managerConfirmationRequired = choreRequiresManagerConfirmation(
+      rules.chores.proofRequirement,
+    );
+    const managerConfirmed = latest ? isChoreManagerConfirmationSatisfied(latest) : false;
     const dueMs = dueAt?.getTime() ?? null;
     const violationMs = dueMs === null ? null : dueMs + rules.chores.gracePeriodMinutes * 60_000;
     const nowMs = now.getTime();
@@ -518,19 +528,22 @@ export function evaluateResidentCompliance({
           residentId,
           houseId,
           status: "compliant",
-          statusReason: "Chore completed with the required proof.",
-          effectiveTargetValue: formatProofRequirements(rules.chores.proofRequirement),
+          statusReason: managerConfirmationRequired
+            ? "Chore completed with the required proof and manager confirmation."
+            : "Chore completed with the required proof.",
+          effectiveTargetValue: proofModeLabel,
           actualValue: latest?.completedAt ?? null,
           dueAt: dueAt.toISOString(),
           evaluatedAt: nowIso,
           configSource: "house",
           metadata: {
             proofProvided: latest?.proofProvided ?? false,
+            managerConfirmationStatus: latest?.managerConfirmationStatus ?? "NOT_REQUIRED",
             assignedChoreNotes: requirements.assignedChoreNotes || null,
           },
         }),
       );
-    } else if (latest && proofRequired && !latest.proofProvided) {
+    } else if (latest && !proofSatisfied) {
       evaluations.push(
         buildEvaluation({
           ruleType: "chores",
@@ -541,7 +554,7 @@ export function evaluateResidentCompliance({
             violationMs !== null && nowMs > violationMs
               ? "Chore was marked complete, but required proof is missing."
               : "Chore has been marked complete, but required proof is still missing.",
-          effectiveTargetValue: formatProofRequirements(rules.chores.proofRequirement),
+          effectiveTargetValue: proofModeLabel,
           actualValue: latest.completedAt,
           dueAt: dueAt.toISOString(),
           evaluatedAt: nowIso,
@@ -549,6 +562,30 @@ export function evaluateResidentCompliance({
           metadata: {
             proofProvided: false,
             invalidCompletion: true,
+          },
+        }),
+      );
+    } else if (latest && managerConfirmationRequired && !managerConfirmed) {
+      evaluations.push(
+        buildEvaluation({
+          ruleType: "chores",
+          residentId,
+          houseId,
+          status: violationMs !== null && nowMs > violationMs ? "violation" : "at_risk",
+          statusReason:
+            violationMs !== null && nowMs > violationMs
+              ? "Chore proof was submitted, but manager confirmation is still missing."
+              : "Chore proof is attached and awaiting manager confirmation.",
+          effectiveTargetValue: proofModeLabel,
+          actualValue: latest.completedAt,
+          dueAt: dueAt.toISOString(),
+          evaluatedAt: nowIso,
+          configSource: "house",
+          metadata: {
+            proofProvided: latest.proofProvided,
+            managerConfirmationRequired: true,
+            managerConfirmationStatus: latest.managerConfirmationStatus ?? "PENDING",
+            managerConfirmationRequestedAt: latest.managerConfirmationRequestedAt ?? null,
           },
         }),
       );
@@ -566,7 +603,7 @@ export function evaluateResidentCompliance({
           evaluatedAt: nowIso,
           configSource: "house",
           metadata: {
-            proofRequirement: formatProofRequirements(rules.chores.proofRequirement),
+            proofRequirement: proofModeLabel,
           },
         }),
       );
@@ -584,7 +621,7 @@ export function evaluateResidentCompliance({
           evaluatedAt: nowIso,
           configSource: "house",
           metadata: {
-            proofRequirement: formatProofRequirements(rules.chores.proofRequirement),
+            proofRequirement: proofModeLabel,
           },
         }),
       );

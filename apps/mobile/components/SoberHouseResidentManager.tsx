@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { geocodeAsync } from "expo-location";
 import {
+  Modal,
   Pressable,
   StyleSheet,
   Switch,
@@ -62,6 +63,7 @@ const ONE_ON_ONE_FREQUENCY_OPTIONS = [
   { value: "BIWEEKLY", label: "Bi-weekly" },
   { value: "MONTHLY", label: "Monthly" },
 ] as const;
+const MAX_SIGNATURE_POINTS_FOR_STORAGE = 1400;
 
 type PersistOptions = {
   showStatus?: boolean;
@@ -72,6 +74,7 @@ type Props = {
   actor: AuditActor;
   linkedUserId: string;
   isSaving: boolean;
+  entryStep?: ResidentOnboardingStep | null;
   onPersist: (
     nextStore: SoberHouseSettingsStore,
     successMessage: string,
@@ -108,6 +111,12 @@ function parseNonNegativeInt(value: string, fallback = 0): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function residentDraftPersistenceFingerprint(draft: ResidentWizardDraft): string {
+  const { updatedAt, ...stableDraft } = draft;
+  void updatedAt;
+  return JSON.stringify(stableDraft);
+}
+
 function buildSignatureSvgMarkup(
   points: SignaturePoint[],
   width: number,
@@ -117,6 +126,17 @@ function buildSignatureSvgMarkup(
     return null;
   }
 
+  const reducePoints = (input: SignaturePoint[], maxPoints: number): SignaturePoint[] => {
+    if (input.length <= maxPoints) {
+      return input;
+    }
+    const step = Math.max(1, Math.ceil(input.length / maxPoints));
+    return input.filter(
+      (point, index) =>
+        point.isStrokeStart || index === 0 || index === input.length - 1 || index % step === 0,
+    );
+  };
+
   const sourcePoints =
     points.length === 1
       ? [
@@ -124,7 +144,8 @@ function buildSignatureSvgMarkup(
           { ...points[0], x: points[0].x + 0.1, y: points[0].y + 0.1, isStrokeStart: false },
         ]
       : points;
-  const path = sourcePoints
+  const normalizedPoints = reducePoints(sourcePoints, MAX_SIGNATURE_POINTS_FOR_STORAGE);
+  const path = normalizedPoints
     .map(
       (point, index) =>
         `${index === 0 || point.isStrokeStart ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`,
@@ -182,6 +203,7 @@ export function SoberHouseResidentManager({
   actor,
   linkedUserId,
   isSaving,
+  entryStep = null,
   onPersist,
 }: Props) {
   const [isEditing, setIsEditing] = useState(false);
@@ -192,11 +214,17 @@ export function SoberHouseResidentManager({
   const [residentStatus, setResidentStatus] = useState<string | null>(null);
   const [signaturePoints, setSignaturePoints] = useState<SignaturePoint[]>([]);
   const [signatureCanvasSize, setSignatureCanvasSize] = useState({ width: 320, height: 160 });
+  const [isSignaturePadVisible, setIsSignaturePadVisible] = useState(false);
+  const lastPersistedDraftFingerprintRef = useRef<string | null>(null);
+  const handledEntryStepRef = useRef<ResidentOnboardingStep | null>(null);
 
   useEffect(() => {
     const nextDraft = createResidentWizardDraftFromProfiles(linkedUserId, store);
     setDraft(nextDraft);
     setWizardStep(nextDraft.currentStep);
+    lastPersistedDraftFingerprintRef.current = store.residentWizardDraft
+      ? residentDraftPersistenceFingerprint(store.residentWizardDraft)
+      : null;
   }, [
     linkedUserId,
     store.residentWizardDraft,
@@ -204,6 +232,43 @@ export function SoberHouseResidentManager({
     store.residentRequirementProfile,
     store.residentConsentRecord,
   ]);
+
+  useEffect(() => {
+    if (!isEditing) {
+      return;
+    }
+
+    const nextDraft = {
+      ...draft,
+      currentStep: wizardStep,
+    };
+    const fingerprint = residentDraftPersistenceFingerprint(nextDraft);
+    if (lastPersistedDraftFingerprintRef.current === fingerprint) {
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      const now = new Date().toISOString();
+      const draftToPersist = {
+        ...nextDraft,
+        currentStep: wizardStep,
+        updatedAt: now,
+      };
+      lastPersistedDraftFingerprintRef.current =
+        residentDraftPersistenceFingerprint(draftToPersist);
+      void onPersist(
+        saveResidentWizardDraft(store, draftToPersist),
+        "Resident wizard draft saved.",
+        {
+          showStatus: false,
+        },
+      ).catch(() => {
+        lastPersistedDraftFingerprintRef.current = null;
+      });
+    }, 450);
+
+    return () => clearTimeout(timeoutId);
+  }, [draft, isEditing, onPersist, store, wizardStep]);
 
   const signaturePreviewPath = useMemo(
     () =>
@@ -380,7 +445,8 @@ export function SoberHouseResidentManager({
           return previous;
         }
 
-        const samples = Math.max(1, Math.ceil(distance / 1.5));
+        const sampleStep = 1.5;
+        const samples = Math.max(1, Math.ceil(distance / sampleStep));
         const additions: SignaturePoint[] = [];
         for (let index = 1; index <= samples; index += 1) {
           const ratio = index / samples;
@@ -553,869 +619,965 @@ export function SoberHouseResidentManager({
     setIsEditing(true);
   }, [isEditing, linkedUserId, residentComplete, residentSetupState.nextStep, store]);
 
+  useEffect(() => {
+    if (!entryStep) {
+      handledEntryStepRef.current = null;
+      return;
+    }
+    if (isEditing || handledEntryStepRef.current === entryStep) {
+      return;
+    }
+    const nextDraft = createResidentWizardDraftFromProfiles(linkedUserId, store);
+    handledEntryStepRef.current = entryStep;
+    setDraft(nextDraft);
+    setWizardStep(entryStep);
+    setResidentStatus(null);
+    setSignaturePoints([]);
+    setIsEditing(true);
+  }, [entryStep, isEditing, linkedUserId, store]);
+
   return (
-    <GlassCard style={styles.card} strong>
-      <Text style={styles.title}>Resident Sober-House Profile</Text>
-      <Text style={styles.meta}>
-        Capture resident placement, requirement branches, and consent acknowledgment on top of the
-        sober-house settings foundation.
-      </Text>
+    <>
+      <GlassCard style={styles.card} strong>
+        <Text style={styles.title}>Resident Sober-House Profile</Text>
+        <Text style={styles.meta}>
+          Capture resident placement, requirement branches, and consent acknowledgment on top of the
+          sober-house settings foundation.
+        </Text>
 
-      {!residentComplete && !isEditing ? (
-        <View style={styles.buttonRow}>
-          <Text style={styles.inlineStatus}>
-            Missing: {residentSetupState.missingItems.join(" • ")}
-          </Text>
-          <AppButton title="Start resident wizard" onPress={startWizard} />
-        </View>
-      ) : null}
-
-      {residentComplete && !isEditing ? (
-        <>
-          <View style={styles.entityCard}>
-            <Text style={styles.entityTitle}>
-              {store.residentHousingProfile?.firstName} {store.residentHousingProfile?.lastName}
-            </Text>
-            <Text style={styles.entityMeta}>
-              House:{" "}
-              {store.houses.find((house) => house.id === store.residentHousingProfile?.houseId)
-                ?.name ?? "Unassigned"}
-            </Text>
-            <Text style={styles.entityMeta}>
-              Move-in: {store.residentHousingProfile?.moveInDate || "Not set"} • Room/Bed:{" "}
-              {store.residentHousingProfile?.roomOrBed || "Not set"}
-            </Text>
-            <Text style={styles.entityMeta}>
-              Program phase: {store.residentHousingProfile?.programPhaseOnEntry || "Not set"}
-            </Text>
-            <Text style={styles.entityMeta}>
-              Role flags: {store.residentRequirementProfile?.isHouseManager ? "House manager " : ""}
-              {store.residentRequirementProfile?.isHouseOwner ? "House owner" : ""}
-              {!store.residentRequirementProfile?.isHouseManager &&
-              !store.residentRequirementProfile?.isHouseOwner
-                ? "Resident"
-                : ""}
-            </Text>
-            <Text style={styles.entityMeta}>
-              Work:{" "}
-              {store.residentRequirementProfile?.workRequired
-                ? store.residentRequirementProfile.currentlyEmployed
-                  ? `Required, employed at ${store.residentRequirementProfile.employerName || "Employer on file"}`
-                  : `Required, ${store.residentRequirementProfile.jobApplicationsRequiredPerWeek} applications/week`
-                : "Not required"}
-            </Text>
-            {store.residentRequirementProfile?.currentlyEmployed ? (
-              <Text style={styles.entityMeta}>
-                Work geofence:{" "}
-                {store.residentRequirementProfile.workplaceGeofenceLat !== null &&
-                store.residentRequirementProfile.workplaceGeofenceLng !== null
-                  ? `${store.residentRequirementProfile.workplaceGeofenceRadiusFeet ?? "Default"} ft radius saved`
-                  : "Pending address resolution"}
-              </Text>
-            ) : null}
-            <Text style={styles.entityMeta}>
-              Meetings:{" "}
-              {store.residentRequirementProfile?.meetingsRequiredWeekly
-                ? `${store.residentRequirementProfile.meetingsRequiredCount} per week`
-                : "Not required"}
-            </Text>
-            <Text style={styles.entityMeta}>
-              Sponsor:{" "}
-              {store.residentRequirementProfile?.sponsorPresent
-                ? `${store.residentRequirementProfile.sponsorName} • ${store.residentRequirementProfile.sponsorContactFrequency}`
-                : "None"}
-            </Text>
-            <Text style={styles.entityMeta}>
-              Curfew override:{" "}
-              {store.residentRequirementProfile?.residentCurfewOverrideEnabled
-                ? `${store.residentRequirementProfile.residentCurfewWeekday} weekdays`
-                : "None"}
-            </Text>
-            <Text style={styles.entityMeta}>
-              Chores: {store.residentRequirementProfile?.assignedChoreNotes || "None"}
-            </Text>
-            <Text style={styles.entityMeta}>
-              One-on-one:{" "}
-              {store.residentRequirementProfile?.oneOnOneRequired
-                ? `${store.residentRequirementProfile.oneOnOneFrequency.toLowerCase()} at ${store.residentRequirementProfile.oneOnOneTimeLocalHhmm}`
-                : "Not required"}
-            </Text>
-            <Text style={styles.entityMeta}>
-              Consent: signed {formatSignedAt(store.residentConsentRecord?.signedAt ?? null)}
-            </Text>
-          </View>
+        {!residentComplete && !isEditing ? (
           <View style={styles.buttonRow}>
-            <AppButton title="Edit resident profile" onPress={startWizard} variant="secondary" />
+            <Text style={styles.inlineStatus}>
+              Missing: {residentSetupState.missingItems.join(" • ")}
+            </Text>
+            <AppButton title="Start resident wizard" onPress={startWizard} />
           </View>
-        </>
-      ) : null}
+        ) : null}
 
-      {isEditing ? (
-        <>
-          <Text style={styles.stepText}>
-            Step {wizardStep} of 8 • {STEP_TITLES[wizardStep]}
-          </Text>
-
-          {wizardStep === 1 ? (
-            <>
-              <Text style={styles.label}>First name</Text>
-              <TextInput
-                style={styles.input}
-                value={draft.firstName}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, firstName: value }))
-                }
-                placeholder="First name"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-              />
-              <Text style={styles.label}>Last name</Text>
-              <TextInput
-                style={styles.input}
-                value={draft.lastName}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, lastName: value }))
-                }
-                placeholder="Last name"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-              />
-              <Text style={styles.label}>Assigned house</Text>
-              <View style={styles.chipRow}>
-                {store.houses.map((house) => (
-                  <Chip
-                    key={house.id}
-                    label={house.name}
-                    selected={draft.assignedHouseId === house.id}
-                    onPress={() =>
-                      setDraft((current) =>
-                        applyHouseDefaultsToResidentDraft(store, linkedUserId, house.id, current),
-                      )
-                    }
-                  />
-                ))}
-              </View>
-              <Text style={styles.label}>Move-in date</Text>
-              <TextInput
-                style={styles.input}
-                value={draft.moveInDate}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({
-                    ...current,
-                    moveInDate: normalizeUsDateInput(value),
-                  }))
-                }
-                placeholder="MM-DD-YYYY"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-              />
-              <Text style={styles.label}>Room / bed</Text>
-              <TextInput
-                style={styles.input}
-                value={draft.roomOrBed}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, roomOrBed: value }))
-                }
-                placeholder="Room 2 / Bed B"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-              />
-              <Text style={styles.label}>Emergency contact name</Text>
-              <TextInput
-                style={styles.input}
-                value={draft.emergencyContactName}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, emergencyContactName: value }))
-                }
-                placeholder="Emergency contact"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-              />
-              <Text style={styles.label}>Emergency contact phone</Text>
-              <TextInput
-                style={styles.input}
-                value={draft.emergencyContactPhone}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({
-                    ...current,
-                    emergencyContactPhone: normalizeUsPhoneInput(value),
-                  }))
-                }
-                keyboardType="phone-pad"
-                placeholder="(555) 555-1212"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-              />
-              <Text style={styles.label}>Program phase on entry</Text>
-              <TextInput
-                style={styles.input}
-                value={draft.programPhaseOnEntry}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, programPhaseOnEntry: value }))
-                }
-                placeholder="Phase 1"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-              />
-              <Text style={styles.label}>Notes</Text>
-              <TextInput
-                style={[styles.input, styles.multilineInput]}
-                value={draft.housingNotes}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, housingNotes: value }))
-                }
-                placeholder="Optional housing notes"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                multiline
-              />
-            </>
-          ) : null}
-
-          {wizardStep === 2 ? (
-            <>
-              <ToggleRow
-                label="House manager"
-                value={draft.isHouseManager}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({ ...current, isHouseManager: value }))
-                }
-              />
-              <ToggleRow
-                label="House owner"
-                value={draft.isHouseOwner}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({ ...current, isHouseOwner: value }))
-                }
-              />
-              <ToggleRow
-                label="Want real-time violation alerts"
-                value={draft.wantsRealTimeViolationAlerts}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({ ...current, wantsRealTimeViolationAlerts: value }))
-                }
-              />
-              <ToggleRow
-                label="Want near-miss alerts"
-                value={draft.wantsNearMissAlerts}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({ ...current, wantsNearMissAlerts: value }))
-                }
-              />
-              <ToggleRow
-                label="Want monthly summary reports"
-                value={draft.wantsMonthlySummaryReports}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({ ...current, wantsMonthlySummaryReports: value }))
-                }
-              />
-            </>
-          ) : null}
-
-          {wizardStep === 3 ? (
-            <>
-              <ToggleRow
-                label="Required to work"
-                value={draft.workRequired}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({
-                    ...current,
-                    workRequired: value,
-                    currentlyEmployed: value ? current.currentlyEmployed : false,
-                    employerName: value ? current.employerName : "",
-                    employerAddress: value ? current.employerAddress : "",
-                    employerPhone: value ? current.employerPhone : "",
-                    expectedWorkScheduleNotes: value ? current.expectedWorkScheduleNotes : "",
-                    jobApplicationsRequiredPerWeek: value
-                      ? current.jobApplicationsRequiredPerWeek
-                      : 0,
-                  }))
-                }
-              />
-              {draft.workRequired ? (
-                <>
-                  <ToggleRow
-                    label="Currently employed"
-                    value={draft.currentlyEmployed}
-                    onValueChange={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        currentlyEmployed: value,
-                        employerName: value ? current.employerName : "",
-                        employerAddress: value ? current.employerAddress : "",
-                        employerPhone: value ? current.employerPhone : "",
-                        expectedWorkScheduleNotes: value ? current.expectedWorkScheduleNotes : "",
-                      }))
-                    }
-                  />
-                  {draft.currentlyEmployed ? (
-                    <>
-                      <Text style={styles.label}>Employer name</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={draft.employerName}
-                        onChangeText={(value) =>
-                          updateDraft((current) => ({ ...current, employerName: value }))
-                        }
-                        placeholder="Employer name"
-                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                      />
-                      <Text style={styles.label}>Employer address</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={draft.employerAddress}
-                        onChangeText={(value) =>
-                          updateDraft((current) => ({ ...current, employerAddress: value }))
-                        }
-                        placeholder="Employer address"
-                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                      />
-                      <Text style={styles.label}>Employer phone</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={draft.employerPhone}
-                        onChangeText={(value) =>
-                          updateDraft((current) => ({
-                            ...current,
-                            employerPhone: normalizeUsPhoneInput(value),
-                          }))
-                        }
-                        keyboardType="phone-pad"
-                        placeholder="(555) 555-3131"
-                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                      />
-                      <Text style={styles.label}>Expected work schedule notes</Text>
-                      <TextInput
-                        style={[styles.input, styles.multilineInput]}
-                        value={draft.expectedWorkScheduleNotes}
-                        onChangeText={(value) =>
-                          updateDraft((current) => ({
-                            ...current,
-                            expectedWorkScheduleNotes: value,
-                          }))
-                        }
-                        placeholder="Expected schedule notes"
-                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                        multiline
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <Text style={styles.label}>Job applications required per week</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={String(draft.jobApplicationsRequiredPerWeek)}
-                        onChangeText={(value) =>
-                          updateDraft((current) => ({
-                            ...current,
-                            jobApplicationsRequiredPerWeek: parseNonNegativeInt(
-                              normalizeIntegerInput(value),
-                              0,
-                            ),
-                          }))
-                        }
-                        keyboardType="number-pad"
-                        placeholder="5"
-                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                      />
-                    </>
-                  )}
-                </>
-              ) : (
-                <Text style={styles.meta}>Employment-specific fields are skipped.</Text>
-              )}
-            </>
-          ) : null}
-
-          {wizardStep === 4 ? (
-            <>
-              <ToggleRow
-                label="Meetings required weekly"
-                value={draft.meetingsRequiredWeekly}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({
-                    ...current,
-                    meetingsRequiredWeekly: value,
-                    meetingsRequiredCount: value ? current.meetingsRequiredCount : 0,
-                  }))
-                }
-              />
-              {draft.meetingsRequiredWeekly ? (
-                <>
-                  <Text style={styles.label}>Meetings required count</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={String(draft.meetingsRequiredCount)}
-                    onChangeText={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        meetingsRequiredCount: parseNonNegativeInt(normalizeIntegerInput(value), 0),
-                      }))
-                    }
-                    keyboardType="number-pad"
-                    placeholder="4"
-                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                  />
-                </>
-              ) : (
-                <Text style={styles.meta}>Meeting requirement details are skipped.</Text>
-              )}
-            </>
-          ) : null}
-
-          {wizardStep === 5 ? (
-            <>
-              {sponsorContactRequired ? (
-                <Text style={styles.meta}>
-                  Sponsor contact is enabled for this house. Complete this recovery section before
-                  continuing.
+        {residentComplete && !isEditing ? (
+          <>
+            <View style={styles.entityCard}>
+              <Text style={styles.entityTitle}>
+                {store.residentHousingProfile?.firstName} {store.residentHousingProfile?.lastName}
+              </Text>
+              <Text style={styles.entityMeta}>
+                House:{" "}
+                {store.houses.find((house) => house.id === store.residentHousingProfile?.houseId)
+                  ?.name ?? "Unassigned"}
+              </Text>
+              <Text style={styles.entityMeta}>
+                Move-in: {store.residentHousingProfile?.moveInDate || "Not set"} • Room/Bed:{" "}
+                {store.residentHousingProfile?.roomOrBed || "Not set"}
+              </Text>
+              <Text style={styles.entityMeta}>
+                Program phase: {store.residentHousingProfile?.programPhaseOnEntry || "Not set"}
+              </Text>
+              <Text style={styles.entityMeta}>
+                Role flags:{" "}
+                {store.residentRequirementProfile?.isHouseManager ? "House manager " : ""}
+                {store.residentRequirementProfile?.isHouseOwner ? "House owner" : ""}
+                {!store.residentRequirementProfile?.isHouseManager &&
+                !store.residentRequirementProfile?.isHouseOwner
+                  ? "Resident"
+                  : ""}
+              </Text>
+              <Text style={styles.entityMeta}>
+                Work:{" "}
+                {store.residentRequirementProfile?.workRequired
+                  ? store.residentRequirementProfile.currentlyEmployed
+                    ? `Required, employed at ${store.residentRequirementProfile.employerName || "Employer on file"}`
+                    : `Required, ${store.residentRequirementProfile.jobApplicationsRequiredPerWeek} applications/week`
+                  : "Not required"}
+              </Text>
+              {store.residentRequirementProfile?.currentlyEmployed ? (
+                <Text style={styles.entityMeta}>
+                  Work geofence:{" "}
+                  {store.residentRequirementProfile.workplaceGeofenceLat !== null &&
+                  store.residentRequirementProfile.workplaceGeofenceLng !== null
+                    ? `${store.residentRequirementProfile.workplaceGeofenceRadiusFeet ?? "Default"} ft radius saved`
+                    : "Pending address resolution"}
                 </Text>
               ) : null}
-              <ToggleRow
-                label="Sponsor present"
-                value={draft.sponsorPresent}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({
-                    ...current,
-                    sponsorPresent: value,
-                    sponsorName: value ? current.sponsorName : "",
-                    sponsorPhone: value ? current.sponsorPhone : "",
-                    sponsorContactFrequency: value ? current.sponsorContactFrequency : "",
-                  }))
-                }
-              />
-              {draft.sponsorPresent ? (
-                <>
-                  <Text style={styles.label}>Sponsor name</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={draft.sponsorName}
-                    onChangeText={(value) =>
-                      updateDraft((current) => ({ ...current, sponsorName: value }))
-                    }
-                    placeholder="Sponsor name"
-                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                  />
-                  <Text style={styles.label}>Sponsor phone</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={draft.sponsorPhone}
-                    onChangeText={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        sponsorPhone: normalizeUsPhoneInput(value),
-                      }))
-                    }
-                    keyboardType="phone-pad"
-                    placeholder="(555) 555-4242"
-                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                  />
-                  <Text style={styles.label}>Required sponsor contact cadence</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={draft.sponsorContactFrequency}
-                    onChangeText={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        sponsorContactFrequency: value,
-                      }))
-                    }
-                    placeholder="3 per week"
-                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                  />
-                </>
-              ) : (
-                <Text style={styles.meta}>
-                  {sponsorContactRequired
-                    ? "Sponsor details are required for this house."
-                    : "Sponsor details are skipped."}
-                </Text>
-              )}
-            </>
-          ) : null}
+              <Text style={styles.entityMeta}>
+                Meetings:{" "}
+                {store.residentRequirementProfile?.meetingsRequiredWeekly
+                  ? `${store.residentRequirementProfile.meetingsRequiredCount} per week`
+                  : "Not required"}
+              </Text>
+              <Text style={styles.entityMeta}>
+                Sponsor:{" "}
+                {store.residentRequirementProfile?.sponsorPresent
+                  ? `${store.residentRequirementProfile.sponsorName} • ${store.residentRequirementProfile.sponsorContactFrequency}`
+                  : "None"}
+              </Text>
+              <Text style={styles.entityMeta}>
+                Curfew override:{" "}
+                {store.residentRequirementProfile?.residentCurfewOverrideEnabled
+                  ? `${store.residentRequirementProfile.residentCurfewWeekday} weekdays`
+                  : "None"}
+              </Text>
+              <Text style={styles.entityMeta}>
+                Chores: {store.residentRequirementProfile?.assignedChoreNotes || "None"}
+              </Text>
+              <Text style={styles.entityMeta}>
+                One-on-one:{" "}
+                {store.residentRequirementProfile?.oneOnOneRequired
+                  ? `${store.residentRequirementProfile.oneOnOneFrequency.toLowerCase()} at ${store.residentRequirementProfile.oneOnOneTimeLocalHhmm}`
+                  : "Not required"}
+              </Text>
+              <Text style={styles.entityMeta}>
+                Consent: signed {formatSignedAt(store.residentConsentRecord?.signedAt ?? null)}
+              </Text>
+            </View>
+            <View style={styles.buttonRow}>
+              <AppButton title="Edit resident profile" onPress={startWizard} variant="secondary" />
+            </View>
+          </>
+        ) : null}
 
-          {wizardStep === 6 ? (
-            <>
-              <ToggleRow
-                label="Resident has curfew override"
-                value={draft.residentCurfewOverrideEnabled}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({
-                    ...current,
-                    residentCurfewOverrideEnabled: value,
-                    residentCurfewWeekday: value ? current.residentCurfewWeekday : "",
-                    residentCurfewFriday: value ? current.residentCurfewFriday : "",
-                    residentCurfewSaturday: value ? current.residentCurfewSaturday : "",
-                    residentCurfewSunday: value ? current.residentCurfewSunday : "",
-                  }))
-                }
-              />
-              {draft.residentCurfewOverrideEnabled ? (
-                <>
-                  <Text style={styles.label}>Weekday curfew</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={draft.residentCurfewWeekday}
-                    onChangeText={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        residentCurfewWeekday: value,
-                      }))
-                    }
-                    placeholder="22:00"
-                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                  />
-                  <Text style={styles.label}>Friday curfew</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={draft.residentCurfewFriday}
-                    onChangeText={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        residentCurfewFriday: value,
-                      }))
-                    }
-                    placeholder="23:00"
-                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                  />
-                  <Text style={styles.label}>Saturday curfew</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={draft.residentCurfewSaturday}
-                    onChangeText={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        residentCurfewSaturday: value,
-                      }))
-                    }
-                    placeholder="23:00"
-                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                  />
-                  <Text style={styles.label}>Sunday curfew</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={draft.residentCurfewSunday}
-                    onChangeText={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        residentCurfewSunday: value,
-                      }))
-                    }
-                    placeholder="22:00"
-                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                  />
-                </>
-              ) : (
-                <Text style={styles.meta}>Curfew override details are skipped.</Text>
-              )}
-              <Text style={styles.label}>Standing exception notes</Text>
-              <TextInput
-                style={[styles.input, styles.multilineInput]}
-                value={draft.standingExceptionNotes}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, standingExceptionNotes: value }))
-                }
-                placeholder="Standing exception notes"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                multiline
-              />
-            </>
-          ) : null}
+        {isEditing ? (
+          <>
+            <Text style={styles.stepText}>
+              Step {wizardStep} of 8 • {STEP_TITLES[wizardStep]}
+            </Text>
 
-          {wizardStep === 7 ? (
-            <>
-              <Text style={styles.label}>Assigned chore notes / summary</Text>
-              <TextInput
-                style={[styles.input, styles.multilineInput]}
-                value={draft.assignedChoreNotes}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, assignedChoreNotes: value }))
-                }
-                placeholder="Assigned chores"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                multiline
-              />
-              <Text style={styles.label}>Resident-specific proof note / override</Text>
-              <TextInput
-                style={[styles.input, styles.multilineInput]}
-                value={draft.proofTypeOverrideNotes}
-                onChangeText={(value) =>
-                  updateDraft((current) => ({ ...current, proofTypeOverrideNotes: value }))
-                }
-                placeholder="Proof-type override notes"
-                placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                multiline
-              />
-              {oneOnOneSectionVisible ? (
-                <>
-                  <Text style={styles.sectionHeader}>One-on-one session</Text>
-                  <ToggleRow
-                    label="One-on-one required"
-                    value={draft.oneOnOneRequired}
-                    onValueChange={(value) =>
-                      updateDraft((current) => ({
-                        ...current,
-                        oneOnOneRequired: value,
-                        oneOnOneAssignedStaffAssignmentId: value
-                          ? current.oneOnOneAssignedStaffAssignmentId
-                          : null,
-                        oneOnOneScheduledDate:
-                          value && current.oneOnOneFrequency === "ONCE"
-                            ? current.oneOnOneScheduledDate
+            {wizardStep === 1 ? (
+              <>
+                <Text style={styles.label}>First name</Text>
+                <TextInput
+                  style={styles.input}
+                  value={draft.firstName}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, firstName: value }))
+                  }
+                  placeholder="First name"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <Text style={styles.label}>Last name</Text>
+                <TextInput
+                  style={styles.input}
+                  value={draft.lastName}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, lastName: value }))
+                  }
+                  placeholder="Last name"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <Text style={styles.label}>Assigned house</Text>
+                <View style={styles.chipRow}>
+                  {store.houses.map((house) => (
+                    <Chip
+                      key={house.id}
+                      label={house.name}
+                      selected={draft.assignedHouseId === house.id}
+                      onPress={() =>
+                        setDraft((current) =>
+                          applyHouseDefaultsToResidentDraft(store, linkedUserId, house.id, current),
+                        )
+                      }
+                    />
+                  ))}
+                </View>
+                <Text style={styles.label}>Move-in date</Text>
+                <TextInput
+                  style={styles.input}
+                  value={draft.moveInDate}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({
+                      ...current,
+                      moveInDate: normalizeUsDateInput(value),
+                    }))
+                  }
+                  placeholder="MM-DD-YYYY"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <Text style={styles.label}>Room / bed</Text>
+                <TextInput
+                  style={styles.input}
+                  value={draft.roomOrBed}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, roomOrBed: value }))
+                  }
+                  placeholder="Room 2 / Bed B"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <Text style={styles.label}>Emergency contact name</Text>
+                <TextInput
+                  style={styles.input}
+                  value={draft.emergencyContactName}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, emergencyContactName: value }))
+                  }
+                  placeholder="Emergency contact"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <Text style={styles.label}>Emergency contact phone</Text>
+                <TextInput
+                  style={styles.input}
+                  value={draft.emergencyContactPhone}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({
+                      ...current,
+                      emergencyContactPhone: normalizeUsPhoneInput(value),
+                    }))
+                  }
+                  keyboardType="phone-pad"
+                  placeholder="(555) 555-1212"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <Text style={styles.label}>Program phase on entry</Text>
+                <TextInput
+                  style={styles.input}
+                  value={draft.programPhaseOnEntry}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, programPhaseOnEntry: value }))
+                  }
+                  placeholder="Phase 1"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                />
+                <Text style={styles.label}>Notes</Text>
+                <TextInput
+                  style={[styles.input, styles.multilineInput]}
+                  value={draft.housingNotes}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, housingNotes: value }))
+                  }
+                  placeholder="Optional housing notes"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  multiline
+                />
+              </>
+            ) : null}
+
+            {wizardStep === 2 ? (
+              <>
+                <ToggleRow
+                  label="House manager"
+                  value={draft.isHouseManager}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({ ...current, isHouseManager: value }))
+                  }
+                />
+                <ToggleRow
+                  label="House owner"
+                  value={draft.isHouseOwner}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({ ...current, isHouseOwner: value }))
+                  }
+                />
+                <ToggleRow
+                  label="Want real-time violation alerts"
+                  value={draft.wantsRealTimeViolationAlerts}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({ ...current, wantsRealTimeViolationAlerts: value }))
+                  }
+                />
+                <ToggleRow
+                  label="Want near-miss alerts"
+                  value={draft.wantsNearMissAlerts}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({ ...current, wantsNearMissAlerts: value }))
+                  }
+                />
+                <ToggleRow
+                  label="Want monthly summary reports"
+                  value={draft.wantsMonthlySummaryReports}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({ ...current, wantsMonthlySummaryReports: value }))
+                  }
+                />
+              </>
+            ) : null}
+
+            {wizardStep === 3 ? (
+              <>
+                <ToggleRow
+                  label="Required to work"
+                  value={draft.workRequired}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({
+                      ...current,
+                      workRequired: value,
+                      currentlyEmployed: value ? current.currentlyEmployed : false,
+                      employerName: value ? current.employerName : "",
+                      employerAddress: value ? current.employerAddress : "",
+                      employerPhone: value ? current.employerPhone : "",
+                      expectedWorkScheduleNotes: value ? current.expectedWorkScheduleNotes : "",
+                      jobApplicationsRequiredPerWeek: value
+                        ? current.jobApplicationsRequiredPerWeek
+                        : 0,
+                    }))
+                  }
+                />
+                {draft.workRequired ? (
+                  <>
+                    <ToggleRow
+                      label="Currently employed"
+                      value={draft.currentlyEmployed}
+                      onValueChange={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          currentlyEmployed: value,
+                          employerName: value ? current.employerName : "",
+                          employerAddress: value ? current.employerAddress : "",
+                          employerPhone: value ? current.employerPhone : "",
+                          expectedWorkScheduleNotes: value ? current.expectedWorkScheduleNotes : "",
+                        }))
+                      }
+                    />
+                    {draft.currentlyEmployed ? (
+                      <>
+                        <Text style={styles.label}>Employer name</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={draft.employerName}
+                          onChangeText={(value) =>
+                            updateDraft((current) => ({ ...current, employerName: value }))
+                          }
+                          placeholder="Employer name"
+                          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                        />
+                        <Text style={styles.label}>Employer address</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={draft.employerAddress}
+                          onChangeText={(value) =>
+                            updateDraft((current) => ({ ...current, employerAddress: value }))
+                          }
+                          placeholder="Employer address"
+                          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                        />
+                        <Text style={styles.label}>Employer phone</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={draft.employerPhone}
+                          onChangeText={(value) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              employerPhone: normalizeUsPhoneInput(value),
+                            }))
+                          }
+                          keyboardType="phone-pad"
+                          placeholder="(555) 555-3131"
+                          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                        />
+                        <Text style={styles.label}>Expected work schedule notes</Text>
+                        <TextInput
+                          style={[styles.input, styles.multilineInput]}
+                          value={draft.expectedWorkScheduleNotes}
+                          onChangeText={(value) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              expectedWorkScheduleNotes: value,
+                            }))
+                          }
+                          placeholder="Expected schedule notes"
+                          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                          multiline
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <Text style={styles.label}>Job applications required per week</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={String(draft.jobApplicationsRequiredPerWeek)}
+                          onChangeText={(value) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              jobApplicationsRequiredPerWeek: parseNonNegativeInt(
+                                normalizeIntegerInput(value),
+                                0,
+                              ),
+                            }))
+                          }
+                          keyboardType="number-pad"
+                          placeholder="5"
+                          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                        />
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <Text style={styles.meta}>Employment-specific fields are skipped.</Text>
+                )}
+              </>
+            ) : null}
+
+            {wizardStep === 4 ? (
+              <>
+                <ToggleRow
+                  label="Meetings required weekly"
+                  value={draft.meetingsRequiredWeekly}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({
+                      ...current,
+                      meetingsRequiredWeekly: value,
+                      meetingsRequiredCount: value ? current.meetingsRequiredCount : 0,
+                    }))
+                  }
+                />
+                {draft.meetingsRequiredWeekly ? (
+                  <>
+                    <Text style={styles.label}>Meetings required count</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={String(draft.meetingsRequiredCount)}
+                      onChangeText={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          meetingsRequiredCount: parseNonNegativeInt(
+                            normalizeIntegerInput(value),
+                            0,
+                          ),
+                        }))
+                      }
+                      keyboardType="number-pad"
+                      placeholder="4"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </>
+                ) : (
+                  <Text style={styles.meta}>Meeting requirement details are skipped.</Text>
+                )}
+              </>
+            ) : null}
+
+            {wizardStep === 5 ? (
+              <>
+                {sponsorContactRequired ? (
+                  <Text style={styles.meta}>
+                    Sponsor contact is enabled for this house. Complete this recovery section before
+                    continuing.
+                  </Text>
+                ) : null}
+                <ToggleRow
+                  label="Sponsor present"
+                  value={draft.sponsorPresent}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({
+                      ...current,
+                      sponsorPresent: value,
+                      sponsorName: value ? current.sponsorName : "",
+                      sponsorPhone: value ? current.sponsorPhone : "",
+                      sponsorContactFrequency: value ? current.sponsorContactFrequency : "",
+                    }))
+                  }
+                />
+                {draft.sponsorPresent ? (
+                  <>
+                    <Text style={styles.label}>Sponsor name</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={draft.sponsorName}
+                      onChangeText={(value) =>
+                        updateDraft((current) => ({ ...current, sponsorName: value }))
+                      }
+                      placeholder="Sponsor name"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                    <Text style={styles.label}>Sponsor phone</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={draft.sponsorPhone}
+                      onChangeText={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          sponsorPhone: normalizeUsPhoneInput(value),
+                        }))
+                      }
+                      keyboardType="phone-pad"
+                      placeholder="(555) 555-4242"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                    <Text style={styles.label}>Required sponsor contact cadence</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={draft.sponsorContactFrequency}
+                      onChangeText={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          sponsorContactFrequency: value,
+                        }))
+                      }
+                      placeholder="3 per week"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </>
+                ) : (
+                  <Text style={styles.meta}>
+                    {sponsorContactRequired
+                      ? "Sponsor details are required for this house."
+                      : "Sponsor details are skipped."}
+                  </Text>
+                )}
+              </>
+            ) : null}
+
+            {wizardStep === 6 ? (
+              <>
+                <ToggleRow
+                  label="Resident has curfew override"
+                  value={draft.residentCurfewOverrideEnabled}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({
+                      ...current,
+                      residentCurfewOverrideEnabled: value,
+                      residentCurfewWeekday: value ? current.residentCurfewWeekday : "",
+                      residentCurfewFriday: value ? current.residentCurfewFriday : "",
+                      residentCurfewSaturday: value ? current.residentCurfewSaturday : "",
+                      residentCurfewSunday: value ? current.residentCurfewSunday : "",
+                    }))
+                  }
+                />
+                {draft.residentCurfewOverrideEnabled ? (
+                  <>
+                    <Text style={styles.label}>Weekday curfew</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={draft.residentCurfewWeekday}
+                      onChangeText={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          residentCurfewWeekday: value,
+                        }))
+                      }
+                      placeholder="22:00"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                    <Text style={styles.label}>Friday curfew</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={draft.residentCurfewFriday}
+                      onChangeText={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          residentCurfewFriday: value,
+                        }))
+                      }
+                      placeholder="23:00"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                    <Text style={styles.label}>Saturday curfew</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={draft.residentCurfewSaturday}
+                      onChangeText={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          residentCurfewSaturday: value,
+                        }))
+                      }
+                      placeholder="23:00"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                    <Text style={styles.label}>Sunday curfew</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={draft.residentCurfewSunday}
+                      onChangeText={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          residentCurfewSunday: value,
+                        }))
+                      }
+                      placeholder="22:00"
+                      placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                    />
+                  </>
+                ) : (
+                  <Text style={styles.meta}>Curfew override details are skipped.</Text>
+                )}
+                <Text style={styles.label}>Standing exception notes</Text>
+                <TextInput
+                  style={[styles.input, styles.multilineInput]}
+                  value={draft.standingExceptionNotes}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, standingExceptionNotes: value }))
+                  }
+                  placeholder="Standing exception notes"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  multiline
+                />
+              </>
+            ) : null}
+
+            {wizardStep === 7 ? (
+              <>
+                <Text style={styles.label}>Assigned chore notes / summary</Text>
+                <TextInput
+                  style={[styles.input, styles.multilineInput]}
+                  value={draft.assignedChoreNotes}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, assignedChoreNotes: value }))
+                  }
+                  placeholder="Assigned chores"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  multiline
+                />
+                <Text style={styles.label}>Resident-specific proof note / override</Text>
+                <TextInput
+                  style={[styles.input, styles.multilineInput]}
+                  value={draft.proofTypeOverrideNotes}
+                  onChangeText={(value) =>
+                    updateDraft((current) => ({ ...current, proofTypeOverrideNotes: value }))
+                  }
+                  placeholder="Proof-type override notes"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  multiline
+                />
+                {oneOnOneSectionVisible ? (
+                  <>
+                    <Text style={styles.sectionHeader}>One-on-one session</Text>
+                    <ToggleRow
+                      label="One-on-one required"
+                      value={draft.oneOnOneRequired}
+                      onValueChange={(value) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          oneOnOneRequired: value,
+                          oneOnOneAssignedStaffAssignmentId: value
+                            ? current.oneOnOneAssignedStaffAssignmentId
                             : null,
-                      }))
-                    }
-                  />
-                  {draft.oneOnOneRequired ? (
-                    <>
-                      <Text style={styles.label}>Assigned manager</Text>
-                      <View style={styles.chipRow}>
-                        {store.staffAssignments
-                          .filter(
-                            (assignment) =>
-                              assignment.status === "ACTIVE" &&
-                              (assignment.role === "OWNER" ||
-                                assignment.role === "HOUSE_MANAGER" ||
-                                assignment.role === "ASSISTANT_MANAGER"),
-                          )
-                          .map((assignment) => (
-                            <Chip
-                              key={assignment.id}
-                              label={`${assignment.firstName} ${assignment.lastName}`.trim()}
-                              selected={draft.oneOnOneAssignedStaffAssignmentId === assignment.id}
-                              onPress={() =>
-                                updateDraft((current) => ({
-                                  ...current,
-                                  oneOnOneAssignedStaffAssignmentId: assignment.id,
-                                }))
-                              }
-                            />
-                          ))}
-                      </View>
-                      <Text style={styles.label}>Frequency</Text>
-                      <View style={styles.chipRow}>
-                        {ONE_ON_ONE_FREQUENCY_OPTIONS.map((option) => (
-                          <Chip
-                            key={option.value}
-                            label={option.label}
-                            selected={draft.oneOnOneFrequency === option.value}
-                            onPress={() =>
-                              updateDraft((current) => ({
-                                ...current,
-                                oneOnOneFrequency: option.value,
-                                oneOnOneWeekday:
-                                  option.value === "ONCE"
-                                    ? null
-                                    : (current.oneOnOneWeekday ?? "TUE"),
-                                oneOnOneScheduledDate:
-                                  option.value === "ONCE" ? current.oneOnOneScheduledDate : null,
-                              }))
-                            }
-                          />
-                        ))}
-                      </View>
-                      {draft.oneOnOneFrequency === "ONCE" ? (
-                        <>
-                          <Text style={styles.label}>Scheduled date</Text>
-                          <TextInput
-                            style={styles.input}
-                            value={draft.oneOnOneScheduledDate ?? ""}
-                            onChangeText={(value) =>
-                              updateDraft((current) => ({
-                                ...current,
-                                oneOnOneScheduledDate: normalizeUsDateInput(value),
-                              }))
-                            }
-                            placeholder="MM-DD-YYYY"
-                            placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                          />
-                        </>
-                      ) : (
-                        <>
-                          <Text style={styles.label}>Recurring day</Text>
-                          <View style={styles.chipRow}>
-                            {SCHEDULED_WEEKDAY_OPTIONS.map((option) => (
+                          oneOnOneScheduledDate:
+                            value && current.oneOnOneFrequency === "ONCE"
+                              ? current.oneOnOneScheduledDate
+                              : null,
+                        }))
+                      }
+                    />
+                    {draft.oneOnOneRequired ? (
+                      <>
+                        <Text style={styles.label}>Assigned manager</Text>
+                        <View style={styles.chipRow}>
+                          {store.staffAssignments
+                            .filter(
+                              (assignment) =>
+                                assignment.status === "ACTIVE" &&
+                                (assignment.role === "OWNER" ||
+                                  assignment.role === "HOUSE_MANAGER" ||
+                                  assignment.role === "ASSISTANT_MANAGER"),
+                            )
+                            .map((assignment) => (
                               <Chip
-                                key={option.value}
-                                label={option.label}
-                                selected={draft.oneOnOneWeekday === option.value}
+                                key={assignment.id}
+                                label={`${assignment.firstName} ${assignment.lastName}`.trim()}
+                                selected={draft.oneOnOneAssignedStaffAssignmentId === assignment.id}
                                 onPress={() =>
                                   updateDraft((current) => ({
                                     ...current,
-                                    oneOnOneWeekday: option.value,
+                                    oneOnOneAssignedStaffAssignmentId: assignment.id,
                                   }))
                                 }
                               />
                             ))}
-                          </View>
-                        </>
-                      )}
-                      <Text style={styles.label}>Scheduled time</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={draft.oneOnOneTimeLocalHhmm}
-                        onChangeText={(value) =>
-                          updateDraft((current) => ({
-                            ...current,
-                            oneOnOneTimeLocalHhmm: value,
-                          }))
-                        }
-                        placeholder="15:00"
-                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                      />
-                      <Text style={styles.label}>Lead-time reminder minutes</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={String(draft.oneOnOneLeadTimeMinutes)}
-                        onChangeText={(value) =>
-                          updateDraft((current) => ({
-                            ...current,
-                            oneOnOneLeadTimeMinutes: parseNonNegativeInt(
-                              normalizeIntegerInput(value),
-                              0,
-                            ),
-                          }))
-                        }
-                        keyboardType="number-pad"
-                        placeholder="30"
-                        placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
-                      />
-                      <ToggleRow
-                        label="Add to calendar"
-                        value={draft.oneOnOneAddToCalendar}
-                        onValueChange={(value) =>
-                          updateDraft((current) => ({
-                            ...current,
-                            oneOnOneAddToCalendar: value,
-                          }))
-                        }
-                      />
-                      <ToggleRow
-                        label="In-app reminder"
-                        value={draft.oneOnOneReminderEnabled}
-                        onValueChange={(value) =>
-                          updateDraft((current) => ({
-                            ...current,
-                            oneOnOneReminderEnabled: value,
-                          }))
-                        }
-                      />
-                    </>
-                  ) : (
-                    <Text style={styles.meta}>One-on-one details are skipped.</Text>
-                  )}
-                </>
-              ) : null}
-            </>
-          ) : null}
-
-          {wizardStep === 8 ? (
-            <>
-              <ToggleRow
-                label="Consent to house rules"
-                value={draft.consentToHouseRules}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({ ...current, consentToHouseRules: value }))
-                }
-              />
-              <ToggleRow
-                label="Consent to location verification"
-                value={draft.consentToLocationVerification}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({ ...current, consentToLocationVerification: value }))
-                }
-              />
-              <ToggleRow
-                label="Consent to compliance documentation"
-                value={draft.consentToComplianceDocumentation}
-                onValueChange={(value) =>
-                  updateDraft((current) => ({
-                    ...current,
-                    consentToComplianceDocumentation: value,
-                  }))
-                }
-              />
-              <Text style={styles.meta}>
-                House: {assignedHouse?.name ?? "Not assigned"} • Current signed status:{" "}
-                {formatSignedAt(draft.consentSignedAt)}
-              </Text>
-              <View style={styles.signatureCanvasWrap}>
-                <View
-                  style={styles.signatureCanvas}
-                  onLayout={(event) => {
-                    const { width, height } = event.nativeEvent.layout;
-                    if (width > 0 && height > 0) {
-                      setSignatureCanvasSize({ width, height });
-                    }
-                  }}
-                  onStartShouldSetResponder={() => true}
-                  onMoveShouldSetResponder={() => true}
-                  onResponderGrant={(event) => addSignaturePoint(event, true)}
-                  onResponderMove={addSignaturePoint}
-                >
-                  <Svg
-                    viewBox={`0 0 ${Math.max(1, signatureCanvasSize.width)} ${Math.max(
-                      1,
-                      signatureCanvasSize.height,
-                    )}`}
-                    style={styles.signatureSvgOverlay}
-                  >
-                    {signaturePreviewPath.length > 0 ? (
-                      <Path
-                        d={signaturePreviewPath}
-                        fill="none"
-                        stroke="#0f172a"
-                        strokeWidth={2}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    ) : null}
-                  </Svg>
-                </View>
-              </View>
-              <View style={styles.buttonRow}>
-                <AppButton
-                  title="Clear signature"
-                  variant="secondary"
-                  onPress={() => {
-                    setSignaturePoints([]);
-                    updateDraft((current) => ({
-                      ...current,
-                      consentSignatureRef: null,
-                      consentSignedAt: null,
-                    }));
-                  }}
-                />
-              </View>
-            </>
-          ) : null}
-
-          {residentStatus ? <Text style={styles.statusText}>{residentStatus}</Text> : null}
-
-          <View style={styles.buttonRow}>
-            {wizardStep > 1 ? (
-              <>
-                <AppButton title="Back" variant="secondary" onPress={() => void previousStep()} />
-                <View style={styles.buttonSpacer} />
+                        </View>
+                        <Text style={styles.label}>Frequency</Text>
+                        <View style={styles.chipRow}>
+                          {ONE_ON_ONE_FREQUENCY_OPTIONS.map((option) => (
+                            <Chip
+                              key={option.value}
+                              label={option.label}
+                              selected={draft.oneOnOneFrequency === option.value}
+                              onPress={() =>
+                                updateDraft((current) => ({
+                                  ...current,
+                                  oneOnOneFrequency: option.value,
+                                  oneOnOneWeekday:
+                                    option.value === "ONCE"
+                                      ? null
+                                      : (current.oneOnOneWeekday ?? "TUE"),
+                                  oneOnOneScheduledDate:
+                                    option.value === "ONCE" ? current.oneOnOneScheduledDate : null,
+                                }))
+                              }
+                            />
+                          ))}
+                        </View>
+                        {draft.oneOnOneFrequency === "ONCE" ? (
+                          <>
+                            <Text style={styles.label}>Scheduled date</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={draft.oneOnOneScheduledDate ?? ""}
+                              onChangeText={(value) =>
+                                updateDraft((current) => ({
+                                  ...current,
+                                  oneOnOneScheduledDate: normalizeUsDateInput(value),
+                                }))
+                              }
+                              placeholder="MM-DD-YYYY"
+                              placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                            />
+                          </>
+                        ) : (
+                          <>
+                            <Text style={styles.label}>Recurring day</Text>
+                            <View style={styles.chipRow}>
+                              {SCHEDULED_WEEKDAY_OPTIONS.map((option) => (
+                                <Chip
+                                  key={option.value}
+                                  label={option.label}
+                                  selected={draft.oneOnOneWeekday === option.value}
+                                  onPress={() =>
+                                    updateDraft((current) => ({
+                                      ...current,
+                                      oneOnOneWeekday: option.value,
+                                    }))
+                                  }
+                                />
+                              ))}
+                            </View>
+                          </>
+                        )}
+                        <Text style={styles.label}>Scheduled time</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={draft.oneOnOneTimeLocalHhmm}
+                          onChangeText={(value) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              oneOnOneTimeLocalHhmm: value,
+                            }))
+                          }
+                          placeholder="15:00"
+                          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                        />
+                        <Text style={styles.label}>Lead-time reminder minutes</Text>
+                        <TextInput
+                          style={styles.input}
+                          value={String(draft.oneOnOneLeadTimeMinutes)}
+                          onChangeText={(value) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              oneOnOneLeadTimeMinutes: parseNonNegativeInt(
+                                normalizeIntegerInput(value),
+                                0,
+                              ),
+                            }))
+                          }
+                          keyboardType="number-pad"
+                          placeholder="30"
+                          placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                        />
+                        <ToggleRow
+                          label="Add to calendar"
+                          value={draft.oneOnOneAddToCalendar}
+                          onValueChange={(value) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              oneOnOneAddToCalendar: value,
+                            }))
+                          }
+                        />
+                        <ToggleRow
+                          label="In-app reminder"
+                          value={draft.oneOnOneReminderEnabled}
+                          onValueChange={(value) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              oneOnOneReminderEnabled: value,
+                            }))
+                          }
+                        />
+                      </>
+                    ) : (
+                      <Text style={styles.meta}>One-on-one details are skipped.</Text>
+                    )}
+                  </>
+                ) : null}
               </>
             ) : null}
-            {wizardStep < 8 ? (
-              <AppButton title="Next" onPress={() => void nextStep()} disabled={isSaving} />
-            ) : (
-              <AppButton
-                title="Save resident profile"
-                onPress={() => void saveAndFinish()}
-                disabled={isSaving}
-              />
-            )}
-          </View>
 
+            {wizardStep === 8 ? (
+              <>
+                <ToggleRow
+                  label="Consent to house rules"
+                  value={draft.consentToHouseRules}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({ ...current, consentToHouseRules: value }))
+                  }
+                />
+                <ToggleRow
+                  label="Consent to location verification"
+                  value={draft.consentToLocationVerification}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({ ...current, consentToLocationVerification: value }))
+                  }
+                />
+                <ToggleRow
+                  label="Consent to compliance documentation"
+                  value={draft.consentToComplianceDocumentation}
+                  onValueChange={(value) =>
+                    updateDraft((current) => ({
+                      ...current,
+                      consentToComplianceDocumentation: value,
+                    }))
+                  }
+                />
+                <Text style={styles.meta}>
+                  House: {assignedHouse?.name ?? "Not assigned"} • Current signed status:{" "}
+                  {formatSignedAt(draft.consentSignedAt)}
+                </Text>
+                <Text style={styles.signatureHint}>
+                  Open the full-screen signature pad for a smoother consent signature capture.
+                </Text>
+                <View style={styles.signatureCanvasWrap}>
+                  {signaturePreviewPath.length > 0 ? (
+                    <View style={styles.signaturePreviewCanvas}>
+                      <Svg
+                        pointerEvents="none"
+                        width="100%"
+                        height="100%"
+                        viewBox={`0 0 ${Math.max(1, signatureCanvasSize.width)} ${Math.max(
+                          1,
+                          signatureCanvasSize.height,
+                        )}`}
+                        style={styles.signatureSvgOverlay}
+                      >
+                        <Path
+                          d={signaturePreviewPath}
+                          fill="none"
+                          stroke="#0f172a"
+                          strokeWidth={2.5}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </Svg>
+                    </View>
+                  ) : (
+                    <Text style={styles.inlineStatus}>
+                      {draft.consentSignatureRef
+                        ? "Signature on file. Open the pad to update it."
+                        : "No signature captured yet."}
+                    </Text>
+                  )}
+                </View>
+                <View style={styles.buttonRow}>
+                  <AppButton
+                    title={
+                      signaturePreviewPath.length > 0 ? "Update signature" : "Open signature pad"
+                    }
+                    onPress={() => setIsSignaturePadVisible(true)}
+                  />
+                  <AppButton
+                    title="Clear signature"
+                    variant="secondary"
+                    onPress={() => {
+                      setSignaturePoints([]);
+                      updateDraft((current) => ({
+                        ...current,
+                        consentSignatureRef: null,
+                        consentSignedAt: null,
+                      }));
+                    }}
+                  />
+                </View>
+              </>
+            ) : null}
+
+            {residentStatus ? <Text style={styles.statusText}>{residentStatus}</Text> : null}
+
+            <View style={styles.buttonRow}>
+              {wizardStep > 1 ? (
+                <>
+                  <AppButton title="Back" variant="secondary" onPress={() => void previousStep()} />
+                  <View style={styles.buttonSpacer} />
+                </>
+              ) : null}
+              {wizardStep < 8 ? (
+                <AppButton title="Next" onPress={() => void nextStep()} disabled={isSaving} />
+              ) : (
+                <AppButton
+                  title="Save resident profile"
+                  onPress={() => void saveAndFinish()}
+                  disabled={isSaving}
+                />
+              )}
+            </View>
+
+            <View style={styles.buttonRow}>
+              <AppButton
+                title="Cancel"
+                variant="secondary"
+                onPress={() => {
+                  setIsEditing(false);
+                  setResidentStatus(null);
+                  setSignaturePoints([]);
+                }}
+              />
+            </View>
+          </>
+        ) : null}
+      </GlassCard>
+      <Modal
+        visible={isSignaturePadVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setIsSignaturePadVisible(false)}
+      >
+        <View style={styles.signatureModalRoot}>
+          <View style={styles.signatureModalHeader}>
+            <Text style={styles.title}>Resident Consent Signature</Text>
+            <Text style={styles.meta}>
+              Draw your signature with your finger in one continuous motion.
+            </Text>
+          </View>
+          <View style={styles.signatureModalCanvasWrap}>
+            <View
+              style={[styles.signatureCanvas, styles.signatureCanvasLandscape]}
+              onLayout={(event) => {
+                setSignatureCanvasSize({
+                  width: event.nativeEvent.layout.width,
+                  height: event.nativeEvent.layout.height,
+                });
+              }}
+              onStartShouldSetResponder={() => true}
+              onMoveShouldSetResponder={() => true}
+              onResponderGrant={(event) => addSignaturePoint(event, true)}
+              onResponderMove={addSignaturePoint}
+            >
+              <Svg
+                pointerEvents="none"
+                width="100%"
+                height="100%"
+                viewBox={`0 0 ${Math.max(1, signatureCanvasSize.width)} ${Math.max(
+                  1,
+                  signatureCanvasSize.height,
+                )}`}
+                style={styles.signatureSvgOverlay}
+              >
+                {signaturePreviewPath.length > 0 ? (
+                  <Path
+                    d={signaturePreviewPath}
+                    fill="none"
+                    stroke="#0f172a"
+                    strokeWidth={2.5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                ) : null}
+              </Svg>
+            </View>
+          </View>
           <View style={styles.buttonRow}>
+            <AppButton title="Done" onPress={() => setIsSignaturePadVisible(false)} />
             <AppButton
-              title="Cancel"
+              title="Clear"
               variant="secondary"
               onPress={() => {
-                setIsEditing(false);
-                setResidentStatus(null);
                 setSignaturePoints([]);
+                updateDraft((current) => ({
+                  ...current,
+                  consentSignatureRef: null,
+                  consentSignedAt: null,
+                }));
               }}
             />
           </View>
-        </>
-      ) : null}
-    </GlassCard>
+        </View>
+      </Modal>
+    </>
   );
 }
 
@@ -1535,14 +1697,50 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.16)",
     backgroundColor: "rgba(255,255,255,0.06)",
     overflow: "hidden",
+    padding: spacing.md,
   },
-  signatureCanvas: {
+  signaturePreviewCanvas: {
     height: 160,
     backgroundColor: "#ffffff",
+    borderRadius: radius.md,
+    overflow: "hidden",
+    position: "relative",
+  },
+  signatureCanvas: {
+    height: 220,
+    backgroundColor: "#ffffff",
+    overflow: "hidden",
+    position: "relative",
   },
   signatureSvgOverlay: {
-    width: "100%",
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  signatureHint: {
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    lineHeight: 18,
+  },
+  signatureModalRoot: {
+    flex: 1,
+    backgroundColor: "rgba(11,6,26,0.98)",
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.lg,
+    gap: spacing.md,
+  },
+  signatureModalHeader: {
+    gap: spacing.xs,
+  },
+  signatureModalCanvasWrap: {
+    flex: 1,
+  },
+  signatureCanvasLandscape: {
     height: "100%",
+    minHeight: 280,
   },
   statusText: {
     color: colors.neonLavender,

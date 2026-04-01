@@ -59,21 +59,6 @@ type DashboardProps = {
     summary: string;
     title?: string;
   };
-  soberHouseChatPreview?: {
-    visible: boolean;
-    threadCount: number;
-    unreadCount: number;
-    acknowledgmentPending: boolean;
-    threads: Array<{
-      id: string;
-      participantName: string;
-      participantRole: string;
-      preview: string;
-      timestamp: string;
-      unreadCount: number;
-      acknowledgmentPending: boolean;
-    }>;
-  } | null;
   soberHouseResidentTiles?: SoberHouseDashboardTileSummary[];
   soberHouseSetupPrompt?: {
     visible: boolean;
@@ -87,11 +72,6 @@ type DashboardProps = {
     underReviewCount: number;
     correctiveActionCount: number;
     recentSummary: string;
-  } | null;
-  houseManagerContact?: {
-    name: string;
-    roleLabel: string;
-    phoneLabel: string;
   } | null;
   homeGroupMeeting: DashboardMeeting | null;
   meetingsAttendedInNinetyDays: number;
@@ -124,11 +104,11 @@ type DashboardProps = {
   onMeetingPress: (meetingId: string) => void;
   onSearchArea: () => void;
   onCallSponsor: () => void;
+  onCallHouseManager?: () => void;
   onOpenMorningRoutine: () => void;
   onOpenNightlyInventory: () => void;
   onOpenNotifications: () => void;
   onOpenSoberHouseKpi?: (kpiId: string) => void;
-  onCallHouseManager?: () => void;
   onOpenRecoverySettings: () => void;
   onOpenPrivacyStatement: () => void;
   onOpenMeetings: () => void;
@@ -140,6 +120,7 @@ type DashboardProps = {
   onOpenAttendance: () => void;
   onOpenAttendanceToday: () => void;
   onOpenTools: () => void;
+  houseManagerCallAvailable?: boolean;
   soberHousingEntryVisible?: boolean;
   soberHousingEntryLabel?: string;
   onOpenSoberHousingSettings: () => void;
@@ -259,6 +240,51 @@ function kpiToneStyle(tone: "green" | "yellow" | "red" | "gray") {
     borderColor: "rgba(255,255,255,0.18)",
     backgroundColor: "rgba(255,255,255,0.06)",
   };
+}
+
+function soberHouseTileProgressPercent(tile: SoberHouseDashboardTileSummary): number {
+  const percentMatch = tile.value.match(/(\d+(?:\.\d+)?)%/);
+  if (percentMatch) {
+    return Math.max(0, Math.min(100, Math.round(Number(percentMatch[1]))));
+  }
+
+  const fractionMatch = tile.value.match(/(\d+)\s*\/\s*(\d+)/);
+  if (fractionMatch) {
+    const completed = Number(fractionMatch[1]);
+    const total = Number(fractionMatch[2]);
+    if (Number.isFinite(completed) && Number.isFinite(total) && total > 0) {
+      return Math.max(0, Math.min(100, Math.round((completed / total) * 100)));
+    }
+    return 0;
+  }
+
+  if (tile.value.toLowerCase() === "setup") {
+    return 0;
+  }
+
+  if (tile.tone === "green") {
+    return 100;
+  }
+  if (tile.tone === "yellow") {
+    return 60;
+  }
+  if (tile.tone === "red") {
+    return 28;
+  }
+  return 12;
+}
+
+function soberHouseTileProgressColor(tone: SoberHouseDashboardTileSummary["tone"]): string {
+  if (tone === "green") {
+    return "rgba(136,255,179,0.95)";
+  }
+  if (tone === "yellow") {
+    return "rgba(253,224,71,0.95)";
+  }
+  if (tone === "red") {
+    return "rgba(252,165,165,0.95)";
+  }
+  return "rgba(201,217,255,0.72)";
 }
 
 function parseSobrietyStartMs(value: string | null): number | null {
@@ -396,11 +422,9 @@ export function Dashboard({
   wisdomText,
   notificationSummary = null,
   dailyChecklist,
-  soberHouseChatPreview = null,
   soberHouseViolations,
   soberHouseResidentTiles = [],
   soberHouseSetupPrompt = null,
-  houseManagerContact = null,
   meetingsAttendedInNinetyDays,
   ninetyDayGoalTarget,
   ninetyDayProgressPct,
@@ -416,11 +440,11 @@ export function Dashboard({
   onMeetingPress,
   onSearchArea,
   onCallSponsor,
+  onCallHouseManager,
   onOpenMorningRoutine,
   onOpenNightlyInventory,
   onOpenNotifications,
   onOpenSoberHouseKpi,
-  onCallHouseManager,
   onOpenRecoverySettings,
   onOpenPrivacyStatement,
   onOpenMeetings,
@@ -432,6 +456,7 @@ export function Dashboard({
   onOpenAttendance,
   onOpenAttendanceToday,
   onOpenTools,
+  houseManagerCallAvailable = false,
   soberHousingEntryVisible = false,
   soberHousingEntryLabel = "Sober Housing Settings",
   onOpenSoberHousingSettings,
@@ -539,6 +564,10 @@ export function Dashboard({
       ? wisdomText
       : SPONSOR_WISDOM_TEXT;
   const notificationBadgeCount = notificationSummary?.badgeCount ?? 0;
+  const appSubtitle =
+    soberHouseResidentTiles.length > 0 || soberHouseSetupPrompt?.visible ? "Housing" : "Recovery";
+  const soberHousePanelTitle =
+    soberHouseResidentTiles.length > 0 ? "Sober House Daily Checklist" : "Sober House Operations";
 
   return (
     <View style={styles.root}>
@@ -549,7 +578,7 @@ export function Dashboard({
           </Pressable>
           <View style={styles.titleWrap}>
             <Text style={styles.appTitle}>Sober²</Text>
-            <Text style={styles.appSubtitle}>Recovery</Text>
+            <Text style={styles.appSubtitle}>{appSubtitle}</Text>
           </View>
           <Pressable onPress={onOpenNotifications} style={styles.iconButton}>
             <Text style={styles.iconText}>🔔</Text>
@@ -678,64 +707,19 @@ export function Dashboard({
             </ScrollView>
           </GlassCard>
         </Pressable>
-        {sponsorCallAvailable ? (
-          <Pressable style={styles.callSponsorButtonBelowWisdom} onPress={onCallSponsor}>
-            <Text style={styles.callNowText}>📞 Call Sponsor</Text>
-          </Pressable>
-        ) : null}
-
-        {soberHouseChatPreview?.visible ? (
-          <Pressable
-            onHoverIn={() => setTileHover("chat", true)}
-            onHoverOut={() => setTileHover("chat", false)}
-            accessibilityRole="button"
-            accessibilityLabel="House manager chat preview"
-          >
-            <GlassCard
-              strong
-              blurIntensity={12}
-              style={[
-                styles.recoveryCard,
-                styles.liquidGlassTile,
-                hoveredTileId === "chat" ? styles.liquidGlassTileHover : null,
-              ]}
-            >
-              <View style={styles.upcomingHeader}>
-                <Text style={styles.recoveryTitle}>House Manager Chat</Text>
-                <View style={styles.soberHouseTileBadge}>
-                  <Text style={styles.soberHouseTileBadgeText}>
-                    {soberHouseChatPreview.unreadCount > 0
-                      ? `${soberHouseChatPreview.unreadCount} new`
-                      : "Live"}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.recoveryText}>
-                {houseManagerContact
-                  ? `Direct operational messaging with ${houseManagerContact.name}`
-                  : "Direct operational messaging with house staff."}
-              </Text>
-              {soberHouseChatPreview.threads.slice(0, 2).map((thread) => (
-                <View
-                  key={thread.id}
-                  style={{ flexDirection: "row", gap: 8, alignItems: "flex-start", marginTop: 8 }}
-                >
-                  <View style={[styles.notificationToneDot, styles.notificationToneDotGray]} />
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={styles.recoveryTitle}>
-                      {thread.participantName} • {thread.participantRole}
-                    </Text>
-                    <Text style={styles.soberHouseTileDetail} numberOfLines={2}>
-                      {thread.preview}
-                    </Text>
-                  </View>
-                </View>
-              ))}
-              {soberHouseChatPreview.acknowledgmentPending ? (
-                <Text style={styles.soberHouseTileDetail}>Acknowledgment required</Text>
-              ) : null}
-            </GlassCard>
-          </Pressable>
+        {sponsorCallAvailable || houseManagerCallAvailable ? (
+          <View style={styles.callActionRow}>
+            {sponsorCallAvailable ? (
+              <Pressable style={styles.callSponsorButtonBelowWisdom} onPress={onCallSponsor}>
+                <Text style={styles.callNowText}>📞 Call Sponsor</Text>
+              </Pressable>
+            ) : null}
+            {houseManagerCallAvailable && onCallHouseManager ? (
+              <Pressable style={styles.callSponsorButtonBelowWisdom} onPress={onCallHouseManager}>
+                <Text style={styles.callNowText}>📞 Call House Manager</Text>
+              </Pressable>
+            ) : null}
+          </View>
         ) : null}
 
         <View style={styles.metricsRow}>
@@ -1408,47 +1392,35 @@ export function Dashboard({
           </GlassCard>
         ) : null}
 
-        {houseManagerContact || soberHouseResidentTiles.length > 0 ? (
+        {soberHouseResidentTiles.length > 0 ? (
           <GlassCard
             strong
             blurIntensity={12}
             style={[styles.recoveryCard, styles.liquidGlassTile]}
           >
             <View style={styles.upcomingHeader}>
-              <Text style={styles.recoveryTitle}>Sober House Operations</Text>
+              <Text style={styles.recoveryTitle}>{soberHousePanelTitle}</Text>
             </View>
-            {houseManagerContact ? (
-              <>
-                <Text style={styles.recoveryText}>
-                  {houseManagerContact.roleLabel}: {houseManagerContact.name} •{" "}
-                  {houseManagerContact.phoneLabel}
-                </Text>
-                {onCallHouseManager ? (
-                  <Pressable
-                    style={styles.soberHouseManagerAction}
-                    onPress={onCallHouseManager}
-                    accessibilityRole="button"
-                    accessibilityLabel="Call house manager"
-                  >
-                    <Text style={styles.soberHouseManagerActionText}>Call house manager</Text>
-                  </Pressable>
-                ) : null}
-              </>
-            ) : null}
             {soberHouseResidentTiles.length > 0 ? (
               <View style={styles.kpiGrid}>
                 {soberHouseResidentTiles.map((tile) => (
                   <Pressable
                     key={tile.id}
                     style={[styles.kpiTile, kpiToneStyle(tile.tone)]}
-                    onPress={() =>
-                      tile.routeTarget === "MEETINGS"
-                        ? onOpenMeetings()
-                        : onOpenSoberHouseKpi?.(tile.id)
-                    }
+                    onPress={() => {
+                      if (onOpenSoberHouseKpi) {
+                        onOpenSoberHouseKpi(tile.id);
+                        return;
+                      }
+                      if (tile.routeTarget === "MEETINGS") {
+                        onOpenMeetings();
+                      }
+                    }}
                   >
                     <View style={styles.soberHouseTileHeader}>
-                      <Text style={styles.kpiTitle}>{tile.title}</Text>
+                      <Text numberOfLines={2} style={styles.kpiTitle}>
+                        {tile.title}
+                      </Text>
                       {tile.badgeLabel ? (
                         <View style={styles.soberHouseTileBadge}>
                           <Text style={styles.soberHouseTileBadgeText}>{tile.badgeLabel}</Text>
@@ -1456,8 +1428,20 @@ export function Dashboard({
                       ) : null}
                     </View>
                     <Text style={styles.kpiValue}>{tile.value}</Text>
-                    <Text style={styles.kpiSubtitle}>{tile.subtitle}</Text>
-                    <Text style={styles.soberHouseTileDetail}>{tile.detail}</Text>
+                    <Text numberOfLines={2} style={styles.soberHouseTileSubtitleCompact}>
+                      {tile.subtitle}
+                    </Text>
+                    <View style={styles.soberHouseTileProgressTrack}>
+                      <View
+                        style={[
+                          styles.soberHouseTileProgressFill,
+                          {
+                            width: `${soberHouseTileProgressPercent(tile)}%`,
+                            backgroundColor: soberHouseTileProgressColor(tile.tone),
+                          },
+                        ]}
+                      />
+                    </View>
                   </Pressable>
                 ))}
               </View>
@@ -2202,17 +2186,28 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   callSponsorButtonBelowWisdom: {
+    flex: 1,
     borderRadius: 20,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.35)",
     backgroundColor: "rgba(90,44,206,0.8)",
     paddingVertical: 10,
+    paddingHorizontal: 16,
     alignItems: "center",
+    justifyContent: "center",
+    minHeight: 48,
+  },
+  callActionRow: {
+    width: "100%",
+    flexDirection: "row",
+    gap: 10,
+    alignItems: "stretch",
   },
   callNowText: {
     color: Design.color.textPrimary,
     fontSize: 16,
     fontWeight: "800",
+    textAlign: "center",
   },
   streakLabel: {
     color: Design.color.textSecondary,
@@ -2610,7 +2605,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     paddingHorizontal: 12,
     paddingVertical: 12,
-    gap: 6,
+    gap: 8,
+    minHeight: 138,
   },
   soberHouseTileHeader: {
     flexDirection: "row",
@@ -2646,7 +2642,7 @@ const styles = StyleSheet.create({
   },
   kpiValue: {
     color: Design.color.textPrimary,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: "900",
   },
   kpiSubtitle: {
@@ -2654,6 +2650,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17,
     fontWeight: "600",
+  },
+  soberHouseTileSubtitleCompact: {
+    color: Design.color.textSecondary,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: "600",
+    minHeight: 32,
+  },
+  soberHouseTileProgressTrack: {
+    marginTop: "auto",
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    overflow: "hidden",
+  },
+  soberHouseTileProgressFill: {
+    height: "100%",
+    borderRadius: 999,
   },
   soberHouseTileDetail: {
     color: Design.color.textPrimary,

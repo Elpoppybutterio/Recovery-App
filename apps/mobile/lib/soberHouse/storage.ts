@@ -263,6 +263,13 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
             : record.proofRequirement
               ? [record.proofRequirement]
               : ["NONE"],
+          managerConfirmationRequired: record.managerConfirmationRequired ?? false,
+          managerConfirmationStatus: record.managerConfirmationRequired
+            ? (record.managerConfirmationStatus ?? "PENDING")
+            : "NOT_REQUIRED",
+          managerConfirmationRequestedAt: record.managerConfirmationRequestedAt ?? null,
+          managerConfirmationRequestedVia: record.managerConfirmationRequestedVia ?? null,
+          managerConfirmedAt: record.managerConfirmedAt ?? null,
         }))
       : [],
     jobApplicationRecords: Array.isArray(candidate.jobApplicationRecords)
