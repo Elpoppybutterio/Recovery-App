@@ -111,6 +111,10 @@ function queueItemId(
   return `${sourceRecordType}:${sourceRecordId}`;
 }
 
+function isNonNull<T>(value: T | null): value is T {
+  return value !== null;
+}
+
 function reviewStatusFromRecord(record: ProofReviewRecord | null): ProofReviewDerivedStatus | null {
   if (!record) {
     return null;
@@ -443,48 +447,47 @@ export function buildSoberHouseProofReviewSummary(input: {
   });
 
   const queue = buildReviewableSources(input.store, input.nowIso)
-    .flatMap((source): ProofReviewQueueItem[] => {
+    .map((source): ProofReviewQueueItem | null => {
       const resident = residentMeta.get(source.residentId);
       const reviewRecord =
         reviewRecordBySource.get(queueItemId(source.sourceRecordType, source.sourceRecordId)) ??
         null;
       const reviewStatus = resolveDerivedStatus(source, reviewRecord);
       if (reviewStatus === "not_tracked") {
-        return [];
+        return null;
       }
       const house = source.houseId ? getHouseById(input.store, source.houseId) : null;
       const notes = reviewRecord?.history.filter((entry) => entry.note.trim().length > 0) ?? [];
       const linkedEnforcementCount = proofEnforcementByResident.get(source.residentId)?.length ?? 0;
-      return [
-        {
-          id: reviewRecord?.id ?? queueItemId(source.sourceRecordType, source.sourceRecordId),
-          sourceKind: reviewRecord ? "record" : "derived",
-          proofReviewRecordId: reviewRecord?.id ?? null,
-          residentId: source.residentId,
-          linkedUserId: source.linkedUserId,
-          residentName: resident?.displayName ?? source.residentId,
-          houseId: source.houseId,
-          houseName: resident?.houseName ?? house?.name ?? "Unassigned",
-          category: source.category,
-          sourceRecordType: source.sourceRecordType,
-          sourceRecordId: source.sourceRecordId,
-          title: source.title,
-          dueAt: source.dueAt,
-          submittedAt: source.submittedAt,
-          reviewStatus,
-          proofRequired: source.proofRequired,
-          proofProvided: source.proofProvided,
-          proofReference: source.proofReference,
-          evidenceItemIds: source.evidenceItemIds,
-          noteCount: notes.length,
-          latestNote: notes.length > 0 ? (notes[notes.length - 1]?.note ?? null) : null,
-          linkedEnforcementCount,
-          complianceBand: resident?.complianceBand ?? "compliant",
-          highRisk:
-            resident?.complianceBand === "critical" || resident?.complianceBand === "noncompliant",
-        } satisfies ProofReviewQueueItem,
-      ];
+      return {
+        id: reviewRecord?.id ?? queueItemId(source.sourceRecordType, source.sourceRecordId),
+        sourceKind: reviewRecord ? "record" : "derived",
+        proofReviewRecordId: reviewRecord?.id ?? null,
+        residentId: source.residentId,
+        linkedUserId: source.linkedUserId,
+        residentName: resident?.displayName ?? source.residentId,
+        houseId: source.houseId,
+        houseName: resident?.houseName ?? house?.name ?? "Unassigned",
+        category: source.category,
+        sourceRecordType: source.sourceRecordType,
+        sourceRecordId: source.sourceRecordId,
+        title: source.title,
+        dueAt: source.dueAt,
+        submittedAt: source.submittedAt,
+        reviewStatus,
+        proofRequired: source.proofRequired,
+        proofProvided: source.proofProvided,
+        proofReference: source.proofReference,
+        evidenceItemIds: source.evidenceItemIds,
+        noteCount: notes.length,
+        latestNote: notes.length > 0 ? (notes[notes.length - 1]?.note ?? null) : null,
+        linkedEnforcementCount,
+        complianceBand: resident?.complianceBand ?? "compliant",
+        highRisk:
+          resident?.complianceBand === "critical" || resident?.complianceBand === "noncompliant",
+      };
     })
+    .filter(isNonNull)
     .sort((left, right) => {
       const urgencyWeight = (value: ProofReviewDerivedStatus) =>
         value === "missing"
