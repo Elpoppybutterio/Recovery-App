@@ -250,7 +250,7 @@ export function canViewCourtParticipantExperience(role: AppAccessRole): boolean 
 }
 
 export function soberHouseEntryLabel(role: AppAccessRole): string {
-  return canManageSoberHouseHierarchy(role) ? "Sober Housing Settings" : "Sober House Profile";
+  return canManageSoberHouseHierarchy(role) ? "Sober Housing Admin" : "Sober House Profile";
 }
 
 export function courtEntryLabel(role: AppAccessRole): string {

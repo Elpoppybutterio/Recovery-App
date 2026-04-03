@@ -29,6 +29,9 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
     version !== 7 &&
     version !== 8 &&
     version !== 10 &&
+    version !== 12 &&
+    version !== 13 &&
+    version !== 14 &&
     version !== SOBER_HOUSE_SETTINGS_STORE_VERSION
   ) {
     return createDefaultSoberHouseSettingsStore();
@@ -54,6 +57,102 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
           sentStatus: null,
           sentAt: null,
         },
+      }))
+    : [];
+  const operatorReportExports = Array.isArray(candidate.operatorReportExports)
+    ? candidate.operatorReportExports.map((record) => ({
+        ...record,
+        organizationId: record.organizationId ?? null,
+        houseId: record.houseId ?? null,
+        residentId: record.residentId ?? null,
+        generatedBy: record.generatedBy ?? { id: "system", name: "System" },
+        itemCount:
+          typeof record.itemCount === "number" && Number.isFinite(record.itemCount)
+            ? record.itemCount
+            : 0,
+        filters: {
+          startDate: record.filters?.startDate ?? record.periodStart.slice(0, 10),
+          endDate: record.filters?.endDate ?? record.periodEnd.slice(0, 10),
+          organizationId: record.filters?.organizationId ?? record.organizationId ?? null,
+          houseId: record.filters?.houseId ?? record.houseId ?? null,
+          residentId: record.filters?.residentId ?? record.residentId ?? null,
+          complianceBand: record.filters?.complianceBand ?? "ALL",
+          onlyOpenViolations: record.filters?.onlyOpenViolations ?? false,
+          onlyMissingProof: record.filters?.onlyMissingProof ?? false,
+          onlyOverdue: record.filters?.onlyOverdue ?? false,
+          highRiskOnly: record.filters?.highRiskOnly ?? false,
+        },
+      }))
+    : [];
+  const scheduledSummaryRecords = Array.isArray(candidate.scheduledSummaryRecords)
+    ? candidate.scheduledSummaryRecords.map((record) => ({
+        ...record,
+        organizationId: record.organizationId ?? null,
+        houseId: record.houseId ?? null,
+        residentId: record.residentId ?? null,
+        generatedBy: record.generatedBy ?? { id: "system", name: "System" },
+        highlights: Array.isArray(record.highlights) ? record.highlights : [],
+        metrics: Array.isArray(record.metrics) ? record.metrics : [],
+        filters: {
+          startDate: record.filters?.startDate ?? record.periodStart.slice(0, 10),
+          endDate: record.filters?.endDate ?? record.periodEnd.slice(0, 10),
+          organizationId: record.filters?.organizationId ?? record.organizationId ?? null,
+          houseId: record.filters?.houseId ?? record.houseId ?? null,
+          residentId: record.filters?.residentId ?? record.residentId ?? null,
+          complianceBand: record.filters?.complianceBand ?? "ALL",
+          onlyOpenViolations: record.filters?.onlyOpenViolations ?? false,
+          onlyMissingProof: record.filters?.onlyMissingProof ?? false,
+          onlyOverdue: record.filters?.onlyOverdue ?? false,
+          highRiskOnly: record.filters?.highRiskOnly ?? false,
+        },
+      }))
+    : [];
+  const proofReviewRecords = Array.isArray(candidate.proofReviewRecords)
+    ? candidate.proofReviewRecords.map((record) => ({
+        ...record,
+        linkedEnforcementRecordId: record.linkedEnforcementRecordId ?? null,
+        proofRequired: record.proofRequired ?? true,
+        proofProvided: record.proofProvided ?? false,
+        proofReference: record.proofReference ?? null,
+        evidenceItemIds: Array.isArray(record.evidenceItemIds) ? record.evidenceItemIds : [],
+        submittedAt: record.submittedAt ?? null,
+        status: record.status ?? "PENDING",
+        reviewedAt: record.reviewedAt ?? null,
+        reviewedBy: record.reviewedBy ?? null,
+        history: Array.isArray(record.history)
+          ? record.history.map((entry) => ({
+              ...entry,
+              note: entry.note ?? "",
+              previousStatus: entry.previousStatus ?? null,
+              nextStatus: entry.nextStatus ?? "PENDING",
+              actor: entry.actor ?? { id: "system", name: "System" },
+            }))
+          : [],
+      }))
+    : [];
+  const enforcementRecords = Array.isArray(candidate.enforcementRecords)
+    ? candidate.enforcementRecords.map((record) => ({
+        ...record,
+        assignedStaffAssignmentId: record.assignedStaffAssignmentId ?? null,
+        linkedViolationId: record.linkedViolationId ?? null,
+        linkedCorrectiveActionId: record.linkedCorrectiveActionId ?? null,
+        dueAt: record.dueAt ?? null,
+        acknowledgedAt: record.acknowledgedAt ?? null,
+        resolvedAt: record.resolvedAt ?? null,
+        escalatedAt: record.escalatedAt ?? null,
+        history: Array.isArray(record.history)
+          ? record.history.map((entry) => ({
+              ...entry,
+              note: entry.note ?? "",
+              previousStatus: entry.previousStatus ?? null,
+              nextStatus: entry.nextStatus ?? null,
+              previousLevel: entry.previousLevel ?? null,
+              nextLevel: entry.nextLevel ?? null,
+              assignedStaffAssignmentId: entry.assignedStaffAssignmentId ?? null,
+              linkedViolationId: entry.linkedViolationId ?? null,
+              actor: entry.actor ?? { id: "system", name: "System" },
+            }))
+          : [],
       }))
     : [];
 
@@ -167,7 +266,17 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
         }))
       : [],
     houseMeetings: Array.isArray(candidate.houseMeetings) ? candidate.houseMeetings : [],
-    oneOnOneSessions: Array.isArray(candidate.oneOnOneSessions) ? candidate.oneOnOneSessions : [],
+    oneOnOneSessions: Array.isArray(candidate.oneOnOneSessions)
+      ? candidate.oneOnOneSessions.map((session) => ({
+          ...session,
+          completionStatus:
+            session.completionStatus ?? (session.completedAt ? "COMPLETED" : "SCHEDULED"),
+          completedAt: session.completedAt ?? null,
+          completedByStaffAssignmentId: session.completedByStaffAssignmentId ?? null,
+          excusedAt: session.excusedAt ?? null,
+          excusedReason: session.excusedReason ?? null,
+        }))
+      : [],
     houseChores: Array.isArray(candidate.houseChores)
       ? candidate.houseChores.map((chore) => ({
           ...chore,
@@ -252,8 +361,29 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
           oneOnOneReminderEnabled: candidate.residentWizardDraft.oneOnOneReminderEnabled ?? false,
         }
       : null,
+    sponsorCallRecords: Array.isArray(candidate.sponsorCallRecords)
+      ? candidate.sponsorCallRecords.map((record) => ({
+          ...record,
+          scheduledFor: record.scheduledFor ?? null,
+          status: record.status ?? (record.completedAt ? "COMPLETED" : "SCHEDULED"),
+          completedAt: record.completedAt ?? null,
+          proofRequired: record.proofRequired ?? false,
+          proofProvided: record.proofProvided ?? false,
+          proofReference: record.proofReference ?? null,
+          proofType: record.proofType ?? "CALL_LOG",
+        }))
+      : [],
     houseMeetingAttendanceRecords: Array.isArray(candidate.houseMeetingAttendanceRecords)
-      ? candidate.houseMeetingAttendanceRecords
+      ? candidate.houseMeetingAttendanceRecords.map((record) => ({
+          ...record,
+          status: record.status ?? (record.attendedAt ? "COMPLETED" : "SCHEDULED"),
+          attendedAt: record.attendedAt ?? null,
+          excusedAt: record.excusedAt ?? null,
+          excusedReason: record.excusedReason ?? null,
+          proofRequired: record.proofRequired ?? false,
+          proofProvided: record.proofProvided ?? false,
+          proofReference: record.proofReference ?? null,
+        }))
       : [],
     choreCompletionRecords: Array.isArray(candidate.choreCompletionRecords)
       ? candidate.choreCompletionRecords.map((record) => ({
@@ -263,6 +393,13 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
             : record.proofRequirement
               ? [record.proofRequirement]
               : ["NONE"],
+          managerConfirmationRequired: record.managerConfirmationRequired ?? false,
+          managerConfirmationStatus: record.managerConfirmationRequired
+            ? (record.managerConfirmationStatus ?? "PENDING")
+            : "NOT_REQUIRED",
+          managerConfirmationRequestedAt: record.managerConfirmationRequestedAt ?? null,
+          managerConfirmationRequestedVia: record.managerConfirmationRequestedVia ?? null,
+          managerConfirmedAt: record.managerConfirmedAt ?? null,
         }))
       : [],
     jobApplicationRecords: Array.isArray(candidate.jobApplicationRecords)
@@ -286,6 +423,10 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
       ? candidate.chatMessageReceipts
       : [],
     monthlyReports,
+    operatorReportExports,
+    scheduledSummaryRecords,
+    proofReviewRecords,
+    enforcementRecords,
     auditLogEntries: Array.isArray(candidate.auditLogEntries) ? candidate.auditLogEntries : [],
   };
 }

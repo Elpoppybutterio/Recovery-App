@@ -12,6 +12,7 @@ import type {
   HouseChore,
   HouseGroup,
   HouseMeeting,
+  HouseMeetingAttendanceRecord,
   HouseRuleSet,
   HouseRuleScopeType,
   MonthlyReport,
@@ -20,9 +21,174 @@ import type {
   ScheduledWeekdayCode,
   SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
+  SponsorCallRecord,
   StaffAssignment,
   Violation,
 } from "./types";
+
+export type EffectiveRuleValueSource = "ORGANIZATION" | "HOUSE_GROUP" | "HOUSE";
+
+export type EffectiveRuleSourceMap = {
+  curfew: EffectiveRuleValueSource;
+  chores: EffectiveRuleValueSource;
+  employment: EffectiveRuleValueSource;
+  jobSearch: EffectiveRuleValueSource;
+  meetings: EffectiveRuleValueSource;
+  sponsorContact: EffectiveRuleValueSource;
+  oneOnOne: EffectiveRuleValueSource;
+  operations: EffectiveRuleValueSource;
+  support: EffectiveRuleValueSource;
+};
+
+export type EffectiveRuleSetResult = {
+  ruleSet: HouseRuleSet;
+  sources: EffectiveRuleSourceMap;
+};
+
+const DEFAULT_RULE_SOURCE_MAP: EffectiveRuleSourceMap = {
+  curfew: "ORGANIZATION",
+  chores: "ORGANIZATION",
+  employment: "ORGANIZATION",
+  jobSearch: "ORGANIZATION",
+  meetings: "ORGANIZATION",
+  sponsorContact: "ORGANIZATION",
+  oneOnOne: "ORGANIZATION",
+  operations: "ORGANIZATION",
+  support: "ORGANIZATION",
+};
+
+function sortStrings(values: readonly string[]): string[] {
+  return [...values].sort((left, right) => left.localeCompare(right));
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableSerialize(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort((left, right) => left.localeCompare(right))
+      .map((key) => `${key}:${stableSerialize(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function normalizeRuleSectionValue<T>(section: T): T {
+  if (!section || typeof section !== "object") {
+    return section;
+  }
+
+  const record = { ...(section as Record<string, unknown>) };
+  if (Array.isArray(record.allowedMeetingTypes)) {
+    record.allowedMeetingTypes = sortStrings(record.allowedMeetingTypes as string[]);
+  }
+  if (Array.isArray(record.proofRequirement)) {
+    record.proofRequirement = sortStrings(record.proofRequirement as string[]);
+  }
+  return record as T;
+}
+
+function ruleSectionDiffers<T>(base: T, candidate: T): boolean {
+  return (
+    stableSerialize(normalizeRuleSectionValue(base)) !==
+    stableSerialize(normalizeRuleSectionValue(candidate))
+  );
+}
+
+function getRawOrganizationRuleSet(store: SoberHouseSettingsStore, now: string): HouseRuleSet {
+  return (
+    getActiveRuleSetForScope(store, "ORGANIZATION", null) ??
+    createDefaultHouseRuleSet(now, "", store.organization?.id ?? null)
+  );
+}
+
+function mergeEffectiveRuleSet(
+  base: EffectiveRuleSetResult,
+  candidate: HouseRuleSet | null,
+  nextSource: EffectiveRuleValueSource,
+): EffectiveRuleSetResult {
+  if (!candidate) {
+    return base;
+  }
+
+  const sources: EffectiveRuleSourceMap = { ...base.sources };
+  const ruleSet: HouseRuleSet = {
+    ...candidate,
+    curfew: base.ruleSet.curfew,
+    chores: base.ruleSet.chores,
+    employment: base.ruleSet.employment,
+    jobSearch: base.ruleSet.jobSearch,
+    meetings: base.ruleSet.meetings,
+    sponsorContact: base.ruleSet.sponsorContact,
+    oneOnOne: base.ruleSet.oneOnOne,
+    operations: base.ruleSet.operations,
+    support: base.ruleSet.support,
+  };
+  let hasOverride = false;
+
+  if (ruleSectionDiffers(base.ruleSet.curfew, candidate.curfew)) {
+    ruleSet.curfew = candidate.curfew;
+    sources.curfew = nextSource;
+    hasOverride = true;
+  }
+  if (ruleSectionDiffers(base.ruleSet.chores, candidate.chores)) {
+    ruleSet.chores = candidate.chores;
+    sources.chores = nextSource;
+    hasOverride = true;
+  }
+  if (ruleSectionDiffers(base.ruleSet.employment, candidate.employment)) {
+    ruleSet.employment = candidate.employment;
+    sources.employment = nextSource;
+    hasOverride = true;
+  }
+  if (ruleSectionDiffers(base.ruleSet.jobSearch, candidate.jobSearch)) {
+    ruleSet.jobSearch = candidate.jobSearch;
+    sources.jobSearch = nextSource;
+    hasOverride = true;
+  }
+  if (ruleSectionDiffers(base.ruleSet.meetings, candidate.meetings)) {
+    ruleSet.meetings = candidate.meetings;
+    sources.meetings = nextSource;
+    hasOverride = true;
+  }
+  if (ruleSectionDiffers(base.ruleSet.sponsorContact, candidate.sponsorContact)) {
+    ruleSet.sponsorContact = candidate.sponsorContact;
+    sources.sponsorContact = nextSource;
+    hasOverride = true;
+  }
+  if (ruleSectionDiffers(base.ruleSet.oneOnOne, candidate.oneOnOne)) {
+    ruleSet.oneOnOne = candidate.oneOnOne;
+    sources.oneOnOne = nextSource;
+    hasOverride = true;
+  }
+  if (ruleSectionDiffers(base.ruleSet.operations, candidate.operations)) {
+    ruleSet.operations = candidate.operations;
+    sources.operations = nextSource;
+    hasOverride = true;
+  }
+  if (ruleSectionDiffers(base.ruleSet.support, candidate.support)) {
+    ruleSet.support = candidate.support;
+    sources.support = nextSource;
+    hasOverride = true;
+  }
+
+  if (!hasOverride) {
+    return {
+      ruleSet: {
+        ...base.ruleSet,
+        name: candidate.name || base.ruleSet.name,
+      },
+      sources,
+    };
+  }
+
+  return {
+    ruleSet,
+    sources,
+  };
+}
 
 export function getActiveHouses(store: SoberHouseSettingsStore): House[] {
   return store.houses.filter((house) => house.status === "ACTIVE");
@@ -92,40 +258,63 @@ export function getPrimaryResidentHouseMembership(
   );
 }
 
+export function getEffectiveRuleSetForScope(
+  store: SoberHouseSettingsStore,
+  scopeType: HouseRuleScopeType,
+  scopeId: string | null,
+  now: string,
+): EffectiveRuleSetResult {
+  if (scopeType === "ORGANIZATION") {
+    return {
+      ruleSet: getRawOrganizationRuleSet(store, now),
+      sources: { ...DEFAULT_RULE_SOURCE_MAP },
+    };
+  }
+
+  if (scopeType === "HOUSE_GROUP") {
+    const organization = getEffectiveRuleSetForScope(store, "ORGANIZATION", null, now);
+    const groupRuleSet = getActiveRuleSetForScope(store, "HOUSE_GROUP", scopeId);
+    return mergeEffectiveRuleSet(organization, groupRuleSet, "HOUSE_GROUP");
+  }
+
+  if (!scopeId) {
+    return getEffectiveRuleSetForScope(store, "ORGANIZATION", null, now);
+  }
+
+  const house = getHouseById(store, scopeId);
+  const base = house?.houseGroupId
+    ? getEffectiveRuleSetForScope(store, "HOUSE_GROUP", house.houseGroupId, now)
+    : getEffectiveRuleSetForScope(store, "ORGANIZATION", null, now);
+  const houseRuleSet = getActiveRuleSetForScope(store, "HOUSE", scopeId);
+  return mergeEffectiveRuleSet(base, houseRuleSet, "HOUSE");
+}
+
 export function getRuleSetForHouse(
   store: SoberHouseSettingsStore,
   houseId: string,
   now: string,
 ): HouseRuleSet {
-  const house = getHouseById(store, houseId);
-  const houseScope =
-    store.houseRuleSets.find(
-      (ruleSet) =>
-        ruleSet.status === "ACTIVE" && ruleSet.scopeType === "HOUSE" && ruleSet.houseId === houseId,
-    ) ?? null;
-  if (houseScope) {
-    return houseScope;
-  }
+  return getEffectiveRuleSetForScope(store, "HOUSE", houseId, now).ruleSet;
+}
 
-  if (house?.houseGroupId) {
-    const groupScope =
-      store.houseRuleSets.find(
-        (ruleSet) =>
-          ruleSet.status === "ACTIVE" &&
-          ruleSet.scopeType === "HOUSE_GROUP" &&
-          ruleSet.houseGroupId === house.houseGroupId,
-      ) ?? null;
-    if (groupScope) {
-      return groupScope;
-    }
-  }
-
-  const organizationScope =
-    store.houseRuleSets.find(
-      (ruleSet) => ruleSet.status === "ACTIVE" && ruleSet.scopeType === "ORGANIZATION",
-    ) ?? null;
+function getActiveRuleSetForScope(
+  store: SoberHouseSettingsStore,
+  scopeType: HouseRuleScopeType,
+  scopeId: string | null,
+): HouseRuleSet | null {
   return (
-    organizationScope ?? createDefaultHouseRuleSet(now, houseId, store.organization?.id ?? null)
+    store.houseRuleSets.find((ruleSet) => {
+      if (ruleSet.status !== "ACTIVE" || ruleSet.scopeType !== scopeType) {
+        return false;
+      }
+      if (scopeType === "ORGANIZATION") {
+        return true;
+      }
+      if (scopeType === "HOUSE_GROUP") {
+        return ruleSet.houseGroupId === scopeId;
+      }
+      return ruleSet.houseId === scopeId;
+    }) ?? null
   );
 }
 
@@ -468,6 +657,82 @@ export function getUpcomingOneOnOneSessions(
     })
     .sort(
       (left, right) => new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime(),
+    );
+}
+
+export function getResidentOneOnOneSessionsInRange(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+  rangeStartIso: string,
+  rangeEndIso: string,
+): OneOnOneSession[] {
+  const rangeStartMs = new Date(rangeStartIso).getTime();
+  const rangeEndMs = new Date(rangeEndIso).getTime();
+  return store.oneOnOneSessions
+    .filter((session) => session.residentId === residentId && session.status === "ACTIVE")
+    .filter((session) => {
+      const scheduledAtMs = new Date(session.scheduledAt).getTime();
+      return (
+        Number.isFinite(scheduledAtMs) &&
+        scheduledAtMs >= rangeStartMs &&
+        scheduledAtMs < rangeEndMs
+      );
+    })
+    .sort(
+      (left, right) => new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime(),
+    );
+}
+
+export function getResidentSponsorCallRecordsInRange(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+  rangeStartIso: string,
+  rangeEndIso: string,
+): SponsorCallRecord[] {
+  const rangeStartMs = new Date(rangeStartIso).getTime();
+  const rangeEndMs = new Date(rangeEndIso).getTime();
+  return store.sponsorCallRecords
+    .filter((record) => record.residentId === residentId)
+    .filter((record) => {
+      const scheduledMs = record.scheduledFor ? new Date(record.scheduledFor).getTime() : null;
+      const completedMs = record.completedAt ? new Date(record.completedAt).getTime() : null;
+      return (
+        (scheduledMs !== null &&
+          Number.isFinite(scheduledMs) &&
+          scheduledMs >= rangeStartMs &&
+          scheduledMs < rangeEndMs) ||
+        (completedMs !== null &&
+          Number.isFinite(completedMs) &&
+          completedMs >= rangeStartMs &&
+          completedMs < rangeEndMs)
+      );
+    })
+    .sort((left, right) => {
+      const leftAt = left.scheduledFor ?? left.completedAt ?? left.createdAt;
+      const rightAt = right.scheduledFor ?? right.completedAt ?? right.createdAt;
+      return new Date(leftAt).getTime() - new Date(rightAt).getTime();
+    });
+}
+
+export function getResidentHouseMeetingAttendanceRecordsInRange(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+  rangeStartIso: string,
+  rangeEndIso: string,
+): HouseMeetingAttendanceRecord[] {
+  const rangeStartMs = new Date(rangeStartIso).getTime();
+  const rangeEndMs = new Date(rangeEndIso).getTime();
+  return store.houseMeetingAttendanceRecords
+    .filter((record) => record.residentId === residentId)
+    .filter((record) => {
+      const scheduledMs = new Date(record.scheduledStartAt).getTime();
+      return (
+        Number.isFinite(scheduledMs) && scheduledMs >= rangeStartMs && scheduledMs < rangeEndMs
+      );
+    })
+    .sort(
+      (left, right) =>
+        new Date(left.scheduledStartAt).getTime() - new Date(right.scheduledStartAt).getTime(),
     );
 }
 

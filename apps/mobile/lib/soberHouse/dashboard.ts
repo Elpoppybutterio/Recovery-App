@@ -1,5 +1,6 @@
 import type { AttendanceRecordSummary, MeetingAttendanceLogRecord } from "../attendance/storage";
 import { statusToneForComplianceStatus } from "./compliance";
+import { isChoreCompletionVerified } from "./proof";
 import {
   getActiveHouseAlertAnnouncements,
   getChatReceiptForMessageAndUser,
@@ -9,6 +10,7 @@ import {
   getUpcomingHouseMeetings,
   getUpcomingOneOnOneSessions,
 } from "./selectors";
+import { buildSoberHouseRoutineSummary } from "./routine";
 import { buildOneOnOneObligationSummary } from "./scheduling";
 import type {
   ChoreFrequency,
@@ -21,6 +23,7 @@ import type {
 
 export type SoberHouseDashboardTileTone = "green" | "yellow" | "red" | "gray";
 export type SoberHouseDashboardTileId =
+  | "sober-house-requirements"
   | "chores"
   | "weekly-meetings"
   | "sponsor-calls"
@@ -55,6 +58,7 @@ export type SoberHouseDashboardTileSummary = {
 
 export type SoberHouseDashboardVisibility = {
   eligible: boolean;
+  showRequirementsTile: boolean;
   showChoreTile: boolean;
   showWeeklyMeetingTile: boolean;
   showSponsorContactTile: boolean;
@@ -68,6 +72,7 @@ export type SoberHouseDashboardVisibility = {
 
 export type SoberHouseResidentDashboardSummary = {
   visibility: SoberHouseDashboardVisibility;
+  requirementsTile: SoberHouseDashboardTileSummary;
   choreTile: SoberHouseDashboardTileSummary;
   weeklyMeetingTile: SoberHouseDashboardTileSummary;
   sponsorContactTile: SoberHouseDashboardTileSummary;
@@ -99,6 +104,7 @@ type ResidentContext = {
   standingExceptionNotes: string;
   workRequired: boolean;
   currentlyEmployed: boolean;
+  sponsorPresent: boolean;
   jobApplicationsRequiredPerWeek: number;
   meetingsRequiredCount: number;
   meetingsRequiredWeekly: boolean;
@@ -235,10 +241,6 @@ function getChorePeriodBounds(
   return { start, endExclusive: end, dueBaseDate };
 }
 
-function hasRequiredProof(proofRequirement: string[]): boolean {
-  return proofRequirement.some((entry) => entry !== "NONE");
-}
-
 function sameCalendarDate(left: Date, right: Date): boolean {
   return (
     left.getFullYear() === right.getFullYear() &&
@@ -340,6 +342,7 @@ function resolveResidentContext(
     standingExceptionNotes: requirements.standingExceptionNotes.trim(),
     workRequired: requirements.workRequired,
     currentlyEmployed: requirements.currentlyEmployed,
+    sponsorPresent: requirements.sponsorPresent,
     jobApplicationsRequiredPerWeek: requirements.jobApplicationsRequiredPerWeek,
     meetingsRequiredCount: requirements.meetingsRequiredCount,
     meetingsRequiredWeekly: requirements.meetingsRequiredWeekly,
@@ -425,10 +428,7 @@ function buildChoreTileSummary({
           if (!sameCalendarDate(new Date(completedAtMs), now)) {
             return false;
           }
-          if (!hasRequiredProof(record.proofRequirement)) {
-            return true;
-          }
-          return record.proofProvided;
+          return isChoreCompletionVerified(record);
         })
         .map((record) => record.houseChoreId as string),
     );
@@ -500,10 +500,7 @@ function buildChoreTileSummary({
     if (completedAtMs < period.start.getTime() || completedAtMs >= period.endExclusive.getTime()) {
       return false;
     }
-    if (!hasRequiredProof(record.proofRequirement)) {
-      return true;
-    }
-    return record.proofProvided;
+    return isChoreCompletionVerified(record);
   });
 
   const dueAt = parseTimeOnDate(period.dueBaseDate, resident.rules.chores.dueTime);
@@ -924,6 +921,20 @@ function buildSponsorContactTileSummary({
   if (requiredCount <= 0) {
     return buildHiddenTile("sponsor-calls", "SOBER_HOUSE", "Sponsor Check-ins");
   }
+  if (!resident.sponsorPresent) {
+    return {
+      id: "sponsor-calls",
+      title: "Sponsor Check-ins",
+      value: "Setup",
+      subtitle: "Sponsor details still need to be added",
+      detail:
+        "Sponsor check-ins are required by house rules, but sponsor details are not on file yet.",
+      tone: "yellow",
+      visible: true,
+      routeTarget: "SOBER_HOUSE",
+      badgeLabel: "Setup needed",
+    };
+  }
 
   const now = new Date(nowIso);
   const weekStart = startOfWeek(now).getTime();
@@ -948,6 +959,58 @@ function buildSponsorContactTileSummary({
     routeTarget: "SOBER_HOUSE",
     badgeLabel:
       remainingCount === 0 ? "On track" : behindPace ? "Behind pace" : `Req ${requiredCount}`,
+  };
+}
+
+function buildRequirementsTileSummary({
+  resident,
+  routineSummary,
+  houseAlertsTile,
+  complianceSnapshotTile,
+}: {
+  resident: ResidentContext | null;
+  routineSummary: ReturnType<typeof buildSoberHouseRoutineSummary>;
+  houseAlertsTile: SoberHouseDashboardTileSummary;
+  complianceSnapshotTile: SoberHouseDashboardTileSummary;
+}): SoberHouseDashboardTileSummary {
+  if (!resident || !routineSummary) {
+    return buildHiddenTile("sober-house-requirements", "SOBER_HOUSE", "Sober House Routine");
+  }
+
+  const completedLabel = `${routineSummary.completedRequiredCount}/${routineSummary.totalRequiredCount}`;
+  const detailBits = [
+    `${completedLabel} required task${routineSummary.totalRequiredCount === 1 ? "" : "s"} complete`,
+    `${routineSummary.openRequiredCount} open`,
+  ];
+  if (routineSummary.overdueCount > 0) {
+    detailBits.push(`${routineSummary.overdueCount} overdue`);
+  }
+
+  return {
+    id: "sober-house-requirements",
+    title: "Sober House Routine",
+    value: `${routineSummary.percentComplete}%`,
+    subtitle:
+      routineSummary.openRequiredCount === 0
+        ? "All required sober-house tasks are complete"
+        : `${routineSummary.openRequiredCount} open • ${routineSummary.overdueCount} overdue`,
+    detail: `Open the resident-safe routine to complete chores, applications, house meetings, and proof-based items. ${detailBits.join(" • ")}.`,
+    tone:
+      routineSummary.overdueCount > 0 ||
+      houseAlertsTile.tone === "red" ||
+      complianceSnapshotTile.tone === "red"
+        ? "red"
+        : routineSummary.openRequiredCount === 0
+          ? "green"
+          : "yellow",
+    visible: true,
+    routeTarget: "SOBER_HOUSE",
+    badgeLabel:
+      routineSummary.openRequiredCount === 0
+        ? "On track"
+        : routineSummary.overdueCount > 0
+          ? `${routineSummary.overdueCount} overdue`
+          : `${routineSummary.openRequiredCount} open`,
   };
 }
 
@@ -1240,6 +1303,13 @@ export function buildSoberHouseResidentDashboardSummary(
   context: SummaryContext,
 ): SoberHouseResidentDashboardSummary {
   const resident = resolveResidentContext(context.store, context.nowIso);
+  const routineSummary = buildSoberHouseRoutineSummary({
+    store: context.store,
+    nowIso: context.nowIso,
+    attendanceRecords: context.attendanceRecords,
+    meetingAttendanceLogs: context.meetingAttendanceLogs,
+    sponsorCallLogs: context.sponsorCallLogs,
+  });
   const choreTile = buildChoreTileSummary({
     store: context.store,
     nowIso: context.nowIso,
@@ -1304,8 +1374,15 @@ export function buildSoberHouseResidentDashboardSummary(
     complianceSummary: context.complianceSummary,
     resident,
   });
+  const requirementsTile = buildRequirementsTileSummary({
+    resident,
+    routineSummary,
+    houseAlertsTile,
+    complianceSnapshotTile,
+  });
   const visibility: SoberHouseDashboardVisibility = {
     eligible: resident !== null,
+    showRequirementsTile: requirementsTile.visible,
     showChoreTile: choreTile.visible,
     showWeeklyMeetingTile: weeklyMeetingTile.visible,
     showSponsorContactTile: sponsorContactTile.visible,
@@ -1319,6 +1396,7 @@ export function buildSoberHouseResidentDashboardSummary(
 
   return {
     visibility,
+    requirementsTile,
     choreTile,
     weeklyMeetingTile,
     sponsorContactTile,
@@ -1329,15 +1407,13 @@ export function buildSoberHouseResidentDashboardSummary(
     complianceSnapshotTile,
     houseScheduleTile,
     tiles: [
+      requirementsTile,
       choreTile,
       weeklyMeetingTile,
       sponsorContactTile,
       jobApplicationsTile,
       houseMeetingsTile,
       oneOnOneTile,
-      houseAlertsTile,
-      complianceSnapshotTile,
-      houseScheduleTile,
     ].filter((tile) => tile.visible),
   };
 }

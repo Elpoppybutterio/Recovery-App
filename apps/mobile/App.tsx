@@ -20,6 +20,7 @@ import {
   KeyboardAvoidingView,
   Linking,
   Modal,
+  NativeModules,
   Platform,
   Pressable,
   Share,
@@ -141,6 +142,22 @@ import {
   type SetupStep,
   type SetupSupervisionMode,
 } from "./lib/onboarding";
+import { buildSeededAccessContext, getSeededDevUser, SEEDED_DEV_USERS } from "./lib/devSeedUsers";
+import {
+  activateParticipantTrack,
+  buildEffectiveOnboardingPathFromTracks,
+  buildLegacyWizardStateFromTracks,
+  createDefaultParticipantTrackState,
+  endParticipantTrack,
+  getActiveParticipantTracks,
+  hasActiveParticipantTrack,
+  labelForParticipantTrack,
+  normalizeParticipantTrackState,
+  participantTrackDescription,
+  updateParticipantTrackSetup,
+  type ParticipantTrackState,
+  type ParticipantTrackType,
+} from "./lib/tracks";
 import { createDefaultRoutinesStore } from "./lib/routines/defaults";
 import { completeMorningItemIfEnabled, computeMorningCompletedAt } from "./lib/routines/completion";
 import {
@@ -197,6 +214,8 @@ import { buildSoberHouseResidentDashboardSummary } from "./lib/soberHouse/dashbo
 import { currentMonthKey } from "./lib/soberHouse/monthlyWindow";
 import {
   applyHouseDefaultsToResidentDraft,
+  createResidentHousingProfileFromDraft,
+  createResidentRequirementProfileFromDraft,
   createDefaultResidentWizardDraft,
   getResidentSetupState,
 } from "./lib/soberHouse/resident";
@@ -205,14 +224,20 @@ import {
   saveResidentWizardDraft,
   setHouseStatus,
   setStaffAssignmentStatus,
+  upsertHouseMeetingAttendanceRecord,
   upsertOrganization,
+  upsertResidentHousingProfile,
   upsertResidentRequirementProfile,
+  upsertSponsorCallRecord,
   upsertStaffAssignment,
+  upsertOneOnOneSession,
   upsertUserAccessProfile,
 } from "./lib/soberHouse/mutations";
 import { buildResidentViolationSummary } from "./lib/soberHouse/interventions";
 import {
   getEffectiveRecurringObligationsForHouse,
+  getEffectiveRuleSetForScope,
+  getHouseMeetingsInRange,
   getRuleSetForHouse,
 } from "./lib/soberHouse/selectors";
 import {
@@ -226,11 +251,7 @@ import {
   requiresSoberHouseDeviceUnlock,
   SOBER_HOUSE_PROTECTED_SESSION_TIMEOUT_MS,
 } from "./lib/soberHouse/deviceAuth";
-import {
-  buildChatThreadSummaries,
-  getChatViewerContexts,
-  getManagerViewerContexts,
-} from "./lib/soberHouse/chat";
+import { buildChatThreadSummaries, getChatViewerContexts } from "./lib/soberHouse/chat";
 import {
   DiagnosticsScreen,
   type DiagnosticsExportAttempt,
@@ -1832,9 +1853,9 @@ function loadOptionalModule<T>(moduleName: string): T | null {
   try {
     switch (moduleName) {
       case "expo-calendar": {
-        if (!isExpoCalendarConfiguredForIos()) {
+        if (!hasCalendarNativeModule()) {
           console.warn(
-            "[calendar] expo-calendar unavailable: missing iOS usage descriptions for calendar/reminders",
+            "[calendar] expo-calendar unavailable: missing native module or iOS usage descriptions",
           );
           return null;
         }
@@ -1873,7 +1894,15 @@ function loadOptionalModule<T>(moduleName: string): T | null {
 }
 
 function hasCalendarNativeModule(): boolean {
-  return isExpoCalendarConfiguredForIos();
+  if (!isExpoCalendarConfiguredForIos()) {
+    return false;
+  }
+  return Boolean(
+    NativeModules.ExpoCalendar ||
+    NativeModules.ExponentCalendar ||
+    NativeModules.EXCalendar ||
+    NativeModules.CalendarModule,
+  );
 }
 
 const mapsModule = loadOptionalModule<typeof import("react-native-maps")>("react-native-maps");
@@ -2158,10 +2187,20 @@ export default function App() {
   const [devAuthIdentityDraft, setDevAuthIdentityDraft] = useState(devAuthUserId);
   const [devAuthOverrideUserId, setDevAuthOverrideUserId] = useState<string | null>(null);
   const [devAuthSignedOut, setDevAuthSignedOut] = useState(false);
+  const currentDevAuthUserId =
+    devAuthSignedOut === true ? "" : (devAuthOverrideUserId?.trim() || devAuthUserId).trim();
+  const activeSeededDevUser = useMemo(
+    () => (currentDevAuthUserId ? getSeededDevUser(currentDevAuthUserId) : null),
+    [currentDevAuthUserId],
+  );
+  const seededAccessContext = useMemo(
+    () => (currentDevAuthUserId ? buildSeededAccessContext(currentDevAuthUserId) : null),
+    [currentDevAuthUserId],
+  );
   const devUserDisplayName =
     typeof extra.devUserDisplayName === "string" && extra.devUserDisplayName.trim().length > 0
       ? extra.devUserDisplayName.trim()
-      : devAuthUserId;
+      : (activeSeededDevUser?.displayName ?? devAuthUserId);
   const meetingFeedUrl =
     typeof extra.meetingFeedUrl === "string" && extra.meetingFeedUrl.trim().length > 0
       ? extra.meetingFeedUrl
@@ -2172,8 +2211,6 @@ export default function App() {
     typeof extra.meetingRadiusMiles === "number" && Number.isFinite(extra.meetingRadiusMiles)
       ? extra.meetingRadiusMiles
       : 50;
-  const currentDevAuthUserId =
-    devAuthSignedOut === true ? "" : (devAuthOverrideUserId?.trim() || devAuthUserId).trim();
   const usesDevAuthShim = true;
 
   const authHeader = useMemo(() => {
@@ -2296,12 +2333,44 @@ export default function App() {
     () => meetingAttendanceLogStorageKey(devAuthUserId),
     [devAuthUserId],
   );
+  const applySeededRecoveryDefaults = useCallback(
+    (input: {
+      setupCompleteRaw: string | null;
+      sobrietyDateRaw: string | null;
+      profileRaw: string | null;
+      ninetyDayGoalRaw: string | null;
+      sponsorEnabledAtRaw: string | null;
+    }) => {
+      if (input.profileRaw || !activeSeededDevUser) {
+        return input;
+      }
+      const seededProfile = activeSeededDevUser.recoveryProfile;
+      const seededSponsorEnabledAt =
+        typeof seededProfile.sponsorEnabledAtIso === "string"
+          ? seededProfile.sponsorEnabledAtIso
+          : null;
+      const seededGoal =
+        typeof seededProfile.ninetyDayGoalTarget === "number"
+          ? String(seededProfile.ninetyDayGoalTarget)
+          : "90";
+      return {
+        setupCompleteRaw:
+          input.setupCompleteRaw ?? (activeSeededDevUser.setupComplete ? "true" : "false"),
+        sobrietyDateRaw: input.sobrietyDateRaw ?? activeSeededDevUser.sobrietyDateIso,
+        profileRaw: JSON.stringify(seededProfile),
+        ninetyDayGoalRaw: input.ninetyDayGoalRaw ?? seededGoal,
+        sponsorEnabledAtRaw: input.sponsorEnabledAtRaw ?? seededSponsorEnabledAt,
+      };
+    },
+    [activeSeededDevUser],
+  );
 
   const [mode, setMode] = useState<RecoveryMode>("A");
   const [homeScreen, setHomeScreen] = useState<HomeScreen>("SETUP");
   const [toolsScreen, setToolsScreen] = useState<ToolsScreen>("HOME");
   const [setupStep, setSetupStep] = useState<SetupStep>(1);
   const [setupComplete, setSetupComplete] = useState(false);
+  const [dashboardEligibleBeforeWizard, setDashboardEligibleBeforeWizard] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [serviceCommitmentStatus, setServiceCommitmentStatus] = useState<string | null>(null);
   const [screen, setScreen] = useState<AppScreen>("LIST");
@@ -2436,6 +2505,9 @@ export default function App() {
     useState<RecoverySubstanceCategory | null>(null);
   const [wizardHasSponsor, setWizardHasSponsor] = useState<boolean | null>(null);
   const [wizardOnboardingPath, setWizardOnboardingPath] = useState<OnboardingPath>("RECOVERY");
+  const [participantTrackState, setParticipantTrackState] = useState<ParticipantTrackState>(() =>
+    createDefaultParticipantTrackState(),
+  );
   const [wizardSupervisionMode, setWizardSupervisionMode] =
     useState<SetupSupervisionMode>("INDEPENDENT");
   const [wizardSoberHouseId, setWizardSoberHouseId] = useState<string | null>(null);
@@ -2461,6 +2533,7 @@ export default function App() {
   const [wizardSponsorKneesSuggested, setWizardSponsorKneesSuggested] = useState<boolean | null>(
     null,
   );
+  const [wizardHasSponsorCallTime, setWizardHasSponsorCallTime] = useState<boolean | null>(null);
   const [wizardRecoverySubstances, setWizardRecoverySubstances] = useState<
     RecoverySubstanceCategory[]
   >([]);
@@ -2649,6 +2722,23 @@ export default function App() {
   const soberHouseAssignedHouse = soberHouseAccessProfile?.houseId
     ? (soberHouseStore.houses.find((house) => house.id === soberHouseAccessProfile.houseId) ?? null)
     : null;
+  const soberHouseAssignedManagerPhone = useMemo(() => {
+    if (!soberHouseAssignedHouse) {
+      return null;
+    }
+    const assignedStaff = soberHouseStore.staffAssignments.filter(
+      (assignment) =>
+        assignment.status === "ACTIVE" &&
+        (assignment.assignedHouseIds.includes(soberHouseAssignedHouse.id) ||
+          assignment.role === "OWNER"),
+    );
+    const manager =
+      assignedStaff.find((assignment) => assignment.role === "HOUSE_MANAGER") ??
+      assignedStaff.find((assignment) => assignment.role === "ASSISTANT_MANAGER") ??
+      assignedStaff.find((assignment) => assignment.role === "OWNER") ??
+      null;
+    return manager?.phone ?? null;
+  }, [soberHouseAssignedHouse, soberHouseStore.staffAssignments]);
   const soberHouseEffectiveRules = soberHouseAssignedHouse
     ? getRuleSetForHouse(
         soberHouseStore,
@@ -2700,10 +2790,6 @@ export default function App() {
       soberHouseStore,
     ],
   );
-  const soberHouseManagerContexts = useMemo(
-    () => getManagerViewerContexts(soberHouseStore),
-    [soberHouseStore],
-  );
   const soberHouseResidentChatViewer = useMemo(
     () =>
       getChatViewerContexts(soberHouseStore).find((context) => context.kind === "resident") ?? null,
@@ -2716,23 +2802,70 @@ export default function App() {
         : [],
     [soberHouseResidentChatViewer, soberHouseStore],
   );
+  const visibleParticipantTracks = useMemo(
+    () => getActiveParticipantTracks(participantTrackState, { includeIncomplete: true }),
+    [participantTrackState],
+  );
+  const inactiveParticipantTracks = useMemo(
+    () => participantTrackState.enrollments.filter((entry) => entry.status === "INACTIVE"),
+    [participantTrackState],
+  );
+  const effectiveParticipantOnboardingPath = useMemo(
+    () => buildEffectiveOnboardingPathFromTracks(participantTrackState),
+    [participantTrackState],
+  );
+  const hasCompleteResidentTrack = useMemo(
+    () => hasActiveParticipantTrack(participantTrackState, "sober_housing_resident"),
+    [participantTrackState],
+  );
+  const hasCompleteCourtTrack = useMemo(
+    () => hasActiveParticipantTrack(participantTrackState, "court_participant"),
+    [participantTrackState],
+  );
+  const hasResidentTrackEnrollment = useMemo(
+    () =>
+      hasActiveParticipantTrack(participantTrackState, "sober_housing_resident", {
+        includeIncomplete: true,
+      }),
+    [participantTrackState],
+  );
+  const hasCourtTrackEnrollment = useMemo(
+    () =>
+      hasActiveParticipantTrack(participantTrackState, "court_participant", {
+        includeIncomplete: true,
+      }),
+    [participantTrackState],
+  );
+  const canAddResidentTrack = !hasResidentTrackEnrollment;
+  const canAddCourtTrack = !hasCourtTrackEnrollment;
   const appAccessRole = useMemo(
     () =>
       deriveAppAccessRole({
-        onboardingPath: wizardOnboardingPath,
+        onboardingPath: effectiveParticipantOnboardingPath,
         soberHouseRole: soberHouseAccessProfile?.role,
         accessContext: serverAccessContext,
       }),
-    [serverAccessContext, soberHouseAccessProfile?.role, wizardOnboardingPath],
+    [effectiveParticipantOnboardingPath, serverAccessContext, soberHouseAccessProfile?.role],
   );
-  const canOpenSoberHouseEntry = canViewSoberHouseResidentExperience(appAccessRole);
-  const canOpenCourtEntry = canViewCourtParticipantExperience(appAccessRole);
+  const canOpenSoberHouseEntry =
+    canManageSoberHouseHierarchy(appAccessRole) ||
+    canViewSoberHouseResidentExperience(appAccessRole) ||
+    hasCompleteResidentTrack;
+  const canOpenCourtEntry =
+    canViewCourtParticipantExperience(appAccessRole) || hasCompleteCourtTrack;
   const protectedOrgSetupAuthorized = canManageSoberHouseHierarchy(appAccessRole);
   const protectedCourtConfigAuthorized = canManageCourtHierarchy(appAccessRole);
+  const visibleOnboardingPathOptions = useMemo(
+    () =>
+      ONBOARDING_PATH_OPTIONS.filter(
+        (option) => option.value !== "SOBER_HOUSE_ORG_ADMIN" || protectedOrgSetupAuthorized,
+      ),
+    [protectedOrgSetupAuthorized],
+  );
   const participantProfileSyncPayload = useMemo(
     () =>
       buildParticipantProfileSyncPayload({
-        onboardingPath: wizardOnboardingPath,
+        onboardingPath: effectiveParticipantOnboardingPath,
         setupComplete,
         appAccessRole,
         accessContext: serverAccessContext,
@@ -2741,17 +2874,17 @@ export default function App() {
       }),
     [
       appAccessRole,
+      effectiveParticipantOnboardingPath,
       serverAccessContext,
       setupComplete,
       soberHouseAccessProfile?.houseId,
       soberHouseAccessProfile?.role,
-      wizardOnboardingPath,
     ],
   );
   const participantObligationSnapshotPayloads = useMemo(
     () =>
       buildObligationSnapshotPayloads({
-        onboardingPath: wizardOnboardingPath,
+        onboardingPath: effectiveParticipantOnboardingPath,
         setupComplete,
         appAccessRole,
         accessContext: serverAccessContext,
@@ -2802,6 +2935,7 @@ export default function App() {
       }),
     [
       appAccessRole,
+      effectiveParticipantOnboardingPath,
       normalizedSponsorName,
       recurringServiceCommitments,
       serverAccessContext,
@@ -2821,13 +2955,21 @@ export default function App() {
       wizardCourtRequirementsSummary,
       wizardCourtSupervisorName,
       wizardJusticeTrack,
-      wizardOnboardingPath,
     ],
   );
-  const setupFlowSteps = useMemo(
-    () => getSetupFlowSteps(wizardOnboardingPath),
-    [wizardOnboardingPath],
-  );
+  const setupFlowSteps = useMemo(() => {
+    const baseSteps = getSetupFlowSteps(wizardOnboardingPath);
+    if (!pathRequiresRecovery(wizardOnboardingPath)) {
+      return baseSteps;
+    }
+    if (wizardHasSponsor !== true) {
+      return baseSteps.filter((step) => step !== 4 && step !== 5 && step !== 6);
+    }
+    if (wizardHasSponsorCallTime === false) {
+      return baseSteps.filter((step) => step !== 5 && step !== 6);
+    }
+    return baseSteps;
+  }, [wizardHasSponsor, wizardHasSponsorCallTime, wizardOnboardingPath]);
   const setupStepIndex = Math.max(0, setupFlowSteps.indexOf(setupStep));
   const setupVisibleStepNumber = setupStepIndex + 1;
   const setupLastStep = setupFlowSteps[setupFlowSteps.length - 1] ?? 1;
@@ -2840,32 +2982,6 @@ export default function App() {
     }
     return "RECOVERY";
   }, [canOpenCourtEntry, canOpenSoberHouseEntry, mode]);
-  const soberHouseManagerContact = useMemo(() => {
-    const primaryManagerContext =
-      soberHouseManagerContexts.find((context) => context.role === "MANAGER") ??
-      soberHouseManagerContexts.find((context) => context.role === "OWNER") ??
-      soberHouseManagerContexts[0] ??
-      null;
-    if (!primaryManagerContext) {
-      return null;
-    }
-    const assignment = soberHouseStore.staffAssignments.find(
-      (entry) => entry.id === primaryManagerContext.staffAssignmentId,
-    );
-    if (!assignment) {
-      return null;
-    }
-    return {
-      name: primaryManagerContext.label,
-      roleLabel:
-        assignment.role === "OWNER"
-          ? "Owner"
-          : assignment.role === "ASSISTANT_MANAGER"
-            ? "Assistant manager"
-            : "House manager",
-      phone: assignment.phone,
-    };
-  }, [soberHouseManagerContexts, soberHouseStore.staffAssignments]);
   const wizardSelectedSoberHouse = wizardSoberHouseId
     ? (soberHouseStore.houses.find((house) => house.id === wizardSoberHouseId) ?? null)
     : null;
@@ -2913,20 +3029,29 @@ export default function App() {
         : null,
     [protectedOrgCurrentTenantId, protectedOrgCurrentUserId],
   );
+  const soberHouseProtectedAdminSessionRequired =
+    canManageSoberHouseHierarchy(appAccessRole) && soberHouseRequiresDeviceUnlock;
   const lockSoberHouseAccess = useCallback((status: string | null = null) => {
     setSoberHouseUnlocked(false);
     setSoberHouseUnlockStatus(status);
     setSoberHouseProtectedSessionLastActiveAtMs(null);
     soberHouseUnlockPromptedRef.current = false;
   }, []);
-  const shouldShowSoberHouseLock =
-    mode === "B" && soberHouseRequiresDeviceUnlock && !soberHouseUnlocked;
   const soberHouseProtectedSessionMessage =
-    mode === "B" && soberHouseRequiresDeviceUnlock && soberHouseUnlocked
+    mode === "B" && soberHouseProtectedAdminSessionRequired && soberHouseUnlocked
       ? `Unlocked for this session. Sober-house records lock again when the app backgrounds, you switch accounts, tap Lock now, or after ${Math.round(SOBER_HOUSE_PROTECTED_SESSION_TIMEOUT_MS / 60000)} minutes of inactivity.`
       : null;
   const isIosSimulator = Platform.OS === "ios" && Constants.isDevice === false;
-  const canUseSimulatorSoberHouseUnlock = isIosSimulator;
+  const canUseSimulatorSoberHouseUnlock =
+    isIosSimulator ||
+    (Platform.OS === "ios" && usesDevAuthShim && Constants.executionEnvironment !== "standalone");
+  const exitSoberHouseAdminEditors = useCallback(() => {
+    setSoberHouseAdminLaunchContext(null);
+    setMode("A");
+    setHomeScreen("DASHBOARD");
+    setScreen("LIST");
+    setSelectedMeeting(null);
+  }, []);
   const loadLocalAuthenticationModule =
     useCallback(async (): Promise<LocalAuthenticationModule | null> => {
       if (localAuthenticationModuleRef.current !== undefined) {
@@ -2947,16 +3072,27 @@ export default function App() {
         return null;
       }
     }, []);
-  const unlockSoberHouseAccess = useCallback(async () => {
-    if (!soberHouseRequiresDeviceUnlock || soberHouseUnlocking) {
-      return;
+  const unlockSoberHouseAccess = useCallback(async (): Promise<string | null> => {
+    if (!soberHouseRequiresDeviceUnlock) {
+      return null;
+    }
+
+    if (soberHouseUnlocked) {
+      setSoberHouseProtectedSessionLastActiveAtMs(Date.now());
+      return null;
+    }
+
+    if (soberHouseUnlocking) {
+      return "Protected admin session is already opening.";
     }
 
     if (canUseSimulatorSoberHouseUnlock) {
       setSoberHouseUnlocked(true);
-      setSoberHouseUnlockStatus(null);
+      setSoberHouseUnlockStatus(
+        "Testing fallback active: protected sober-house admin session opened without device passcode on simulator/dev runtime.",
+      );
       setSoberHouseProtectedSessionLastActiveAtMs(Date.now());
-      return;
+      return null;
     }
 
     setSoberHouseUnlocking(true);
@@ -2964,10 +3100,10 @@ export default function App() {
     try {
       const localAuthentication = await loadLocalAuthenticationModule();
       if (!localAuthentication) {
-        setSoberHouseUnlockStatus(
-          "This build does not include device authentication. Rebuild the app with Face ID / passcode support to open sober-house records.",
-        );
-        return;
+        const message =
+          "This build does not include device authentication. Rebuild the app with Face ID / passcode support to open sober-house admin records.";
+        setSoberHouseUnlockStatus(message);
+        return message;
       }
 
       const [hasHardware, isEnrolled] = await Promise.all([
@@ -2980,10 +3116,10 @@ export default function App() {
       ]);
 
       if (!hasHardware || !isEnrolled) {
-        setSoberHouseUnlockStatus(
-          "Device authentication is unavailable. Enable Face ID, Touch ID, or an iPhone passcode to open sober-house records.",
-        );
-        return;
+        const message =
+          "Device authentication is unavailable. Enable Face ID, Touch ID, or an iPhone passcode to open sober-house admin records.";
+        setSoberHouseUnlockStatus(message);
+        return message;
       }
 
       const result = await localAuthentication.authenticateAsync({
@@ -2997,14 +3133,13 @@ export default function App() {
         setSoberHouseUnlocked(true);
         setSoberHouseUnlockStatus(null);
         setSoberHouseProtectedSessionLastActiveAtMs(Date.now());
-        return;
+        return null;
       }
 
       if (result.error === "user_cancel" || result.error === "system_cancel") {
-        setSoberHouseUnlockStatus(
-          "Unlock canceled. Use Face ID or your device passcode to continue.",
-        );
-        return;
+        const message = "Unlock canceled. Use Face ID or your device passcode to continue.";
+        setSoberHouseUnlockStatus(message);
+        return message;
       }
 
       if (
@@ -3012,17 +3147,20 @@ export default function App() {
         result.error === "not_enrolled" ||
         result.error === "passcode_not_set"
       ) {
-        setSoberHouseUnlockStatus(
-          "Device authentication is unavailable. Enable Face ID, Touch ID, or an iPhone passcode to open sober-house records.",
-        );
-        return;
+        const message =
+          "Device authentication is unavailable. Enable Face ID, Touch ID, or an iPhone passcode to open sober-house admin records.";
+        setSoberHouseUnlockStatus(message);
+        return message;
       }
 
-      setSoberHouseUnlockStatus("Unlock failed. Try Face ID or your device passcode again.");
+      const message = "Unlock failed. Try Face ID or your device passcode again.";
+      setSoberHouseUnlockStatus(message);
+      return message;
     } catch {
-      setSoberHouseUnlockStatus(
-        "Device authentication could not start. Try Face ID or your device passcode again.",
-      );
+      const message =
+        "Device authentication could not start. Try Face ID or your device passcode again.";
+      setSoberHouseUnlockStatus(message);
+      return message;
     } finally {
       setSoberHouseUnlocking(false);
     }
@@ -3030,6 +3168,7 @@ export default function App() {
     canUseSimulatorSoberHouseUnlock,
     loadLocalAuthenticationModule,
     soberHouseRequiresDeviceUnlock,
+    soberHouseUnlocked,
     soberHouseUnlocking,
   ]);
   useEffect(() => {
@@ -3052,43 +3191,16 @@ export default function App() {
 
     if (mode !== "B") {
       soberHouseUnlockPromptedRef.current = false;
-      return;
     }
-
-    if (soberHouseUnlocked) {
-      return;
-    }
-
-    if (canUseSimulatorSoberHouseUnlock) {
-      soberHouseUnlockPromptedRef.current = false;
-      setSoberHouseUnlockStatus(
-        "Simulator mode: tap Enter Code once to open sober-house records for this session.",
-      );
-      return;
-    }
-
-    if (soberHouseUnlockPromptedRef.current) {
-      return;
-    }
-
-    soberHouseUnlockPromptedRef.current = true;
-    void unlockSoberHouseAccess();
-  }, [
-    canUseSimulatorSoberHouseUnlock,
-    lockSoberHouseAccess,
-    mode,
-    soberHouseRequiresDeviceUnlock,
-    soberHouseUnlocked,
-    unlockSoberHouseAccess,
-  ]);
+  }, [lockSoberHouseAccess, mode, soberHouseRequiresDeviceUnlock]);
 
   useEffect(() => {
-    if (mode !== "B" || !soberHouseRequiresDeviceUnlock || !soberHouseUnlocked) {
+    if (mode !== "B" || !soberHouseProtectedAdminSessionRequired || !soberHouseUnlocked) {
       return;
     }
 
     setSoberHouseProtectedSessionLastActiveAtMs(Date.now());
-  }, [homeScreen, mode, soberHouseRequiresDeviceUnlock, soberHouseUnlocked]);
+  }, [homeScreen, mode, soberHouseProtectedAdminSessionRequired, soberHouseUnlocked]);
 
   useEffect(() => {
     const sessionExpired = isSoberHouseProtectedSessionExpired(
@@ -3097,8 +3209,8 @@ export default function App() {
       SOBER_HOUSE_PROTECTED_SESSION_TIMEOUT_MS,
     );
 
-    if (!soberHouseRequiresDeviceUnlock || !soberHouseUnlocked || sessionExpired) {
-      if (soberHouseRequiresDeviceUnlock && soberHouseUnlocked && sessionExpired) {
+    if (!soberHouseProtectedAdminSessionRequired || !soberHouseUnlocked || sessionExpired) {
+      if (soberHouseProtectedAdminSessionRequired && soberHouseUnlocked && sessionExpired) {
         lockSoberHouseAccess(
           "Protected session locked after inactivity. Unlock again to continue.",
         );
@@ -3130,7 +3242,7 @@ export default function App() {
   }, [
     lockSoberHouseAccess,
     soberHouseProtectedSessionLastActiveAtMs,
-    soberHouseRequiresDeviceUnlock,
+    soberHouseProtectedAdminSessionRequired,
     soberHouseUnlocked,
   ]);
 
@@ -3153,6 +3265,18 @@ export default function App() {
 
     lockSoberHouseAccess();
   }, [currentAccessUserId, devAuthSignedOut, lockSoberHouseAccess]);
+  useEffect(() => {
+    if (mode !== "B" || !soberHouseProtectedAdminSessionRequired || soberHouseUnlocked) {
+      return;
+    }
+
+    exitSoberHouseAdminEditors();
+  }, [
+    exitSoberHouseAdminEditors,
+    mode,
+    soberHouseProtectedAdminSessionRequired,
+    soberHouseUnlocked,
+  ]);
   const sponsorAlertFingerprint = useMemo(
     () => buildSponsorAlertFingerprint(sponsorEventFingerprint, sponsorLeadMinutes),
     [sponsorEventFingerprint, sponsorLeadMinutes],
@@ -4055,30 +4179,44 @@ export default function App() {
       return null;
     }
 
+    const liveComplianceViolations =
+      soberHouseComplianceSummary?.evaluations.filter(
+        (evaluation) => evaluation.status === "violation",
+      ) ?? [];
     const activeViolations = soberHouseResidentViolations.violations.filter(
       (violation) =>
         violation.status === "OPEN" ||
         violation.status === "UNDER_REVIEW" ||
         violation.status === "CORRECTIVE_ACTION_ASSIGNED",
     );
-    const openCount = activeViolations.filter((violation) => violation.status === "OPEN").length;
+    const persistedViolationRuleTypes = new Set(
+      activeViolations.map((violation) => violation.ruleType),
+    );
+    const unpersistedLiveViolations = liveComplianceViolations.filter(
+      (evaluation) => !persistedViolationRuleTypes.has(evaluation.ruleType),
+    );
+    const openCount =
+      activeViolations.filter((violation) => violation.status === "OPEN").length +
+      unpersistedLiveViolations.length;
     const underReviewCount = activeViolations.filter(
       (violation) => violation.status === "UNDER_REVIEW",
     ).length;
     const correctiveActionCount = soberHouseResidentViolations.activeCorrectiveActions.length;
     const latestViolation =
       activeViolations[0] ?? soberHouseResidentViolations.violations[0] ?? null;
+    const latestLiveViolation = liveComplianceViolations[0] ?? null;
 
     return {
-      activeCount: activeViolations.length,
+      activeCount: activeViolations.length + unpersistedLiveViolations.length,
       openCount,
       underReviewCount,
       correctiveActionCount,
-      recentSummary: latestViolation
-        ? latestViolation.reasonSummary
-        : "No recorded sober-house violations.",
+      recentSummary:
+        latestViolation?.reasonSummary ??
+        latestLiveViolation?.statusReason ??
+        "No recorded sober-house violations.",
     };
-  }, [soberHouseAccessProfile?.role, soberHouseResidentViolations]);
+  }, [soberHouseAccessProfile?.role, soberHouseComplianceSummary, soberHouseResidentViolations]);
   const soberHouseResidentDashboardSummary = useMemo(
     () =>
       buildSoberHouseResidentDashboardSummary({
@@ -6107,8 +6245,20 @@ export default function App() {
   );
 
   const openDailyReflectionsRead = useCallback(() => {
-    void openDailyReflections("read");
-  }, [openDailyReflections]);
+    const completionReason = completeMorningItemForCurrentDayIfEnabled(DAILY_REFLECTIONS_ITEM_ID);
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+
+    void Linking.openURL(DAILY_REFLECTIONS_URL).catch(() => {
+      setRoutinesStatus("Read complete. Unable to open Daily Reflections.");
+    });
+
+    if (completionReason === "completed" || completionReason === "already-complete") {
+      setRoutinesStatus("Read complete.");
+    }
+  }, [completeMorningItemForCurrentDayIfEnabled]);
 
   const openDailyReflectionsListen = useCallback(() => {
     void openDailyReflections("listen");
@@ -6453,6 +6603,11 @@ export default function App() {
 
   const refreshServerAccessContext = useCallback(async () => {
     if (!apiUrl || !authHeaders) {
+      if (seededAccessContext) {
+        setServerAccessContext(seededAccessContext);
+        setServerRoleCheckStatus("Using seeded QA access context.");
+        return "authorized" as const;
+      }
       setServerAccessContext(null);
       setServerRoleCheckStatus("Sign in to continue.");
       return "unauthenticated" as const;
@@ -6461,6 +6616,11 @@ export default function App() {
     try {
       const response = await fetch(`${apiUrl}/v1/me/access-context`, { headers: authHeaders });
       if (!response.ok) {
+        if (seededAccessContext) {
+          setServerAccessContext(seededAccessContext);
+          setServerRoleCheckStatus("Using seeded QA access context.");
+          return "authorized" as const;
+        }
         setServerAccessContext(null);
         setServerRoleCheckStatus(
           response.status === 401
@@ -6472,6 +6632,11 @@ export default function App() {
 
       const payload = parseAccessContextResponse(await response.json());
       if (!payload) {
+        if (seededAccessContext) {
+          setServerAccessContext(seededAccessContext);
+          setServerRoleCheckStatus("Using seeded QA access context.");
+          return "authorized" as const;
+        }
         setServerAccessContext(null);
         setServerRoleCheckStatus("Organization setup is available only to authorized admins.");
         return "unauthorized" as const;
@@ -6481,18 +6646,28 @@ export default function App() {
       setServerRoleCheckStatus(null);
       return "authorized" as const;
     } catch {
+      if (seededAccessContext) {
+        setServerAccessContext(seededAccessContext);
+        setServerRoleCheckStatus("Using seeded QA access context.");
+        return "authorized" as const;
+      }
       setServerAccessContext(null);
       setServerRoleCheckStatus("Organization setup is available only to authorized admins.");
       return "unauthorized" as const;
     }
-  }, [apiUrl, authHeaders]);
+  }, [apiUrl, authHeaders, seededAccessContext]);
 
   useEffect(() => {
     let active = true;
 
     if (!apiUrl || !authHeaders) {
-      setServerAccessContext(null);
-      setServerRoleCheckStatus("Sign in to continue.");
+      if (seededAccessContext) {
+        setServerAccessContext(seededAccessContext);
+        setServerRoleCheckStatus("Using seeded QA access context.");
+      } else {
+        setServerAccessContext(null);
+        setServerRoleCheckStatus("Sign in to continue.");
+      }
       return () => {
         active = false;
       };
@@ -6508,7 +6683,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [apiUrl, authHeaders, refreshServerAccessContext]);
+  }, [apiUrl, authHeaders, refreshServerAccessContext, seededAccessContext]);
 
   useEffect(() => {
     let active = true;
@@ -6650,7 +6825,15 @@ export default function App() {
   ]);
 
   const handleModeSelect = useCallback(
-    (nextMode: RecoveryMode) => {
+    async (nextMode: RecoveryMode) => {
+      if (nextMode === "B" && soberHouseProtectedAdminSessionRequired) {
+        const unlockError = await unlockSoberHouseAccess();
+        if (unlockError) {
+          Alert.alert("Protected admin session required", unlockError);
+          return;
+        }
+      }
+
       setMode(nextMode);
       if (nextMode === "A") {
         setHomeScreen(setupComplete ? "DASHBOARD" : "SETUP");
@@ -6666,7 +6849,12 @@ export default function App() {
         setHomeScreen("SETTINGS");
       }
     },
-    [refreshMeetings, setupComplete],
+    [
+      refreshMeetings,
+      setupComplete,
+      soberHouseProtectedAdminSessionRequired,
+      unlockSoberHouseAccess,
+    ],
   );
 
   const openSettingsHub = useCallback(() => {
@@ -6847,10 +7035,19 @@ export default function App() {
     attendanceEntryPoint === "meetings" ? "Back to upcoming meetings" : "Back to dashboard";
 
   const openSoberHousingSettings = useCallback(
-    (launchContext: SoberHouseAdminLaunchContext | null = null) => {
+    async (launchContext: SoberHouseAdminLaunchContext | null = null) => {
       if (!canOpenSoberHouseEntry) {
         return;
       }
+
+      if (soberHouseProtectedAdminSessionRequired) {
+        const unlockError = await unlockSoberHouseAccess();
+        if (unlockError) {
+          Alert.alert("Protected admin session required", unlockError);
+          return;
+        }
+      }
+
       setSoberHouseAdminLaunchContext(launchContext);
       setMode("B");
       setHomeScreen("SETTINGS");
@@ -6858,7 +7055,13 @@ export default function App() {
       setScreen("LIST");
       setSelectedMeeting(null);
     },
-    [canOpenSoberHouseEntry],
+    [canOpenSoberHouseEntry, soberHouseProtectedAdminSessionRequired, unlockSoberHouseAccess],
+  );
+  const openResidentSoberHouseProfile = useCallback(
+    (residentView: "OVERVIEW" | "REQUIREMENTS" = "REQUIREMENTS") => {
+      openSoberHousingSettings({ module: "HUB", residentView });
+    },
+    [openSoberHousingSettings],
   );
   const soberHouseSettingsScreenKey = useMemo(() => {
     if (!soberHouseAdminLaunchContext) {
@@ -6871,6 +7074,7 @@ export default function App() {
       soberHouseAdminLaunchContext.mode ?? "view",
       soberHouseAdminLaunchContext.houseId ?? "none",
       soberHouseAdminLaunchContext.staffAssignmentId ?? "none",
+      soberHouseAdminLaunchContext.residentView ?? "overview",
     ].join(":");
   }, [soberHouseAdminLaunchContext]);
 
@@ -6948,10 +7152,27 @@ export default function App() {
   );
   const openSoberHouseDashboardDetail = useCallback(
     (kpiId: string) => {
-      void kpiId;
-      openSoberHousingSettings();
+      if (kpiId === "weekly-meetings") {
+        openMeetingsHub();
+        return;
+      }
+      if (
+        kpiId === "sober-house-requirements" ||
+        kpiId === "chores" ||
+        kpiId === "sponsor-calls" ||
+        kpiId === "job-applications" ||
+        kpiId === "house-meetings" ||
+        kpiId === "one-on-ones" ||
+        kpiId === "house-alerts" ||
+        kpiId === "compliance-snapshot" ||
+        kpiId === "house-schedule"
+      ) {
+        openSoberHousingSettings({ module: "HUB", residentView: "REQUIREMENTS" });
+        return;
+      }
+      openSoberHousingSettings({ module: "HUB", residentView: "REQUIREMENTS" });
     },
-    [openSoberHousingSettings],
+    [openMeetingsHub, openSoberHousingSettings],
   );
   const openSoberHouseCreateHouse = useCallback(() => {
     openSoberHousingSettings({ module: "HOUSES", mode: "create" });
@@ -7005,6 +7226,213 @@ export default function App() {
     },
     [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
   );
+  const markOwnerDashboardOneOnOneCompleted = useCallback(
+    async (residentId: string) => {
+      const timestamp = new Date().toISOString();
+      const membership =
+        soberHouseStore.residentHouseMemberships.find(
+          (item) =>
+            item.residentId === residentId && item.status === "ACTIVE" && item.moveOutDate === null,
+        ) ?? null;
+      if (!membership) {
+        setOwnerDashboardStatus("Could not find an active house membership for that resident.");
+        return;
+      }
+
+      const existingSession =
+        soberHouseStore.oneOnOneSessions
+          .filter((session) => session.residentId === residentId && session.status === "ACTIVE")
+          .sort(
+            (left, right) =>
+              new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime(),
+          )
+          .find(
+            (session) =>
+              session.completionStatus !== "COMPLETED" && session.completionStatus !== "EXCUSED",
+          ) ?? null;
+      const assignedStaffAssignmentId =
+        soberHouseStore.residentRequirementProfile?.residentId === residentId
+          ? soberHouseStore.residentRequirementProfile.oneOnOneAssignedStaffAssignmentId
+          : null;
+      const result = upsertOneOnOneSession(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        {
+          id: existingSession?.id,
+          organizationId: membership.organizationId,
+          houseId: membership.houseId,
+          residentId,
+          linkedUserId: membership.linkedUserId,
+          staffAssignmentId: existingSession?.staffAssignmentId ?? assignedStaffAssignmentId,
+          recurringObligationId: existingSession?.recurringObligationId ?? null,
+          title: existingSession?.title ?? "One-on-one",
+          notes: existingSession?.notes ?? "Completed from operator reporting.",
+          scheduledAt: existingSession?.scheduledAt ?? timestamp,
+          endsAt: existingSession?.endsAt ?? null,
+          required: existingSession?.required ?? true,
+          reminderLeadMinutes: existingSession?.reminderLeadMinutes ?? 30,
+          inAppReminderEnabled: existingSession?.inAppReminderEnabled ?? false,
+          addToCalendar: existingSession?.addToCalendar ?? false,
+          managerConfirmationRequired: existingSession?.managerConfirmationRequired ?? false,
+          completionStatus: "COMPLETED",
+          completedAt: timestamp,
+          completedByStaffAssignmentId:
+            assignedStaffAssignmentId ?? existingSession?.completedByStaffAssignmentId ?? null,
+          excusedAt: null,
+          excusedReason: null,
+          status: "ACTIVE",
+        },
+        timestamp,
+      );
+      await persistSoberHouseStore(result.store);
+      setOwnerDashboardStatus("Marked the one-on-one as completed.");
+    },
+    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+  );
+  const logOwnerDashboardSponsorCallCompleted = useCallback(
+    async (residentId: string) => {
+      const timestamp = new Date().toISOString();
+      const membership =
+        soberHouseStore.residentHouseMemberships.find(
+          (item) =>
+            item.residentId === residentId && item.status === "ACTIVE" && item.moveOutDate === null,
+        ) ?? null;
+      if (!membership) {
+        setOwnerDashboardStatus("Could not find an active house membership for that resident.");
+        return;
+      }
+      const effectiveRules = getEffectiveRuleSetForScope(
+        soberHouseStore,
+        "HOUSE",
+        membership.houseId,
+        timestamp,
+      ).ruleSet;
+      const proofType = effectiveRules.sponsorContact.proofType;
+      const existingRecord =
+        soberHouseStore.sponsorCallRecords
+          .filter((record) => record.residentId === residentId)
+          .sort(
+            (left, right) =>
+              new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+          )
+          .find((record) => record.status !== "COMPLETED" && record.status !== "EXCUSED") ?? null;
+      const result = upsertSponsorCallRecord(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        {
+          id: existingRecord?.id,
+          residentId,
+          linkedUserId: membership.linkedUserId,
+          organizationId: membership.organizationId,
+          houseId: membership.houseId,
+          scheduledFor: existingRecord?.scheduledFor ?? timestamp,
+          status: "COMPLETED",
+          completedAt: timestamp,
+          proofRequired: effectiveRules.sponsorContact.enabled,
+          proofProvided: proofType === "CALL_LOG",
+          proofReference: existingRecord?.proofReference ?? null,
+          proofType,
+          notes:
+            proofType === "CALL_LOG"
+              ? "Logged from operator reporting."
+              : "Completed from operator reporting. Proof still pending.",
+        },
+        timestamp,
+      );
+      await persistSoberHouseStore(result.store);
+      setOwnerDashboardStatus(
+        proofType === "CALL_LOG"
+          ? "Logged the sponsor call as completed."
+          : "Logged the sponsor call. Proof is still pending for this requirement.",
+      );
+    },
+    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+  );
+  const markOwnerDashboardHouseMeetingAttendance = useCallback(
+    async (residentId: string, nextStatus: "COMPLETED" | "MISSED") => {
+      const timestamp = new Date().toISOString();
+      const membership =
+        soberHouseStore.residentHouseMemberships.find(
+          (item) =>
+            item.residentId === residentId && item.status === "ACTIVE" && item.moveOutDate === null,
+        ) ?? null;
+      if (!membership) {
+        setOwnerDashboardStatus("Could not find an active house membership for that resident.");
+        return;
+      }
+      const now = new Date(timestamp);
+      const weekStart = new Date(now);
+      weekStart.setHours(0, 0, 0, 0);
+      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekEnd.getDate() + 7);
+      const dueMeetings = getHouseMeetingsInRange(
+        soberHouseStore,
+        membership.houseId,
+        weekStart.toISOString(),
+        weekEnd.toISOString(),
+      ).filter((meeting) => meeting.required);
+      const effectiveRules = getEffectiveRuleSetForScope(
+        soberHouseStore,
+        "HOUSE",
+        membership.houseId,
+        timestamp,
+      ).ruleSet;
+      const existingRecordIds = new Set(
+        soberHouseStore.houseMeetingAttendanceRecords
+          .filter((record) => record.residentId === residentId)
+          .map((record) => `${record.houseMeetingId ?? "none"}:${record.scheduledStartAt}`),
+      );
+      const selectedMeeting =
+        dueMeetings.find(
+          (meeting) => !existingRecordIds.has(`${meeting.id}:${meeting.startsAt}`),
+        ) ??
+        dueMeetings[0] ??
+        null;
+      const existingRecord =
+        selectedMeeting === null
+          ? null
+          : (soberHouseStore.houseMeetingAttendanceRecords.find(
+              (record) =>
+                record.residentId === residentId &&
+                record.houseMeetingId === selectedMeeting.id &&
+                record.scheduledStartAt === selectedMeeting.startsAt,
+            ) ?? null);
+      const result = upsertHouseMeetingAttendanceRecord(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        {
+          id: existingRecord?.id,
+          residentId,
+          linkedUserId: membership.linkedUserId,
+          organizationId: membership.organizationId,
+          houseId: membership.houseId,
+          houseMeetingId: selectedMeeting?.id ?? null,
+          recurringObligationId: selectedMeeting?.recurringObligationId ?? null,
+          scheduledStartAt: selectedMeeting?.startsAt ?? timestamp,
+          status: nextStatus,
+          attendedAt: nextStatus === "COMPLETED" ? timestamp : null,
+          excusedAt: null,
+          excusedReason: null,
+          proofRequired: effectiveRules.support.requireHouseMeetingAcknowledgment,
+          proofProvided: false,
+          proofReference: null,
+          notes:
+            nextStatus === "COMPLETED"
+              ? "Marked attended from operator reporting."
+              : "Marked missed from operator reporting.",
+        },
+        timestamp,
+      );
+      await persistSoberHouseStore(result.store);
+      setOwnerDashboardStatus(
+        nextStatus === "COMPLETED"
+          ? "Marked the resident as having attended the house meeting."
+          : "Marked the resident as having missed the house meeting.",
+      );
+    },
+    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+  );
 
   const searchMeetingsFromDashboard = useCallback(async () => {
     setHomeScreen("MEETINGS");
@@ -7033,6 +7461,10 @@ export default function App() {
 
   const restartSetup = useCallback(() => {
     const residentProfile = soberHouseStore.residentHousingProfile;
+    const residentDraft =
+      soberHouseStore.residentWizardDraft?.linkedUserId === devAuthUserId
+        ? soberHouseStore.residentWizardDraft
+        : null;
     const organization = soberHouseStore.organization;
     const recoveredOnboardingPath = inferOnboardingPath({
       onboardingPath: wizardOnboardingPath,
@@ -7046,6 +7478,7 @@ export default function App() {
       soberHouseRole: soberHouseStore.userAccessProfile?.role ?? null,
     });
     setMode("A");
+    setDashboardEligibleBeforeWizard(setupComplete);
     setSetupComplete(false);
     setHomeScreen("SETUP");
     setSetupStep(1);
@@ -7064,17 +7497,28 @@ export default function App() {
     setWizardOrganizationPrimaryPhone(formatUsPhoneDisplay(organization?.primaryPhone ?? ""));
     setWizardOrganizationPrimaryEmail(organization?.primaryEmail ?? "");
     setWizardOrganizationNotes(organization?.notes ?? "");
-    setWizardResidentFirstName(residentProfile?.firstName ?? "");
-    setWizardResidentLastName(residentProfile?.lastName ?? "");
-    setWizardResidentMoveInDate(formatIsoToUsDate(residentProfile?.moveInDate ?? ""));
-    setWizardResidentRoomOrBed(residentProfile?.roomOrBed ?? "");
-    setWizardResidentEmergencyContactName(residentProfile?.emergencyContactName ?? "");
-    setWizardResidentEmergencyContactPhone(
-      formatUsPhoneDisplay(residentProfile?.emergencyContactPhone ?? ""),
+    setWizardResidentFirstName(residentProfile?.firstName ?? residentDraft?.firstName ?? "");
+    setWizardResidentLastName(residentProfile?.lastName ?? residentDraft?.lastName ?? "");
+    setWizardResidentMoveInDate(
+      residentProfile?.moveInDate
+        ? formatIsoToUsDate(residentProfile.moveInDate)
+        : (residentDraft?.moveInDate ?? ""),
     );
-    setWizardResidentProgramPhase(residentProfile?.programPhaseOnEntry ?? "");
+    setWizardResidentRoomOrBed(residentProfile?.roomOrBed ?? residentDraft?.roomOrBed ?? "");
+    setWizardResidentEmergencyContactName(
+      residentProfile?.emergencyContactName ?? residentDraft?.emergencyContactName ?? "",
+    );
+    setWizardResidentEmergencyContactPhone(
+      formatUsPhoneDisplay(
+        residentProfile?.emergencyContactPhone ?? residentDraft?.emergencyContactPhone ?? "",
+      ),
+    );
+    setWizardResidentProgramPhase(
+      residentProfile?.programPhaseOnEntry ?? residentDraft?.programPhaseOnEntry ?? "",
+    );
     setWizardJusticeTrack(wizardJusticeTrack);
     setWizardSponsorKneesSuggested(sponsorEnabled ? (sponsorKneesSuggested ?? true) : null);
+    setWizardHasSponsorCallTime(sponsorEnabled ? true : false);
     setWizardRecoverySubstances(recoverySubstances);
     setWizardMeetingSignatureRequired(meetingSignatureRequired);
     setScreen("LIST");
@@ -7085,10 +7529,13 @@ export default function App() {
     meetingSignatureRequired,
     refreshMeetings,
     recurringServiceCommitments,
+    setupComplete,
     soberHouseStore.residentHousingProfile,
+    soberHouseStore.residentWizardDraft,
     soberHouseStore.organization,
     soberHouseStore.userAccessProfile?.houseId,
     soberHouseStore.userAccessProfile?.role,
+    devAuthUserId,
     sponsorEnabled,
     sponsorKneesSuggested,
     recoverySubstances,
@@ -7167,8 +7614,26 @@ export default function App() {
             sponsorLeadMinutes?: SponsorLeadMinutes;
             sponsorKneesSuggested?: boolean | null;
             meetingAutoAddToCalendar?: boolean;
+            participantTracks?: ParticipantTrackState;
             wizardOnboardingPath?: OnboardingPath;
             wizardSupervisionMode?: SetupSupervisionMode;
+            wizardLastActiveStep?: SetupStep;
+            wizardHasSponsor?: boolean | null;
+            wizardHasSponsorCallTime?: boolean | null;
+            wizardHasHomeGroup?: boolean | null;
+            wizardOrganizationName?: string;
+            wizardOrganizationPrimaryContactName?: string;
+            wizardOrganizationPrimaryPhone?: string;
+            wizardOrganizationPrimaryEmail?: string;
+            wizardOrganizationNotes?: string;
+            wizardSoberHouseId?: string | null;
+            wizardResidentFirstName?: string;
+            wizardResidentLastName?: string;
+            wizardResidentMoveInDate?: string;
+            wizardResidentRoomOrBed?: string;
+            wizardResidentEmergencyContactName?: string;
+            wizardResidentEmergencyContactPhone?: string;
+            wizardResidentProgramPhase?: string;
             wizardJusticeTrack?: SetupJusticeTrack;
             wizardCourtProgramName?: string;
             wizardCourtSupervisorName?: string;
@@ -7341,10 +7806,23 @@ export default function App() {
           if (typeof parsedProfile.meetingAutoAddToCalendar === "boolean") {
             setMeetingAutoAddToCalendar(parsedProfile.meetingAutoAddToCalendar);
           }
+          const normalizedParticipantTracks = normalizeParticipantTrackState(
+            parsedProfile.participantTracks,
+            {
+              setupComplete: resolvedSetupComplete,
+              onboardingPath: parsedProfile.wizardOnboardingPath,
+              wizardJusticeTrack: parsedProfile.wizardJusticeTrack,
+              nowIso: new Date().toISOString(),
+            },
+          );
+          setParticipantTrackState(normalizedParticipantTracks);
+          const legacyTrackState = buildLegacyWizardStateFromTracks(normalizedParticipantTracks);
           const inferredOnboardingPath = inferOnboardingPath({
-            onboardingPath: parsedProfile.wizardOnboardingPath,
-            wizardSupervisionMode: parsedProfile.wizardSupervisionMode,
-            wizardJusticeTrack: parsedProfile.wizardJusticeTrack,
+            onboardingPath: legacyTrackState.onboardingPath,
+            wizardSupervisionMode:
+              parsedProfile.wizardSupervisionMode ?? legacyTrackState.wizardSupervisionMode,
+            wizardJusticeTrack:
+              parsedProfile.wizardJusticeTrack ?? legacyTrackState.wizardJusticeTrack,
           });
           setWizardOnboardingPath(inferredOnboardingPath);
           if (
@@ -7353,6 +7831,8 @@ export default function App() {
             parsedProfile.wizardSupervisionMode === "SOBER_HOUSE_OWNER"
           ) {
             setWizardSupervisionMode(parsedProfile.wizardSupervisionMode);
+          } else {
+            setWizardSupervisionMode(legacyTrackState.wizardSupervisionMode);
           }
           if (
             parsedProfile.wizardJusticeTrack === "NONE" ||
@@ -7360,6 +7840,8 @@ export default function App() {
             parsedProfile.wizardJusticeTrack === "PROBATION_PAROLE"
           ) {
             setWizardJusticeTrack(parsedProfile.wizardJusticeTrack);
+          } else {
+            setWizardJusticeTrack(legacyTrackState.wizardJusticeTrack);
           }
           if (typeof parsedProfile.wizardCourtProgramName === "string") {
             setWizardCourtProgramName(parsedProfile.wizardCourtProgramName);
@@ -7373,12 +7855,100 @@ export default function App() {
           if (typeof parsedProfile.wizardCourtDeadlineSummary === "string") {
             setWizardCourtDeadlineSummary(parsedProfile.wizardCourtDeadlineSummary);
           }
+          if (
+            typeof parsedProfile.wizardLastActiveStep === "number" &&
+            Number.isFinite(parsedProfile.wizardLastActiveStep)
+          ) {
+            const nextStep = Math.max(
+              1,
+              Math.min(11, Math.floor(parsedProfile.wizardLastActiveStep)),
+            );
+            setSetupStep(nextStep as SetupStep);
+          }
+          if (
+            typeof parsedProfile.wizardHasSponsor === "boolean" ||
+            parsedProfile.wizardHasSponsor === null
+          ) {
+            setWizardHasSponsor(parsedProfile.wizardHasSponsor ?? null);
+          }
+          if (
+            typeof parsedProfile.wizardHasSponsorCallTime === "boolean" ||
+            parsedProfile.wizardHasSponsorCallTime === null
+          ) {
+            setWizardHasSponsorCallTime(parsedProfile.wizardHasSponsorCallTime ?? null);
+          } else if (parsedProfile.wizardHasSponsor === true) {
+            setWizardHasSponsorCallTime(true);
+          } else if (parsedProfile.wizardHasSponsor === false) {
+            setWizardHasSponsorCallTime(false);
+          }
+          if (
+            typeof parsedProfile.wizardHasHomeGroup === "boolean" ||
+            parsedProfile.wizardHasHomeGroup === null
+          ) {
+            setWizardHasHomeGroup(parsedProfile.wizardHasHomeGroup ?? null);
+          }
+          if (typeof parsedProfile.wizardOrganizationName === "string") {
+            setWizardOrganizationName(parsedProfile.wizardOrganizationName);
+          }
+          if (typeof parsedProfile.wizardOrganizationPrimaryContactName === "string") {
+            setWizardOrganizationPrimaryContactName(
+              parsedProfile.wizardOrganizationPrimaryContactName,
+            );
+          }
+          if (typeof parsedProfile.wizardOrganizationPrimaryPhone === "string") {
+            setWizardOrganizationPrimaryPhone(parsedProfile.wizardOrganizationPrimaryPhone);
+          }
+          if (typeof parsedProfile.wizardOrganizationPrimaryEmail === "string") {
+            setWizardOrganizationPrimaryEmail(parsedProfile.wizardOrganizationPrimaryEmail);
+          }
+          if (typeof parsedProfile.wizardOrganizationNotes === "string") {
+            setWizardOrganizationNotes(parsedProfile.wizardOrganizationNotes);
+          }
+          if (
+            typeof parsedProfile.wizardSoberHouseId === "string" ||
+            parsedProfile.wizardSoberHouseId === null
+          ) {
+            setWizardSoberHouseId(parsedProfile.wizardSoberHouseId ?? null);
+          }
+          if (typeof parsedProfile.wizardResidentFirstName === "string") {
+            setWizardResidentFirstName(parsedProfile.wizardResidentFirstName);
+          }
+          if (typeof parsedProfile.wizardResidentLastName === "string") {
+            setWizardResidentLastName(parsedProfile.wizardResidentLastName);
+          }
+          if (typeof parsedProfile.wizardResidentMoveInDate === "string") {
+            setWizardResidentMoveInDate(parsedProfile.wizardResidentMoveInDate);
+          }
+          if (typeof parsedProfile.wizardResidentRoomOrBed === "string") {
+            setWizardResidentRoomOrBed(parsedProfile.wizardResidentRoomOrBed);
+          }
+          if (typeof parsedProfile.wizardResidentEmergencyContactName === "string") {
+            setWizardResidentEmergencyContactName(parsedProfile.wizardResidentEmergencyContactName);
+          }
+          if (typeof parsedProfile.wizardResidentEmergencyContactPhone === "string") {
+            setWizardResidentEmergencyContactPhone(
+              parsedProfile.wizardResidentEmergencyContactPhone,
+            );
+          }
+          if (typeof parsedProfile.wizardResidentProgramPhase === "string") {
+            setWizardResidentProgramPhase(parsedProfile.wizardResidentProgramPhase);
+          }
         } catch (error) {
           console.log("[setup-persist] read failure", {
             key: "profile",
             error: formatError(error),
           });
         }
+      }
+      if (!input.profileRaw) {
+        setParticipantTrackState(
+          normalizeParticipantTrackState(null, {
+            setupComplete: resolvedSetupComplete,
+            onboardingPath: resolvedSetupComplete ? "RECOVERY" : wizardOnboardingPath,
+            wizardJusticeTrack,
+            nowIso: new Date().toISOString(),
+          }),
+        );
       }
 
       if (typeof input.ninetyDayGoalRaw === "string" && input.ninetyDayGoalRaw.trim().length > 0) {
@@ -7594,13 +8164,14 @@ export default function App() {
           return;
         }
         setWizardSponsorKneesSuggested((current) => (current === null ? true : current));
-        setWizardWantsReminders((current) => (current === null ? true : current));
+        setWizardHasSponsorCallTime((current) => (current === null ? true : current));
         setSponsorEnabled(true);
         setSetupStep(4);
       } else {
         setSponsorEnabled(false);
         setSponsorActive(false);
         setWizardSponsorKneesSuggested(null);
+        setWizardHasSponsorCallTime(false);
         setSponsorKneesSuggested(null);
         setWizardWantsReminders(false);
         setSetupStep(7);
@@ -7614,21 +8185,40 @@ export default function App() {
           setSetupError("Choose whether your sponsor suggests praying on your knees.");
           return;
         }
+        if (wizardHasSponsorCallTime === null) {
+          setSetupError("Choose whether you have a sponsor call time.");
+          return;
+        }
         setSponsorKneesSuggested(wizardSponsorKneesSuggested);
+        if (wizardHasSponsorCallTime) {
+          setWizardWantsReminders((current) => (current === null ? true : current));
+          setSetupStep(5);
+        } else {
+          setWizardWantsReminders(false);
+          setSponsorActive(false);
+          setSetupStep(7);
+        }
       } else {
         setSponsorKneesSuggested(null);
+        setWizardHasSponsorCallTime(false);
+        setWizardWantsReminders(false);
+        setSponsorActive(false);
+        setSetupStep(7);
       }
-      setSetupStep(5);
       return;
     }
 
     if (setupStep === 5) {
+      if (wizardHasSponsor !== true || wizardHasSponsorCallTime !== true) {
+        setSetupStep(7);
+        return;
+      }
       setSetupStep(6);
       return;
     }
 
     if (setupStep === 6) {
-      if (wizardHasSponsor) {
+      if (wizardHasSponsor && wizardHasSponsorCallTime) {
         if (wizardWantsReminders === null) {
           setSetupError("Choose whether calendar notifications and alerts are enabled.");
           return;
@@ -7647,6 +8237,7 @@ export default function App() {
         setSponsorEnabledAtIso((current) => current ?? new Date().toISOString());
       } else {
         setWizardWantsReminders(false);
+        setSponsorActive(false);
       }
       setSetupStep(7);
       return;
@@ -7773,16 +8364,6 @@ export default function App() {
     wizardResidentRoomOrBed,
     wizardSoberHouseId,
   ]);
-
-  const previousSetupStep = useCallback(() => {
-    setSetupError(null);
-    const currentIndex = setupFlowSteps.indexOf(setupStep);
-    if (currentIndex <= 0) {
-      setSetupStep(1);
-      return;
-    }
-    setSetupStep(setupFlowSteps[currentIndex - 1] ?? 1);
-  }, [setupFlowSteps, setupStep]);
 
   useEffect(() => {
     if (!showProtectedOrgAccessGate || protectedOrgSetupAuthorized) {
@@ -8167,14 +8748,6 @@ export default function App() {
     },
     [appendSponsorCallLog, autoCompleteSponsorCheckIn, sponsorPhoneDigits],
   );
-  const callHouseManagerFromDashboard = useCallback(async () => {
-    if (!soberHouseManagerContact?.phone) {
-      setSponsorStatus("Add a house manager phone number in sober-house staff assignments.");
-      return;
-    }
-    await openPhoneCall(soberHouseManagerContact.phone, "button");
-  }, [openPhoneCall, soberHouseManagerContact?.phone]);
-
   const openMeetingDestination = useCallback(async (meeting: MeetingRecord) => {
     if (
       meeting.format === "ONLINE" ||
@@ -8850,8 +9423,25 @@ export default function App() {
         sponsorRepeatPreset: RepeatPreset;
         sponsorRepeatDays: WeekdayCode[];
         sponsorLeadMinutes: SponsorLeadMinutes;
+        participantTracks: ParticipantTrackState;
         wizardOnboardingPath: OnboardingPath;
         wizardSupervisionMode: SetupSupervisionMode;
+        wizardLastActiveStep: SetupStep;
+        wizardHasSponsor: boolean | null;
+        wizardHasHomeGroup: boolean | null;
+        wizardOrganizationName: string;
+        wizardOrganizationPrimaryContactName: string;
+        wizardOrganizationPrimaryPhone: string;
+        wizardOrganizationPrimaryEmail: string;
+        wizardOrganizationNotes: string;
+        wizardSoberHouseId: string | null;
+        wizardResidentFirstName: string;
+        wizardResidentLastName: string;
+        wizardResidentMoveInDate: string;
+        wizardResidentRoomOrBed: string;
+        wizardResidentEmergencyContactName: string;
+        wizardResidentEmergencyContactPhone: string;
+        wizardResidentProgramPhase: string;
         wizardJusticeTrack: SetupJusticeTrack;
         wizardCourtProgramName: string;
         wizardCourtSupervisorName: string;
@@ -8892,8 +9482,31 @@ export default function App() {
         sponsorLeadMinutes: overrides?.sponsorLeadMinutes ?? sponsorLeadMinutes,
         sponsorKneesSuggested: overrides?.sponsorKneesSuggested ?? sponsorKneesSuggested,
         meetingAutoAddToCalendar: overrides?.meetingAutoAddToCalendar ?? meetingAutoAddToCalendar,
+        participantTracks: overrides?.participantTracks ?? participantTrackState,
         wizardOnboardingPath: overrides?.wizardOnboardingPath ?? wizardOnboardingPath,
         wizardSupervisionMode: overrides?.wizardSupervisionMode ?? wizardSupervisionMode,
+        wizardLastActiveStep: overrides?.wizardLastActiveStep ?? setupStep,
+        wizardHasSponsor: overrides?.wizardHasSponsor ?? wizardHasSponsor,
+        wizardHasHomeGroup: overrides?.wizardHasHomeGroup ?? wizardHasHomeGroup,
+        wizardOrganizationName: overrides?.wizardOrganizationName ?? wizardOrganizationName,
+        wizardOrganizationPrimaryContactName:
+          overrides?.wizardOrganizationPrimaryContactName ?? wizardOrganizationPrimaryContactName,
+        wizardOrganizationPrimaryPhone:
+          overrides?.wizardOrganizationPrimaryPhone ?? wizardOrganizationPrimaryPhone,
+        wizardOrganizationPrimaryEmail:
+          overrides?.wizardOrganizationPrimaryEmail ?? wizardOrganizationPrimaryEmail,
+        wizardOrganizationNotes: overrides?.wizardOrganizationNotes ?? wizardOrganizationNotes,
+        wizardSoberHouseId: overrides?.wizardSoberHouseId ?? wizardSoberHouseId,
+        wizardResidentFirstName: overrides?.wizardResidentFirstName ?? wizardResidentFirstName,
+        wizardResidentLastName: overrides?.wizardResidentLastName ?? wizardResidentLastName,
+        wizardResidentMoveInDate: overrides?.wizardResidentMoveInDate ?? wizardResidentMoveInDate,
+        wizardResidentRoomOrBed: overrides?.wizardResidentRoomOrBed ?? wizardResidentRoomOrBed,
+        wizardResidentEmergencyContactName:
+          overrides?.wizardResidentEmergencyContactName ?? wizardResidentEmergencyContactName,
+        wizardResidentEmergencyContactPhone:
+          overrides?.wizardResidentEmergencyContactPhone ?? wizardResidentEmergencyContactPhone,
+        wizardResidentProgramPhase:
+          overrides?.wizardResidentProgramPhase ?? wizardResidentProgramPhase,
         wizardJusticeTrack: overrides?.wizardJusticeTrack ?? wizardJusticeTrack,
         wizardCourtProgramName: overrides?.wizardCourtProgramName ?? wizardCourtProgramName,
         wizardCourtSupervisorName:
@@ -8966,13 +9579,296 @@ export default function App() {
       sponsorPhoneDigits,
       sponsorRepeatDaysSorted,
       sponsorRepeatPreset,
+      participantTrackState,
+      setupStep,
       wizardCourtDeadlineSummary,
       wizardCourtProgramName,
       wizardCourtRequirementsSummary,
       wizardCourtSupervisorName,
+      wizardHasHomeGroup,
+      wizardHasSponsor,
       wizardJusticeTrack,
       wizardOnboardingPath,
+      wizardOrganizationName,
+      wizardOrganizationNotes,
+      wizardOrganizationPrimaryContactName,
+      wizardOrganizationPrimaryEmail,
+      wizardOrganizationPrimaryPhone,
+      wizardResidentEmergencyContactName,
+      wizardResidentEmergencyContactPhone,
+      wizardResidentFirstName,
+      wizardResidentLastName,
+      wizardResidentMoveInDate,
+      wizardResidentProgramPhase,
+      wizardResidentRoomOrBed,
+      wizardSoberHouseId,
       wizardSupervisionMode,
+    ],
+  );
+
+  const leaveSetupWizard = useCallback(() => {
+    setSetupError(null);
+    setMode("A");
+    setSetupComplete(dashboardEligibleBeforeWizard);
+    setHomeScreen(dashboardEligibleBeforeWizard ? "DASHBOARD" : "SETTINGS");
+    setToolsScreen("HOME");
+    setScreen("LIST");
+    setSelectedMeeting(null);
+  }, [dashboardEligibleBeforeWizard]);
+
+  const persistSetupWizardProgress = useCallback(async () => {
+    if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
+      const assignedHouseId =
+        wizardSoberHouseId ?? soberHouseStore.userAccessProfile?.houseId ?? null;
+      let residentDraft = createDefaultResidentWizardDraft(devAuthUserId);
+      if (assignedHouseId) {
+        residentDraft = applyHouseDefaultsToResidentDraft(
+          soberHouseStore,
+          devAuthUserId,
+          assignedHouseId,
+          residentDraft,
+        );
+      }
+      const nextStore = saveResidentWizardDraft(soberHouseStore, {
+        ...residentDraft,
+        assignedHouseId,
+        firstName: wizardResidentFirstName.trim(),
+        lastName: wizardResidentLastName.trim(),
+        moveInDate: parseUsDateToIso(wizardResidentMoveInDate) ?? wizardResidentMoveInDate,
+        roomOrBed: wizardResidentRoomOrBed.trim(),
+        emergencyContactName: wizardResidentEmergencyContactName.trim(),
+        emergencyContactPhone: formatUsPhoneDisplay(wizardResidentEmergencyContactPhone),
+        programPhaseOnEntry: wizardResidentProgramPhase.trim(),
+        sponsorPresent: wizardHasSponsor ?? residentDraft.sponsorPresent,
+        sponsorName: sponsorName.trim(),
+        sponsorPhone: formatUsPhoneDisplay(sponsorPhoneDigits),
+        meetingsRequiredWeekly:
+          wizardSelectedSoberHouseRules?.meetings.meetingsRequired ??
+          residentDraft.meetingsRequiredWeekly,
+        meetingsRequiredCount:
+          wizardSelectedSoberHouseRules?.meetings.meetingsPerWeek ??
+          residentDraft.meetingsRequiredCount,
+        workRequired:
+          wizardSelectedSoberHouseRules?.employment.employmentRequired ??
+          residentDraft.workRequired,
+        jobApplicationsRequiredPerWeek:
+          wizardSelectedSoberHouseRules?.jobSearch.applicationsRequiredPerWeek ??
+          residentDraft.jobApplicationsRequiredPerWeek,
+        updatedAt: new Date().toISOString(),
+      });
+      await persistSoberHouseStore(nextStore);
+    }
+
+    await persistRecoveryStateSnapshot({
+      setupComplete: dashboardEligibleBeforeWizard,
+      wizardOnboardingPath,
+      wizardSupervisionMode,
+      wizardLastActiveStep: setupStep,
+      wizardHasSponsor,
+      wizardHasHomeGroup,
+      wizardOrganizationName,
+      wizardOrganizationPrimaryContactName,
+      wizardOrganizationPrimaryPhone,
+      wizardOrganizationPrimaryEmail,
+      wizardOrganizationNotes,
+      wizardSoberHouseId,
+      wizardResidentFirstName,
+      wizardResidentLastName,
+      wizardResidentMoveInDate,
+      wizardResidentRoomOrBed,
+      wizardResidentEmergencyContactName,
+      wizardResidentEmergencyContactPhone,
+      wizardResidentProgramPhase,
+      wizardJusticeTrack,
+      wizardCourtProgramName,
+      wizardCourtSupervisorName,
+      wizardCourtRequirementsSummary,
+      wizardCourtDeadlineSummary,
+    });
+  }, [
+    dashboardEligibleBeforeWizard,
+    devAuthUserId,
+    persistRecoveryStateSnapshot,
+    persistSoberHouseStore,
+    setupStep,
+    soberHouseStore,
+    sponsorName,
+    sponsorPhoneDigits,
+    wizardCourtDeadlineSummary,
+    wizardCourtProgramName,
+    wizardCourtRequirementsSummary,
+    wizardCourtSupervisorName,
+    wizardHasHomeGroup,
+    wizardHasSponsor,
+    wizardJusticeTrack,
+    wizardOnboardingPath,
+    wizardOrganizationName,
+    wizardOrganizationNotes,
+    wizardOrganizationPrimaryContactName,
+    wizardOrganizationPrimaryEmail,
+    wizardOrganizationPrimaryPhone,
+    wizardResidentEmergencyContactName,
+    wizardResidentEmergencyContactPhone,
+    wizardResidentFirstName,
+    wizardResidentLastName,
+    wizardResidentMoveInDate,
+    wizardResidentProgramPhase,
+    wizardResidentRoomOrBed,
+    wizardSelectedSoberHouseRules,
+    wizardSoberHouseId,
+    wizardSupervisionMode,
+  ]);
+
+  const confirmExitSetupWizard = useCallback(() => {
+    Alert.alert(
+      "Exit setup?",
+      "You can continue later from Settings without stepping back through the wizard.",
+      [
+        { text: "Continue setup", style: "cancel" },
+        {
+          text: "Save and exit",
+          onPress: () => {
+            void (async () => {
+              await persistSetupWizardProgress();
+              leaveSetupWizard();
+            })();
+          },
+        },
+        {
+          text: "Exit without saving",
+          style: "destructive",
+          onPress: leaveSetupWizard,
+        },
+      ],
+    );
+  }, [leaveSetupWizard, persistSetupWizardProgress]);
+
+  const previousSetupStep = useCallback(() => {
+    setSetupError(null);
+    const currentIndex = setupFlowSteps.indexOf(setupStep);
+    if (currentIndex <= 0) {
+      confirmExitSetupWizard();
+      return;
+    }
+    setSetupStep(setupFlowSteps[currentIndex - 1] ?? 1);
+  }, [confirmExitSetupWizard, setupFlowSteps, setupStep]);
+
+  const saveParticipantTrackState = useCallback(
+    async (
+      nextTrackState: ParticipantTrackState,
+      overrides?: Partial<{
+        wizardOnboardingPath: OnboardingPath;
+        wizardSupervisionMode: SetupSupervisionMode;
+        wizardJusticeTrack: SetupJusticeTrack;
+      }>,
+    ) => {
+      const legacyTrackState = buildLegacyWizardStateFromTracks(nextTrackState);
+      const nextWizardOnboardingPath =
+        overrides?.wizardOnboardingPath ?? legacyTrackState.onboardingPath;
+      const nextWizardSupervisionMode =
+        overrides?.wizardSupervisionMode ?? legacyTrackState.wizardSupervisionMode;
+      const nextWizardJusticeTrack =
+        overrides?.wizardJusticeTrack ?? legacyTrackState.wizardJusticeTrack;
+      setParticipantTrackState(nextTrackState);
+      setWizardOnboardingPath(nextWizardOnboardingPath);
+      setWizardSupervisionMode(nextWizardSupervisionMode);
+      setWizardJusticeTrack(nextWizardJusticeTrack);
+      await persistRecoveryStateSnapshot({
+        participantTracks: nextTrackState,
+        wizardOnboardingPath: nextWizardOnboardingPath,
+        wizardSupervisionMode: nextWizardSupervisionMode,
+        wizardJusticeTrack: nextWizardJusticeTrack,
+      });
+    },
+    [persistRecoveryStateSnapshot],
+  );
+
+  const beginParticipantTrackSetup = useCallback(
+    async (trackType: Exclude<ParticipantTrackType, "recovery_only">) => {
+      const timestamp = new Date().toISOString();
+      const nextTrackState = activateParticipantTrack(participantTrackState, trackType, timestamp, {
+        setupStatus: "IN_PROGRESS",
+        linkedOrganizationId: soberHouseStore.organization?.id ?? null,
+        linkedHouseId:
+          trackType === "sober_housing_resident"
+            ? (soberHouseStore.userAccessProfile?.houseId ?? null)
+            : null,
+        linkedCourtProgramName:
+          trackType === "court_participant" ? wizardCourtProgramName.trim() || null : null,
+        courtTrackKind:
+          trackType === "court_participant" && wizardJusticeTrack !== "NONE"
+            ? wizardJusticeTrack
+            : null,
+      });
+      const nextWizardOnboardingPath: OnboardingPath =
+        trackType === "sober_housing_resident" ? "SOBER_HOUSE_RESIDENT" : "COURT_PROGRAM";
+      await saveParticipantTrackState(nextTrackState, {
+        wizardOnboardingPath: nextWizardOnboardingPath,
+        wizardSupervisionMode:
+          trackType === "sober_housing_resident" ? "SOBER_HOUSE_RESIDENT" : "INDEPENDENT",
+        wizardJusticeTrack:
+          trackType === "court_participant"
+            ? wizardJusticeTrack === "NONE"
+              ? "DRUG_COURT"
+              : wizardJusticeTrack
+            : "NONE",
+      });
+      setDashboardEligibleBeforeWizard(setupComplete);
+      setSetupComplete(false);
+      setMode("A");
+      setHomeScreen("SETUP");
+      setSetupStep(10);
+      setSetupError(null);
+    },
+    [
+      participantTrackState,
+      saveParticipantTrackState,
+      setupComplete,
+      soberHouseStore.organization?.id,
+      soberHouseStore.userAccessProfile?.houseId,
+      wizardCourtProgramName,
+      wizardJusticeTrack,
+    ],
+  );
+
+  const endParticipantTrackFromSettings = useCallback(
+    async (trackType: Exclude<ParticipantTrackType, "recovery_only">) => {
+      const timestamp = new Date().toISOString();
+      const nextTrackState = endParticipantTrack(participantTrackState, trackType, timestamp);
+      const role = soberHouseStore.userAccessProfile?.role;
+      const shouldClearParticipantRole =
+        (trackType === "sober_housing_resident" && role === "HOUSE_RESIDENT") ||
+        (trackType === "court_participant" &&
+          (role === "DRUG_COURT_PARTICIPANT" || role === "PROBATION_PAROLE_PARTICIPANT"));
+      if (shouldClearParticipantRole) {
+        const nextStore = upsertUserAccessProfile(
+          soberHouseStore,
+          { id: devAuthUserId, name: devUserDisplayName },
+          {
+            id: soberHouseStore.userAccessProfile?.id,
+            linkedUserId: devAuthUserId,
+            role: "UNASSIGNED",
+            organizationId: soberHouseStore.userAccessProfile?.organizationId ?? null,
+            houseId: null,
+            houseGroupId: null,
+            status: "ACTIVE",
+          },
+          timestamp,
+        ).store;
+        await persistSoberHouseStore(nextStore);
+      }
+      await saveParticipantTrackState(nextTrackState);
+      setMode("A");
+      setHomeScreen("DASHBOARD");
+      setSetupError(null);
+    },
+    [
+      devAuthUserId,
+      devUserDisplayName,
+      participantTrackState,
+      persistSoberHouseStore,
+      saveParticipantTrackState,
+      soberHouseStore,
     ],
   );
 
@@ -9406,6 +10302,15 @@ export default function App() {
 
       let nextSoberHouseStore = soberHouseStore;
       const soberHouseTimestamp = new Date().toISOString();
+      let nextParticipantTrackState = participantTrackState;
+      if (recoveryRequired) {
+        nextParticipantTrackState = updateParticipantTrackSetup(
+          nextParticipantTrackState,
+          "recovery_only",
+          "COMPLETE",
+          soberHouseTimestamp,
+        );
+      }
       const actor = { id: devAuthUserId, name: devUserDisplayName };
       if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
         nextSoberHouseStore = upsertOrganization(
@@ -9488,9 +10393,9 @@ export default function App() {
           wizardSoberHouseId,
           createDefaultResidentWizardDraft(devAuthUserId),
         );
-        nextSoberHouseStore = saveResidentWizardDraft(nextSoberHouseStore, {
+        const residentDraft = {
           ...baseResidentDraft,
-          currentStep: 2,
+          currentStep: 2 as const,
           firstName: wizardResidentFirstName.trim(),
           lastName: wizardResidentLastName.trim(),
           moveInDate: parseUsDateToIso(wizardResidentMoveInDate) ?? wizardResidentMoveInDate,
@@ -9506,7 +10411,42 @@ export default function App() {
             ? `${wizardSelectedSoberHouseRules.sponsorContact.contactsRequiredPerWeek} per week`
             : baseResidentDraft.sponsorContactFrequency,
           updatedAt: soberHouseTimestamp,
-        });
+        };
+        const residentHousingProfile = createResidentHousingProfileFromDraft(
+          nextSoberHouseStore,
+          devAuthUserId,
+          residentDraft,
+          soberHouseTimestamp,
+        );
+        nextSoberHouseStore = upsertResidentHousingProfile(
+          nextSoberHouseStore,
+          actor,
+          residentHousingProfile,
+          soberHouseTimestamp,
+        ).store;
+        const residentRequirementProfile = createResidentRequirementProfileFromDraft(
+          nextSoberHouseStore,
+          devAuthUserId,
+          residentDraft,
+          soberHouseTimestamp,
+        );
+        nextSoberHouseStore = upsertResidentRequirementProfile(
+          nextSoberHouseStore,
+          actor,
+          residentRequirementProfile,
+          soberHouseTimestamp,
+        ).store;
+        nextSoberHouseStore = saveResidentWizardDraft(nextSoberHouseStore, null);
+        nextParticipantTrackState = updateParticipantTrackSetup(
+          nextParticipantTrackState,
+          "sober_housing_resident",
+          "COMPLETE",
+          soberHouseTimestamp,
+          {
+            linkedOrganizationId: nextSoberHouseStore.organization?.id ?? null,
+            linkedHouseId: wizardSoberHouseId,
+          },
+        );
       } else if (wizardOnboardingPath === "COURT_PROGRAM") {
         nextSoberHouseStore = upsertUserAccessProfile(
           nextSoberHouseStore,
@@ -9524,6 +10464,18 @@ export default function App() {
           },
           soberHouseTimestamp,
         ).store;
+        nextParticipantTrackState = updateParticipantTrackSetup(
+          nextParticipantTrackState,
+          "court_participant",
+          "COMPLETE",
+          soberHouseTimestamp,
+          {
+            linkedOrganizationId: nextSoberHouseStore.organization?.id ?? null,
+            linkedCourtProgramName: wizardCourtProgramName.trim() || null,
+            courtTrackKind:
+              wizardJusticeTrack === "PROBATION_PAROLE" ? "PROBATION_PAROLE" : "DRUG_COURT",
+          },
+        );
       } else {
         nextSoberHouseStore = upsertUserAccessProfile(
           nextSoberHouseStore,
@@ -9540,6 +10492,8 @@ export default function App() {
         ).store;
       }
       await persistSoberHouseStore(nextSoberHouseStore);
+      setParticipantTrackState(nextParticipantTrackState);
+      const legacyTrackState = buildLegacyWizardStateFromTracks(nextParticipantTrackState);
       await persistRecoveryStateSnapshot({
         mode: "A",
         setupComplete: true,
@@ -9592,15 +10546,17 @@ export default function App() {
             ? sponsorPhoneDigits
             : ""
           : sponsorPhoneDigits,
-        wizardOnboardingPath,
-        wizardSupervisionMode,
-        wizardJusticeTrack,
+        participantTracks: nextParticipantTrackState,
+        wizardOnboardingPath: legacyTrackState.onboardingPath,
+        wizardSupervisionMode: legacyTrackState.wizardSupervisionMode,
+        wizardJusticeTrack: legacyTrackState.wizardJusticeTrack,
         wizardCourtProgramName,
         wizardCourtSupervisorName,
         wizardCourtRequirementsSummary,
         wizardCourtDeadlineSummary,
       });
 
+      setDashboardEligibleBeforeWizard(false);
       setSetupComplete(true);
       setSetupStep(1);
       await completeSetupIntoDashboard("wizard-finish");
@@ -9705,6 +10661,7 @@ export default function App() {
       mode: "A",
       setupComplete: true,
     });
+    setDashboardEligibleBeforeWizard(false);
     setSetupComplete(true);
     setMode("A");
     setHomeScreen("DASHBOARD");
@@ -12022,7 +12979,12 @@ export default function App() {
   );
 
   const queueMeetingAttendance = useCallback(
-    async (meeting: MeetingRecord) => {
+    async (
+      meeting: MeetingRecord,
+      options?: {
+        stayOnDashboard?: boolean;
+      },
+    ) => {
       if (activeAttendance && !activeAttendance.endAt) {
         Alert.alert(
           "Attendance in progress",
@@ -12050,8 +13012,10 @@ export default function App() {
         calendarEventId: existingPlannedEventId,
       };
       setAttendanceAutomationPlan(nextPlan);
-      setSelectedMeeting(meeting);
-      setHomeScreen("MEETINGS");
+      if (!options?.stayOnDashboard) {
+        setSelectedMeeting(meeting);
+        setHomeScreen("MEETINGS");
+      }
 
       const hasValidGeofence =
         meeting.format !== "ONLINE" &&
@@ -12146,7 +13110,7 @@ export default function App() {
         return;
       }
 
-      await queueMeetingAttendance(meeting);
+      await queueMeetingAttendance(meeting, { stayOnDashboard: true });
     },
     [queueMeetingAttendance, resolveMeetingForLogging],
   );
@@ -12517,14 +13481,21 @@ export default function App() {
             AsyncStorage.getItem(ninetyDayGoalStorage),
             AsyncStorage.getItem(sponsorEnabledAtStorage),
           ]);
-          const { hasLocalSponsorProfile } = hydratePersistedRecoverySettings({
-            modeRaw,
-            sponsorUiPrefsRaw,
+          const seededDefaults = applySeededRecoveryDefaults({
             setupCompleteRaw,
             sobrietyDateRaw,
             profileRaw,
             ninetyDayGoalRaw,
             sponsorEnabledAtRaw,
+          });
+          const { hasLocalSponsorProfile } = hydratePersistedRecoverySettings({
+            modeRaw,
+            sponsorUiPrefsRaw,
+            setupCompleteRaw: seededDefaults.setupCompleteRaw,
+            sobrietyDateRaw: seededDefaults.sobrietyDateRaw,
+            profileRaw: seededDefaults.profileRaw,
+            ninetyDayGoalRaw: seededDefaults.ninetyDayGoalRaw,
+            sponsorEnabledAtRaw: seededDefaults.sponsorEnabledAtRaw,
           });
           if (enableSponsorApiSync && !hasLocalSponsorProfile) {
             await fetchSponsorConfig();
@@ -12605,6 +13576,13 @@ export default function App() {
           loadRoutinesStore(devAuthUserId),
           readCurrentLocation(false),
         ]);
+        const seededDefaults = applySeededRecoveryDefaults({
+          setupCompleteRaw,
+          sobrietyDateRaw,
+          profileRaw,
+          ninetyDayGoalRaw,
+          sponsorEnabledAtRaw,
+        });
 
         await refreshMeetings({ location: initialLocation });
         if (!initialLocation) {
@@ -12616,11 +13594,11 @@ export default function App() {
         const { hasLocalSponsorProfile } = hydratePersistedRecoverySettings({
           modeRaw,
           sponsorUiPrefsRaw,
-          setupCompleteRaw,
-          sobrietyDateRaw,
-          profileRaw,
-          ninetyDayGoalRaw,
-          sponsorEnabledAtRaw,
+          setupCompleteRaw: seededDefaults.setupCompleteRaw,
+          sobrietyDateRaw: seededDefaults.sobrietyDateRaw,
+          profileRaw: seededDefaults.profileRaw,
+          ninetyDayGoalRaw: seededDefaults.ninetyDayGoalRaw,
+          sponsorEnabledAtRaw: seededDefaults.sponsorEnabledAtRaw,
         });
 
         if (attendanceRaw) {
@@ -12992,6 +13970,7 @@ export default function App() {
     devAuthUserId,
     enableSponsorApiSync,
     fetchSponsorConfig,
+    applySeededRecoveryDefaults,
     hydratePersistedRecoverySettings,
     readCurrentLocation,
     refreshMeetings,
@@ -13006,9 +13985,21 @@ export default function App() {
   useEffect(() => {
     let active = true;
     void (async () => {
-      const nextStore = await loadSoberHouseSettingsStore(devAuthUserId);
+      const loadedStore = await loadSoberHouseSettingsStore(devAuthUserId);
       if (!active) {
         return;
+      }
+      const seededSoberHouseStore = activeSeededDevUser?.soberHouseStore;
+      const shouldUseSeededSoberHouseStore =
+        seededSoberHouseStore !== null &&
+        seededSoberHouseStore !== undefined &&
+        loadedStore.userAccessProfile === null &&
+        loadedStore.organization === null &&
+        loadedStore.houses.length === 0 &&
+        loadedStore.houseRuleSets.length === 0;
+      const nextStore = shouldUseSeededSoberHouseStore ? seededSoberHouseStore : loadedStore;
+      if (shouldUseSeededSoberHouseStore) {
+        await saveSoberHouseSettingsStore(devAuthUserId, nextStore);
       }
       setSoberHouseStore(nextStore);
       const role = nextStore.userAccessProfile?.role;
@@ -13027,27 +14018,58 @@ export default function App() {
       setWizardOrganizationPrimaryPhone(nextStore.organization?.primaryPhone ?? "");
       setWizardOrganizationPrimaryEmail(nextStore.organization?.primaryEmail ?? "");
       setWizardOrganizationNotes(nextStore.organization?.notes ?? "");
-      setWizardOnboardingPath(
-        inferOnboardingPath({
+      setParticipantTrackState((current) => {
+        const legacyTracks = normalizeParticipantTrackState(null, {
+          setupComplete,
           onboardingPath: wizardOnboardingPath,
-          wizardSupervisionMode:
-            role === "HOUSE_RESIDENT"
-              ? "SOBER_HOUSE_RESIDENT"
-              : role === "OWNER_OPERATOR"
-                ? "SOBER_HOUSE_OWNER"
-                : wizardSupervisionMode,
           wizardJusticeTrack,
           soberHouseRole: role ?? null,
-        }),
-      );
+          houseId: nextStore.userAccessProfile?.houseId ?? null,
+          organizationId: nextStore.organization?.id ?? null,
+          nowIso: new Date().toISOString(),
+        });
+        let nextTrackState = normalizeParticipantTrackState(current, {
+          setupComplete,
+          onboardingPath: wizardOnboardingPath,
+          wizardJusticeTrack,
+          nowIso: new Date().toISOString(),
+        });
+        legacyTracks.enrollments.forEach((legacyTrack) => {
+          if (
+            !nextTrackState.enrollments.some(
+              (entry) =>
+                entry.trackType === legacyTrack.trackType &&
+                entry.status === "ACTIVE" &&
+                entry.setupStatus === legacyTrack.setupStatus,
+            )
+          ) {
+            nextTrackState = activateParticipantTrack(
+              nextTrackState,
+              legacyTrack.trackType,
+              legacyTrack.startedAt,
+              {
+                setupStatus: legacyTrack.setupStatus,
+                linkedOrganizationId: legacyTrack.linkedOrganizationId,
+                linkedHouseId: legacyTrack.linkedHouseId,
+                linkedCourtProgramId: legacyTrack.linkedCourtProgramId,
+                linkedCourtProgramName: legacyTrack.linkedCourtProgramName,
+                courtTrackKind: legacyTrack.courtTrackKind,
+              },
+            );
+          }
+        });
+        return nextTrackState;
+      });
     })();
     return () => {
       active = false;
     };
   }, [
+    activeSeededDevUser?.soberHouseStore,
     devAuthUserId,
     homeScreen,
     mode,
+    setupComplete,
     wizardJusticeTrack,
     wizardOnboardingPath,
     wizardSupervisionMode,
@@ -14300,14 +15322,24 @@ export default function App() {
                     onDevIdentityDraftChange={setDevAuthIdentityDraft}
                     onApplyDevIdentity={switchProtectedOrgDevIdentity}
                     onBack={previousSetupStep}
+                    onExit={confirmExitSetupWizard}
                     onRequestAccess={requestProtectedOrgAccess}
                   />
                 ) : (
                   <GlassCard style={styles.card} strong>
-                    <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
-                    <Text style={styles.sectionMeta}>
-                      Step {setupVisibleStepNumber} of {setupFlowSteps.length}
-                    </Text>
+                    <View style={styles.headerRow}>
+                      <View style={styles.headerTextWrap}>
+                        <Text style={styles.sectionTitle}>Recovery Setup Wizard</Text>
+                        <Text style={styles.sectionMeta}>
+                          Step {setupVisibleStepNumber} of {setupFlowSteps.length}
+                        </Text>
+                      </View>
+                      <AppButton
+                        title="Exit"
+                        variant="secondary"
+                        onPress={confirmExitSetupWizard}
+                      />
+                    </View>
                     {setupStep === 1 ? (
                       <>
                         <Text style={styles.label}>What should Sober² help you with first?</Text>
@@ -14315,7 +15347,7 @@ export default function App() {
                           Choose the path that best matches why you're here right now.
                         </Text>
                         <View style={styles.chipRow}>
-                          {ONBOARDING_PATH_OPTIONS.map((option) => (
+                          {visibleOnboardingPathOptions.map((option) => (
                             <Pressable
                               key={option.value}
                               style={[
@@ -15585,52 +16617,42 @@ export default function App() {
               ) : null}
 
               {homeScreen === "DASHBOARD" ? (
-                shouldShowSoberHouseLock ? (
-                  <GlassCard style={styles.card} strong>
-                    <Text style={styles.sectionTitle}>Unlock Sober House</Text>
-                    <Text style={styles.sectionMeta}>
-                      {canUseSimulatorSoberHouseUnlock
-                        ? "Simulator mode requires the sober-house test passcode before admin records can be opened."
-                        : "Protected sober-house records require Face ID, Touch ID, or your iPhone passcode before they can be opened."}
-                    </Text>
-                    {soberHouseUnlockStatus ? (
-                      <Text style={styles.sectionMeta}>{soberHouseUnlockStatus}</Text>
+                canManageSoberHouseHierarchy(appAccessRole) &&
+                soberHouseAccessProfile?.role === "OWNER_OPERATOR" ? (
+                  <>
+                    {soberHouseUnlockStatus && soberHouseProtectedAdminSessionRequired ? (
+                      <GlassCard style={styles.card} strong>
+                        <Text style={styles.sectionTitle}>Protected Admin Session</Text>
+                        <Text style={styles.sectionMeta}>{soberHouseUnlockStatus}</Text>
+                      </GlassCard>
                     ) : null}
-                    <View style={styles.buttonRow}>
-                      <AppButton
-                        title={
-                          canUseSimulatorSoberHouseUnlock
-                            ? "Enter Code"
-                            : soberHouseUnlocking
-                              ? "Unlocking..."
-                              : "Unlock with Face ID / Passcode"
-                        }
-                        onPress={() => void unlockSoberHouseAccess()}
-                        disabled={soberHouseUnlocking}
-                      />
-                      <View style={styles.buttonSpacer} />
-                      <AppButton title="Back to Recovery" onPress={() => handleModeSelect("A")} />
-                    </View>
-                  </GlassCard>
-                ) : canManageSoberHouseHierarchy(appAccessRole) &&
-                  soberHouseAccessProfile?.role === "OWNER_OPERATOR" ? (
-                  <SoberHouseOwnerDashboard
-                    store={soberHouseStore}
-                    notificationSummary={communicationNotificationSummary}
-                    onOpenNotifications={openNotificationsHub}
-                    onOpenSettings={openSoberHousingSettings}
-                    onCreateHouse={openSoberHouseCreateHouse}
-                    onEditHouse={openSoberHouseEditHouse}
-                    onToggleHouseStatus={updateOwnerDashboardHouseStatus}
-                    onCreateManager={openSoberHouseCreateManager}
-                    onEditManager={openSoberHouseEditManager}
-                    onToggleManagerStatus={updateOwnerDashboardStaffStatus}
-                    onOpenChat={openMessagesHub}
-                    onCompileReportsNow={(houseIds) => {
-                      void compileOwnerScopeReportsNow(houseIds);
-                    }}
-                    compileStatus={ownerDashboardStatus}
-                  />
+                    <SoberHouseOwnerDashboard
+                      store={soberHouseStore}
+                      notificationSummary={communicationNotificationSummary}
+                      onOpenNotifications={openNotificationsHub}
+                      onOpenSettings={openSoberHousingSettings}
+                      onCreateHouse={openSoberHouseCreateHouse}
+                      onEditHouse={openSoberHouseEditHouse}
+                      onToggleHouseStatus={updateOwnerDashboardHouseStatus}
+                      onCreateManager={openSoberHouseCreateManager}
+                      onEditManager={openSoberHouseEditManager}
+                      onToggleManagerStatus={updateOwnerDashboardStaffStatus}
+                      onOpenChat={openMessagesHub}
+                      onCompileReportsNow={(houseIds) => {
+                        void compileOwnerScopeReportsNow(houseIds);
+                      }}
+                      onMarkOneOnOneCompleted={(residentId) => {
+                        void markOwnerDashboardOneOnOneCompleted(residentId);
+                      }}
+                      onLogSponsorCallCompleted={(residentId) => {
+                        void logOwnerDashboardSponsorCallCompleted(residentId);
+                      }}
+                      onMarkHouseMeetingAttendance={(residentId, status) => {
+                        void markOwnerDashboardHouseMeetingAttendance(residentId, status);
+                      }}
+                      compileStatus={ownerDashboardStatus}
+                    />
+                  </>
                 ) : (
                   <Dashboard
                     daysSober={daysSober}
@@ -15645,30 +16667,6 @@ export default function App() {
                     wisdomText={dailyWisdomText}
                     notificationSummary={communicationNotificationSummary}
                     dailyChecklist={dailyChecklistStatus}
-                    soberHouseChatPreview={
-                      soberHouseAccessProfile?.role === "HOUSE_RESIDENT"
-                        ? {
-                            visible: true,
-                            threadCount: soberHouseResidentChatSummaries.length,
-                            unreadCount: soberHouseResidentChatSummaries.reduce(
-                              (count, summary) => count + summary.unreadCount,
-                              0,
-                            ),
-                            acknowledgmentPending: soberHouseResidentChatSummaries.some(
-                              (summary) => summary.acknowledgmentPending,
-                            ),
-                            threads: soberHouseResidentChatSummaries.slice(0, 2).map((summary) => ({
-                              id: summary.thread.id,
-                              participantName: summary.otherParticipantName,
-                              participantRole: summary.otherParticipantRole,
-                              preview: summary.lastMessage?.bodyText ?? "No messages yet.",
-                              timestamp: summary.lastMessage?.createdAt ?? summary.thread.createdAt,
-                              unreadCount: summary.unreadCount,
-                              acknowledgmentPending: summary.acknowledgmentPending,
-                            })),
-                          }
-                        : null
-                    }
                     soberHouseResidentTiles={soberHouseResidentDashboardSummary.tiles}
                     soberHouseSetupPrompt={
                       soberHouseAccessProfile?.role === "HOUSE_RESIDENT" &&
@@ -15686,17 +16684,6 @@ export default function App() {
                         : null
                     }
                     soberHouseViolations={soberHouseViolationTile}
-                    houseManagerContact={
-                      soberHouseManagerContact
-                        ? {
-                            name: soberHouseManagerContact.name,
-                            roleLabel: soberHouseManagerContact.roleLabel,
-                            phoneLabel:
-                              formatUsPhoneDisplay(soberHouseManagerContact.phone || "") ||
-                              "No phone on file",
-                          }
-                        : null
-                    }
                     homeGroupMeeting={
                       homeGroupUpcoming
                         ? {
@@ -15740,13 +16727,13 @@ export default function App() {
                     onCallSponsor={() => {
                       void openPhoneCall();
                     }}
+                    onCallHouseManager={() => {
+                      void openPhoneCall(soberHouseAssignedManagerPhone, "button");
+                    }}
                     onOpenMorningRoutine={openMorningRoutine}
                     onOpenNightlyInventory={openNightlyInventory}
                     onOpenNotifications={openNotificationsHub}
                     onOpenSoberHouseKpi={openSoberHouseDashboardDetail}
-                    onCallHouseManager={() => {
-                      void callHouseManagerFromDashboard();
-                    }}
                     onOpenMeetings={openMeetingsHub}
                     onOpenOnlineMeetingsNow={() => {
                       void openOnlineMeetingsNow();
@@ -15755,87 +16742,25 @@ export default function App() {
                     onOpenRecoveryGauge={openRecoveryGauge}
                     onOpenRecoverySettings={openSettingsHub}
                     onOpenPrivacyStatement={openPrivacyStatement}
-                    supervisionPanel={
-                      soberHouseAccessProfile?.role === "HOUSE_RESIDENT" ? (
-                        <GlassCard style={styles.card} strong>
-                          <Text style={styles.sectionTitle}>Sober House Check-In</Text>
-                          <Text style={styles.sectionMeta}>
-                            Assigned house: {soberHouseAssignedHouse?.name ?? "Not assigned"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Meetings this week:{" "}
-                            {soberHouseEffectiveRules?.meetings.meetingsRequired
-                              ? `${soberHouseEffectiveRules.meetings.meetingsPerWeek} required`
-                              : "No weekly requirement"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Sponsor contact:{" "}
-                            {soberHouseEffectiveRules?.sponsorContact.enabled
-                              ? `${soberHouseEffectiveRules.sponsorContact.contactsRequiredPerWeek} per week`
-                              : "Not required"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Work status:{" "}
-                            {soberHouseStore.residentRequirementProfile?.workRequired
-                              ? soberHouseStore.residentRequirementProfile.currentlyEmployed
-                                ? "Required and employed"
-                                : "Required and tracking job search"
-                              : "Not required"}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Backend obligations: {backendParticipantObligations.length}
-                          </Text>
-                          <Text style={styles.sectionMeta}>
-                            Open backend violations:{" "}
-                            {
-                              backendParticipantViolations.filter(
-                                (violation) =>
-                                  violation.status === "OPEN" ||
-                                  violation.status === "UNDER_REVIEW",
-                              ).length
-                            }
-                          </Text>
-                          {participantSyncStatus ? (
-                            <Text style={styles.sectionMeta}>{participantSyncStatus}</Text>
-                          ) : null}
-                          {soberHouseComplianceSummary?.evaluations.map((evaluation) => (
-                            <Text
-                              key={evaluation.ruleType}
-                              style={[
-                                styles.sectionMeta,
-                                {
-                                  color:
-                                    statusToneForComplianceStatus(evaluation.status) === "red"
-                                      ? "#fca5a5"
-                                      : statusToneForComplianceStatus(evaluation.status) ===
-                                          "yellow"
-                                        ? "#fde68a"
-                                        : statusToneForComplianceStatus(evaluation.status) ===
-                                            "green"
-                                          ? "#86efac"
-                                          : colors.textSecondary,
-                                },
-                              ]}
-                            >
-                              {evaluation.ruleType}: {evaluation.statusReason}
-                            </Text>
-                          ))}
-                          <View style={styles.buttonRow}>
-                            <AppButton
-                              title="View sober-house profile"
-                              variant="secondary"
-                              onPress={openSoberHousingSettings}
-                            />
-                          </View>
-                        </GlassCard>
-                      ) : null
-                    }
+                    supervisionPanel={null}
                     onOpenAttendance={() => openAttendanceHub("dashboard")}
                     onOpenAttendanceToday={() => openAttendanceHub("dashboard")}
                     onOpenTools={openToolsHub}
-                    soberHousingEntryVisible={canOpenSoberHouseEntry}
+                    houseManagerCallAvailable={
+                      soberHouseAccessProfile?.role === "HOUSE_RESIDENT" &&
+                      Boolean(soberHouseAssignedManagerPhone)
+                    }
+                    soberHousingEntryVisible={
+                      soberHouseAccessProfile?.role === "HOUSE_RESIDENT"
+                        ? false
+                        : canOpenSoberHouseEntry
+                    }
                     soberHousingEntryLabel={soberHouseEntryLabel(appAccessRole)}
-                    onOpenSoberHousingSettings={openSoberHousingSettings}
+                    onOpenSoberHousingSettings={
+                      soberHouseAccessProfile?.role === "HOUSE_RESIDENT"
+                        ? () => openResidentSoberHouseProfile("REQUIREMENTS")
+                        : openSoberHousingSettings
+                    }
                     courtEntryVisible={canOpenCourtEntry}
                     courtEntryLabel={courtEntryLabel(appAccessRole)}
                     onOpenProbationParoleSettings={openProbationParoleSettings}
@@ -17223,6 +18148,216 @@ export default function App() {
                     </View>
                   </GlassCard>
 
+                  {canManageSoberHouseHierarchy(appAccessRole) ? (
+                    <GlassCard style={styles.card} strong>
+                      <Text style={styles.sectionTitle}>Sober Housing Admin</Text>
+                      <Text style={styles.sectionMeta}>
+                        Protected sober-house organization access is active for this user. Open the
+                        admin hub directly from here instead of relying on a resident-facing
+                        dashboard tile.
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Current backend roles:{" "}
+                        {currentAccessRoles.length > 0
+                          ? currentAccessRoles.join(", ")
+                          : "No protected roles detected"}
+                      </Text>
+                      <View style={styles.buttonRow}>
+                        <AppButton
+                          title="Open admin hub"
+                          onPress={() => openSoberHousingSettings({ module: "HUB" })}
+                        />
+                        <View style={styles.buttonSpacer} />
+                        <AppButton
+                          title="Organization"
+                          variant="secondary"
+                          onPress={() => openSoberHousingSettings({ module: "ORGANIZATION" })}
+                        />
+                      </View>
+                      <View style={styles.buttonRow}>
+                        <AppButton
+                          title="Houses"
+                          variant="secondary"
+                          onPress={() => openSoberHousingSettings({ module: "HOUSES" })}
+                        />
+                        <View style={styles.buttonSpacer} />
+                        <AppButton
+                          title="Add House"
+                          variant="secondary"
+                          onPress={() =>
+                            openSoberHousingSettings({ module: "HOUSES", mode: "create" })
+                          }
+                        />
+                      </View>
+                    </GlassCard>
+                  ) : null}
+
+                  {usesDevAuthShim ? (
+                    <GlassCard style={styles.card} strong>
+                      <Text style={styles.sectionTitle}>QA Visibility</Text>
+                      <Text style={styles.sectionMeta}>
+                        Current DEV user: {currentDevAuthUserId || "Signed out"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>App role: {appAccessRole}</Text>
+                      <Text style={styles.sectionMeta}>
+                        Active tracks:{" "}
+                        {visibleParticipantTracks.map((track) => track.trackType).join(", ") ||
+                          "None"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Protected roles:{" "}
+                        {currentAccessRoles.length > 0 ? currentAccessRoles.join(", ") : "None"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Wizard: {setupComplete ? "completed" : `saved at step ${setupStep}`}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Sober house context: org {soberHouseStore.organization?.id ?? "none"} •
+                        house {soberHouseAccessProfile?.houseId ?? "none"} • group{" "}
+                        {soberHouseAccessProfile?.houseGroupId ?? "none"}
+                      </Text>
+                    </GlassCard>
+                  ) : null}
+
+                  <GlassCard style={styles.card} strong>
+                    <Text style={styles.sectionTitle}>My Tracks</Text>
+                    <Text style={styles.sectionMeta}>
+                      Recovery is your permanent base profile. Participant tracks can be added or
+                      ended here without deleting recovery settings or history.
+                    </Text>
+                    {visibleParticipantTracks.map((track) => (
+                      <View key={track.id} style={styles.historyCard}>
+                        <Text style={styles.meetingName}>
+                          {labelForParticipantTrack(track.trackType)}
+                        </Text>
+                        <Text style={styles.sectionMeta}>
+                          {track.setupStatus === "COMPLETE" ? "Active" : "Setup in progress"} •{" "}
+                          {participantTrackDescription(track)}
+                        </Text>
+                        {track.trackType === "sober_housing_resident" ? (
+                          <View style={styles.buttonRow}>
+                            <AppButton
+                              title={
+                                track.setupStatus === "COMPLETE"
+                                  ? "View requirements"
+                                  : "Continue setup"
+                              }
+                              variant="secondary"
+                              onPress={() =>
+                                track.setupStatus === "COMPLETE"
+                                  ? openResidentSoberHouseProfile("REQUIREMENTS")
+                                  : void beginParticipantTrackSetup("sober_housing_resident")
+                              }
+                            />
+                            <View style={styles.buttonSpacer} />
+                            <AppButton
+                              title="End track"
+                              variant="secondary"
+                              onPress={() =>
+                                void endParticipantTrackFromSettings("sober_housing_resident")
+                              }
+                            />
+                          </View>
+                        ) : null}
+                        {track.trackType === "court_participant" ? (
+                          <View style={styles.buttonRow}>
+                            <AppButton
+                              title={
+                                track.setupStatus === "COMPLETE" ? "View program" : "Continue setup"
+                              }
+                              variant="secondary"
+                              onPress={() =>
+                                track.setupStatus === "COMPLETE"
+                                  ? openProbationParoleSettings()
+                                  : void beginParticipantTrackSetup("court_participant")
+                              }
+                            />
+                            <View style={styles.buttonSpacer} />
+                            <AppButton
+                              title="End track"
+                              variant="secondary"
+                              onPress={() =>
+                                void endParticipantTrackFromSettings("court_participant")
+                              }
+                            />
+                          </View>
+                        ) : null}
+                      </View>
+                    ))}
+                    <Text style={styles.label}>Add or transition tracks</Text>
+                    <View style={styles.buttonRow}>
+                      <AppButton
+                        title={canAddResidentTrack ? "Add resident track" : "Resident active"}
+                        variant="secondary"
+                        onPress={() => void beginParticipantTrackSetup("sober_housing_resident")}
+                        disabled={!canAddResidentTrack}
+                      />
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title={canAddCourtTrack ? "Add court track" : "Court active"}
+                        variant="secondary"
+                        onPress={() => void beginParticipantTrackSetup("court_participant")}
+                        disabled={!canAddCourtTrack}
+                      />
+                    </View>
+                    {inactiveParticipantTracks.length > 0 ? (
+                      <>
+                        <Text style={styles.label}>Completed / inactive</Text>
+                        {inactiveParticipantTracks.map((track) => (
+                          <Text key={track.id} style={styles.sectionMeta}>
+                            {labelForParticipantTrack(track.trackType)} ended{" "}
+                            {track.endedAt
+                              ? formatDateTimeLabel(new Date(track.endedAt))
+                              : "previously"}
+                            .
+                          </Text>
+                        ))}
+                      </>
+                    ) : null}
+                    {usesDevAuthShim ? (
+                      <>
+                        <Text style={styles.label}>Seeded QA users</Text>
+                        <Text style={styles.sectionMeta}>
+                          Protected admin areas still require backend grants. These seeded
+                          identities only give deterministic participant/profile state for testing.
+                        </Text>
+                        <View style={styles.chipRow}>
+                          {SEEDED_DEV_USERS.map((seededUser) => (
+                            <Pressable
+                              key={seededUser.userId}
+                              style={[
+                                styles.chip,
+                                currentDevAuthUserId === seededUser.userId
+                                  ? styles.chipSelected
+                                  : null,
+                              ]}
+                              onPress={() => {
+                                setDevAuthIdentityDraft(seededUser.userId);
+                                setDevAuthOverrideUserId(seededUser.userId);
+                                setDevAuthSignedOut(false);
+                                setServerAccessContext(null);
+                                setServerRoleCheckStatus(
+                                  `Checking access for DEV_${seededUser.userId}...`,
+                                );
+                              }}
+                            >
+                              <Text
+                                style={[
+                                  styles.chipText,
+                                  currentDevAuthUserId === seededUser.userId
+                                    ? styles.chipTextSelected
+                                    : null,
+                                ]}
+                              >
+                                {seededUser.displayName}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      </>
+                    ) : null}
+                  </GlassCard>
+
                   {soberHouseAccessProfile?.role === "HOUSE_RESIDENT" ? (
                     <GlassCard style={styles.card} strong>
                       <Text style={styles.sectionTitle}>Sober House Program Requirements</Text>
@@ -17255,8 +18390,8 @@ export default function App() {
                       </Text>
                       <Text style={styles.sectionMeta}>
                         House-controlled requirements are read-only here. Update personal recovery
-                        preferences below, and use Sober House Settings for your assigned-house
-                        profile.
+                        preferences below, and use your Sober House Profile routine to complete
+                        assigned requirements.
                       </Text>
                     </GlassCard>
                   ) : null}
@@ -18267,33 +19402,6 @@ export default function App() {
                     <AppButton title="Back to Dashboard" onPress={() => handleModeSelect("A")} />
                   </View>
                 </GlassCard>
-              ) : shouldShowSoberHouseLock ? (
-                <GlassCard style={styles.card} strong>
-                  <Text style={styles.sectionTitle}>Unlock Sober House</Text>
-                  <Text style={styles.sectionMeta}>
-                    {canUseSimulatorSoberHouseUnlock
-                      ? "Simulator mode requires the sober-house test passcode before protected records can be opened."
-                      : "Protected sober-house records require Face ID, Touch ID, or your iPhone passcode before they can be opened."}
-                  </Text>
-                  {soberHouseUnlockStatus ? (
-                    <Text style={styles.sectionMeta}>{soberHouseUnlockStatus}</Text>
-                  ) : null}
-                  <View style={styles.buttonRow}>
-                    <AppButton
-                      title={
-                        canUseSimulatorSoberHouseUnlock
-                          ? "Enter Code"
-                          : soberHouseUnlocking
-                            ? "Unlocking..."
-                            : "Unlock with Face ID / Passcode"
-                      }
-                      onPress={() => void unlockSoberHouseAccess()}
-                      disabled={soberHouseUnlocking}
-                    />
-                    <View style={styles.buttonSpacer} />
-                    <AppButton title="Back to Recovery" onPress={() => handleModeSelect("A")} />
-                  </View>
-                </GlassCard>
               ) : (
                 <>
                   {soberHouseProtectedSessionMessage ? (
@@ -18319,6 +19427,7 @@ export default function App() {
                     actorId={devAuthUserId}
                     actorName={devUserDisplayName}
                     viewerRole={appAccessRole}
+                    sponsorCallLogs={sponsorCallLogs}
                     adminLaunchContext={soberHouseAdminLaunchContext}
                     onBack={() => handleModeSelect("A")}
                   />

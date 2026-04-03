@@ -9,11 +9,11 @@ import {
   type AppAccessRole,
 } from "../lib/access";
 import { formatUsPhoneDisplay, normalizeUsPhoneInput } from "../lib/phone";
-import { SoberHouseResidentManager } from "../components/SoberHouseResidentManager";
 import { SoberHouseComplianceSection } from "../components/SoberHouseComplianceSection";
 import { SoberHouseInterventionSection } from "../components/SoberHouseInterventionSection";
 import { SoberHouseChatSection } from "../components/SoberHouseChatSection";
 import { SoberHouseReportsSection } from "../components/SoberHouseReportsSection";
+import { SoberHouseResidentManager } from "../components/SoberHouseResidentManager";
 import {
   buildSoberHouseOwnerHouseDetail,
   buildSoberHouseOwnerHouseViolationRows,
@@ -42,6 +42,7 @@ import {
   type MeetingType,
   type Organization,
   type RecurringObligation,
+  type ResidentOnboardingStep,
   type ScheduledFrequency,
   type ScheduledWeekdayCode,
   type SoberHouseAccessRole,
@@ -73,23 +74,27 @@ import {
   upsertUserAccessProfile,
 } from "../lib/soberHouse/mutations";
 import {
+  getEffectiveRuleSetForScope,
   getHouseGroupById,
   getRecurringObligationsForScope,
   getRuleSetForScope,
   getUserAccessProfile,
   isResidentAccess,
   getStaffAssignmentById,
+  type EffectiveRuleValueSource,
 } from "../lib/soberHouse/selectors";
 import {
   loadSoberHouseSettingsStore,
   saveSoberHouseSettingsStore,
 } from "../lib/soberHouse/storage";
+import { getResidentSetupState } from "../lib/soberHouse/resident";
 
 type SoberHouseSettingsScreenProps = {
   userId: string;
   actorId: string;
   actorName: string;
   viewerRole: AppAccessRole;
+  sponsorCallLogs: Array<{ id: string; atIso: string; success: boolean }>;
   onBack: () => void;
   adminLaunchContext?: SoberHouseAdminLaunchContext | null;
 };
@@ -110,11 +115,14 @@ type AdminModule =
   | "VIOLATIONS"
   | "REPORTS";
 
+type ResidentView = "OVERVIEW" | "REQUIREMENTS" | "SETUP";
+
 export type SoberHouseAdminLaunchContext = {
   module: AdminModule;
   mode?: "view" | "create" | "edit";
   houseId?: string | null;
   staffAssignmentId?: string | null;
+  residentView?: ResidentView;
 };
 
 function resolveInitialAdminModule(
@@ -126,6 +134,41 @@ function resolveInitialAdminModule(
   }
 
   return adminLaunchContext.module;
+}
+
+function resolveInitialResidentView(
+  viewerRole: AppAccessRole,
+  adminLaunchContext: SoberHouseAdminLaunchContext | null,
+): ResidentView {
+  if (adminLaunchContext?.residentView) {
+    return adminLaunchContext.residentView;
+  }
+
+  if (canManageSoberHouseHierarchy(viewerRole)) {
+    return "OVERVIEW";
+  }
+
+  return "OVERVIEW";
+}
+
+function residentSetupStepForRule(
+  ruleType: "curfew" | "chores" | "jobSearch" | "meetings" | "sponsorContact" | "work",
+): ResidentOnboardingStep {
+  switch (ruleType) {
+    case "work":
+    case "jobSearch":
+      return 3;
+    case "meetings":
+      return 4;
+    case "sponsorContact":
+      return 5;
+    case "curfew":
+      return 6;
+    case "chores":
+      return 7;
+    default:
+      return 1;
+  }
 }
 
 const INPUT_PLACEHOLDER_COLOR = "rgba(245,243,255,0.45)";
@@ -660,6 +703,114 @@ function summarizeHouseMeetingSchedule(obligation: RecurringObligation): string 
   return `${frequencyLabel} • ${weekdayLabel} • ${formatTwelveHourTime(obligation.timeLocalHhmm)}`;
 }
 
+function labelForEffectiveRuleSource(source: EffectiveRuleValueSource): string {
+  if (source === "HOUSE") {
+    return "House Override";
+  }
+  if (source === "HOUSE_GROUP") {
+    return "House Group";
+  }
+  return "Organization Default";
+}
+
+function summarizeSourceBreakdown(values: EffectiveRuleValueSource[]): string {
+  const counts = values.reduce<Record<EffectiveRuleValueSource, number>>(
+    (current, value) => ({
+      ...current,
+      [value]: (current[value] ?? 0) + 1,
+    }),
+    {
+      ORGANIZATION: 0,
+      HOUSE_GROUP: 0,
+      HOUSE: 0,
+    },
+  );
+  return [
+    counts.ORGANIZATION > 0 ? `${counts.ORGANIZATION} org default` : null,
+    counts.HOUSE_GROUP > 0 ? `${counts.HOUSE_GROUP} group template` : null,
+    counts.HOUSE > 0 ? `${counts.HOUSE} house override` : null,
+  ]
+    .filter((value): value is string => value !== null)
+    .join(" • ");
+}
+
+type EffectiveRuleSummaryItem = {
+  label: string;
+  value: string;
+  source: EffectiveRuleValueSource;
+};
+
+function buildEffectiveRuleSummaryItems(input: {
+  ruleSet: HouseRuleSet;
+  sources: {
+    meetings: EffectiveRuleValueSource;
+    sponsorContact: EffectiveRuleValueSource;
+    employment: EffectiveRuleValueSource;
+    jobSearch: EffectiveRuleValueSource;
+    chores: EffectiveRuleValueSource;
+    curfew: EffectiveRuleValueSource;
+  };
+  houseMeetingCount: number;
+  houseMeetingSource: EffectiveRuleValueSource;
+}): EffectiveRuleSummaryItem[] {
+  return [
+    {
+      label: "Meetings per week",
+      value: input.ruleSet.meetings.meetingsRequired
+        ? String(input.ruleSet.meetings.meetingsPerWeek)
+        : "Not required",
+      source: input.sources.meetings,
+    },
+    {
+      label: "Sponsor calls",
+      value: input.ruleSet.sponsorContact.enabled
+        ? `${input.ruleSet.sponsorContact.contactsRequiredPerWeek} per week`
+        : "Not required",
+      source: input.sources.sponsorContact,
+    },
+    {
+      label: "Work / job applications",
+      value: input.ruleSet.employment.employmentRequired
+        ? input.ruleSet.jobSearch.applicationsRequiredPerWeek > 0
+          ? `Employment required or ${input.ruleSet.jobSearch.applicationsRequiredPerWeek} applications/week`
+          : "Employment required"
+        : input.ruleSet.jobSearch.applicationsRequiredPerWeek > 0
+          ? `${input.ruleSet.jobSearch.applicationsRequiredPerWeek} applications/week`
+          : "Not required",
+      source:
+        input.sources.jobSearch === "HOUSE" || input.sources.jobSearch === "HOUSE_GROUP"
+          ? input.sources.jobSearch
+          : input.sources.employment,
+    },
+    {
+      label: "Chores",
+      value: input.ruleSet.chores.enabled
+        ? `${input.ruleSet.chores.frequency.toLowerCase()} • ${formatProofRequirementList(
+            input.ruleSet.chores.proofRequirement,
+          )}`
+        : "Not required",
+      source: input.sources.chores,
+    },
+    {
+      label: "Curfew",
+      value: input.ruleSet.curfew.enabled
+        ? `${formatTwelveHourTime(input.ruleSet.curfew.weekdayCurfew)} weekdays`
+        : "Not monitored",
+      source: input.sources.curfew,
+    },
+    {
+      label: "House meetings",
+      value:
+        input.houseMeetingCount > 0
+          ? `${input.houseMeetingCount} inherited schedule${
+              input.houseMeetingCount === 1 ? "" : "s"
+            }`
+          : "No recurring default",
+      source: input.houseMeetingSource,
+    },
+  ];
+}
+
 function labelForAccessRole(role: SoberHouseAccessRole): string {
   if (role === "OWNER_OPERATOR") {
     return "Owner / operator";
@@ -751,6 +902,54 @@ function OptionChip({
   );
 }
 
+function RuleSectionCard({
+  title,
+  meta,
+  enabled,
+  onToggle,
+  disabledMessage,
+  children,
+}: {
+  title: string;
+  meta?: string;
+  enabled?: boolean;
+  onToggle?: (value: boolean) => void;
+  disabledMessage?: string;
+  children?: ReactNode;
+}) {
+  const showsToggle = typeof enabled === "boolean" && typeof onToggle === "function";
+  const showDisabledMessage = showsToggle && enabled === false;
+
+  return (
+    <View style={styles.ruleSectionCard}>
+      <View style={styles.ruleSectionHeader}>
+        <View style={styles.ruleSectionHeaderCopy}>
+          <Text style={styles.ruleSectionTitle}>{title}</Text>
+          {meta ? <Text style={styles.ruleSectionMeta}>{meta}</Text> : null}
+        </View>
+        {showsToggle ? (
+          <View style={styles.ruleSectionToggleWrap}>
+            <Text
+              style={[
+                styles.ruleSectionState,
+                enabled ? styles.ruleSectionStateEnabled : styles.ruleSectionStateDisabled,
+              ]}
+            >
+              {enabled ? "On" : "Off"}
+            </Text>
+            <Switch value={enabled} onValueChange={onToggle} />
+          </View>
+        ) : null}
+      </View>
+      {showDisabledMessage ? (
+        <Text style={styles.ruleSectionDisabledCopy}>{disabledMessage}</Text>
+      ) : (
+        <View style={styles.ruleSectionBody}>{children}</View>
+      )}
+    </View>
+  );
+}
+
 function SetupModuleCard({
   title,
   meta,
@@ -781,6 +980,7 @@ export function SoberHouseSettingsScreen({
   actorId,
   actorName,
   viewerRole,
+  sponsorCallLogs,
   onBack,
   adminLaunchContext = null,
 }: SoberHouseSettingsScreenProps) {
@@ -792,6 +992,11 @@ export function SoberHouseSettingsScreen({
   const [adminModule, setAdminModule] = useState<AdminModule>(() =>
     resolveInitialAdminModule(viewerRole, adminLaunchContext),
   );
+  const [residentView, setResidentView] = useState<ResidentView>(() =>
+    resolveInitialResidentView(viewerRole, adminLaunchContext),
+  );
+  const [residentSetupEntryStep, setResidentSetupEntryStep] =
+    useState<ResidentOnboardingStep | null>(null);
   const [selectedAdminHouseId, setSelectedAdminHouseId] = useState<string | null>(null);
   const [selectedAdminHouseView, setSelectedAdminHouseView] = useState<"OVERVIEW" | "VIOLATIONS">(
     "OVERVIEW",
@@ -862,10 +1067,15 @@ export function SoberHouseSettingsScreen({
       setSelectedHouseIds([]);
       setSelectedRuleScope({ scopeType: "ORGANIZATION", scopeId: null });
       setAdminModule(resolveInitialAdminModule(viewerRole, adminLaunchContext));
+      setResidentView(resolveInitialResidentView(viewerRole, adminLaunchContext));
       setSelectedAdminHouseId(null);
       setSelectedAdminHouseView("OVERVIEW");
 
-      if (canManageSoberHouseHierarchy(viewerRole) && adminLaunchContext) {
+      if (
+        canManageSoberHouseHierarchy(viewerRole) &&
+        adminLaunchContext &&
+        !adminLaunchContext.residentView
+      ) {
         if (adminLaunchContext.module === "HOUSES") {
           if (adminLaunchContext.mode === "create") {
             setHouseDraft(createHouseDraft(null));
@@ -907,6 +1117,11 @@ export function SoberHouseSettingsScreen({
     };
   }, [adminLaunchContext, userId, viewerRole]);
 
+  const openResidentSetup = useCallback((entryStep: ResidentOnboardingStep | null = null) => {
+    setResidentSetupEntryStep(entryStep);
+    setResidentView("SETUP");
+  }, []);
+
   useEffect(() => {
     if (!store) {
       return;
@@ -939,14 +1154,41 @@ export function SoberHouseSettingsScreen({
       return;
     }
 
+    const editableRuleSet =
+      selectedRuleScope.scopeType === "ORGANIZATION"
+        ? getRuleSetForScope(store, "ORGANIZATION", null)
+        : selectedRuleScope.scopeType === "HOUSE_GROUP"
+          ? (getRuleSetForScope(store, "HOUSE_GROUP", selectedRuleScope.scopeId) ??
+            getEffectiveRuleSetForScope(
+              store,
+              "HOUSE_GROUP",
+              selectedRuleScope.scopeId,
+              new Date().toISOString(),
+            ).ruleSet)
+          : selectedRuleScope.scopeId
+            ? (getRuleSetForScope(store, "HOUSE", selectedRuleScope.scopeId) ??
+              getEffectiveRuleSetForScope(
+                store,
+                "HOUSE",
+                selectedRuleScope.scopeId,
+                new Date().toISOString(),
+              ).ruleSet)
+            : null;
+
     setRuleDraft(
       createHouseRuleSetDraft(
-        getRuleSetForScope(store, selectedRuleScope.scopeType, selectedRuleScope.scopeId),
+        editableRuleSet,
         selectedRuleScope.scopeType,
         selectedRuleScope.scopeId,
       ),
     );
   }, [selectedRuleScope, store]);
+
+  useEffect(() => {
+    if (adminModule === "ORGANIZATION") {
+      setSelectedRuleScope({ scopeType: "ORGANIZATION", scopeId: null });
+    }
+  }, [adminModule]);
 
   const scopedHouseMeetingSchedules = useMemo(
     () =>
@@ -1316,6 +1558,12 @@ export function SoberHouseSettingsScreen({
     }
 
     const timestamp = new Date().toISOString();
+    const effectiveRuleSet = getEffectiveRuleSetForScope(
+      store,
+      selectedRuleScope.scopeType,
+      selectedRuleScope.scopeId,
+      timestamp,
+    ).ruleSet;
     const result = upsertHouseRuleSet(
       store,
       actor,
@@ -1381,6 +1629,9 @@ export function SoberHouseSettingsScreen({
           contactsRequiredPerWeek: parseNonNegativeInt(ruleDraft.sponsorContactsRequiredPerWeek, 0),
           proofType: ruleDraft.sponsorProofType,
         },
+        oneOnOne: effectiveRuleSet.oneOnOne,
+        operations: effectiveRuleSet.operations,
+        support: effectiveRuleSet.support,
       },
       timestamp,
     );
@@ -1582,19 +1833,55 @@ export function SoberHouseSettingsScreen({
 
   const userAccessProfile = store ? getUserAccessProfile(store) : null;
   const residentMode = store ? isResidentAccess(store) : false;
+  const forceResidentSafeMode = residentMode && adminLaunchContext?.residentView !== undefined;
+  const residentSetupState = useMemo(
+    () => (residentMode && store ? getResidentSetupState(store, userId) : null),
+    [residentMode, store, userId],
+  );
+  const residentAssignedHouseId =
+    userAccessProfile?.houseId ??
+    store?.residentHousingProfile?.houseId ??
+    (store?.residentWizardDraft?.linkedUserId === userId
+      ? store.residentWizardDraft.assignedHouseId
+      : null);
   const residentAssignedHouse =
-    store && userAccessProfile?.houseId
-      ? (store.houses.find((house) => house.id === userAccessProfile.houseId) ?? null)
+    store && residentAssignedHouseId
+      ? (store.houses.find((house) => house.id === residentAssignedHouseId) ?? null)
       : null;
+  const nowIso = new Date().toISOString();
   const residentAssignedRuleSet =
     store && residentAssignedHouse
-      ? (getRuleSetForScope(store, "HOUSE", residentAssignedHouse.id) ??
-        (residentAssignedHouse.houseGroupId
-          ? getRuleSetForScope(store, "HOUSE_GROUP", residentAssignedHouse.houseGroupId)
-          : null) ??
-        getRuleSetForScope(store, "ORGANIZATION", null))
+      ? getEffectiveRuleSetForScope(store, "HOUSE", residentAssignedHouse.id, nowIso)
       : null;
-  const showAdminControls = canManageSoberHouseHierarchy(viewerRole);
+  const residentHouseMeetingSchedules =
+    store && residentAssignedHouse
+      ? getRecurringObligationsForScope(store, "HOUSE", residentAssignedHouse.id, "HOUSE_MEETING")
+      : [];
+  const residentGroupMeetingSchedules =
+    store && residentAssignedHouse?.houseGroupId
+      ? getRecurringObligationsForScope(
+          store,
+          "HOUSE_GROUP",
+          residentAssignedHouse.houseGroupId,
+          "HOUSE_MEETING",
+        )
+      : [];
+  const residentOrganizationMeetingSchedules = store
+    ? getRecurringObligationsForScope(store, "ORGANIZATION", null, "HOUSE_MEETING")
+    : [];
+  const residentEffectiveMeetingSchedules =
+    residentHouseMeetingSchedules.length > 0
+      ? residentHouseMeetingSchedules
+      : residentGroupMeetingSchedules.length > 0
+        ? residentGroupMeetingSchedules
+        : residentOrganizationMeetingSchedules;
+  const residentMeetingSource: EffectiveRuleValueSource =
+    residentHouseMeetingSchedules.length > 0
+      ? "HOUSE"
+      : residentGroupMeetingSchedules.length > 0
+        ? "HOUSE_GROUP"
+        : "ORGANIZATION";
+  const showAdminControls = canManageSoberHouseHierarchy(viewerRole) && !forceResidentSafeMode;
 
   if (loading || !store) {
     return (
@@ -1626,32 +1913,172 @@ export function SoberHouseSettingsScreen({
   const selectedAdminHouseViolations = selectedAdminHouseId
     ? buildSoberHouseOwnerHouseViolationRows(store, selectedAdminHouseId)
     : [];
-  const selectedAdminHouseRuleSource = selectedAdminHouseRecord
-    ? store.houseRuleSets.some(
-        (ruleSet) =>
-          ruleSet.scopeType === "HOUSE" &&
-          ruleSet.houseId === selectedAdminHouseRecord.id &&
-          ruleSet.status === "ACTIVE",
+  const selectedAdminHouseEffectiveRules =
+    selectedAdminHouseRecord !== null
+      ? getEffectiveRuleSetForScope(store, "HOUSE", selectedAdminHouseRecord.id, nowIso)
+      : null;
+  const selectedAdminHouseBaseSourceLabel = selectedAdminHouseRecord?.houseGroupId
+    ? `House group template: ${
+        getHouseGroupById(store, selectedAdminHouseRecord.houseGroupId)?.name ?? "Assigned group"
+      }`
+    : "Organization default";
+  const selectedAdminHouseMeetingSchedules = selectedAdminHouseRecord
+    ? getRecurringObligationsForScope(store, "HOUSE", selectedAdminHouseRecord.id, "HOUSE_MEETING")
+    : [];
+  const selectedAdminGroupMeetingSchedules = selectedAdminHouseRecord?.houseGroupId
+    ? getRecurringObligationsForScope(
+        store,
+        "HOUSE_GROUP",
+        selectedAdminHouseRecord.houseGroupId,
+        "HOUSE_MEETING",
       )
-      ? "House override"
-      : selectedAdminHouseRecord.houseGroupId
-        ? `House group template: ${getHouseGroupById(store, selectedAdminHouseRecord.houseGroupId)?.name ?? "Assigned group"}`
-        : "Organization default"
-    : null;
-  const editingHouseRuleSource = editingHouseId
-    ? store.houseRuleSets.some(
-        (ruleSet) =>
-          ruleSet.scopeType === "HOUSE" &&
-          ruleSet.houseId === editingHouseId &&
-          ruleSet.status === "ACTIVE",
-      )
-      ? "House override"
+    : [];
+  const selectedAdminHouseMeetingSource: EffectiveRuleValueSource =
+    selectedAdminHouseMeetingSchedules.length > 0
+      ? "HOUSE"
+      : selectedAdminGroupMeetingSchedules.length > 0
+        ? "HOUSE_GROUP"
+        : "ORGANIZATION";
+  const selectedAdminHouseRuleSummaryItems =
+    selectedAdminHouseEffectiveRules !== null
+      ? buildEffectiveRuleSummaryItems({
+          ruleSet: selectedAdminHouseEffectiveRules.ruleSet,
+          sources: selectedAdminHouseEffectiveRules.sources,
+          houseMeetingCount:
+            selectedAdminHouseMeetingSchedules.length > 0
+              ? selectedAdminHouseMeetingSchedules.length
+              : selectedAdminGroupMeetingSchedules.length > 0
+                ? selectedAdminGroupMeetingSchedules.length
+                : residentOrganizationMeetingSchedules.length,
+          houseMeetingSource: selectedAdminHouseMeetingSource,
+        })
+      : [];
+  const selectedAdminHouseEffectiveBreakdown =
+    selectedAdminHouseEffectiveRules !== null
+      ? summarizeSourceBreakdown([
+          ...Object.values(selectedAdminHouseEffectiveRules.sources),
+          selectedAdminHouseMeetingSource,
+        ])
+      : "";
+  const editingHouseBaseSourceLabel = houseDraft.houseGroupId
+    ? `House group template: ${
+        getHouseGroupById(store, houseDraft.houseGroupId)?.name ?? "Assigned group"
+      }`
+    : "Organization default";
+  const editingHouseRuleContext =
+    editingHouseId !== null
+      ? getEffectiveRuleSetForScope(store, "HOUSE", editingHouseId, nowIso)
       : houseDraft.houseGroupId
-        ? `House group template: ${getHouseGroupById(store, houseDraft.houseGroupId)?.name ?? "Assigned group"}`
-        : "Organization default"
-    : houseDraft.houseGroupId
-      ? `House group template: ${getHouseGroupById(store, houseDraft.houseGroupId)?.name ?? "Assigned group"}`
-      : "Organization default";
+        ? getEffectiveRuleSetForScope(store, "HOUSE_GROUP", houseDraft.houseGroupId, nowIso)
+        : getEffectiveRuleSetForScope(store, "ORGANIZATION", null, nowIso);
+  const editingHouseLocalMeetingSchedules =
+    editingHouseId !== null
+      ? getRecurringObligationsForScope(store, "HOUSE", editingHouseId, "HOUSE_MEETING")
+      : [];
+  const editingHouseBaseMeetingSchedules = houseDraft.houseGroupId
+    ? getRecurringObligationsForScope(
+        store,
+        "HOUSE_GROUP",
+        houseDraft.houseGroupId,
+        "HOUSE_MEETING",
+      )
+    : residentOrganizationMeetingSchedules;
+  const editingHouseMeetingSource: EffectiveRuleValueSource =
+    editingHouseLocalMeetingSchedules.length > 0
+      ? "HOUSE"
+      : houseDraft.houseGroupId
+        ? "HOUSE_GROUP"
+        : "ORGANIZATION";
+  const editingHouseRuleSummaryItems = buildEffectiveRuleSummaryItems({
+    ruleSet: editingHouseRuleContext.ruleSet,
+    sources: editingHouseRuleContext.sources,
+    houseMeetingCount:
+      editingHouseLocalMeetingSchedules.length > 0
+        ? editingHouseLocalMeetingSchedules.length
+        : editingHouseBaseMeetingSchedules.length,
+    houseMeetingSource: editingHouseMeetingSource,
+  });
+  const editingHouseEffectiveBreakdown = summarizeSourceBreakdown([
+    ...Object.values(editingHouseRuleContext.sources),
+    editingHouseMeetingSource,
+  ]);
+  const selectedRulesScopeReady =
+    selectedRuleScope.scopeType === "ORGANIZATION" || selectedRuleScope.scopeId !== null;
+  const selectedRulesScopeEffectiveRules = selectedRulesScopeReady
+    ? getEffectiveRuleSetForScope(
+        store,
+        selectedRuleScope.scopeType,
+        selectedRuleScope.scopeId,
+        nowIso,
+      )
+    : null;
+  const selectedRulesScopeMeetingSchedules = selectedRulesScopeReady
+    ? getRecurringObligationsForScope(
+        store,
+        selectedRuleScope.scopeType,
+        selectedRuleScope.scopeId,
+        "HOUSE_MEETING",
+      )
+    : [];
+  const selectedRulesScopeHouseMeetingSource: EffectiveRuleValueSource =
+    selectedRuleScope.scopeType === "HOUSE" && selectedRuleScope.scopeId
+      ? getRecurringObligationsForScope(store, "HOUSE", selectedRuleScope.scopeId, "HOUSE_MEETING")
+          .length > 0
+        ? "HOUSE"
+        : store.houses.find((house) => house.id === selectedRuleScope.scopeId)?.houseGroupId
+          ? getRecurringObligationsForScope(
+              store,
+              "HOUSE_GROUP",
+              store.houses.find((house) => house.id === selectedRuleScope.scopeId)?.houseGroupId ??
+                null,
+              "HOUSE_MEETING",
+            ).length > 0
+            ? "HOUSE_GROUP"
+            : "ORGANIZATION"
+          : "ORGANIZATION"
+      : selectedRuleScope.scopeType === "HOUSE_GROUP"
+        ? selectedRuleScope.scopeId &&
+          getRecurringObligationsForScope(
+            store,
+            "HOUSE_GROUP",
+            selectedRuleScope.scopeId,
+            "HOUSE_MEETING",
+          ).length > 0
+          ? "HOUSE_GROUP"
+          : "ORGANIZATION"
+        : "ORGANIZATION";
+  const selectedRulesScopeEffectiveMeetingCount =
+    selectedRuleScope.scopeType === "HOUSE" && selectedRuleScope.scopeId
+      ? getRecurringObligationsForScope(store, "HOUSE", selectedRuleScope.scopeId, "HOUSE_MEETING")
+          .length > 0
+        ? getRecurringObligationsForScope(
+            store,
+            "HOUSE",
+            selectedRuleScope.scopeId,
+            "HOUSE_MEETING",
+          ).length
+        : store.houses.find((house) => house.id === selectedRuleScope.scopeId)?.houseGroupId
+          ? getRecurringObligationsForScope(
+              store,
+              "HOUSE_GROUP",
+              store.houses.find((house) => house.id === selectedRuleScope.scopeId)?.houseGroupId ??
+                null,
+              "HOUSE_MEETING",
+            ).length > 0
+            ? getRecurringObligationsForScope(
+                store,
+                "HOUSE_GROUP",
+                store.houses.find((house) => house.id === selectedRuleScope.scopeId)
+                  ?.houseGroupId ?? null,
+                "HOUSE_MEETING",
+              ).length
+            : residentOrganizationMeetingSchedules.length
+          : residentOrganizationMeetingSchedules.length
+      : selectedRuleScope.scopeType === "HOUSE_GROUP" && selectedRuleScope.scopeId
+        ? selectedRulesScopeMeetingSchedules.length > 0
+          ? selectedRulesScopeMeetingSchedules.length
+          : residentOrganizationMeetingSchedules.length
+        : selectedRulesScopeMeetingSchedules.length;
   const organizationSetupStatus = store.organization
     ? `Complete • ${store.organization.name || "Organization saved"}`
     : "Start setup";
@@ -1693,33 +2120,72 @@ export function SoberHouseSettingsScreen({
       <GlassCard style={styles.subCard}>
         <SectionHeader
           title={editingHouseId ? `Edit House: ${houseDraft.name || "House"}` : "New House"}
-          meta="Update the house profile here, then open house-specific rules from the same flow."
+          meta="Choose the base rule source, confirm inherited defaults, and manage any house-only overrides."
         />
-        <Text style={styles.entityMeta}>Rule source: {editingHouseRuleSource}</Text>
+        <Text style={styles.entityMeta}>Base source: {editingHouseBaseSourceLabel}</Text>
+        <Text style={styles.entityMeta}>Effective breakdown: {editingHouseEffectiveBreakdown}</Text>
         <View style={styles.buttonRow}>
           <AppButton
-            title={editingHouseId ? "Edit house rules" : "Save house before rules"}
+            title={editingHouseId ? "Edit local overrides" : "Save house before overrides"}
             variant="secondary"
             onPress={() => openHouseRulesEditor(editingHouseId)}
             disabled={isSaving || !editingHouseId}
           />
         </View>
-        <FieldLabel>House group</FieldLabel>
+        <FieldLabel>Rule source mode</FieldLabel>
         <View style={styles.chipRow}>
           <OptionChip
-            label="No group"
+            label="Organization default"
             selected={houseDraft.houseGroupId === null}
             onPress={() => setHouseDraft((current) => ({ ...current, houseGroupId: null }))}
           />
-          {store.houseGroups.map((group) => (
-            <OptionChip
-              key={group.id}
-              label={group.name}
-              selected={houseDraft.houseGroupId === group.id}
-              onPress={() => setHouseDraft((current) => ({ ...current, houseGroupId: group.id }))}
-            />
-          ))}
+          <OptionChip
+            label="House group template"
+            selected={houseDraft.houseGroupId !== null}
+            onPress={() => {
+              const firstGroupId = store.houseGroups[0]?.id ?? null;
+              if (!firstGroupId) {
+                setStatusMessage("Create a house group before assigning a house-group template.");
+                return;
+              }
+              setHouseDraft((current) => ({
+                ...current,
+                houseGroupId: current.houseGroupId ?? firstGroupId,
+              }));
+            }}
+          />
         </View>
+        {houseDraft.houseGroupId !== null ? (
+          <>
+            <FieldLabel>Assigned house group template</FieldLabel>
+            <View style={styles.chipRow}>
+              {store.houseGroups.map((group) => (
+                <OptionChip
+                  key={group.id}
+                  label={group.name}
+                  selected={houseDraft.houseGroupId === group.id}
+                  onPress={() =>
+                    setHouseDraft((current) => ({ ...current, houseGroupId: group.id }))
+                  }
+                />
+              ))}
+            </View>
+          </>
+        ) : null}
+        <GlassCard style={styles.subCard}>
+          <SectionHeader
+            title="Effective Requirements"
+            meta="These are the resident-facing defaults this house will resolve to right now."
+          />
+          {editingHouseRuleSummaryItems.map((item) => (
+            <View key={item.label} style={styles.auditRow}>
+              <Text style={styles.auditTitle}>{item.label}</Text>
+              <Text style={styles.entityMeta}>
+                {item.value} ({labelForEffectiveRuleSource(item.source)})
+              </Text>
+            </View>
+          ))}
+        </GlassCard>
         <FieldLabel>House name</FieldLabel>
         <TextInput
           style={styles.input}
@@ -1902,22 +2368,54 @@ export function SoberHouseSettingsScreen({
             </Text>
             <Text style={styles.entityMeta}>
               Meetings required:{" "}
-              {residentAssignedRuleSet?.meetings.meetingsRequired
-                ? `${residentAssignedRuleSet.meetings.meetingsPerWeek} per week`
+              {residentAssignedRuleSet?.ruleSet.meetings.meetingsRequired
+                ? `${residentAssignedRuleSet.ruleSet.meetings.meetingsPerWeek} per week`
                 : "No weekly meeting requirement"}
             </Text>
             <Text style={styles.entityMeta}>
               Sponsor contact:{" "}
-              {residentAssignedRuleSet?.sponsorContact.enabled
-                ? `${residentAssignedRuleSet.sponsorContact.contactsRequiredPerWeek} per week`
+              {residentAssignedRuleSet?.ruleSet.sponsorContact.enabled
+                ? `${residentAssignedRuleSet.ruleSet.sponsorContact.contactsRequiredPerWeek} per week`
                 : "Not required"}
             </Text>
             <Text style={styles.entityMeta}>
               Curfew:{" "}
-              {residentAssignedRuleSet?.curfew.enabled
-                ? `${residentAssignedRuleSet.curfew.weekdayCurfew} weekdays`
+              {residentAssignedRuleSet?.ruleSet.curfew.enabled
+                ? `${formatTwelveHourTime(residentAssignedRuleSet.ruleSet.curfew.weekdayCurfew)} weekdays`
                 : "Disabled"}
             </Text>
+            {residentSetupState ? (
+              <Text style={styles.entityMeta}>
+                {residentSetupState.complete
+                  ? "Resident setup is saved. Review house requirements here and complete assigned tasks from the routine page."
+                  : `Setup remaining: ${residentSetupState.missingItems.join(" • ")}`}
+              </Text>
+            ) : null}
+            {residentMode ? (
+              <View style={styles.buttonRow}>
+                <AppButton
+                  title="Overview"
+                  variant={residentView === "OVERVIEW" ? "primary" : "secondary"}
+                  onPress={() => setResidentView("OVERVIEW")}
+                />
+                <View style={styles.buttonSpacer} />
+                <AppButton
+                  title="Routine"
+                  variant={residentView === "REQUIREMENTS" ? "primary" : "secondary"}
+                  onPress={() => setResidentView("REQUIREMENTS")}
+                />
+                {!residentSetupState?.complete || residentView === "SETUP" ? (
+                  <>
+                    <View style={styles.buttonSpacer} />
+                    <AppButton
+                      title="Complete setup"
+                      variant={residentView === "SETUP" ? "primary" : "secondary"}
+                      onPress={() => openResidentSetup()}
+                    />
+                  </>
+                ) : null}
+              </View>
+            ) : null}
           </>
         )}
         <SaveStatus message={statusMessage} />
@@ -2086,68 +2584,183 @@ export function SoberHouseSettingsScreen({
         </GlassCard>
       ) : null}
 
-      {residentMode ? (
-        <GlassCard style={styles.card} strong>
-          <SectionHeader
-            title="Assigned House Defaults"
-            meta="Residents can review inherited policy here, but house defaults are edited by owners/operators only."
+      {residentMode && residentView === "OVERVIEW" ? (
+        <>
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="Sober House Requirements"
+              meta="Resident-safe overview of the effective house requirements driving your dashboard and sober-house routine."
+            />
+            <Text style={styles.entityTitle}>
+              {residentAssignedHouse?.name ?? "No house assigned"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              Organization: {store.organization?.name ?? "No organization configured"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              House group:{" "}
+              {residentAssignedHouse?.houseGroupId
+                ? (getHouseGroupById(store, residentAssignedHouse.houseGroupId)?.name ??
+                  "Unassigned")
+                : "Unassigned"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              Effective rule sources:{" "}
+              {residentAssignedRuleSet
+                ? summarizeSourceBreakdown([
+                    ...Object.values(residentAssignedRuleSet.sources),
+                    residentMeetingSource,
+                  ])
+                : "No active rules configured"}
+            </Text>
+            <Text style={styles.entityMeta}>
+              Rule precedence: {"house override -> house-group template -> organization default"}
+            </Text>
+            {residentAssignedRuleSet
+              ? buildEffectiveRuleSummaryItems({
+                  ruleSet: residentAssignedRuleSet.ruleSet,
+                  sources: residentAssignedRuleSet.sources,
+                  houseMeetingCount: residentEffectiveMeetingSchedules.length,
+                  houseMeetingSource: residentMeetingSource,
+                }).map((item) => (
+                  <Text key={item.label} style={styles.entityMeta}>
+                    {item.label}: {item.value} ({labelForEffectiveRuleSource(item.source)})
+                  </Text>
+                ))
+              : null}
+            {residentAssignedRuleSet ? (
+              <>
+                <Text style={styles.entityMeta}>
+                  Proof / photo requirements: meetings{" "}
+                  {residentAssignedRuleSet.ruleSet.meetings.proofMethod
+                    .toLowerCase()
+                    .replaceAll("_", " ")}{" "}
+                  ({labelForEffectiveRuleSource(residentAssignedRuleSet.sources.meetings)}) • chores{" "}
+                  {formatProofRequirementList(
+                    residentAssignedRuleSet.ruleSet.chores.proofRequirement,
+                  )}{" "}
+                  ({labelForEffectiveRuleSource(residentAssignedRuleSet.sources.chores)}) • job
+                  applications{" "}
+                  {residentAssignedRuleSet.ruleSet.jobSearch.proofRequired
+                    ? "photo proof required"
+                    : "proof optional"}
+                </Text>
+                <Text style={styles.entityMeta}>
+                  Curfew / accountability:{" "}
+                  {residentAssignedRuleSet.ruleSet.curfew.enabled
+                    ? `${formatTwelveHourTime(
+                        residentAssignedRuleSet.ruleSet.curfew.weekdayCurfew,
+                      )} weekdays with ${residentAssignedRuleSet.ruleSet.curfew.gracePeriodMinutes} minute grace`
+                    : "Curfew monitoring is not enabled"}
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.entityMeta}>
+                No active sober-house rules are configured for this resident yet.
+              </Text>
+            )}
+          </GlassCard>
+
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="House Meeting Schedule"
+              meta="Read-only recurring requirements inherited from your organization, house group, or house."
+            />
+            {residentEffectiveMeetingSchedules.length === 0 ? (
+              <Text style={styles.sectionMeta}>No recurring house meetings are configured.</Text>
+            ) : (
+              residentEffectiveMeetingSchedules.map((schedule) => (
+                <View key={schedule.id} style={styles.auditRow}>
+                  <Text style={styles.auditTitle}>{schedule.title}</Text>
+                  <Text style={styles.entityMeta}>{summarizeHouseMeetingSchedule(schedule)}</Text>
+                  <Text style={styles.entityMeta}>
+                    {schedule.locationLabel || "House location"} •{" "}
+                    {labelForEffectiveRuleSource(residentMeetingSource)}
+                  </Text>
+                </View>
+              ))
+            )}
+          </GlassCard>
+        </>
+      ) : null}
+
+      {residentMode && residentView === "REQUIREMENTS" ? (
+        <>
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="Sober House Routine"
+              meta="Complete resident-safe sober-house tasks here: chores, applications, house meetings, and work accountability."
+            />
+            <Text style={styles.entityMeta}>
+              This routine stays resident-safe. Admin setup, rule editing, and house hierarchy
+              controls remain protected.
+            </Text>
+            {residentAssignedRuleSet ? (
+              <>
+                <Text style={styles.entityMeta}>
+                  Active rule sources:{" "}
+                  {summarizeSourceBreakdown([
+                    ...Object.values(residentAssignedRuleSet.sources),
+                    residentMeetingSource,
+                  ])}
+                </Text>
+                {buildEffectiveRuleSummaryItems({
+                  ruleSet: residentAssignedRuleSet.ruleSet,
+                  sources: residentAssignedRuleSet.sources,
+                  houseMeetingCount: residentEffectiveMeetingSchedules.length,
+                  houseMeetingSource: residentMeetingSource,
+                }).map((item) => (
+                  <Text key={`routine-${item.label}`} style={styles.entityMeta}>
+                    {item.label}: {item.value} ({labelForEffectiveRuleSource(item.source)})
+                  </Text>
+                ))}
+              </>
+            ) : null}
+          </GlassCard>
+          <SoberHouseComplianceSection
+            userId={userId}
+            store={store}
+            actor={actor}
+            isSaving={isSaving}
+            sponsorCallLogs={sponsorCallLogs}
+            onOpenSetupCompletion={(ruleType) =>
+              openResidentSetup(residentSetupStepForRule(ruleType))
+            }
+            onPersist={persistStore}
           />
-          <Text style={styles.entityTitle}>
-            {residentAssignedHouse?.name ?? "No house assigned"}
-          </Text>
-          <Text style={styles.entityMeta}>
-            Organization: {store.organization?.name ?? "No organization configured"}
-          </Text>
-          <Text style={styles.entityMeta}>
-            House group:{" "}
-            {residentAssignedHouse?.houseGroupId
-              ? (getHouseGroupById(store, residentAssignedHouse.houseGroupId)?.name ?? "Unassigned")
-              : "Unassigned"}
-          </Text>
-          <Text style={styles.entityMeta}>
-            Meetings required:{" "}
-            {residentAssignedRuleSet?.meetings.meetingsRequired
-              ? `${residentAssignedRuleSet.meetings.meetingsPerWeek} per week`
-              : "No weekly meeting requirement"}
-          </Text>
-          <Text style={styles.entityMeta}>
-            Work requirement:{" "}
-            {residentAssignedRuleSet?.employment.employmentRequired ? "Required" : "Not required"}
-          </Text>
-          <Text style={styles.entityMeta}>
-            Sponsor contact:{" "}
-            {residentAssignedRuleSet?.sponsorContact.enabled
-              ? `${residentAssignedRuleSet.sponsorContact.contactsRequiredPerWeek} per week`
-              : "Not required"}
-          </Text>
-          <Text style={styles.entityMeta}>
-            Curfew:{" "}
-            {residentAssignedRuleSet?.curfew.enabled
-              ? `${residentAssignedRuleSet.curfew.weekdayCurfew} weekdays`
-              : "Disabled"}
-          </Text>
-        </GlassCard>
+        </>
       ) : null}
 
-      {residentMode ? (
-        <SoberHouseResidentManager
-          store={store}
-          actor={actor}
-          linkedUserId={userId}
-          isSaving={isSaving}
-          onPersist={persistStore}
-        />
-      ) : null}
-
-      {residentMode ? (
-        <SoberHouseComplianceSection
-          userId={userId}
-          store={store}
-          actor={actor}
-          isSaving={isSaving}
-          readOnly
-          onPersist={persistStore}
-        />
+      {residentMode && residentView === "SETUP" ? (
+        <>
+          <GlassCard style={styles.card} strong>
+            <SectionHeader
+              title="Complete Resident Setup"
+              meta="Finish the resident-only details that drive work, sponsor, curfew, chores, and other sober-house requirements."
+            />
+            <Text style={styles.entityMeta}>
+              This screen stays resident-safe. Organization defaults, houses, house groups, and rule
+              editing remain protected for sober-house admins only.
+            </Text>
+            {residentSetupState && !residentSetupState.complete ? (
+              <Text style={styles.entityMeta}>
+                Remaining setup: {residentSetupState.missingItems.join(" • ")}
+              </Text>
+            ) : (
+              <Text style={styles.entityMeta}>
+                Update the resident-specific details tied to your current sober-house requirements.
+              </Text>
+            )}
+          </GlassCard>
+          <SoberHouseResidentManager
+            store={store}
+            actor={actor}
+            linkedUserId={userId}
+            isSaving={isSaving}
+            entryStep={residentSetupEntryStep}
+            onPersist={persistStore}
+          />
+        </>
       ) : null}
 
       {showAdminControls && adminModule === "RESIDENTS" ? (
@@ -2298,6 +2911,276 @@ export function SoberHouseSettingsScreen({
               disabled={isSaving}
             />
           </View>
+          <GlassCard style={styles.subCard}>
+            <SectionHeader
+              title="Organization Default Rules"
+              meta="Set the baseline rule layer every house inherits first. House groups and house overrides can still refine these defaults later."
+            />
+            <View style={styles.ruleSectionList}>
+              <RuleSectionCard
+                title="Meetings"
+                meta="Set the base weekly meeting target for resident dashboards and checklist logic."
+                enabled={ruleDraft.meetingsRequired}
+                onToggle={(value) =>
+                  setRuleDraft((current) => ({ ...current, meetingsRequired: value }))
+                }
+                disabledMessage="Meeting targets stay hidden until this default is turned on."
+              >
+                <View style={styles.ruleFieldBlock}>
+                  <FieldLabel>Meetings per week</FieldLabel>
+                  <TextInput
+                    style={styles.input}
+                    value={ruleDraft.meetingsPerWeek}
+                    onChangeText={(value) =>
+                      setRuleDraft((current) => ({
+                        ...current,
+                        meetingsPerWeek: normalizeIntegerInput(value),
+                      }))
+                    }
+                    keyboardType="number-pad"
+                    placeholder="4"
+                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  />
+                </View>
+              </RuleSectionCard>
+
+              <RuleSectionCard
+                title="Sponsor Contact"
+                meta="Define the baseline sponsor-call cadence residents inherit by default."
+                enabled={ruleDraft.sponsorContactEnabled}
+                onToggle={(value) =>
+                  setRuleDraft((current) => ({ ...current, sponsorContactEnabled: value }))
+                }
+                disabledMessage="Sponsor call goals stay hidden until this default is turned on."
+              >
+                <View style={styles.ruleFieldBlock}>
+                  <FieldLabel>Sponsor calls per week</FieldLabel>
+                  <TextInput
+                    style={styles.input}
+                    value={ruleDraft.sponsorContactsRequiredPerWeek}
+                    onChangeText={(value) =>
+                      setRuleDraft((current) => ({
+                        ...current,
+                        sponsorContactsRequiredPerWeek: normalizeIntegerInput(value),
+                      }))
+                    }
+                    keyboardType="number-pad"
+                    placeholder="3"
+                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  />
+                </View>
+              </RuleSectionCard>
+
+              <RuleSectionCard
+                title="Work / Job Applications"
+                meta="Use this section for employment accountability and fallback job-search expectations."
+                enabled={ruleDraft.employmentRequired}
+                onToggle={(value) =>
+                  setRuleDraft((current) => ({ ...current, employmentRequired: value }))
+                }
+                disabledMessage="Employment and application requirements stay hidden until this default is turned on."
+              >
+                <View style={styles.ruleFieldBlock}>
+                  <FieldLabel>Job applications per week</FieldLabel>
+                  <TextInput
+                    style={styles.input}
+                    value={ruleDraft.jobSearchApplicationsRequiredPerWeek}
+                    onChangeText={(value) =>
+                      setRuleDraft((current) => ({
+                        ...current,
+                        jobSearchApplicationsRequiredPerWeek: normalizeIntegerInput(value),
+                      }))
+                    }
+                    keyboardType="number-pad"
+                    placeholder="0"
+                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  />
+                </View>
+                <View style={styles.ruleFieldBlock}>
+                  <ToggleRow
+                    label="Workplace verification"
+                    value={ruleDraft.workplaceVerificationEnabled}
+                    onValueChange={(value) =>
+                      setRuleDraft((current) => ({
+                        ...current,
+                        workplaceVerificationEnabled: value,
+                      }))
+                    }
+                  />
+                </View>
+                <View style={styles.ruleFieldBlock}>
+                  <ToggleRow
+                    label="Manager verification"
+                    value={ruleDraft.managerVerificationRequired}
+                    onValueChange={(value) =>
+                      setRuleDraft((current) => ({
+                        ...current,
+                        managerVerificationRequired: value,
+                      }))
+                    }
+                  />
+                </View>
+              </RuleSectionCard>
+
+              <RuleSectionCard
+                title="Chores"
+                meta="Set the default recurring chore rhythm residents inherit."
+                enabled={ruleDraft.choresEnabled}
+                onToggle={(value) =>
+                  setRuleDraft((current) => ({ ...current, choresEnabled: value }))
+                }
+                disabledMessage="Chore configuration stays hidden until chores are required."
+              >
+                <View style={styles.ruleFieldBlock}>
+                  <FieldLabel>Chore frequency</FieldLabel>
+                  <View style={styles.chipRow}>
+                    {CHORE_FREQUENCY_OPTIONS.map((option) => (
+                      <OptionChip
+                        key={option.value}
+                        label={option.label}
+                        selected={ruleDraft.choresFrequency === option.value}
+                        onPress={() =>
+                          setRuleDraft((current) => ({
+                            ...current,
+                            choresFrequency: option.value,
+                          }))
+                        }
+                      />
+                    ))}
+                  </View>
+                </View>
+              </RuleSectionCard>
+
+              <RuleSectionCard
+                title="Curfew"
+                meta="Set the default weekday curfew baseline for houses that inherit organization monitoring."
+                enabled={ruleDraft.curfewEnabled}
+                onToggle={(value) =>
+                  setRuleDraft((current) => ({ ...current, curfewEnabled: value }))
+                }
+                disabledMessage="Curfew timing stays hidden until monitoring is turned on."
+              >
+                <View style={styles.ruleFieldBlock}>
+                  <FieldLabel>Weekday curfew</FieldLabel>
+                  <TextInput
+                    style={styles.input}
+                    value={ruleDraft.weekdayCurfew}
+                    onChangeText={(value) =>
+                      setRuleDraft((current) => ({ ...current, weekdayCurfew: value }))
+                    }
+                    placeholder="10:00 PM"
+                    placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  />
+                </View>
+              </RuleSectionCard>
+
+              <RuleSectionCard
+                title="Proof & Verification"
+                meta="Choose how residents prove meetings, chores, and accountability items without mixing those controls into unrelated sections."
+              >
+                <View style={styles.ruleFieldBlock}>
+                  <FieldLabel>Meeting proof mode</FieldLabel>
+                  <Text style={styles.ruleFieldMeta}>
+                    Applies whenever meetings are required for this scope.
+                  </Text>
+                  <View style={styles.chipRow}>
+                    {MEETING_PROOF_METHOD_OPTIONS.map((option) => (
+                      <OptionChip
+                        key={option.value}
+                        label={option.label}
+                        selected={ruleDraft.meetingsProofMethod === option.value}
+                        onPress={() =>
+                          setRuleDraft((current) => ({
+                            ...current,
+                            meetingsProofMethod: option.value,
+                          }))
+                        }
+                      />
+                    ))}
+                  </View>
+                </View>
+                <View style={styles.ruleFieldBlock}>
+                  <FieldLabel>Chore proof / photo requirements</FieldLabel>
+                  <Text style={styles.ruleFieldMeta}>
+                    {ruleDraft.choresEnabled
+                      ? "Residents must satisfy these proof defaults when chores are required."
+                      : "These proof defaults apply whenever chores are turned on."}
+                  </Text>
+                  <View style={styles.chipRow}>
+                    {PROOF_REQUIREMENT_OPTIONS.map((option) => (
+                      <OptionChip
+                        key={option.value}
+                        label={option.label}
+                        selected={ruleDraft.choresProofRequirement.includes(option.value)}
+                        onPress={() =>
+                          setRuleDraft((current) => ({
+                            ...current,
+                            choresProofRequirement: toggleStringValue(
+                              current.choresProofRequirement,
+                              option.value,
+                            ),
+                          }))
+                        }
+                      />
+                    ))}
+                  </View>
+                </View>
+              </RuleSectionCard>
+
+              <RuleSectionCard
+                title="House Meetings"
+                meta="Recurring house meeting defaults inherit from this organization layer unless a lower scope overrides them."
+              >
+                <View style={styles.ruleSummaryBanner}>
+                  <Text style={styles.ruleSummaryValue}>
+                    {residentOrganizationMeetingSchedules.length}
+                  </Text>
+                  <View style={styles.ruleSummaryCopy}>
+                    <Text style={styles.ruleSummaryLabel}>Recurring defaults configured</Text>
+                    <Text style={styles.ruleFieldMeta}>
+                      {residentOrganizationMeetingSchedules.length > 0
+                        ? "Review or edit the inherited meeting schedule in the full rules editor."
+                        : "No recurring organization-level house meetings are configured yet."}
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.ruleSecondaryActionRow}>
+                  <AppButton
+                    title="Manage house meetings"
+                    variant="secondary"
+                    onPress={() => {
+                      setSelectedRuleScope({ scopeType: "ORGANIZATION", scopeId: null });
+                      setAdminModule("RULES");
+                    }}
+                  />
+                </View>
+              </RuleSectionCard>
+            </View>
+            <View style={styles.ruleSecondaryActionRow}>
+              <AppButton
+                title="Open full rules editor"
+                variant="secondary"
+                onPress={() => {
+                  setSelectedRuleScope({ scopeType: "ORGANIZATION", scopeId: null });
+                  setAdminModule("RULES");
+                }}
+              />
+            </View>
+            <View style={styles.ruleSaveBar}>
+              <View style={styles.ruleSaveCopy}>
+                <Text style={styles.ruleSaveTitle}>Save organization defaults</Text>
+                <Text style={styles.ruleSaveMeta}>
+                  These defaults feed resident meetings, sponsor, chores, work, curfew, proof, and
+                  house-meeting KPIs unless a lower scope overrides them.
+                </Text>
+              </View>
+              <AppButton
+                title="Save organization default rules"
+                onPress={() => void saveRuleSet()}
+                disabled={isSaving}
+              />
+            </View>
+          </GlassCard>
         </GlassCard>
       ) : null}
 
@@ -2342,6 +3225,15 @@ export function SoberHouseSettingsScreen({
                     <View key={group.id} style={styles.entityCard}>
                       <Text style={styles.entityTitle}>{group.name}</Text>
                       <Text style={styles.entityMeta}>
+                        Template layer:{" "}
+                        {summarizeSourceBreakdown([
+                          ...Object.values(
+                            getEffectiveRuleSetForScope(store, "HOUSE_GROUP", group.id, nowIso)
+                              .sources,
+                          ),
+                        ])}
+                      </Text>
+                      <Text style={styles.entityMeta}>
                         Houses:{" "}
                         {group.houseIds
                           .map(
@@ -2354,6 +3246,18 @@ export function SoberHouseSettingsScreen({
                       <Text style={styles.entityMeta}>
                         {group.status === "ACTIVE" ? "Active" : "Inactive"}
                       </Text>
+                      <Text style={styles.entityMeta}>
+                        Meetings:{" "}
+                        {getEffectiveRuleSetForScope(store, "HOUSE_GROUP", group.id, nowIso).ruleSet
+                          .meetings.meetingsRequired
+                          ? `${getEffectiveRuleSetForScope(store, "HOUSE_GROUP", group.id, nowIso).ruleSet.meetings.meetingsPerWeek}/week`
+                          : "Not required"}{" "}
+                        • Sponsor:{" "}
+                        {getEffectiveRuleSetForScope(store, "HOUSE_GROUP", group.id, nowIso).ruleSet
+                          .sponsorContact.enabled
+                          ? `${getEffectiveRuleSetForScope(store, "HOUSE_GROUP", group.id, nowIso).ruleSet.sponsorContact.contactsRequiredPerWeek}/week`
+                          : "Not required"}
+                      </Text>
                       <View style={styles.buttonRow}>
                         <AppButton
                           title="Edit"
@@ -2362,6 +3266,15 @@ export function SoberHouseSettingsScreen({
                             setEditingHouseGroupId(group.id);
                             setHouseGroupDraft(createHouseGroupDraft(group));
                             setIsHouseGroupEditorVisible(true);
+                          }}
+                        />
+                        <View style={styles.buttonSpacer} />
+                        <AppButton
+                          title="Edit template"
+                          variant="secondary"
+                          onPress={() => {
+                            setSelectedRuleScope({ scopeType: "HOUSE_GROUP", scopeId: group.id });
+                            setAdminModule("RULES");
                           }}
                         />
                         <View style={styles.buttonSpacer} />
@@ -2435,12 +3348,35 @@ export function SoberHouseSettingsScreen({
                     setHouseGroupDraft((current) => ({ ...current, isActive: value }))
                   }
                 />
+                {editingHouseGroupId ? (
+                  <Text style={styles.sectionMeta}>
+                    Rule template: edit the reusable ruleset for this house group from the Rules
+                    module. Houses assigned here inherit this template before any house-level
+                    overrides.
+                  </Text>
+                ) : null}
                 <View style={styles.buttonRow}>
                   <AppButton
                     title={editingHouseGroupId ? "Update group" : "Create group"}
                     onPress={() => void saveHouseGroup()}
                     disabled={isSaving}
                   />
+                  {editingHouseGroupId ? (
+                    <>
+                      <View style={styles.buttonSpacer} />
+                      <AppButton
+                        title="Edit template rules"
+                        variant="secondary"
+                        onPress={() => {
+                          setSelectedRuleScope({
+                            scopeType: "HOUSE_GROUP",
+                            scopeId: editingHouseGroupId,
+                          });
+                          setAdminModule("RULES");
+                        }}
+                      />
+                    </>
+                  ) : null}
                   <View style={styles.buttonSpacer} />
                   <AppButton
                     title="Cancel"
@@ -2474,7 +3410,10 @@ export function SoberHouseSettingsScreen({
                     {selectedAdminHouseDetail.geofenceRadiusFeetDefault} ft
                   </Text>
                   <Text style={styles.entityMeta}>
-                    Rule source: {selectedAdminHouseRuleSource ?? "Organization default"}
+                    Base source: {selectedAdminHouseBaseSourceLabel}
+                  </Text>
+                  <Text style={styles.entityMeta}>
+                    Effective breakdown: {selectedAdminHouseEffectiveBreakdown}
                   </Text>
                   {selectedAdminHouseView === "OVERVIEW" ? (
                     <>
@@ -2494,6 +3433,11 @@ export function SoberHouseSettingsScreen({
                           ? "Derived from saved address"
                           : "Pending address resolution"}
                       </Text>
+                      {selectedAdminHouseRuleSummaryItems.map((item) => (
+                        <Text key={item.label} style={styles.entityMeta}>
+                          {item.label}: {item.value} ({labelForEffectiveRuleSource(item.source)})
+                        </Text>
+                      ))}
                       {selectedAdminHouseDetail.notes ? (
                         <Text style={styles.entityMeta}>{selectedAdminHouseDetail.notes}</Text>
                       ) : null}
@@ -2769,7 +3713,7 @@ export function SoberHouseSettingsScreen({
         </>
       ) : null}
 
-      {adminModule === "MANAGERS" ? (
+      {showAdminControls && adminModule === "MANAGERS" ? (
         <GlassCard style={styles.card} strong>
           <SectionHeader
             title="Staff / Managers"
@@ -2984,15 +3928,15 @@ export function SoberHouseSettingsScreen({
         </GlassCard>
       ) : null}
 
-      {adminModule === "RULES" ? (
+      {showAdminControls && adminModule === "RULES" ? (
         <GlassCard style={styles.card} strong>
           <SectionHeader
-            title="House Rules"
-            meta="Defaults cascade organization → house group → house → resident. Select a scope before editing."
+            title="Rules Editor"
+            meta="Edit the rule source directly: organization defaults, house-group templates, or house-specific overrides."
           />
           <Text style={styles.sectionMeta}>
-            Source guide: organization default is the baseline, house groups act as reusable
-            templates, and house scope is where local overrides live.
+            Source guide: organization default is the baseline, house groups are reusable templates,
+            and house scope stores local overrides that can sit on top of inherited defaults.
           </Text>
           <FieldLabel>Configuration scope</FieldLabel>
           <View style={styles.chipRow}>
@@ -3053,6 +3997,41 @@ export function SoberHouseSettingsScreen({
                   ? ` • ${store.houses.find((house) => house.id === selectedRuleScope.scopeId)?.name ?? "Unknown house"}`
                   : ""}
               </Text>
+              {selectedRulesScopeEffectiveRules ? (
+                <GlassCard style={styles.subCard}>
+                  <SectionHeader
+                    title="Rule Source Manager"
+                    meta="This makes the active source of each resident KPI-driving rule explicit before you edit it."
+                    action={
+                      <View style={styles.inlineButtonRow}>
+                        <AppButton
+                          title="Violations"
+                          variant="secondary"
+                          onPress={() => setAdminModule("VIOLATIONS")}
+                        />
+                      </View>
+                    }
+                  />
+                  <Text style={styles.entityMeta}>
+                    Resident KPI drivers: meetings, sponsorship, chores, work/job applications,
+                    curfew, house meetings, and proof settings resolve from this layer.
+                  </Text>
+                  {buildEffectiveRuleSummaryItems({
+                    ruleSet: selectedRulesScopeEffectiveRules.ruleSet,
+                    sources: selectedRulesScopeEffectiveRules.sources,
+                    houseMeetingCount: selectedRulesScopeEffectiveMeetingCount,
+                    houseMeetingSource: selectedRulesScopeHouseMeetingSource,
+                  }).map((item) => (
+                    <Text key={item.label} style={styles.entityMeta}>
+                      {item.label}: {item.value} ({labelForEffectiveRuleSource(item.source)})
+                    </Text>
+                  ))}
+                  <Text style={styles.entityMeta}>
+                    Violations / corrective actions use the Violations & Actions module for alert
+                    routing, corrective actions, and manager follow-up.
+                  </Text>
+                </GlassCard>
+              ) : null}
               <FieldLabel>Rule set name</FieldLabel>
               <TextInput
                 style={styles.input}
@@ -4190,6 +5169,116 @@ const styles = StyleSheet.create({
   subCard: {
     gap: spacing.sm,
     marginTop: spacing.sm,
+  },
+  ruleSectionList: {
+    gap: spacing.sm,
+  },
+  ruleSectionCard: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "rgba(15,23,42,0.34)",
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  ruleSectionHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: spacing.md,
+  },
+  ruleSectionHeaderCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  ruleSectionTitle: {
+    color: colors.textPrimary,
+    fontSize: typography.h3,
+    fontWeight: "700",
+  },
+  ruleSectionMeta: {
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    lineHeight: 18,
+  },
+  ruleSectionToggleWrap: {
+    alignItems: "flex-end",
+    gap: 6,
+  },
+  ruleSectionState: {
+    fontSize: typography.tiny,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  ruleSectionStateEnabled: {
+    color: "#86efac",
+  },
+  ruleSectionStateDisabled: {
+    color: colors.textSecondary,
+  },
+  ruleSectionDisabledCopy: {
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    lineHeight: 18,
+  },
+  ruleSectionBody: {
+    gap: spacing.sm,
+  },
+  ruleFieldBlock: {
+    gap: spacing.xs,
+  },
+  ruleFieldMeta: {
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    lineHeight: 18,
+  },
+  ruleSummaryBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    padding: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    backgroundColor: "rgba(255,255,255,0.05)",
+  },
+  ruleSummaryValue: {
+    color: colors.textPrimary,
+    fontSize: 28,
+    fontWeight: "700",
+    minWidth: 28,
+  },
+  ruleSummaryCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  ruleSummaryLabel: {
+    color: colors.textPrimary,
+    fontSize: typography.small,
+    fontWeight: "700",
+  },
+  ruleSecondaryActionRow: {
+    alignItems: "flex-start",
+  },
+  ruleSaveBar: {
+    gap: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.08)",
+  },
+  ruleSaveCopy: {
+    gap: 4,
+  },
+  ruleSaveTitle: {
+    color: colors.textPrimary,
+    fontSize: typography.body,
+    fontWeight: "700",
+  },
+  ruleSaveMeta: {
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    lineHeight: 18,
   },
   buttonRow: {
     flexDirection: "row",

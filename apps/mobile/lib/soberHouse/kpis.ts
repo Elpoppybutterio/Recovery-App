@@ -1,4 +1,5 @@
 import type { AttendanceRecordSummary, MeetingAttendanceLogRecord } from "../attendance/storage";
+import { isChoreCompletionVerified } from "./proof";
 import { getHouseById, getRuleSetForHouse } from "./selectors";
 import {
   buildMonthlyWindow,
@@ -176,8 +177,7 @@ function groupViolationsByRuleType(
 }
 
 function validChoreCompletion(record: ChoreCompletionRecord): boolean {
-  const proofRequired = record.proofRequirement.some((requirement) => requirement !== "NONE");
-  return !proofRequired || record.proofProvided || Boolean(record.proofReference);
+  return isChoreCompletionVerified(record);
 }
 
 function enumerateChorePeriods(

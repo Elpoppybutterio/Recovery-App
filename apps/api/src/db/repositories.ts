@@ -282,6 +282,13 @@ export interface HouseRow {
   created_at: string;
 }
 
+export interface OrganizationRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  created_at: string;
+}
+
 export interface ParticipantProfileRow {
   user_id: string;
   tenant_id: string;
@@ -1079,6 +1086,52 @@ export function createRepositories(db: DbClient) {
           isPlatformOwner: grants.some((grant) => grant.role === "platform_owner"),
         },
       };
+    },
+
+    async listOrganizations(
+      tenantId: string,
+      organizationIds?: string[],
+    ): Promise<OrganizationRow[]> {
+      const result = await db.query<OrganizationRow>(
+        `
+        SELECT
+          id,
+          tenant_id,
+          name,
+          created_at
+        FROM organizations
+        WHERE tenant_id = $1
+        ORDER BY name ASC, created_at ASC
+      `,
+        [tenantId],
+      );
+
+      const allowedIds = organizationIds ? new Set(organizationIds) : null;
+      return result.rows.filter((row) => (allowedIds ? allowedIds.has(row.id) : true));
+    },
+
+    async listHouses(
+      tenantId: string,
+      filters: { organizationId?: string } = {},
+    ): Promise<HouseRow[]> {
+      const result = await db.query<HouseRow>(
+        `
+        SELECT
+          id,
+          tenant_id,
+          organization_id,
+          name,
+          created_at
+        FROM houses
+        WHERE tenant_id = $1
+        ORDER BY name ASC, created_at ASC
+      `,
+        [tenantId],
+      );
+
+      return result.rows.filter((row) =>
+        filters.organizationId ? row.organization_id === filters.organizationId : true,
+      );
     },
 
     async upsertParticipantProfile(

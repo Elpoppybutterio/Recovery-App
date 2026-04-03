@@ -25,12 +25,24 @@ import {
 import { selectMeetingGuideFeedsForLocation } from "./meeting-guide";
 import { mapTypeCodesToLabels } from "./meeting-guide";
 import { requirePermission, requireRole, requireSupervisorAssignment } from "./rbac";
+import {
+  buildOperatorControlPlaneSnapshot,
+  persistOperatorControlPlaneStore,
+} from "./soberHouseControlPlane";
 import { getDailyWisdomQuote, wisdomDailyQuerySchema } from "./wisdom";
 
 const logger = createLogger("api");
 
 const tenantConfigBodySchema = z.object({
   value: z.unknown(),
+});
+
+const operatorControlPlaneQuerySchema = z.object({
+  organizationId: z.string().min(1).optional(),
+});
+
+const operatorControlPlaneBodySchema = z.object({
+  store: z.unknown(),
 });
 
 const meetingCreateBodySchema = z.object({
@@ -801,6 +813,114 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       }
 
       return accessContext;
+    },
+  );
+
+  app.get(
+    "/v1/operator/sober-house/control-plane",
+    {
+      preHandler: [authenticateRequest],
+      config: {
+        audit: {
+          action: "sober_house.control_plane.read",
+          subjectType: "organization",
+          subjectIdFrom: "query:organizationId",
+          sensitiveRead: true,
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = operatorControlPlaneQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      try {
+        return await buildOperatorControlPlaneSnapshot({
+          repositories,
+          tenantRepositories,
+          actor,
+          organizationId: parsedQuery.data.organizationId ?? null,
+          nowIso: now().toISOString(),
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.put(
+    "/v1/operator/sober-house/control-plane",
+    {
+      preHandler: [authenticateRequest],
+      config: {
+        audit: {
+          action: "sober_house.control_plane.update",
+          subjectType: "organization",
+          subjectIdFrom: "query:organizationId",
+          sensitiveRead: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = operatorControlPlaneQuerySchema.safeParse(request.query ?? {});
+      const parsedBody = operatorControlPlaneBodySchema.safeParse(request.body);
+      if (!parsedQuery.success || !parsedBody.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          details: {
+            query: parsedQuery.success ? undefined : parsedQuery.error.flatten(),
+            body: parsedBody.success ? undefined : parsedBody.error.flatten(),
+          },
+        });
+        return;
+      }
+
+      try {
+        const snapshot = await buildOperatorControlPlaneSnapshot({
+          repositories,
+          tenantRepositories,
+          actor,
+          organizationId: parsedQuery.data.organizationId ?? null,
+          nowIso: now().toISOString(),
+        });
+        await persistOperatorControlPlaneStore({
+          tenantRepositories,
+          actor,
+          organizationId: snapshot.session.organizationId,
+          store: parsedBody.data.store,
+        });
+        return await buildOperatorControlPlaneSnapshot({
+          repositories,
+          tenantRepositories,
+          actor,
+          organizationId: snapshot.session.organizationId,
+          nowIso: now().toISOString(),
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
     },
   );
 

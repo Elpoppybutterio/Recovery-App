@@ -5,7 +5,7 @@ export const SOBER_HOUSE_PROTECTED_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 export function requiresSoberHouseDeviceUnlock(
   role: SoberHouseAccessRole | null | undefined,
 ): boolean {
-  return role === "HOUSE_RESIDENT";
+  return role === "OWNER_OPERATOR";
 }
 
 export function isSoberHouseProtectedSessionExpired(

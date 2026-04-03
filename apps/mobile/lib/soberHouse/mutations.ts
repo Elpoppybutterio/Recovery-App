@@ -1,6 +1,7 @@
 import { appendAuditEntries, buildAuditActionEntry, buildAuditEntriesForChange } from "./audit";
 import {
   cloneSoberHouseStore,
+  createEntityId,
   createDefaultAlertPreference,
   createDefaultChatMessage,
   createDefaultChatMessageReceipt,
@@ -8,6 +9,7 @@ import {
   createDefaultChatThread,
   createDefaultChoreCompletionRecord,
   createDefaultCorrectiveAction,
+  createDefaultEnforcementRecord,
   createDefaultEvidenceItem,
   createDefaultHouse,
   createDefaultHouseAlertAnnouncement,
@@ -19,10 +21,14 @@ import {
   createDefaultJobApplicationRecord,
   createDefaultMonthlyReport,
   createDefaultOneOnOneSession,
+  createDefaultOperatorReportExportRecord,
   createDefaultOrganization,
+  createDefaultProofReviewRecord,
   createDefaultRecurringObligation,
   createDefaultResidentHouseMembership,
+  createDefaultScheduledSummaryRecord,
   createDefaultSoberHouseUserAccessProfile,
+  createDefaultSponsorCallRecord,
   createDefaultStaffAssignment,
   createDefaultViolation,
   createDefaultWorkVerificationRecord,
@@ -36,6 +42,10 @@ import type {
   ChatThread,
   ChoreCompletionRecord,
   CorrectiveAction,
+  EnforcementHistoryEntry,
+  EnforcementLevel,
+  EnforcementRecord,
+  EnforcementStatus,
   EvidenceItem,
   House,
   HouseAlertAnnouncement,
@@ -47,16 +57,22 @@ import type {
   JobApplicationRecord,
   MonthlyReport,
   OneOnOneSession,
+  OperatorReportExportRecord,
   Organization,
+  ProofReviewHistoryAction,
+  ProofReviewHistoryEntry,
+  ProofReviewRecord,
   RecurringObligation,
   ResidentConsentRecord,
   ResidentHouseMembership,
   ResidentHousingProfile,
   ResidentRequirementProfile,
   ResidentWizardDraft,
+  ScheduledSummaryRecord,
   SoberHouseEntityType,
   SoberHouseSettingsStore,
   SoberHouseUserAccessProfile,
+  SponsorCallRecord,
   StaffAssignment,
   Violation,
   ViolationStatus,
@@ -227,6 +243,32 @@ function matchesRuleScope(ruleSet: HouseRuleSet, candidate: HouseRuleSet): boole
     ruleSet.houseId === candidate.houseId &&
     ruleSet.houseGroupId === candidate.houseGroupId
   );
+}
+
+function createEnforcementHistoryEntry(
+  actor: AuditActor,
+  timestamp: string,
+  fields: Omit<EnforcementHistoryEntry, "id" | "createdAt" | "actor">,
+): EnforcementHistoryEntry {
+  return {
+    id: createEntityId("enforcement-history"),
+    createdAt: timestamp,
+    actor,
+    ...fields,
+  };
+}
+
+function createProofReviewHistoryEntry(
+  actor: AuditActor,
+  timestamp: string,
+  fields: Omit<ProofReviewHistoryEntry, "id" | "createdAt" | "actor">,
+): ProofReviewHistoryEntry {
+  return {
+    id: createEntityId("proof-review-history"),
+    createdAt: timestamp,
+    actor,
+    ...fields,
+  };
 }
 
 export function upsertHouseGroup(
@@ -894,6 +936,45 @@ export function upsertHouseMeetingAttendanceRecord(
   );
 }
 
+export function upsertSponsorCallRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<SponsorCallRecord, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.sponsorCallRecords.find((record) => record.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultSponsorCallRecord(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: SponsorCallRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  return applyAuditedEntityChange(
+    store,
+    actor,
+    "sponsorCallRecord",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      sponsorCallRecords: replaceById(draftStore.sponsorCallRecords, nextValue),
+    }),
+    timestamp,
+  );
+}
+
 export function upsertJobApplicationRecord(
   store: SoberHouseSettingsStore,
   actor: AuditActor,
@@ -1158,6 +1239,477 @@ export function upsertCorrectiveAction(
     store: appendAuditEntries(result.store, [actionEntry]),
     auditCount: result.auditCount + 1,
   };
+}
+
+export function upsertEnforcementRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<EnforcementRecord, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.enforcementRecords.find((record) => record.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultEnforcementRecord(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: EnforcementRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "enforcementRecord",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      enforcementRecords: replaceById(draftStore.enforcementRecords, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "enforcementRecord",
+    entityId: nextValue.id,
+    actionTaken: previous ? "enforcement_updated" : "enforcement_created",
+    fieldChanged: "status",
+    oldValue: previous?.status ?? null,
+    newValue: nextValue.status,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertProofReviewRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<ProofReviewRecord, "id" | "createdAt" | "updatedAt"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.proofReviewRecords.find((record) => record.id === fields.id) ?? null;
+  const base =
+    previous ??
+    createDefaultProofReviewRecord(
+      timestamp,
+      fields.residentId,
+      fields.linkedUserId,
+      fields.organizationId,
+      fields.houseId,
+      fields.id,
+    );
+  const nextValue: ProofReviewRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+    createdAt: base.createdAt,
+    updatedAt: timestamp,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "proofReviewRecord",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      proofReviewRecords: replaceById(draftStore.proofReviewRecords, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "proofReviewRecord",
+    entityId: nextValue.id,
+    actionTaken: previous ? "proof_review_updated" : "proof_review_created",
+    fieldChanged: "status",
+    oldValue: previous?.status ?? null,
+    newValue: nextValue.status,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function reviewProofRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  proofReviewRecordId: string,
+  status: ProofReviewRecord["status"],
+  timestamp: string,
+  note = "",
+): MutationResult {
+  const previous = store.proofReviewRecords.find((record) => record.id === proofReviewRecordId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  let action: ProofReviewHistoryAction = "SET_PENDING";
+  if (status === "APPROVED") {
+    action = "APPROVED";
+  } else if (status === "REJECTED") {
+    action = "REJECTED";
+  } else if (status === "FOLLOW_UP_REQUIRED") {
+    action = "FOLLOW_UP_REQUIRED";
+  }
+
+  return upsertProofReviewRecord(
+    store,
+    actor,
+    {
+      ...previous,
+      status,
+      reviewedAt: timestamp,
+      reviewedBy: actor,
+      history: [
+        ...previous.history,
+        createProofReviewHistoryEntry(actor, timestamp, {
+          action,
+          note,
+          previousStatus: previous.status,
+          nextStatus: status,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function createProofReviewRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<
+    ProofReviewRecord,
+    "id" | "createdAt" | "updatedAt" | "history" | "reviewedAt" | "reviewedBy"
+  > & { id?: string },
+  timestamp: string,
+): MutationResult {
+  return upsertProofReviewRecord(
+    store,
+    actor,
+    {
+      ...fields,
+      reviewedAt: null,
+      reviewedBy: null,
+      history: [
+        createProofReviewHistoryEntry(actor, timestamp, {
+          action: "CREATED",
+          note: "",
+          previousStatus: null,
+          nextStatus: fields.status,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function addProofReviewNote(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  proofReviewRecordId: string,
+  note: string,
+  timestamp: string,
+): MutationResult {
+  const previous = store.proofReviewRecords.find((record) => record.id === proofReviewRecordId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  return upsertProofReviewRecord(
+    store,
+    actor,
+    {
+      ...previous,
+      history: [
+        ...previous.history,
+        createProofReviewHistoryEntry(actor, timestamp, {
+          action: "NOTE_ADDED",
+          note,
+          previousStatus: previous.status,
+          nextStatus: previous.status,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function createEnforcementRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<
+    EnforcementRecord,
+    "id" | "createdAt" | "updatedAt" | "history" | "acknowledgedAt" | "resolvedAt" | "escalatedAt"
+  > & { id?: string },
+  timestamp: string,
+): MutationResult {
+  return upsertEnforcementRecord(
+    store,
+    actor,
+    {
+      ...fields,
+      status: fields.status ?? "OPEN",
+      acknowledgedAt: null,
+      resolvedAt: null,
+      escalatedAt: null,
+      history: [
+        createEnforcementHistoryEntry(actor, timestamp, {
+          action: "CREATED",
+          note: fields.reasonSummary,
+          previousStatus: null,
+          nextStatus: fields.status ?? "OPEN",
+          previousLevel: null,
+          nextLevel: fields.level,
+          assignedStaffAssignmentId: fields.assignedStaffAssignmentId ?? null,
+          linkedViolationId: fields.linkedViolationId ?? null,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function acknowledgeEnforcementRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  enforcementRecordId: string,
+  timestamp: string,
+  note = "",
+): MutationResult {
+  const previous = store.enforcementRecords.find((record) => record.id === enforcementRecordId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  return upsertEnforcementRecord(
+    store,
+    actor,
+    {
+      ...previous,
+      status: "ACKNOWLEDGED",
+      acknowledgedAt: timestamp,
+      history: [
+        ...previous.history,
+        createEnforcementHistoryEntry(actor, timestamp, {
+          action: "ACKNOWLEDGED",
+          note,
+          previousStatus: previous.status,
+          nextStatus: "ACKNOWLEDGED",
+          previousLevel: previous.level,
+          nextLevel: previous.level,
+          assignedStaffAssignmentId: previous.assignedStaffAssignmentId,
+          linkedViolationId: previous.linkedViolationId,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function addEnforcementRecordNote(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  enforcementRecordId: string,
+  note: string,
+  timestamp: string,
+): MutationResult {
+  const previous = store.enforcementRecords.find((record) => record.id === enforcementRecordId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  return upsertEnforcementRecord(
+    store,
+    actor,
+    {
+      ...previous,
+      history: [
+        ...previous.history,
+        createEnforcementHistoryEntry(actor, timestamp, {
+          action: "NOTE_ADDED",
+          note,
+          previousStatus: previous.status,
+          nextStatus: previous.status,
+          previousLevel: previous.level,
+          nextLevel: previous.level,
+          assignedStaffAssignmentId: previous.assignedStaffAssignmentId,
+          linkedViolationId: previous.linkedViolationId,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function assignEnforcementRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  enforcementRecordId: string,
+  assignedStaffAssignmentId: string | null,
+  timestamp: string,
+  note = "",
+): MutationResult {
+  const previous = store.enforcementRecords.find((record) => record.id === enforcementRecordId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  return upsertEnforcementRecord(
+    store,
+    actor,
+    {
+      ...previous,
+      assignedStaffAssignmentId,
+      history: [
+        ...previous.history,
+        createEnforcementHistoryEntry(actor, timestamp, {
+          action: "ASSIGNED",
+          note,
+          previousStatus: previous.status,
+          nextStatus: previous.status,
+          previousLevel: previous.level,
+          nextLevel: previous.level,
+          assignedStaffAssignmentId,
+          linkedViolationId: previous.linkedViolationId,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function resolveEnforcementRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  enforcementRecordId: string,
+  timestamp: string,
+  note = "",
+): MutationResult {
+  const previous = store.enforcementRecords.find((record) => record.id === enforcementRecordId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  return upsertEnforcementRecord(
+    store,
+    actor,
+    {
+      ...previous,
+      status: "RESOLVED",
+      resolvedAt: timestamp,
+      history: [
+        ...previous.history,
+        createEnforcementHistoryEntry(actor, timestamp, {
+          action: "RESOLVED",
+          note,
+          previousStatus: previous.status,
+          nextStatus: "RESOLVED",
+          previousLevel: previous.level,
+          nextLevel: previous.level,
+          assignedStaffAssignmentId: previous.assignedStaffAssignmentId,
+          linkedViolationId: previous.linkedViolationId,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function escalateEnforcementRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  enforcementRecordId: string,
+  nextLevel: EnforcementLevel,
+  timestamp: string,
+  note = "",
+): MutationResult {
+  const previous = store.enforcementRecords.find((record) => record.id === enforcementRecordId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  return upsertEnforcementRecord(
+    store,
+    actor,
+    {
+      ...previous,
+      level: nextLevel,
+      status: "ESCALATED",
+      escalatedAt: timestamp,
+      history: [
+        ...previous.history,
+        createEnforcementHistoryEntry(actor, timestamp, {
+          action: "ESCALATED",
+          note,
+          previousStatus: previous.status,
+          nextStatus: "ESCALATED",
+          previousLevel: previous.level,
+          nextLevel,
+          assignedStaffAssignmentId: previous.assignedStaffAssignmentId,
+          linkedViolationId: previous.linkedViolationId,
+        }),
+      ],
+    },
+    timestamp,
+  );
+}
+
+export function linkEnforcementRecordToViolation(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  enforcementRecordId: string,
+  violationId: string,
+  timestamp: string,
+  note = "",
+): MutationResult {
+  const previous = store.enforcementRecords.find((record) => record.id === enforcementRecordId);
+  if (!previous) {
+    return { store, auditCount: 0 };
+  }
+
+  return upsertEnforcementRecord(
+    store,
+    actor,
+    {
+      ...previous,
+      linkedViolationId: violationId,
+      history: [
+        ...previous.history,
+        createEnforcementHistoryEntry(actor, timestamp, {
+          action: "INCIDENT_LINKED",
+          note,
+          previousStatus: previous.status,
+          nextStatus: previous.status,
+          previousLevel: previous.level,
+          nextLevel: previous.level,
+          assignedStaffAssignmentId: previous.assignedStaffAssignmentId,
+          linkedViolationId: violationId,
+        }),
+      ],
+    },
+    timestamp,
+  );
 }
 
 export function upsertEvidenceItem(
@@ -1441,7 +1993,7 @@ export function upsertMonthlyReport(
   const result = applyAuditedEntityChange(
     store,
     actor,
-    "monthlyReport",
+    "operatorReportExport",
     previous,
     nextValue,
     (draftStore) => ({
@@ -1460,6 +2012,94 @@ export function upsertMonthlyReport(
     fieldChanged: "status",
     oldValue: previous?.status ?? null,
     newValue: nextValue.status,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertOperatorReportExportRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<OperatorReportExportRecord, "id"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.operatorReportExports.find((record) => record.id === fields.id) ?? null;
+  const base = previous ?? createDefaultOperatorReportExportRecord(timestamp, fields.id);
+  const nextValue: OperatorReportExportRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "monthlyReport",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      operatorReportExports: replaceById(draftStore.operatorReportExports, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "monthlyReport",
+    entityId: nextValue.id,
+    actionTaken: previous ? "operator_report_export_updated" : "operator_report_export_created",
+    fieldChanged: "title",
+    oldValue: previous?.title ?? null,
+    newValue: nextValue.title,
+  });
+
+  return {
+    store: appendAuditEntries(result.store, [actionEntry]),
+    auditCount: result.auditCount + 1,
+  };
+}
+
+export function upsertScheduledSummaryRecord(
+  store: SoberHouseSettingsStore,
+  actor: AuditActor,
+  fields: Omit<ScheduledSummaryRecord, "id"> & { id?: string },
+  timestamp: string,
+): MutationResult {
+  const previous = store.scheduledSummaryRecords.find((record) => record.id === fields.id) ?? null;
+  const base = previous ?? createDefaultScheduledSummaryRecord(timestamp, fields.id);
+  const nextValue: ScheduledSummaryRecord = {
+    ...base,
+    ...fields,
+    id: base.id,
+  };
+
+  const result = applyAuditedEntityChange(
+    store,
+    actor,
+    "scheduledSummaryRecord",
+    previous,
+    nextValue,
+    (draftStore) => ({
+      ...draftStore,
+      scheduledSummaryRecords: replaceById(draftStore.scheduledSummaryRecords, nextValue),
+    }),
+    timestamp,
+  );
+
+  const actionEntry = buildAuditActionEntry({
+    actor,
+    timestamp,
+    entityType: "scheduledSummaryRecord",
+    entityId: nextValue.id,
+    actionTaken: previous ? "scheduled_summary_updated" : "scheduled_summary_created",
+    fieldChanged: "title",
+    oldValue: previous?.title ?? null,
+    newValue: nextValue.title,
   });
 
   return {

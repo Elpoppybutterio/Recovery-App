@@ -1,6 +1,6 @@
 import type { SignatureRef } from "../signatures/signatureStore";
 
-export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 12 as const;
+export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 16 as const;
 
 export type EntityStatus = "ACTIVE" | "INACTIVE";
 export type HouseType =
@@ -15,6 +15,9 @@ export type StaffRole = "OWNER" | "HOUSE_MANAGER" | "ASSISTANT_MANAGER" | "RESID
 export type CurfewAlertBasis = "CLOCK_ONLY" | "ESTIMATED_TRAVEL_TIME" | "BOTH";
 export type ChoreFrequency = "DAILY" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
 export type ProofRequirement = "NONE" | "CHECKLIST" | "PHOTO" | "MANAGER_CONFIRMATION";
+export type ManagerConfirmationStatus = "NOT_REQUIRED" | "PENDING" | "CONFIRMED";
+export type ManagerConfirmationHandoffMethod = "SHARE_SHEET" | "TEXT_MESSAGE";
+export type EventCompletionStatus = "SCHEDULED" | "COMPLETED" | "MISSED" | "EXCUSED";
 export type MeetingType =
   | "AA"
   | "NA"
@@ -64,6 +67,7 @@ export type SoberHouseEntityType =
   | "residentHousingProfile"
   | "residentRequirementProfile"
   | "residentConsentRecord"
+  | "sponsorCallRecord"
   | "houseMeetingAttendanceRecord"
   | "choreCompletionRecord"
   | "jobApplicationRecord"
@@ -75,7 +79,11 @@ export type SoberHouseEntityType =
   | "chatParticipant"
   | "chatMessage"
   | "chatMessageReceipt"
-  | "monthlyReport";
+  | "monthlyReport"
+  | "operatorReportExport"
+  | "scheduledSummaryRecord"
+  | "proofReviewRecord"
+  | "enforcementRecord";
 export type ResidentOnboardingStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 export type ComplianceRuleType =
   | "curfew"
@@ -156,6 +164,78 @@ export type MonthlyReportStatus =
 export type MonthlyReportGeneratedBy = "SYSTEM" | "USER";
 export type ReportDistributionRecipientType = "RESIDENT" | "MANAGER" | "OWNER" | "COURT" | "OTHER";
 export type ReportDistributionMethod = "EMAIL" | "SMS" | "PORTAL" | "PRINT" | "OTHER";
+export type OperatorReportExportType =
+  | "RESIDENT_COMPLIANCE_SUMMARY"
+  | "HOUSE_COMPLIANCE_REPORT"
+  | "ORGANIZATION_ROLLUP_REPORT"
+  | "VIOLATIONS_INCIDENTS_EXPORT"
+  | "OVERDUE_MISSING_PROOF_REPORT";
+export type OperatorReportFormat = "PDF" | "CSV";
+export type OperatorReportScopeType = "ORGANIZATION" | "HOUSE" | "RESIDENT";
+export type OperatorReportComplianceBandFilter =
+  | "ALL"
+  | "compliant"
+  | "warning"
+  | "noncompliant"
+  | "critical";
+export type OperatorScheduledSummaryType =
+  | "DAILY_HOUSE"
+  | "WEEKLY_HOUSE_MANAGER"
+  | "WEEKLY_ORGANIZATION";
+export type ProofReviewCategory =
+  | "CHORES"
+  | "HOUSE_MEETINGS"
+  | "SPONSOR_CALLS"
+  | "JOB_SEARCH"
+  | "WORK";
+export type ProofReviewSourceRecordType =
+  | "CHORE_COMPLETION"
+  | "HOUSE_MEETING_ATTENDANCE"
+  | "SPONSOR_CALL"
+  | "JOB_APPLICATION"
+  | "WORK_VERIFICATION";
+export type ProofReviewStatus = "PENDING" | "APPROVED" | "REJECTED" | "FOLLOW_UP_REQUIRED";
+export type ProofReviewDerivedStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "follow_up_required"
+  | "missing"
+  | "not_tracked";
+export type ProofReviewHistoryAction =
+  | "CREATED"
+  | "SET_PENDING"
+  | "APPROVED"
+  | "REJECTED"
+  | "FOLLOW_UP_REQUIRED"
+  | "NOTE_ADDED";
+export type EnforcementLevel =
+  | "REMINDER"
+  | "WARNING"
+  | "STAFF_REVIEW"
+  | "INCIDENT"
+  | "DISCHARGE_REVIEW";
+export type EnforcementStatus = "OPEN" | "ACKNOWLEDGED" | "RESOLVED" | "ESCALATED";
+export type EnforcementCategory =
+  | "CHORES"
+  | "CURFEW"
+  | "HOUSE_MEETINGS"
+  | "ONE_ON_ONES"
+  | "SPONSOR_CALLS"
+  | "MISSING_PROOF"
+  | "WORK"
+  | "JOB_SEARCH"
+  | "MEETINGS"
+  | "VIOLATION"
+  | "REPEATED_NONCOMPLIANCE";
+export type EnforcementHistoryAction =
+  | "CREATED"
+  | "ACKNOWLEDGED"
+  | "NOTE_ADDED"
+  | "ASSIGNED"
+  | "RESOLVED"
+  | "ESCALATED"
+  | "INCIDENT_LINKED";
 export type SoberHouseAccessRole =
   | "UNASSIGNED"
   | "OWNER_OPERATOR"
@@ -625,6 +705,11 @@ export type OneOnOneSession = {
   inAppReminderEnabled: boolean;
   addToCalendar: boolean;
   managerConfirmationRequired: boolean;
+  completionStatus: EventCompletionStatus;
+  completedAt: string | null;
+  completedByStaffAssignmentId: string | null;
+  excusedAt: string | null;
+  excusedReason: string | null;
   status: EntityStatus;
   createdAt: string;
   updatedAt: string;
@@ -755,6 +840,29 @@ export type ChoreCompletionRecord = {
   proofRequirement: ProofRequirement[];
   proofProvided: boolean;
   proofReference: string | null;
+  managerConfirmationRequired?: boolean;
+  managerConfirmationStatus?: ManagerConfirmationStatus;
+  managerConfirmationRequestedAt?: string | null;
+  managerConfirmationRequestedVia?: ManagerConfirmationHandoffMethod | null;
+  managerConfirmedAt?: string | null;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SponsorCallRecord = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  organizationId: string | null;
+  houseId: string | null;
+  scheduledFor: string | null;
+  status: EventCompletionStatus;
+  completedAt: string | null;
+  proofRequired: boolean;
+  proofProvided: boolean;
+  proofReference: string | null;
+  proofType: SponsorProofType;
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -769,7 +877,13 @@ export type HouseMeetingAttendanceRecord = {
   houseMeetingId: string | null;
   recurringObligationId: string | null;
   scheduledStartAt: string;
-  attendedAt: string;
+  status: EventCompletionStatus;
+  attendedAt: string | null;
+  excusedAt: string | null;
+  excusedReason: string | null;
+  proofRequired: boolean;
+  proofProvided: boolean;
+  proofReference: string | null;
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -866,6 +980,39 @@ export type EvidenceItem = {
   createdBy: AuditActor;
   metadata: Record<string, string | number | boolean | null>;
   description: string;
+};
+
+export type ProofReviewHistoryEntry = {
+  id: string;
+  createdAt: string;
+  actor: AuditActor;
+  action: ProofReviewHistoryAction;
+  note: string;
+  previousStatus: ProofReviewStatus | null;
+  nextStatus: ProofReviewStatus;
+};
+
+export type ProofReviewRecord = {
+  id: string;
+  residentId: string;
+  linkedUserId: string;
+  houseId: string | null;
+  organizationId: string | null;
+  category: ProofReviewCategory;
+  sourceRecordType: ProofReviewSourceRecordType;
+  sourceRecordId: string;
+  linkedEnforcementRecordId: string | null;
+  proofRequired: boolean;
+  proofProvided: boolean;
+  proofReference: string | null;
+  evidenceItemIds: string[];
+  submittedAt: string | null;
+  status: ProofReviewStatus;
+  reviewedAt: string | null;
+  reviewedBy: AuditActor | null;
+  history: ProofReviewHistoryEntry[];
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type ChatThread = {
@@ -1084,6 +1231,100 @@ export type MonthlyReport = {
   updatedAt: string;
 };
 
+export type OperatorReportFilterSnapshot = {
+  startDate: string;
+  endDate: string;
+  organizationId: string | null;
+  houseId: string | null;
+  residentId: string | null;
+  complianceBand: OperatorReportComplianceBandFilter;
+  onlyOpenViolations: boolean;
+  onlyMissingProof: boolean;
+  onlyOverdue: boolean;
+  highRiskOnly: boolean;
+};
+
+export type OperatorReportExportRecord = {
+  id: string;
+  reportType: OperatorReportExportType;
+  format: OperatorReportFormat;
+  scopeType: OperatorReportScopeType;
+  organizationId: string | null;
+  houseId: string | null;
+  residentId: string | null;
+  periodStart: string;
+  periodEnd: string;
+  generatedAt: string;
+  generatedBy: AuditActor;
+  title: string;
+  fileRef: string;
+  itemCount: number;
+  filters: OperatorReportFilterSnapshot;
+};
+
+export type OperatorSummaryMetric = {
+  label: string;
+  value: string;
+  detail: string;
+};
+
+export type ScheduledSummaryRecord = {
+  id: string;
+  summaryType: OperatorScheduledSummaryType;
+  scopeType: OperatorReportScopeType;
+  organizationId: string | null;
+  houseId: string | null;
+  residentId: string | null;
+  periodStart: string;
+  periodEnd: string;
+  generatedAt: string;
+  generatedBy: AuditActor;
+  title: string;
+  subtitle: string;
+  highlights: string[];
+  metrics: OperatorSummaryMetric[];
+  filters: OperatorReportFilterSnapshot;
+};
+
+export type EnforcementHistoryEntry = {
+  id: string;
+  createdAt: string;
+  actor: AuditActor;
+  action: EnforcementHistoryAction;
+  note: string;
+  previousStatus: EnforcementStatus | null;
+  nextStatus: EnforcementStatus | null;
+  previousLevel: EnforcementLevel | null;
+  nextLevel: EnforcementLevel | null;
+  assignedStaffAssignmentId: string | null;
+  linkedViolationId: string | null;
+};
+
+export type EnforcementRecord = {
+  id: string;
+  organizationId: string | null;
+  houseId: string | null;
+  residentId: string;
+  linkedUserId: string;
+  category: EnforcementCategory;
+  sourceRuleType: ViolationRuleType | "houseMeetings" | "oneOnOne" | "missingProof";
+  sourceSignal: string;
+  level: EnforcementLevel;
+  status: EnforcementStatus;
+  reasonSummary: string;
+  recommendedAction: string;
+  assignedStaffAssignmentId: string | null;
+  linkedViolationId: string | null;
+  linkedCorrectiveActionId: string | null;
+  dueAt: string | null;
+  acknowledgedAt: string | null;
+  resolvedAt: string | null;
+  escalatedAt: string | null;
+  history: EnforcementHistoryEntry[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ResidentWizardDraft = {
   linkedUserId: string;
   currentStep: ResidentOnboardingStep;
@@ -1158,6 +1399,7 @@ export type SoberHouseSettingsStore = {
   residentRequirementProfile: ResidentRequirementProfile | null;
   residentConsentRecord: ResidentConsentRecord | null;
   residentWizardDraft: ResidentWizardDraft | null;
+  sponsorCallRecords: SponsorCallRecord[];
   houseMeetingAttendanceRecords: HouseMeetingAttendanceRecord[];
   choreCompletionRecords: ChoreCompletionRecord[];
   jobApplicationRecords: JobApplicationRecord[];
@@ -1170,6 +1412,10 @@ export type SoberHouseSettingsStore = {
   chatMessages: ChatMessage[];
   chatMessageReceipts: ChatMessageReceipt[];
   monthlyReports: MonthlyReport[];
+  operatorReportExports: OperatorReportExportRecord[];
+  scheduledSummaryRecords: ScheduledSummaryRecord[];
+  proofReviewRecords: ProofReviewRecord[];
+  enforcementRecords: EnforcementRecord[];
   auditLogEntries: AuditLogEntry[];
 };
 
