@@ -59,9 +59,7 @@ describe("operator live data adapter", () => {
   });
 
   it("uses the configured dashboard api url when present", () => {
-    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
-    expect(resolveDashboardApiUrl()).toBe("https://api.example.com");
-    vi.unstubAllEnvs();
+    expect(resolveDashboardApiUrl()).toBe("/api/operator/sober-house/control-plane");
   });
 
   it("returns unauthenticated when no dev user id is provided", async () => {
@@ -85,7 +83,7 @@ describe("operator live data adapter", () => {
     );
 
     const result = await loadOperatorLiveSnapshot({
-      apiUrl: "https://api.example.com",
+      apiUrl: "/api/operator/sober-house/control-plane",
       devUserId: "org-admin-user",
       organizationId: "org-1",
       fetchImpl,
@@ -97,6 +95,15 @@ describe("operator live data adapter", () => {
       expect(result.snapshot.data.store.organization?.id).toBe("org-1");
     }
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/api/operator/sober-house/control-plane?organizationId=org-1",
+      expect.objectContaining({
+        cache: "no-store",
+        headers: {
+          Authorization: "Bearer DEV_org-admin-user",
+        },
+      }),
+    );
   });
 
   it("returns forbidden when the live api denies org access", async () => {
@@ -109,7 +116,7 @@ describe("operator live data adapter", () => {
     );
 
     const result = await loadOperatorLiveSnapshot({
-      apiUrl: "https://api.example.com",
+      apiUrl: "/api/operator/sober-house/control-plane",
       devUserId: "org-admin-user",
       organizationId: null,
       fetchImpl,
@@ -131,7 +138,7 @@ describe("operator live data adapter", () => {
     );
 
     const snapshot = await persistOperatorLiveSnapshot({
-      apiUrl: "https://api.example.com",
+      apiUrl: "/api/operator/sober-house/control-plane",
       devUserId: "org-admin-user",
       organizationId: "org-1",
       store: createSnapshotPayload().data.store,
@@ -140,5 +147,11 @@ describe("operator live data adapter", () => {
 
     expect(snapshot.session.operatorUserId).toBe("org-admin-user");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/api/operator/sober-house/control-plane?organizationId=org-1",
+      expect.objectContaining({
+        method: "PUT",
+      }),
+    );
   });
 });

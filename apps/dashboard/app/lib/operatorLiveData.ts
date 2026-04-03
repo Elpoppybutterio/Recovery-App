@@ -36,8 +36,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function resolveDashboardApiUrl(): string {
-  const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
-  return configured && configured.length > 0 ? configured : "http://localhost:3001";
+  return "/api/operator/sober-house/control-plane";
 }
 
 export function normalizeDevOperatorUserId(value: string): string {
@@ -52,11 +51,12 @@ export function buildDevOperatorAuthHeader(userId: string): Record<string, strin
 }
 
 function buildSnapshotUrl(apiUrl: string, organizationId: string | null): string {
-  const url = new URL("/v1/operator/sober-house/control-plane", apiUrl);
+  const isAbsolute = apiUrl.startsWith("http://") || apiUrl.startsWith("https://");
+  const url = isAbsolute ? new URL(apiUrl) : new URL(apiUrl, "http://dashboard.local");
   if (organizationId) {
     url.searchParams.set("organizationId", organizationId);
   }
-  return url.toString();
+  return isAbsolute ? url.toString() : `${url.pathname}${url.search}`;
 }
 
 function parseSnapshot(payload: unknown): OperatorLiveSnapshot | null {
