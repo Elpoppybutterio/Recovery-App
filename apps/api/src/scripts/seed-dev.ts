@@ -42,7 +42,7 @@ type HouseSeed = {
 type AccessGrantSeed = {
   tenantId: string;
   userId: string;
-  role: "platform_owner" | "resident_user" | "court_participant" | "court_supervisor";
+  role: "platform_owner" | "org_admin" | "resident_user" | "court_participant" | "court_supervisor";
   organizationId?: string;
   courtProgramId?: string;
   grantedByUserId: string;
@@ -89,6 +89,13 @@ const DEV_USERS: DevUserSeed[] = [
     email: "supervisor-a@example.com",
     displayName: "Supervisor A",
     roles: [Role.SUPERVISOR],
+  },
+  {
+    id: "demo",
+    tenantId: "tenant-a",
+    email: "demo@example.com",
+    displayName: "Demo",
+    roles: [Role.ADMIN],
   },
   {
     id: "enduser-a1",
@@ -143,6 +150,12 @@ const ACCESS_GRANTS: AccessGrantSeed[] = [
   },
   {
     tenantId: "tenant-a",
+    userId: "demo",
+    role: "platform_owner",
+    grantedByUserId: "admin-a",
+  },
+  {
+    tenantId: "tenant-a",
     userId: "supervisor-a",
     role: "court_supervisor",
     courtProgramId: "court-boulder",
@@ -162,6 +175,15 @@ const ACCESS_GRANTS: AccessGrantSeed[] = [
     courtProgramId: "court-boulder",
     grantedByUserId: "admin-a",
   },
+  ...ORGANIZATIONS.filter((organization) => organization.tenantId === "tenant-a").map(
+    (organization) => ({
+      tenantId: organization.tenantId,
+      userId: "demo",
+      role: "org_admin" as const,
+      organizationId: organization.id,
+      grantedByUserId: "admin-a",
+    }),
+  ),
 ];
 
 export async function seedDevUsers(env: ApiEnv = loadApiEnv()): Promise<void> {
@@ -312,4 +334,13 @@ export async function seedDevUsers(env: ApiEnv = loadApiEnv()): Promise<void> {
   } finally {
     await db.end?.();
   }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  seedDevUsers().catch((error) => {
+    logger.error("dev.seed.failed", {
+      error: error instanceof Error ? error.message : "unknown",
+    });
+    process.exit(1);
+  });
 }

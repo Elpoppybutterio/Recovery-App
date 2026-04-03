@@ -21,7 +21,7 @@
     "test": "turbo run test",
     "format": "prettier --write .",
     "db:migrate": "pnpm --filter @recovery/api db:migrate",
-    "db:seed": "node -e \"console.log('No database configured yet. Add seed scripts under /apps/api and run your seed tool here.')\"",
+    "db:seed": "pnpm --filter @recovery/api db:seed",
     "ci": "pnpm lint && pnpm typecheck && pnpm test",
     "prepare": "husky"
   },

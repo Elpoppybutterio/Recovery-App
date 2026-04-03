@@ -60,6 +60,12 @@ export async function seedCoreFixtures(db: InMemoryDb) {
     display_name: "Supervisor A",
   });
   db.addUser({
+    id: "demo",
+    tenant_id: "tenant-a",
+    email: "demo@example.com",
+    display_name: "Demo",
+  });
+  db.addUser({
     id: "enduser-a1",
     tenant_id: "tenant-a",
     email: "enduser-a1@example.com",
@@ -158,6 +164,20 @@ export async function seedCoreFixtures(db: InMemoryDb) {
     user_id: "supervisor-a",
     role: "court_supervisor",
     court_program_id: "court-boulder",
+    granted_by_user_id: "admin-a",
+  });
+  db.addUserRole({ tenant_id: "tenant-a", user_id: "demo", role: Role.ADMIN });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "demo",
+    role: "platform_owner",
+    granted_by_user_id: "admin-a",
+  });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "demo",
+    role: "org_admin",
+    organization_id: "org-alpine",
     granted_by_user_id: "admin-a",
   });
   db.addUserRole({ tenant_id: "tenant-a", user_id: "enduser-a1", role: Role.END_USER });
