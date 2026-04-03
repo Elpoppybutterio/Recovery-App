@@ -51,6 +51,7 @@ import {
   getHouseById,
   getHouseGroupById,
 } from "../../../mobile/lib/soberHouse/selectors";
+import type { SoberHouseLiveStoreSlice } from "../../../../packages/shared-types/src/soberHouse";
 import type {
   OperatorReportExportType,
   ProofRequirement,
@@ -112,7 +113,7 @@ export type OperatorEnforcementQueueFilters = EnforcementQueueFilters;
 export type OperatorProofQueueFilters = ProofReviewQueueFilters;
 
 export type OperatorControlPlaneDataSource = {
-  store: SoberHouseSettingsStore;
+  store: SoberHouseSettingsStore & SoberHouseLiveStoreSlice;
   residentDirectory: ResidentDirectoryEntry[];
   roleDefaults: Record<OperatorWebRole, { houseId: string | null }>;
 };

@@ -1,4 +1,5 @@
 import type {
+  AlertAcknowledgementRecord,
   AlertPreference,
   ChatMessage,
   ChatMessageReceipt,
@@ -24,6 +25,7 @@ import type {
   ScheduledSummaryRecord,
   RecurringObligation,
   ResidentHouseMembership,
+  ScheduledItemCompletionRecord,
   SponsorCallRecord,
   SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
@@ -59,6 +61,8 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     houseMeetings: [],
     oneOnOneSessions: [],
     houseChores: [],
+    alertAcknowledgementRecords: [],
+    scheduledItemCompletionRecords: [],
     houseAlertAnnouncements: [],
     alertPreferences: [],
     residentHousingProfile: null,
@@ -1006,6 +1010,17 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
       ...chore,
       proofRequirement: [...chore.proofRequirement],
     })),
+    alertAcknowledgementRecords: store.alertAcknowledgementRecords.map(
+      (record): AlertAcknowledgementRecord => ({
+        ...record,
+      }),
+    ),
+    scheduledItemCompletionRecords: store.scheduledItemCompletionRecords.map(
+      (record): ScheduledItemCompletionRecord => ({
+        ...record,
+        proofRequirement: [...record.proofRequirement],
+      }),
+    ),
     houseAlertAnnouncements: store.houseAlertAnnouncements.map((announcement) => ({
       ...announcement,
     })),

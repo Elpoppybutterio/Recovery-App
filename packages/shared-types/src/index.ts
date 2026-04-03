@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export * from "./soberHouse";
+
 export enum Role {
   END_USER = "END_USER",
   SPONSOR = "SPONSOR",
