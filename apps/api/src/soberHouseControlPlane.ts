@@ -105,18 +105,40 @@ function deriveOperatorRoleFromGrant(role: string): OperatorWebRole | null {
   if (role === "house_manager") {
     return "HOUSE_MANAGER";
   }
+  if (role === "resident_user") {
+    return "STAFF_VIEWER";
+  }
   return null;
 }
 
 function defaultOperatorRole(role: OperatorWebRole): OperatorWebRole {
-  return role === "HOUSE_MANAGER" ? "HOUSE_MANAGER" : "ORG_ADMIN";
+  if (role === "HOUSE_MANAGER") {
+    return "HOUSE_MANAGER";
+  }
+  if (role === "STAFF_VIEWER") {
+    return "STAFF_VIEWER";
+  }
+  return "ORG_ADMIN";
 }
 
 function allowedRolesForOperatorRole(role: OperatorWebRole): OperatorWebRole[] {
+  if (role === "STAFF_VIEWER") {
+    return ["STAFF_VIEWER"];
+  }
   if (role === "HOUSE_MANAGER") {
     return ["HOUSE_MANAGER", "STAFF_VIEWER"];
   }
   return ["ORG_ADMIN", "HOUSE_MANAGER", "STAFF_VIEWER"];
+}
+
+function operatorRolePriority(role: OperatorWebRole): number {
+  if (role === "ORG_ADMIN") {
+    return 3;
+  }
+  if (role === "HOUSE_MANAGER") {
+    return 2;
+  }
+  return 1;
 }
 
 function roleDefaultsFromHouses(houses: HouseRow[]): RoleDefaults {
@@ -509,7 +531,10 @@ async function resolveAvailableOrganizations(
       continue;
     }
     const current = scoped.get(grant.organizationId);
-    const nextRole = current?.operatorRole === "ORG_ADMIN" ? current.operatorRole : operatorRole;
+    const nextRole =
+      current && operatorRolePriority(current.operatorRole) >= operatorRolePriority(operatorRole)
+        ? current.operatorRole
+        : operatorRole;
     scoped.set(grant.organizationId, {
       organizationId: grant.organizationId,
       organizationName: grant.organizationName ?? grant.organizationId,
@@ -719,13 +744,17 @@ export async function buildOperatorControlPlaneSnapshot(input: {
     input.repositories.listHouses(input.actor.tenantId, {
       organizationId: selectedOrganization.organization.id,
     }),
-    input.tenantRepositories.participantProfiles.listScoped(input.actor, {
+    input.repositories
+      .listParticipantProfiles(input.actor.tenantId)
+      .then((profiles) =>
+        profiles.filter(
+          (profile) => profile.organization_id === selectedOrganization.organization.id,
+        ),
+      ),
+    input.repositories.listComplianceEvents(input.actor.tenantId, {
       organizationId: selectedOrganization.organization.id,
     }),
-    input.tenantRepositories.participantCompliance.listScoped(input.actor, {
-      organizationId: selectedOrganization.organization.id,
-    }),
-    input.tenantRepositories.participantViolations.listScoped(input.actor, {
+    input.repositories.listViolations(input.actor.tenantId, {
       organizationId: selectedOrganization.organization.id,
     }),
   ]);
