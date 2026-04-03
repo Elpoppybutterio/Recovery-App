@@ -31,7 +31,7 @@
     ]
   },
   "devDependencies": {
-    "@types/node": "^22.13.4",
+    "@types/node": "^22.19.11",
     "@typescript-eslint/eslint-plugin": "^8.24.1",
     "@typescript-eslint/parser": "^8.24.1",
     "eas-cli": "^18.0.6",
