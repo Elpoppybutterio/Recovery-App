@@ -8,6 +8,13 @@ import {
   type SoberHouseOwnerDashboardKpiTile,
   type SoberHouseOwnerKpiTileId,
 } from "../lib/soberHouse/orgDashboard";
+import {
+  buildOperatorMetricCards,
+  buildSoberHouseOperatorReportingSummary,
+  residentMatchesOperatorFilter,
+  type OperatorComplianceBand,
+  type OperatorResidentFilter,
+} from "../lib/soberHouse/operatorReporting";
 import type { SoberHouseSettingsStore } from "../lib/soberHouse/types";
 import { Design } from "../lib/ui/design";
 import { AppButton } from "../lib/ui/AppButton";
@@ -26,6 +33,9 @@ type Props = {
   onToggleManagerStatus: (staffAssignmentId: string, nextStatus: "ACTIVE" | "INACTIVE") => void;
   onOpenChat: () => void;
   onCompileReportsNow: (houseIds: string[]) => void;
+  onMarkOneOnOneCompleted: (residentId: string) => void;
+  onLogSponsorCallCompleted: (residentId: string) => void;
+  onMarkHouseMeetingAttendance: (residentId: string, status: "COMPLETED" | "MISSED") => void;
   compileStatus: string | null;
 };
 
@@ -33,10 +43,40 @@ type OwnerDashboardView =
   | { kind: "HOME" }
   | { kind: "HOUSES" }
   | { kind: "HOUSE_DETAIL"; houseId: string }
+  | { kind: "RESIDENT_DETAIL"; residentId: string }
   | { kind: "MANAGERS" }
   | { kind: "VIOLATIONS" }
   | { kind: "REPORTS" }
   | { kind: "HOUSE_VIOLATIONS"; houseId: string };
+
+const RESIDENT_FILTER_OPTIONS: Array<{ id: OperatorResidentFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "compliant", label: "Compliant" },
+  { id: "warning", label: "Warning" },
+  { id: "noncompliant", label: "Noncompliant" },
+  { id: "critical", label: "Critical" },
+  { id: "overdue-chores", label: "Overdue chores" },
+  { id: "curfew-issues", label: "Curfew issues" },
+  { id: "meeting-noncompliance", label: "Meeting issues" },
+  { id: "overdue-one-on-ones", label: "One-on-ones due" },
+];
+
+function complianceTone(band: OperatorComplianceBand): SoberHouseOwnerDashboardKpiTile["tone"] {
+  if (band === "critical" || band === "noncompliant") {
+    return "red";
+  }
+  if (band === "warning") {
+    return "yellow";
+  }
+  return "green";
+}
+
+function complianceLabel(band: OperatorComplianceBand): string {
+  if (band === "noncompliant") {
+    return "Noncompliant";
+  }
+  return band.charAt(0).toUpperCase() + band.slice(1);
+}
 
 function toneStyle(tone: SoberHouseOwnerDashboardKpiTile["tone"]) {
   if (tone === "green") {
@@ -100,16 +140,32 @@ export function SoberHouseOwnerDashboard({
   onToggleManagerStatus,
   onOpenChat,
   onCompileReportsNow,
+  onMarkOneOnOneCompleted,
+  onLogSponsorCallCompleted,
+  onMarkHouseMeetingAttendance,
   compileStatus,
 }: Props) {
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [selectedHouseIds, setSelectedHouseIds] = useState<string[]>([]);
   const [houseGroupFilterId, setHouseGroupFilterId] = useState<string | null>(null);
   const [houseSearchQuery, setHouseSearchQuery] = useState("");
+  const [residentFilter, setResidentFilter] = useState<OperatorResidentFilter>("all");
   const [view, setView] = useState<OwnerDashboardView>({ kind: "HOME" });
   const summary = useMemo(
     () => buildSoberHouseOwnerDashboardSummary({ store, selectedGroupIds, selectedHouseIds }),
     [selectedGroupIds, selectedHouseIds, store],
+  );
+  const reporting = useMemo(
+    () =>
+      buildSoberHouseOperatorReportingSummary({
+        store,
+        nowIso: new Date().toISOString(),
+      }),
+    [store],
+  );
+  const operatorMetricCards = useMemo(
+    () => buildOperatorMetricCards(reporting.organization),
+    [reporting.organization],
   );
   const scopedHouseRows = summary.houseRows;
   const housesWithViolations = useMemo(
@@ -124,9 +180,25 @@ export function SoberHouseOwnerDashboard({
   );
   const focusedHouseId =
     view.kind === "HOUSE_DETAIL" || view.kind === "HOUSE_VIOLATIONS" ? view.houseId : null;
+  const focusedResidentId = view.kind === "RESIDENT_DETAIL" ? view.residentId : null;
   const focusedHouseDetail = useMemo(
     () => (focusedHouseId ? buildSoberHouseOwnerHouseDetail(store, focusedHouseId) : null),
     [focusedHouseId, store],
+  );
+  const focusedHouseReporting = useMemo(
+    () =>
+      focusedHouseId
+        ? (reporting.houses.find((house) => house.houseId === focusedHouseId) ?? null)
+        : null,
+    [focusedHouseId, reporting.houses],
+  );
+  const focusedResidentReporting = useMemo(
+    () =>
+      focusedResidentId
+        ? (reporting.residents.find((resident) => resident.residentId === focusedResidentId) ??
+          null)
+        : null,
+    [focusedResidentId, reporting.residents],
   );
   const scopedManagers = useMemo(
     () =>
@@ -156,6 +228,14 @@ export function SoberHouseOwnerDashboard({
     [scopedHouseRows, summary.availableGroups],
   );
   const showHouseSearch = scopedHouseRows.length > 10;
+  const filteredHouseResidents = useMemo(() => {
+    if (!focusedHouseReporting) {
+      return [];
+    }
+    return focusedHouseReporting.residents.filter((resident) =>
+      residentMatchesOperatorFilter(resident, residentFilter),
+    );
+  }, [focusedHouseReporting, residentFilter]);
 
   const toggleValue = (id: string, current: string[], setter: (next: string[]) => void) => {
     setter(current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
@@ -198,28 +278,32 @@ export function SoberHouseOwnerDashboard({
               ? "Sober House Org Dashboard"
               : view.kind === "HOUSES"
                 ? "Houses"
-                : view.kind === "MANAGERS"
-                  ? "Managers"
-                  : view.kind === "VIOLATIONS"
-                    ? "Violations by House"
-                    : view.kind === "REPORTS"
-                      ? "Current Reports"
-                      : view.kind === "HOUSE_VIOLATIONS"
-                        ? (focusedHouseDetail?.houseName ?? "House Violations")
-                        : (focusedHouseDetail?.houseName ?? "House Overview")}
+                : view.kind === "RESIDENT_DETAIL"
+                  ? (focusedResidentReporting?.displayName ?? "Resident Reporting")
+                  : view.kind === "MANAGERS"
+                    ? "Managers"
+                    : view.kind === "VIOLATIONS"
+                      ? "Violations by House"
+                      : view.kind === "REPORTS"
+                        ? "Current Reports"
+                        : view.kind === "HOUSE_VIOLATIONS"
+                          ? (focusedHouseDetail?.houseName ?? "House Violations")
+                          : (focusedHouseDetail?.houseName ?? "House Overview")}
           </Text>
           <Text style={styles.subtitle}>
             {view.kind === "HOME"
               ? summary.organizationName
-              : view.kind === "MANAGERS"
-                ? "Add, edit, and activate staff assignments for the current scope."
-                : view.kind === "VIOLATIONS"
-                  ? "Choose a house to review its current violations."
-                  : view.kind === "REPORTS"
-                    ? "Review current report coverage across the houses in scope."
-                    : view.kind === "HOUSE_VIOLATIONS"
-                      ? "Violation detail for the selected house."
-                      : "Operational detail for the selected house."}
+              : view.kind === "RESIDENT_DETAIL"
+                ? "Resident compliance, requirement progress, and incident detail."
+                : view.kind === "MANAGERS"
+                  ? "Add, edit, and activate staff assignments for the current scope."
+                  : view.kind === "VIOLATIONS"
+                    ? "Choose a house to review its current violations."
+                    : view.kind === "REPORTS"
+                      ? "Organization-wide reporting, trends, and drilldowns."
+                      : view.kind === "HOUSE_VIOLATIONS"
+                        ? "Violation detail for the selected house."
+                        : "Operational detail and resident reporting for the selected house."}
           </Text>
         </View>
         <View style={styles.headerAction}>
@@ -444,47 +528,141 @@ export function SoberHouseOwnerDashboard({
         ) : null}
 
         {view.kind === "REPORTS" ? (
-          <GlassCard style={styles.card} strong>
-            <Text style={styles.sectionTitle}>Current Reports</Text>
-            <Text style={styles.metaText}>
-              Review current-version report coverage for the houses in scope.
-            </Text>
-            <View style={styles.actionRow}>
-              <AppButton
-                title="Compile reports now"
-                onPress={() => onCompileReportsNow(summary.filteredHouseIds)}
-                disabled={summary.filteredHouseIds.length === 0}
-              />
-              <AppButton title="Manage organization" variant="secondary" onPress={onOpenSettings} />
-            </View>
-            {compileStatus ? <Text style={styles.metaText}>{compileStatus}</Text> : null}
-            {scopedHouseRows.length === 0 ? (
-              <Text style={styles.metaText}>No houses match the current filter scope.</Text>
-            ) : (
-              scopedHouseRows.map((row) => (
-                <Pressable
-                  key={row.houseId}
-                  style={styles.rowCard}
-                  onPress={() => setView({ kind: "HOUSE_DETAIL", houseId: row.houseId })}
-                >
-                  <Text style={styles.rowTitle}>{row.houseName}</Text>
-                  <Text style={styles.metaText}>
-                    {row.groupName} • {row.status === "ACTIVE" ? "Active" : "Inactive"}
-                  </Text>
-                  <Text style={styles.metaText}>
-                    Current reports {row.currentReports} • Violations {row.activeViolations} •
-                    Corrective actions {row.correctiveActionsOpen}
-                  </Text>
-                </Pressable>
-              ))
-            )}
-          </GlassCard>
-        ) : null}
-
-        {view.kind === "HOUSE_DETAIL" && focusedHouseDetail ? (
           <>
             <GlassCard style={styles.card} strong>
-              <Text style={styles.sectionTitle}>House Overview</Text>
+              <Text style={styles.sectionTitle}>Organization Overview</Text>
+              <Text style={styles.metaText}>
+                Drillable reporting for the current sober-housing scope.
+              </Text>
+              <View style={styles.actionRow}>
+                <AppButton
+                  title="Compile reports now"
+                  onPress={() => onCompileReportsNow(summary.filteredHouseIds)}
+                  disabled={summary.filteredHouseIds.length === 0}
+                />
+                <AppButton
+                  title="Manage organization"
+                  variant="secondary"
+                  onPress={onOpenSettings}
+                />
+              </View>
+              {compileStatus ? <Text style={styles.metaText}>{compileStatus}</Text> : null}
+              <View style={styles.kpiGrid}>
+                {operatorMetricCards.map((metric) => (
+                  <GlassCard key={metric.label} style={styles.kpiCard}>
+                    <Text style={styles.kpiValue}>{metric.value}</Text>
+                    <Text style={styles.kpiLabel}>{metric.label}</Text>
+                    <Text style={styles.kpiDetail}>{metric.detail}</Text>
+                  </GlassCard>
+                ))}
+              </View>
+            </GlassCard>
+
+            <GlassCard style={styles.card}>
+              <Text style={styles.sectionTitle}>Highest-Risk Houses</Text>
+              {reporting.organization.highestRiskHouses.length === 0 ? (
+                <Text style={styles.metaText}>No houses in scope yet.</Text>
+              ) : (
+                reporting.organization.highestRiskHouses.map((house) => (
+                  <Pressable
+                    key={house.houseId}
+                    style={[styles.rowCard, toneStyle(complianceTone(house.complianceBand))]}
+                    onPress={() => setView({ kind: "HOUSE_DETAIL", houseId: house.houseId })}
+                  >
+                    <Text style={styles.rowTitle}>{house.houseName}</Text>
+                    <Text style={styles.metaText}>
+                      {complianceLabel(house.complianceBand)} • {house.detail}
+                    </Text>
+                  </Pressable>
+                ))
+              )}
+            </GlassCard>
+
+            <GlassCard style={styles.card}>
+              <Text style={styles.sectionTitle}>Highest-Risk Residents</Text>
+              {reporting.organization.highestRiskResidents.length === 0 ? (
+                <Text style={styles.metaText}>No residents in scope yet.</Text>
+              ) : (
+                reporting.organization.highestRiskResidents.map((resident) => (
+                  <Pressable
+                    key={resident.residentId}
+                    style={[styles.rowCard, toneStyle(complianceTone(resident.complianceBand))]}
+                    onPress={() =>
+                      setView({ kind: "RESIDENT_DETAIL", residentId: resident.residentId })
+                    }
+                  >
+                    <Text style={styles.rowTitle}>{resident.residentName}</Text>
+                    <Text style={styles.metaText}>
+                      {resident.houseName} • {complianceLabel(resident.complianceBand)}
+                    </Text>
+                    <Text style={styles.metaText}>{resident.detail}</Text>
+                  </Pressable>
+                ))
+              )}
+            </GlassCard>
+
+            <GlassCard style={styles.card}>
+              <Text style={styles.sectionTitle}>Houses by Compliance</Text>
+              {reporting.organization.housesByCompliance.length === 0 ? (
+                <Text style={styles.metaText}>No houses match the current scope.</Text>
+              ) : (
+                reporting.organization.housesByCompliance.map((house) => (
+                  <Pressable
+                    key={house.houseId}
+                    style={styles.rowCard}
+                    onPress={() => setView({ kind: "HOUSE_DETAIL", houseId: house.houseId })}
+                  >
+                    <Text style={styles.rowTitle}>{house.houseName}</Text>
+                    <Text style={styles.metaText}>
+                      {house.compliancePercent === null ? "N/A" : `${house.compliancePercent}%`}{" "}
+                      compliance
+                    </Text>
+                    <Text style={styles.metaText}>{house.detail}</Text>
+                  </Pressable>
+                ))
+              )}
+            </GlassCard>
+
+            <GlassCard style={styles.card}>
+              <Text style={styles.sectionTitle}>Recent Trends</Text>
+              <Text style={styles.metaText}>
+                Violations, curfew misses, and chore misses over the last 7 days.
+              </Text>
+              <View style={styles.trendGroup}>
+                <Text style={styles.fieldLabel}>Violations</Text>
+                {reporting.organization.recentViolationsTrend.map((point) => (
+                  <View key={`violations-${point.key}`} style={styles.trendRow}>
+                    <Text style={styles.metaText}>{point.label}</Text>
+                    <Text style={styles.rowTitle}>{point.count}</Text>
+                  </View>
+                ))}
+              </View>
+              <View style={styles.trendGroup}>
+                <Text style={styles.fieldLabel}>Curfew</Text>
+                {reporting.organization.recentCurfewTrend.map((point) => (
+                  <View key={`curfew-${point.key}`} style={styles.trendRow}>
+                    <Text style={styles.metaText}>{point.label}</Text>
+                    <Text style={styles.rowTitle}>{point.count}</Text>
+                  </View>
+                ))}
+              </View>
+              <View style={styles.trendGroup}>
+                <Text style={styles.fieldLabel}>Missed chores</Text>
+                {reporting.organization.recentMissedChoreTrend.map((point) => (
+                  <View key={`chores-${point.key}`} style={styles.trendRow}>
+                    <Text style={styles.metaText}>{point.label}</Text>
+                    <Text style={styles.rowTitle}>{point.count}</Text>
+                  </View>
+                ))}
+              </View>
+            </GlassCard>
+          </>
+        ) : null}
+
+        {view.kind === "HOUSE_DETAIL" && focusedHouseDetail && focusedHouseReporting ? (
+          <>
+            <GlassCard style={styles.card} strong>
+              <Text style={styles.sectionTitle}>House Reporting</Text>
               <Text style={styles.metaText}>{focusedHouseDetail.address}</Text>
               <Text style={styles.metaText}>
                 {focusedHouseDetail.groupName} •{" "}
@@ -501,14 +679,48 @@ export function SoberHouseOwnerDashboard({
                   : "Pending address resolution"}
               </Text>
               <Text style={styles.metaText}>
-                Residents {focusedHouseDetail.activeResidents} • Staff{" "}
-                {focusedHouseDetail.assignedStaffCount} • Reports{" "}
-                {focusedHouseDetail.currentReports}
+                Occupancy {focusedHouseReporting.occupiedBeds}/{focusedHouseReporting.bedCount} •
+                Residents {focusedHouseReporting.rosterCount} • Staff{" "}
+                {focusedHouseDetail.assignedStaffCount}
               </Text>
               <Text style={styles.metaText}>
-                Violations {focusedHouseDetail.activeViolations} • Under review{" "}
-                {focusedHouseDetail.underReviewViolations} • Corrective actions{" "}
-                {focusedHouseDetail.openCorrectiveActions}
+                Compliance{" "}
+                {focusedHouseReporting.compliancePercent === null
+                  ? "N/A"
+                  : `${focusedHouseReporting.compliancePercent}%`}{" "}
+                • Warning {focusedHouseReporting.warningResidents} • Critical{" "}
+                {focusedHouseReporting.criticalResidents}
+              </Text>
+              <Text style={styles.metaText}>
+                Missed chores {focusedHouseReporting.missedChoresToday} • Curfew misses{" "}
+                {focusedHouseReporting.curfewMissesThisWeek} • Open violations{" "}
+                {focusedHouseReporting.openViolations}
+              </Text>
+              <Text style={styles.metaText}>
+                Meetings{" "}
+                {focusedHouseReporting.meetingsRequired === null
+                  ? "Tracking pending"
+                  : `${focusedHouseReporting.meetingsCompleted ?? 0}/${focusedHouseReporting.meetingsRequired}`}{" "}
+                • One-on-ones{" "}
+                {focusedHouseReporting.oneOnOnesTracked
+                  ? `${focusedHouseReporting.oneOnOnesCompleted ?? 0}/${focusedHouseReporting.oneOnOnesDue ?? 0}`
+                  : "Tracking pending"}
+              </Text>
+              <Text style={styles.metaText}>
+                Sponsor calls{" "}
+                {focusedHouseReporting.sponsorCallsTracked
+                  ? `${focusedHouseReporting.sponsorCallAdherencePercent ?? 0}% adherence`
+                  : "Tracking pending"}{" "}
+                • House meetings{" "}
+                {focusedHouseReporting.residents.reduce(
+                  (total, resident) => total + resident.houseMeetingsCompleted,
+                  0,
+                )}
+                /
+                {focusedHouseReporting.residents.reduce(
+                  (total, resident) => total + resident.houseMeetingsDue,
+                  0,
+                )}
               </Text>
               {focusedHouseDetail.phone ? (
                 <Text style={styles.metaText}>Phone: {focusedHouseDetail.phone}</Text>
@@ -532,6 +744,54 @@ export function SoberHouseOwnerDashboard({
             </GlassCard>
 
             <GlassCard style={styles.card}>
+              <Text style={styles.sectionTitle}>Resident Filters</Text>
+              <View style={styles.chipRow}>
+                {RESIDENT_FILTER_OPTIONS.map((option) => (
+                  <Pressable
+                    key={option.id}
+                    style={[styles.chip, residentFilter === option.id ? styles.chipSelected : null]}
+                    onPress={() => setResidentFilter(option.id)}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        residentFilter === option.id ? styles.chipTextSelected : null,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+              {filteredHouseResidents.length === 0 ? (
+                <Text style={styles.metaText}>
+                  No residents match the current reporting filter.
+                </Text>
+              ) : (
+                filteredHouseResidents.map((resident) => (
+                  <Pressable
+                    key={resident.residentId}
+                    style={[styles.rowCard, toneStyle(complianceTone(resident.complianceBand))]}
+                    onPress={() =>
+                      setView({ kind: "RESIDENT_DETAIL", residentId: resident.residentId })
+                    }
+                  >
+                    <Text style={styles.rowTitle}>{resident.displayName}</Text>
+                    <Text style={styles.metaText}>
+                      {complianceLabel(resident.complianceBand)} • Score {resident.complianceScore}{" "}
+                      • {resident.trend}
+                    </Text>
+                    <Text style={styles.metaText}>
+                      Chores {resident.choresCompleted}/{resident.choresAssigned} • Curfew misses{" "}
+                      {resident.curfewMissesThisWeek} • Open violations {resident.openViolations}
+                    </Text>
+                    <Text style={styles.metaText}>{resident.statusReasons[0]}</Text>
+                  </Pressable>
+                ))
+              )}
+            </GlassCard>
+
+            <GlassCard style={styles.card}>
               <Text style={styles.sectionTitle}>Recent Violations</Text>
               {focusedHouseDetail.violations.length === 0 ? (
                 <Text style={styles.metaText}>No violations recorded for this house.</Text>
@@ -548,6 +808,185 @@ export function SoberHouseOwnerDashboard({
                   </View>
                 ))
               )}
+            </GlassCard>
+          </>
+        ) : null}
+
+        {view.kind === "RESIDENT_DETAIL" && focusedResidentReporting ? (
+          <>
+            <GlassCard
+              style={[
+                styles.card,
+                toneStyle(complianceTone(focusedResidentReporting.complianceBand)),
+              ]}
+              strong
+            >
+              <Text style={styles.sectionTitle}>Resident Compliance Profile</Text>
+              <Text style={styles.metaText}>
+                {focusedResidentReporting.houseName} • {focusedResidentReporting.houseGroupName}
+              </Text>
+              <Text style={styles.metaText}>
+                {complianceLabel(focusedResidentReporting.complianceBand)} • Score{" "}
+                {focusedResidentReporting.complianceScore} • Trend {focusedResidentReporting.trend}
+              </Text>
+              <Text style={styles.metaText}>
+                {focusedResidentReporting.statusReasons.join(" • ")}
+              </Text>
+            </GlassCard>
+
+            <View style={styles.kpiGrid}>
+              <GlassCard style={styles.kpiCard}>
+                <Text style={styles.kpiValue}>
+                  {focusedResidentReporting.meetingsTracked
+                    ? `${focusedResidentReporting.meetingsCompleted ?? 0}/${focusedResidentReporting.meetingsRequired ?? 0}`
+                    : "N/A"}
+                </Text>
+                <Text style={styles.kpiLabel}>Meetings</Text>
+                <Text style={styles.kpiDetail}>
+                  {focusedResidentReporting.meetingsTracked
+                    ? "Required vs completed"
+                    : "Tracking not compiled for this resident yet."}
+                </Text>
+              </GlassCard>
+              <GlassCard style={styles.kpiCard}>
+                <Text style={styles.kpiValue}>
+                  {focusedResidentReporting.choresCompleted}/
+                  {focusedResidentReporting.choresAssigned}
+                </Text>
+                <Text style={styles.kpiLabel}>Chores</Text>
+                <Text style={styles.kpiDetail}>
+                  {focusedResidentReporting.overdueChores} overdue •{" "}
+                  {focusedResidentReporting.missingProofCount} missing proof
+                </Text>
+              </GlassCard>
+              <GlassCard style={styles.kpiCard}>
+                <Text style={styles.kpiValue}>{focusedResidentReporting.curfewMissesThisWeek}</Text>
+                <Text style={styles.kpiLabel}>Curfew misses</Text>
+                <Text style={styles.kpiDetail}>Current week</Text>
+              </GlassCard>
+              <GlassCard style={styles.kpiCard}>
+                <Text style={styles.kpiValue}>
+                  {focusedResidentReporting.houseMeetingsCompleted}/
+                  {focusedResidentReporting.houseMeetingsDue}
+                </Text>
+                <Text style={styles.kpiLabel}>House meetings</Text>
+                <Text style={styles.kpiDetail}>Required this week</Text>
+              </GlassCard>
+              <GlassCard style={styles.kpiCard}>
+                <Text style={styles.kpiValue}>
+                  {focusedResidentReporting.oneOnOnesTracked
+                    ? `${focusedResidentReporting.oneOnOnesCompleted ?? 0}/${focusedResidentReporting.oneOnOnesDue ?? 0}`
+                    : (focusedResidentReporting.oneOnOnesDue ?? 0)}
+                </Text>
+                <Text style={styles.kpiLabel}>One-on-ones</Text>
+                <Text style={styles.kpiDetail}>
+                  {focusedResidentReporting.oneOnOnesTracked
+                    ? "Due vs completed"
+                    : "Due count only. Completion tracking pending."}
+                </Text>
+              </GlassCard>
+              <GlassCard style={styles.kpiCard}>
+                <Text style={styles.kpiValue}>
+                  {focusedResidentReporting.sponsorCallsTracked
+                    ? `${focusedResidentReporting.sponsorCallsCompleted ?? 0}/${focusedResidentReporting.sponsorCallsDue ?? 0}`
+                    : (focusedResidentReporting.sponsorCallsDue ?? 0)}
+                </Text>
+                <Text style={styles.kpiLabel}>Sponsor calls</Text>
+                <Text style={styles.kpiDetail}>
+                  {focusedResidentReporting.sponsorCallsTracked
+                    ? "Due vs completed"
+                    : "No explicit sponsor-call completions logged yet."}
+                </Text>
+              </GlassCard>
+              <GlassCard style={styles.kpiCard}>
+                <Text style={styles.kpiValue}>
+                  {focusedResidentReporting.jobApplicationsTracked
+                    ? `${focusedResidentReporting.jobApplicationsCompleted ?? 0}/${focusedResidentReporting.jobApplicationsDue ?? 0}`
+                    : focusedResidentReporting.workRequired
+                      ? focusedResidentReporting.workVerifiedThisWeek === true
+                        ? "Met"
+                        : focusedResidentReporting.workVerifiedThisWeek === false
+                          ? "Due"
+                          : "N/A"
+                      : "N/A"}
+                </Text>
+                <Text style={styles.kpiLabel}>Work / job search</Text>
+                <Text style={styles.kpiDetail}>
+                  {focusedResidentReporting.jobApplicationsTracked
+                    ? "Applications due vs completed"
+                    : focusedResidentReporting.workTracked
+                      ? "Employment accountability state"
+                      : "Not applicable"}
+                </Text>
+              </GlassCard>
+            </View>
+
+            <GlassCard style={styles.card}>
+              <Text style={styles.sectionTitle}>Completion Actions</Text>
+              <Text style={styles.metaText}>
+                Log explicit sober-house completions so operator reporting reflects real event data.
+              </Text>
+              <View style={styles.actionRow}>
+                <AppButton
+                  title="Mark one-on-one complete"
+                  variant="secondary"
+                  onPress={() => onMarkOneOnOneCompleted(focusedResidentReporting.residentId)}
+                />
+                {focusedResidentReporting.sponsorCallsDue &&
+                focusedResidentReporting.sponsorCallsDue > 0 ? (
+                  <AppButton
+                    title="Log sponsor call"
+                    variant="secondary"
+                    onPress={() => onLogSponsorCallCompleted(focusedResidentReporting.residentId)}
+                  />
+                ) : null}
+              </View>
+              {focusedResidentReporting.houseMeetingsDue > 0 ? (
+                <View style={styles.actionRow}>
+                  <AppButton
+                    title="Mark house meeting attended"
+                    variant="secondary"
+                    onPress={() =>
+                      onMarkHouseMeetingAttendance(focusedResidentReporting.residentId, "COMPLETED")
+                    }
+                  />
+                  <AppButton
+                    title="Mark house meeting missed"
+                    variant="secondary"
+                    onPress={() =>
+                      onMarkHouseMeetingAttendance(focusedResidentReporting.residentId, "MISSED")
+                    }
+                  />
+                </View>
+              ) : null}
+            </GlassCard>
+
+            <GlassCard style={styles.card}>
+              <Text style={styles.sectionTitle}>Violations and Proof</Text>
+              <Text style={styles.metaText}>
+                Open violations {focusedResidentReporting.openViolations} • Active incidents{" "}
+                {focusedResidentReporting.unresolvedIncidents}
+              </Text>
+              <Text style={styles.metaText}>
+                Missing proof {focusedResidentReporting.missingProofCount} • Sponsor tracking{" "}
+                {focusedResidentReporting.sponsorCallsTracked ? "enabled" : "not tracked"}
+              </Text>
+              <View style={styles.actionRow}>
+                <AppButton
+                  title="Back to house"
+                  variant="secondary"
+                  onPress={() =>
+                    focusedResidentReporting.houseId
+                      ? setView({ kind: "HOUSE_DETAIL", houseId: focusedResidentReporting.houseId })
+                      : setView({ kind: "REPORTS" })
+                  }
+                />
+                <AppButton
+                  title="Open reports"
+                  variant="secondary"
+                  onPress={() => setView({ kind: "REPORTS" })}
+                />
+              </View>
             </GlassCard>
           </>
         ) : null}
@@ -644,9 +1083,9 @@ export function SoberHouseOwnerDashboard({
             </GlassCard>
 
             <View style={styles.kpiGrid}>
-              {summary.kpis.map((tile) => (
-                <Pressable key={tile.id} onPress={() => openTile(tile.id)}>
-                  <GlassCard style={[styles.kpiCard, toneStyle(tile.tone)]}>
+              {operatorMetricCards.map((tile) => (
+                <Pressable key={tile.label} onPress={() => setView({ kind: "REPORTS" })}>
+                  <GlassCard style={styles.kpiCard}>
                     <Text style={styles.kpiValue}>{tile.value}</Text>
                     <Text style={styles.kpiLabel}>{tile.label}</Text>
                     <Text style={styles.kpiDetail}>{tile.detail}</Text>
@@ -656,11 +1095,11 @@ export function SoberHouseOwnerDashboard({
             </View>
 
             <GlassCard style={styles.card}>
-              <Text style={styles.sectionTitle}>House KPIs</Text>
-              {summary.houseRows.length === 0 ? (
+              <Text style={styles.sectionTitle}>Houses by Compliance</Text>
+              {reporting.houses.length === 0 ? (
                 <Text style={styles.metaText}>No houses match the current filter scope.</Text>
               ) : (
-                summary.houseRows.map((row) => (
+                reporting.houses.map((row) => (
                   <Pressable
                     key={row.houseId}
                     style={styles.rowCard}
@@ -668,11 +1107,14 @@ export function SoberHouseOwnerDashboard({
                   >
                     <Text style={styles.rowTitle}>{row.houseName}</Text>
                     <Text style={styles.metaText}>
-                      {row.groupName} • {row.status === "ACTIVE" ? "Active" : "Inactive"}
+                      {row.groupName} •{" "}
+                      {row.compliancePercent === null
+                        ? "N/A"
+                        : `${row.compliancePercent}% compliance`}
                     </Text>
                     <Text style={styles.metaText}>
-                      Violations {row.activeViolations} • Under review {row.underReviewViolations} •
-                      Corrective actions {row.correctiveActionsOpen} • Reports {row.currentReports}
+                      Residents {row.rosterCount} • Warning {row.warningResidents} • Critical{" "}
+                      {row.criticalResidents} • Open violations {row.openViolations}
                     </Text>
                   </Pressable>
                 ))
@@ -680,22 +1122,26 @@ export function SoberHouseOwnerDashboard({
             </GlassCard>
 
             <GlassCard style={styles.card}>
-              <Text style={styles.sectionTitle}>Areas of Concern</Text>
-              {summary.concerns.map((concern) => (
-                <Pressable
-                  key={concern.id}
-                  style={[styles.rowCard, toneStyle(concern.tone)]}
-                  onPress={() =>
-                    concern.id === "clear"
-                      ? undefined
-                      : setView({ kind: "HOUSE_VIOLATIONS", houseId: concern.id })
-                  }
-                  disabled={concern.id === "clear"}
-                >
-                  <Text style={styles.rowTitle}>{concern.title}</Text>
-                  <Text style={styles.metaText}>{concern.detail}</Text>
-                </Pressable>
-              ))}
+              <Text style={styles.sectionTitle}>Highest-Risk Residents</Text>
+              {reporting.organization.highestRiskResidents.length === 0 ? (
+                <Text style={styles.metaText}>No residents in scope yet.</Text>
+              ) : (
+                reporting.organization.highestRiskResidents.map((concern) => (
+                  <Pressable
+                    key={concern.residentId}
+                    style={[styles.rowCard, toneStyle(complianceTone(concern.complianceBand))]}
+                    onPress={() =>
+                      setView({ kind: "RESIDENT_DETAIL", residentId: concern.residentId })
+                    }
+                  >
+                    <Text style={styles.rowTitle}>{concern.residentName}</Text>
+                    <Text style={styles.metaText}>
+                      {concern.houseName} • {complianceLabel(concern.complianceBand)}
+                    </Text>
+                    <Text style={styles.metaText}>{concern.detail}</Text>
+                  </Pressable>
+                ))
+              )}
             </GlassCard>
           </>
         ) : null}
@@ -881,5 +1327,16 @@ const styles = StyleSheet.create({
     color: Design.color.textPrimary,
     fontSize: 15,
     fontWeight: "800",
+  },
+  trendGroup: {
+    gap: 6,
+    marginTop: 4,
+  },
+  trendRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingVertical: 2,
   },
 });

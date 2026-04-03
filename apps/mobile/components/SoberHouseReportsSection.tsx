@@ -1,8 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { loadAttendanceRecords, loadMeetingAttendanceLogs } from "../lib/attendance/storage";
+import {
+  exportSoberHouseOperatorReportCsv,
+  exportSoberHouseOperatorReportPdf,
+} from "../lib/pdf/exportSoberHouseOperatorReport";
 import { exportSoberHouseMonthlyReportPdf } from "../lib/pdf/exportSoberHouseMonthlyReportPdf";
 import { currentMonthKey } from "../lib/soberHouse/monthlyWindow";
+import {
+  upsertOperatorReportExportRecord,
+  upsertScheduledSummaryRecord,
+} from "../lib/soberHouse/mutations";
+import { buildSoberHouseOperatorReportingSummary } from "../lib/soberHouse/operatorReporting";
+import {
+  buildDefaultOperatorReportFilters,
+  buildScheduledSummaryDraft,
+  buildSoberHouseOperatorReportDocument,
+} from "../lib/soberHouse/reportingExports";
 import {
   generateHouseMonthlyReport,
   generateResidentMonthlyReport,
@@ -21,6 +35,10 @@ import type {
   AuditActor,
   HouseMonthlyReportSnapshot,
   MonthlyReport,
+  OperatorReportComplianceBandFilter,
+  OperatorReportExportType,
+  OperatorReportFilterSnapshot,
+  OperatorScheduledSummaryType,
   MonthlyReportStatus,
   ResidentMonthlyReportSnapshot,
   SoberHouseSettingsStore,
@@ -91,6 +109,40 @@ function KpiCard({ label, value, detail }: { label: string; value: string; detai
       <Text style={styles.kpiDetail}>{detail}</Text>
     </View>
   );
+}
+
+function operatorReportLabel(value: OperatorReportExportType): string {
+  switch (value) {
+    case "RESIDENT_COMPLIANCE_SUMMARY":
+      return "Resident";
+    case "HOUSE_COMPLIANCE_REPORT":
+      return "House";
+    case "ORGANIZATION_ROLLUP_REPORT":
+      return "Organization";
+    case "VIOLATIONS_INCIDENTS_EXPORT":
+      return "Violations";
+    case "OVERDUE_MISSING_PROOF_REPORT":
+      return "Missing proof";
+    default:
+      return value;
+  }
+}
+
+function operatorSummaryLabel(value: OperatorScheduledSummaryType): string {
+  switch (value) {
+    case "DAILY_HOUSE":
+      return "Daily house";
+    case "WEEKLY_HOUSE_MANAGER":
+      return "Weekly manager";
+    case "WEEKLY_ORGANIZATION":
+      return "Weekly organization";
+    default:
+      return value;
+  }
+}
+
+function complianceBandLabel(value: OperatorReportComplianceBandFilter): string {
+  return value === "ALL" ? "All statuses" : value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function RenderResidentReport({ snapshot }: { snapshot: ResidentMonthlyReportSnapshot }) {
@@ -282,6 +334,12 @@ export function SoberHouseReportsSection({ userId, store, actor, isSaving, onPer
     operationalConcerns: "",
     followUpPriorities: "",
   });
+  const [operatorReportType, setOperatorReportType] = useState<OperatorReportExportType>(
+    "ORGANIZATION_ROLLUP_REPORT",
+  );
+  const [operatorFilters, setOperatorFilters] = useState<OperatorReportFilterSnapshot>(() =>
+    buildDefaultOperatorReportFilters(store, new Date().toISOString()),
+  );
 
   const canManageReports = store.residentHousingProfile?.linkedUserId !== actor.id;
 
@@ -306,6 +364,72 @@ export function SoberHouseReportsSection({ userId, store, actor, isSaving, onPer
     }
     setSelectedHouseId(store.residentHousingProfile?.houseId ?? store.houses[0]?.id ?? null);
   }, [selectedHouseId, store.houses, store.residentHousingProfile?.houseId]);
+
+  const operatorSummary = useMemo(
+    () => buildSoberHouseOperatorReportingSummary({ store, nowIso: new Date().toISOString() }),
+    [store],
+  );
+  const operatorResidentOptions = useMemo(
+    () =>
+      operatorSummary.residents.filter((resident) =>
+        operatorFilters.houseId ? resident.houseId === operatorFilters.houseId : true,
+      ),
+    [operatorFilters.houseId, operatorSummary.residents],
+  );
+  const operatorPreview = useMemo(
+    () =>
+      buildSoberHouseOperatorReportDocument({
+        store,
+        nowIso: new Date().toISOString(),
+        filters: operatorFilters,
+        reportType: operatorReportType,
+      }),
+    [operatorFilters, operatorReportType, store],
+  );
+  const recentOperatorExports = useMemo(
+    () =>
+      [...store.operatorReportExports].sort(
+        (left, right) =>
+          new Date(right.generatedAt).getTime() - new Date(left.generatedAt).getTime(),
+      ),
+    [store.operatorReportExports],
+  );
+  const recentScheduledSummaries = useMemo(
+    () =>
+      [...store.scheduledSummaryRecords].sort(
+        (left, right) =>
+          new Date(right.generatedAt).getTime() - new Date(left.generatedAt).getTime(),
+      ),
+    [store.scheduledSummaryRecords],
+  );
+
+  useEffect(() => {
+    setOperatorFilters((current) => {
+      const nextHouseId =
+        current.houseId && store.houses.some((house) => house.id === current.houseId)
+          ? current.houseId
+          : null;
+      const nextResidentId =
+        current.residentId &&
+        operatorSummary.residents.some((resident) => resident.residentId === current.residentId)
+          ? current.residentId
+          : null;
+      const nextOrganizationId = store.organization?.id ?? null;
+      if (
+        nextHouseId === current.houseId &&
+        nextResidentId === current.residentId &&
+        nextOrganizationId === current.organizationId
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        organizationId: nextOrganizationId,
+        houseId: nextHouseId,
+        residentId: nextResidentId,
+      };
+    });
+  }, [operatorSummary.residents, store.houses, store.organization?.id]);
 
   const residentReports = useMemo(
     () =>
@@ -562,6 +686,93 @@ export function SoberHouseReportsSection({ userId, store, actor, isSaving, onPer
     }
   }, [actor, canManageSelectedReport, onPersist, selectedReport, store]);
 
+  const patchOperatorFilters = useCallback((patch: Partial<OperatorReportFilterSnapshot>) => {
+    setOperatorFilters((current) => ({ ...current, ...patch }));
+  }, []);
+
+  const exportOperatorReport = useCallback(
+    async (format: "PDF" | "CSV") => {
+      if (!canManageReports) {
+        return;
+      }
+      try {
+        const timestamp = new Date().toISOString();
+        const document = buildSoberHouseOperatorReportDocument({
+          store,
+          nowIso: timestamp,
+          filters: operatorFilters,
+          reportType: operatorReportType,
+        });
+        const fileRef =
+          format === "PDF"
+            ? await exportSoberHouseOperatorReportPdf(document)
+            : await exportSoberHouseOperatorReportCsv(document);
+        const result = upsertOperatorReportExportRecord(
+          store,
+          actor,
+          {
+            reportType: operatorReportType,
+            format,
+            scopeType: operatorFilters.residentId
+              ? "RESIDENT"
+              : operatorFilters.houseId
+                ? "HOUSE"
+                : "ORGANIZATION",
+            organizationId: store.organization?.id ?? null,
+            houseId: operatorFilters.houseId,
+            residentId: operatorFilters.residentId,
+            periodStart: `${operatorFilters.startDate}T00:00:00.000Z`,
+            periodEnd: `${operatorFilters.endDate}T23:59:59.999Z`,
+            generatedAt: timestamp,
+            generatedBy: actor,
+            title: document.title,
+            fileRef,
+            itemCount: document.itemCount,
+            filters: operatorFilters,
+          },
+          timestamp,
+        );
+        await onPersist(result.store, `${format} operator report generated.`);
+        setLocalStatus(null);
+      } catch (error) {
+        setLocalStatus(
+          error instanceof Error ? error.message : `Unable to generate ${format} operator report.`,
+        );
+      }
+    },
+    [actor, canManageReports, onPersist, operatorFilters, operatorReportType, store],
+  );
+
+  const generateScheduledSummary = useCallback(
+    async (summaryType: OperatorScheduledSummaryType) => {
+      if (!canManageReports) {
+        return;
+      }
+      try {
+        const timestamp = new Date().toISOString();
+        const draft = buildScheduledSummaryDraft({
+          store,
+          nowIso: timestamp,
+          filters: operatorFilters,
+          summaryType,
+        });
+        const result = upsertScheduledSummaryRecord(
+          store,
+          actor,
+          { ...draft, generatedBy: actor },
+          timestamp,
+        );
+        await onPersist(result.store, `${operatorSummaryLabel(summaryType)} generated.`);
+        setLocalStatus(null);
+      } catch (error) {
+        setLocalStatus(
+          error instanceof Error ? error.message : "Unable to generate scheduled summary.",
+        );
+      }
+    },
+    [actor, canManageReports, onPersist, operatorFilters, store],
+  );
+
   return (
     <GlassCard style={styles.card}>
       <View style={styles.headerRow}>
@@ -572,6 +783,257 @@ export function SoberHouseReportsSection({ userId, store, actor, isSaving, onPer
           </Text>
         </View>
       </View>
+
+      {canManageReports ? (
+        <View style={styles.workflowCard}>
+          <Text style={styles.subsectionTitle}>Operator reporting console</Text>
+          <Text style={styles.sectionMeta}>
+            Generate filtered operator PDFs, CSV exports, and in-app daily/weekly summaries from the
+            live sober-house compliance model.
+          </Text>
+
+          <View style={styles.controlsRow}>
+            <View style={styles.controlBlock}>
+              <Text style={styles.fieldLabel}>Report type</Text>
+              <View style={styles.selectorRow}>
+                {(
+                  [
+                    "ORGANIZATION_ROLLUP_REPORT",
+                    "HOUSE_COMPLIANCE_REPORT",
+                    "RESIDENT_COMPLIANCE_SUMMARY",
+                    "VIOLATIONS_INCIDENTS_EXPORT",
+                    "OVERDUE_MISSING_PROOF_REPORT",
+                  ] as OperatorReportExportType[]
+                ).map((type) => (
+                  <Chip
+                    key={type}
+                    label={operatorReportLabel(type)}
+                    selected={operatorReportType === type}
+                    onPress={() => setOperatorReportType(type)}
+                  />
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.dateRangeRow}>
+              <View style={[styles.controlBlock, styles.dateControl]}>
+                <Text style={styles.fieldLabel}>Start date</Text>
+                <TextInput
+                  style={styles.input}
+                  value={operatorFilters.startDate}
+                  onChangeText={(value) => patchOperatorFilters({ startDate: value })}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  autoCapitalize="none"
+                />
+              </View>
+              <View style={[styles.controlBlock, styles.dateControl]}>
+                <Text style={styles.fieldLabel}>End date</Text>
+                <TextInput
+                  style={styles.input}
+                  value={operatorFilters.endDate}
+                  onChangeText={(value) => patchOperatorFilters({ endDate: value })}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={INPUT_PLACEHOLDER_COLOR}
+                  autoCapitalize="none"
+                />
+              </View>
+            </View>
+
+            <View style={styles.controlBlock}>
+              <Text style={styles.fieldLabel}>House scope</Text>
+              <View style={styles.selectorRow}>
+                <Chip
+                  label="All houses"
+                  selected={operatorFilters.houseId === null}
+                  onPress={() => patchOperatorFilters({ houseId: null, residentId: null })}
+                />
+                {store.houses.map((house) => (
+                  <Chip
+                    key={house.id}
+                    label={house.name}
+                    selected={operatorFilters.houseId === house.id}
+                    onPress={() => patchOperatorFilters({ houseId: house.id, residentId: null })}
+                  />
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.controlBlock}>
+              <Text style={styles.fieldLabel}>Resident scope</Text>
+              <View style={styles.selectorRow}>
+                <Chip
+                  label="All residents"
+                  selected={operatorFilters.residentId === null}
+                  onPress={() => patchOperatorFilters({ residentId: null })}
+                />
+                {operatorResidentOptions.map((resident) => (
+                  <Chip
+                    key={resident.residentId}
+                    label={resident.displayName}
+                    selected={operatorFilters.residentId === resident.residentId}
+                    onPress={() => patchOperatorFilters({ residentId: resident.residentId })}
+                  />
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.controlBlock}>
+              <Text style={styles.fieldLabel}>Compliance band</Text>
+              <View style={styles.selectorRow}>
+                {(
+                  [
+                    "ALL",
+                    "compliant",
+                    "warning",
+                    "noncompliant",
+                    "critical",
+                  ] as OperatorReportComplianceBandFilter[]
+                ).map((band) => (
+                  <Chip
+                    key={band}
+                    label={complianceBandLabel(band)}
+                    selected={operatorFilters.complianceBand === band}
+                    onPress={() => patchOperatorFilters({ complianceBand: band })}
+                  />
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.controlBlock}>
+              <Text style={styles.fieldLabel}>Focus filters</Text>
+              <View style={styles.selectorRow}>
+                <Chip
+                  label="Open violations"
+                  selected={operatorFilters.onlyOpenViolations}
+                  onPress={() =>
+                    patchOperatorFilters({
+                      onlyOpenViolations: !operatorFilters.onlyOpenViolations,
+                    })
+                  }
+                />
+                <Chip
+                  label="Missing proof"
+                  selected={operatorFilters.onlyMissingProof}
+                  onPress={() =>
+                    patchOperatorFilters({ onlyMissingProof: !operatorFilters.onlyMissingProof })
+                  }
+                />
+                <Chip
+                  label="Overdue only"
+                  selected={operatorFilters.onlyOverdue}
+                  onPress={() =>
+                    patchOperatorFilters({ onlyOverdue: !operatorFilters.onlyOverdue })
+                  }
+                />
+                <Chip
+                  label="High risk"
+                  selected={operatorFilters.highRiskOnly}
+                  onPress={() =>
+                    patchOperatorFilters({ highRiskOnly: !operatorFilters.highRiskOnly })
+                  }
+                />
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.kpiGrid}>
+            {operatorPreview.metrics.map((metric) => (
+              <KpiCard
+                key={metric.label}
+                label={metric.label}
+                value={metric.value}
+                detail={metric.detail}
+              />
+            ))}
+          </View>
+
+          <View style={styles.buttonRow}>
+            <AppButton
+              title="Export PDF"
+              onPress={() => void exportOperatorReport("PDF")}
+              disabled={isSaving}
+            />
+            <View style={styles.buttonSpacer} />
+            <AppButton
+              title="Export CSV"
+              variant="secondary"
+              onPress={() => void exportOperatorReport("CSV")}
+              disabled={isSaving}
+            />
+            <View style={styles.buttonSpacer} />
+            <AppButton
+              title="Daily house summary"
+              variant="secondary"
+              onPress={() => void generateScheduledSummary("DAILY_HOUSE")}
+              disabled={isSaving || !operatorFilters.houseId}
+            />
+            <View style={styles.buttonSpacer} />
+            <AppButton
+              title="Weekly manager summary"
+              variant="secondary"
+              onPress={() => void generateScheduledSummary("WEEKLY_HOUSE_MANAGER")}
+              disabled={isSaving || !operatorFilters.houseId}
+            />
+            <View style={styles.buttonSpacer} />
+            <AppButton
+              title="Weekly organization summary"
+              variant="secondary"
+              onPress={() => void generateScheduledSummary("WEEKLY_ORGANIZATION")}
+              disabled={isSaving}
+            />
+          </View>
+
+          <View style={styles.inboxLayout}>
+            <View style={styles.threadList}>
+              <Text style={styles.subsectionTitle}>Recent operator exports</Text>
+              {recentOperatorExports.length === 0 ? (
+                <Text style={styles.sectionMeta}>No operator exports have been generated yet.</Text>
+              ) : (
+                recentOperatorExports.slice(0, 6).map((record) => (
+                  <View key={record.id} style={styles.threadRow}>
+                    <Text style={styles.threadTitle}>{record.title}</Text>
+                    <Text style={styles.threadMeta}>
+                      {operatorReportLabel(record.reportType)} • {record.format} •{" "}
+                      {record.itemCount} items
+                    </Text>
+                    <Text style={styles.threadMeta}>
+                      {record.filters.startDate} to {record.filters.endDate} •{" "}
+                      {formatIso(record.generatedAt)}
+                    </Text>
+                    <Text style={styles.threadPreview}>{record.fileRef}</Text>
+                  </View>
+                ))
+              )}
+            </View>
+
+            <View style={styles.threadList}>
+              <Text style={styles.subsectionTitle}>Recent scheduled summaries</Text>
+              {recentScheduledSummaries.length === 0 ? (
+                <Text style={styles.sectionMeta}>
+                  No daily or weekly summaries have been generated yet.
+                </Text>
+              ) : (
+                recentScheduledSummaries.slice(0, 6).map((record) => (
+                  <View key={record.id} style={styles.threadRow}>
+                    <Text style={styles.threadTitle}>{record.title}</Text>
+                    <Text style={styles.threadMeta}>
+                      {operatorSummaryLabel(record.summaryType)} • {record.filters.startDate} to{" "}
+                      {record.filters.endDate}
+                    </Text>
+                    <Text style={styles.threadPreview}>{record.subtitle}</Text>
+                    {record.metrics.slice(0, 3).map((metric) => (
+                      <Text key={metric.label} style={styles.threadMeta}>
+                        {metric.label}: {metric.value}
+                      </Text>
+                    ))}
+                  </View>
+                ))
+              )}
+            </View>
+          </View>
+        </View>
+      ) : null}
 
       <View style={styles.controlsRow}>
         <View style={styles.controlBlock}>
@@ -969,6 +1431,13 @@ const styles = StyleSheet.create({
   },
   controlsRow: {
     gap: spacing.md,
+  },
+  dateRangeRow: {
+    flexDirection: "row",
+    gap: spacing.sm,
+  },
+  dateControl: {
+    flex: 1,
   },
   controlBlock: {
     gap: spacing.xs,

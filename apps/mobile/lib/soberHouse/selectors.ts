@@ -12,6 +12,7 @@ import type {
   HouseChore,
   HouseGroup,
   HouseMeeting,
+  HouseMeetingAttendanceRecord,
   HouseRuleSet,
   HouseRuleScopeType,
   MonthlyReport,
@@ -20,6 +21,7 @@ import type {
   ScheduledWeekdayCode,
   SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
+  SponsorCallRecord,
   StaffAssignment,
   Violation,
 } from "./types";
@@ -655,6 +657,82 @@ export function getUpcomingOneOnOneSessions(
     })
     .sort(
       (left, right) => new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime(),
+    );
+}
+
+export function getResidentOneOnOneSessionsInRange(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+  rangeStartIso: string,
+  rangeEndIso: string,
+): OneOnOneSession[] {
+  const rangeStartMs = new Date(rangeStartIso).getTime();
+  const rangeEndMs = new Date(rangeEndIso).getTime();
+  return store.oneOnOneSessions
+    .filter((session) => session.residentId === residentId && session.status === "ACTIVE")
+    .filter((session) => {
+      const scheduledAtMs = new Date(session.scheduledAt).getTime();
+      return (
+        Number.isFinite(scheduledAtMs) &&
+        scheduledAtMs >= rangeStartMs &&
+        scheduledAtMs < rangeEndMs
+      );
+    })
+    .sort(
+      (left, right) => new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime(),
+    );
+}
+
+export function getResidentSponsorCallRecordsInRange(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+  rangeStartIso: string,
+  rangeEndIso: string,
+): SponsorCallRecord[] {
+  const rangeStartMs = new Date(rangeStartIso).getTime();
+  const rangeEndMs = new Date(rangeEndIso).getTime();
+  return store.sponsorCallRecords
+    .filter((record) => record.residentId === residentId)
+    .filter((record) => {
+      const scheduledMs = record.scheduledFor ? new Date(record.scheduledFor).getTime() : null;
+      const completedMs = record.completedAt ? new Date(record.completedAt).getTime() : null;
+      return (
+        (scheduledMs !== null &&
+          Number.isFinite(scheduledMs) &&
+          scheduledMs >= rangeStartMs &&
+          scheduledMs < rangeEndMs) ||
+        (completedMs !== null &&
+          Number.isFinite(completedMs) &&
+          completedMs >= rangeStartMs &&
+          completedMs < rangeEndMs)
+      );
+    })
+    .sort((left, right) => {
+      const leftAt = left.scheduledFor ?? left.completedAt ?? left.createdAt;
+      const rightAt = right.scheduledFor ?? right.completedAt ?? right.createdAt;
+      return new Date(leftAt).getTime() - new Date(rightAt).getTime();
+    });
+}
+
+export function getResidentHouseMeetingAttendanceRecordsInRange(
+  store: SoberHouseSettingsStore,
+  residentId: string,
+  rangeStartIso: string,
+  rangeEndIso: string,
+): HouseMeetingAttendanceRecord[] {
+  const rangeStartMs = new Date(rangeStartIso).getTime();
+  const rangeEndMs = new Date(rangeEndIso).getTime();
+  return store.houseMeetingAttendanceRecords
+    .filter((record) => record.residentId === residentId)
+    .filter((record) => {
+      const scheduledMs = new Date(record.scheduledStartAt).getTime();
+      return (
+        Number.isFinite(scheduledMs) && scheduledMs >= rangeStartMs && scheduledMs < rangeEndMs
+      );
+    })
+    .sort(
+      (left, right) =>
+        new Date(left.scheduledStartAt).getTime() - new Date(right.scheduledStartAt).getTime(),
     );
 }
 

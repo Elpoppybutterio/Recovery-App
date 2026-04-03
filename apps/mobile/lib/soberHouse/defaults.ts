@@ -6,6 +6,7 @@ import type {
   ChatThread,
   ChoreCompletionRecord,
   CorrectiveAction,
+  EnforcementRecord,
   EvidenceItem,
   House,
   HouseAlertAnnouncement,
@@ -18,8 +19,12 @@ import type {
   MonthlyReport,
   Organization,
   OneOnOneSession,
+  OperatorReportExportRecord,
+  ProofReviewRecord,
+  ScheduledSummaryRecord,
   RecurringObligation,
   ResidentHouseMembership,
+  SponsorCallRecord,
   SoberHouseUserAccessProfile,
   SoberHouseSettingsStore,
   StaffAssignment,
@@ -60,6 +65,7 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     residentRequirementProfile: null,
     residentConsentRecord: null,
     residentWizardDraft: null,
+    sponsorCallRecords: [],
     houseMeetingAttendanceRecords: [],
     choreCompletionRecords: [],
     jobApplicationRecords: [],
@@ -72,6 +78,10 @@ export function createDefaultSoberHouseSettingsStore(): SoberHouseSettingsStore 
     chatMessages: [],
     chatMessageReceipts: [],
     monthlyReports: [],
+    operatorReportExports: [],
+    scheduledSummaryRecords: [],
+    proofReviewRecords: [],
+    enforcementRecords: [],
     auditLogEntries: [],
   };
 }
@@ -403,6 +413,11 @@ export function createDefaultOneOnOneSession(
     inAppReminderEnabled: false,
     addToCalendar: false,
     managerConfirmationRequired: false,
+    completionStatus: "SCHEDULED",
+    completedAt: null,
+    completedByStaffAssignmentId: null,
+    excusedAt: null,
+    excusedReason: null,
     status: "ACTIVE",
     createdAt: now,
     updatedAt: now,
@@ -515,7 +530,40 @@ export function createDefaultHouseMeetingAttendanceRecord(
     houseMeetingId: null,
     recurringObligationId: null,
     scheduledStartAt: now,
+    status: "COMPLETED",
     attendedAt: now,
+    excusedAt: null,
+    excusedReason: null,
+    proofRequired: false,
+    proofProvided: false,
+    proofReference: null,
+    notes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultSponsorCallRecord(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("sponsor-call"),
+): SponsorCallRecord {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    organizationId,
+    houseId,
+    scheduledFor: null,
+    status: "SCHEDULED",
+    completedAt: null,
+    proofRequired: false,
+    proofProvided: false,
+    proofReference: null,
+    proofType: "CALL_LOG",
     notes: "",
     createdAt: now,
     updatedAt: now,
@@ -563,6 +611,38 @@ export function createDefaultWorkVerificationRecord(
     verifiedAt: now,
     verificationMethod: "SELF_REPORTED",
     notes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultProofReviewRecord(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("proof-review"),
+): ProofReviewRecord {
+  return {
+    id,
+    residentId,
+    linkedUserId,
+    houseId,
+    organizationId,
+    category: "CHORES",
+    sourceRecordType: "CHORE_COMPLETION",
+    sourceRecordId: "",
+    linkedEnforcementRecordId: null,
+    proofRequired: true,
+    proofProvided: false,
+    proofReference: null,
+    evidenceItemIds: [],
+    submittedAt: null,
+    status: "PENDING",
+    reviewedAt: null,
+    reviewedBy: null,
+    history: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -632,6 +712,40 @@ export function createDefaultCorrectiveAction(
     status: "OPEN",
     completedAt: null,
     completionNotes: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createDefaultEnforcementRecord(
+  now: string,
+  residentId: string,
+  linkedUserId: string,
+  organizationId: string | null,
+  houseId: string | null,
+  id = createEntityId("enforcement"),
+): EnforcementRecord {
+  return {
+    id,
+    organizationId,
+    houseId,
+    residentId,
+    linkedUserId,
+    category: "VIOLATION",
+    sourceRuleType: "other",
+    sourceSignal: "",
+    level: "REMINDER",
+    status: "OPEN",
+    reasonSummary: "",
+    recommendedAction: "",
+    assignedStaffAssignmentId: null,
+    linkedViolationId: null,
+    linkedCorrectiveActionId: null,
+    dueAt: null,
+    acknowledgedAt: null,
+    resolvedAt: null,
+    escalatedAt: null,
+    history: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -780,6 +894,74 @@ export function createDefaultMonthlyReport(
   };
 }
 
+export function createDefaultOperatorReportExportRecord(
+  now: string,
+  id = createEntityId("operator-export"),
+): OperatorReportExportRecord {
+  return {
+    id,
+    reportType: "ORGANIZATION_ROLLUP_REPORT",
+    format: "PDF",
+    scopeType: "ORGANIZATION",
+    organizationId: null,
+    houseId: null,
+    residentId: null,
+    periodStart: now,
+    periodEnd: now,
+    generatedAt: now,
+    generatedBy: { id: "system", name: "System" },
+    title: "Operator report export",
+    fileRef: "",
+    itemCount: 0,
+    filters: {
+      startDate: now.slice(0, 10),
+      endDate: now.slice(0, 10),
+      organizationId: null,
+      houseId: null,
+      residentId: null,
+      complianceBand: "ALL",
+      onlyOpenViolations: false,
+      onlyMissingProof: false,
+      onlyOverdue: false,
+      highRiskOnly: false,
+    },
+  };
+}
+
+export function createDefaultScheduledSummaryRecord(
+  now: string,
+  id = createEntityId("scheduled-summary"),
+): ScheduledSummaryRecord {
+  return {
+    id,
+    summaryType: "WEEKLY_ORGANIZATION",
+    scopeType: "ORGANIZATION",
+    organizationId: null,
+    houseId: null,
+    residentId: null,
+    periodStart: now,
+    periodEnd: now,
+    generatedAt: now,
+    generatedBy: { id: "system", name: "System" },
+    title: "Scheduled summary",
+    subtitle: "",
+    highlights: [],
+    metrics: [],
+    filters: {
+      startDate: now.slice(0, 10),
+      endDate: now.slice(0, 10),
+      organizationId: null,
+      houseId: null,
+      residentId: null,
+      complianceBand: "ALL",
+      onlyOpenViolations: false,
+      onlyMissingProof: false,
+      onlyOverdue: false,
+      highRiskOnly: false,
+    },
+  };
+}
+
 export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouseSettingsStore {
   return {
     version: store.version,
@@ -853,6 +1035,7 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
             : null,
         }
       : null,
+    sponsorCallRecords: store.sponsorCallRecords.map((record) => ({ ...record })),
     houseMeetingAttendanceRecords: store.houseMeetingAttendanceRecords.map((record) => ({
       ...record,
     })),
@@ -910,6 +1093,34 @@ export function cloneSoberHouseStore(store: SoberHouseSettingsStore): SoberHouse
         exportedBy: { ...entry.exportedBy },
       })),
       distributionMetadata: { ...report.distributionMetadata },
+    })),
+    operatorReportExports: store.operatorReportExports.map((record) => ({
+      ...record,
+      generatedBy: { ...record.generatedBy },
+      filters: { ...record.filters },
+    })),
+    scheduledSummaryRecords: store.scheduledSummaryRecords.map((record) => ({
+      ...record,
+      generatedBy: { ...record.generatedBy },
+      highlights: [...record.highlights],
+      metrics: record.metrics.map((metric) => ({ ...metric })),
+      filters: { ...record.filters },
+    })),
+    proofReviewRecords: store.proofReviewRecords.map((record) => ({
+      ...record,
+      evidenceItemIds: [...record.evidenceItemIds],
+      reviewedBy: record.reviewedBy ? { ...record.reviewedBy } : null,
+      history: record.history.map((entry) => ({
+        ...entry,
+        actor: { ...entry.actor },
+      })),
+    })),
+    enforcementRecords: store.enforcementRecords.map((record) => ({
+      ...record,
+      history: record.history.map((entry) => ({
+        ...entry,
+        actor: { ...entry.actor },
+      })),
     })),
     auditLogEntries: store.auditLogEntries.map((entry) => ({
       ...entry,

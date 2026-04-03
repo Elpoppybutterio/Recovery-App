@@ -419,6 +419,16 @@ export class InMemoryDb implements DbPool {
     });
   }
 
+  addTenantConfig(
+    record: Omit<TenantConfig, "id" | "updated_at"> & { id?: number; updated_at?: string },
+  ) {
+    this.tenantConfigs.push({
+      id: record.id ?? this.tenantConfigId++,
+      updated_at: record.updated_at ?? new Date().toISOString(),
+      ...record,
+    });
+  }
+
   addParticipantProfile(
     record: Omit<ParticipantProfile, "created_at" | "updated_at" | "display_name"> & {
       display_name?: string | null;
@@ -473,6 +483,20 @@ export class InMemoryDb implements DbPool {
         ...record,
       },
       ...this.violations.filter((entry) => entry.id !== record.id),
+    ];
+  }
+
+  addComplianceEvent(
+    record: Omit<ComplianceEvent, "created_at"> & {
+      created_at?: string;
+    },
+  ) {
+    this.complianceEvents = [
+      {
+        created_at: record.created_at ?? new Date().toISOString(),
+        ...record,
+      },
+      ...this.complianceEvents.filter((entry) => entry.id !== record.id),
     ];
   }
 
@@ -714,6 +738,50 @@ export class InMemoryDb implements DbPool {
       const rows = this.participantProfiles
         .filter((entry) => entry.tenant_id === tenantId)
         .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("from organizations") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by name asc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.organizations
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const nameCompare = left.name.localeCompare(right.name);
+          if (nameCompare !== 0) {
+            return nameCompare;
+          }
+          return left.created_at.localeCompare(right.created_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("from houses") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by name asc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.houses
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const nameCompare = left.name.localeCompare(right.name);
+          if (nameCompare !== 0) {
+            return nameCompare;
+          }
+          return left.created_at.localeCompare(right.created_at);
+        })
         .map((entry) => ({ ...entry })) as Row[];
       return {
         rowCount: rows.length,

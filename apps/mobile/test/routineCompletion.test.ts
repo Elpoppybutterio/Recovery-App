@@ -115,4 +115,19 @@ describe("morning routine completion", () => {
     expect(result.reason).toBe("completed");
     expect(result.nextDayState.completedByItemId["bb-86-88"]).toBe("2026-02-26T09:00:00.000Z");
   });
+
+  it("marks Daily Reflections complete when enabled", () => {
+    const result = completeMorningItemIfEnabled(
+      createDayState(),
+      [{ id: "daily-reflections", title: "Daily Reflections", enabled: true }],
+      "daily-reflections",
+      "2026-02-26T09:15:00.000Z",
+    );
+
+    expect(result.reason).toBe("completed");
+    expect(result.changed).toBe(true);
+    expect(result.nextDayState.completedByItemId["daily-reflections"]).toBe(
+      "2026-02-26T09:15:00.000Z",
+    );
+  });
 });

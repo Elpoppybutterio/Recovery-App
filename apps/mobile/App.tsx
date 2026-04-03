@@ -224,15 +224,20 @@ import {
   saveResidentWizardDraft,
   setHouseStatus,
   setStaffAssignmentStatus,
+  upsertHouseMeetingAttendanceRecord,
   upsertOrganization,
   upsertResidentHousingProfile,
   upsertResidentRequirementProfile,
+  upsertSponsorCallRecord,
   upsertStaffAssignment,
+  upsertOneOnOneSession,
   upsertUserAccessProfile,
 } from "./lib/soberHouse/mutations";
 import { buildResidentViolationSummary } from "./lib/soberHouse/interventions";
 import {
   getEffectiveRecurringObligationsForHouse,
+  getEffectiveRuleSetForScope,
+  getHouseMeetingsInRange,
   getRuleSetForHouse,
 } from "./lib/soberHouse/selectors";
 import {
@@ -6240,8 +6245,20 @@ export default function App() {
   );
 
   const openDailyReflectionsRead = useCallback(() => {
-    void openDailyReflections("read");
-  }, [openDailyReflections]);
+    const completionReason = completeMorningItemForCurrentDayIfEnabled(DAILY_REFLECTIONS_ITEM_ID);
+    if (completionReason === "disabled") {
+      setRoutinesStatus("Turn this checklist item on first.");
+      return;
+    }
+
+    void Linking.openURL(DAILY_REFLECTIONS_URL).catch(() => {
+      setRoutinesStatus("Read complete. Unable to open Daily Reflections.");
+    });
+
+    if (completionReason === "completed" || completionReason === "already-complete") {
+      setRoutinesStatus("Read complete.");
+    }
+  }, [completeMorningItemForCurrentDayIfEnabled]);
 
   const openDailyReflectionsListen = useCallback(() => {
     void openDailyReflections("listen");
@@ -7205,6 +7222,213 @@ export default function App() {
       await persistSoberHouseStore(result.store);
       setOwnerDashboardStatus(
         `Staff ${nextStatus === "ACTIVE" ? "reactivated" : "deactivated"} with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
+      );
+    },
+    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+  );
+  const markOwnerDashboardOneOnOneCompleted = useCallback(
+    async (residentId: string) => {
+      const timestamp = new Date().toISOString();
+      const membership =
+        soberHouseStore.residentHouseMemberships.find(
+          (item) =>
+            item.residentId === residentId && item.status === "ACTIVE" && item.moveOutDate === null,
+        ) ?? null;
+      if (!membership) {
+        setOwnerDashboardStatus("Could not find an active house membership for that resident.");
+        return;
+      }
+
+      const existingSession =
+        soberHouseStore.oneOnOneSessions
+          .filter((session) => session.residentId === residentId && session.status === "ACTIVE")
+          .sort(
+            (left, right) =>
+              new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime(),
+          )
+          .find(
+            (session) =>
+              session.completionStatus !== "COMPLETED" && session.completionStatus !== "EXCUSED",
+          ) ?? null;
+      const assignedStaffAssignmentId =
+        soberHouseStore.residentRequirementProfile?.residentId === residentId
+          ? soberHouseStore.residentRequirementProfile.oneOnOneAssignedStaffAssignmentId
+          : null;
+      const result = upsertOneOnOneSession(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        {
+          id: existingSession?.id,
+          organizationId: membership.organizationId,
+          houseId: membership.houseId,
+          residentId,
+          linkedUserId: membership.linkedUserId,
+          staffAssignmentId: existingSession?.staffAssignmentId ?? assignedStaffAssignmentId,
+          recurringObligationId: existingSession?.recurringObligationId ?? null,
+          title: existingSession?.title ?? "One-on-one",
+          notes: existingSession?.notes ?? "Completed from operator reporting.",
+          scheduledAt: existingSession?.scheduledAt ?? timestamp,
+          endsAt: existingSession?.endsAt ?? null,
+          required: existingSession?.required ?? true,
+          reminderLeadMinutes: existingSession?.reminderLeadMinutes ?? 30,
+          inAppReminderEnabled: existingSession?.inAppReminderEnabled ?? false,
+          addToCalendar: existingSession?.addToCalendar ?? false,
+          managerConfirmationRequired: existingSession?.managerConfirmationRequired ?? false,
+          completionStatus: "COMPLETED",
+          completedAt: timestamp,
+          completedByStaffAssignmentId:
+            assignedStaffAssignmentId ?? existingSession?.completedByStaffAssignmentId ?? null,
+          excusedAt: null,
+          excusedReason: null,
+          status: "ACTIVE",
+        },
+        timestamp,
+      );
+      await persistSoberHouseStore(result.store);
+      setOwnerDashboardStatus("Marked the one-on-one as completed.");
+    },
+    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+  );
+  const logOwnerDashboardSponsorCallCompleted = useCallback(
+    async (residentId: string) => {
+      const timestamp = new Date().toISOString();
+      const membership =
+        soberHouseStore.residentHouseMemberships.find(
+          (item) =>
+            item.residentId === residentId && item.status === "ACTIVE" && item.moveOutDate === null,
+        ) ?? null;
+      if (!membership) {
+        setOwnerDashboardStatus("Could not find an active house membership for that resident.");
+        return;
+      }
+      const effectiveRules = getEffectiveRuleSetForScope(
+        soberHouseStore,
+        "HOUSE",
+        membership.houseId,
+        timestamp,
+      ).ruleSet;
+      const proofType = effectiveRules.sponsorContact.proofType;
+      const existingRecord =
+        soberHouseStore.sponsorCallRecords
+          .filter((record) => record.residentId === residentId)
+          .sort(
+            (left, right) =>
+              new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+          )
+          .find((record) => record.status !== "COMPLETED" && record.status !== "EXCUSED") ?? null;
+      const result = upsertSponsorCallRecord(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        {
+          id: existingRecord?.id,
+          residentId,
+          linkedUserId: membership.linkedUserId,
+          organizationId: membership.organizationId,
+          houseId: membership.houseId,
+          scheduledFor: existingRecord?.scheduledFor ?? timestamp,
+          status: "COMPLETED",
+          completedAt: timestamp,
+          proofRequired: effectiveRules.sponsorContact.enabled,
+          proofProvided: proofType === "CALL_LOG",
+          proofReference: existingRecord?.proofReference ?? null,
+          proofType,
+          notes:
+            proofType === "CALL_LOG"
+              ? "Logged from operator reporting."
+              : "Completed from operator reporting. Proof still pending.",
+        },
+        timestamp,
+      );
+      await persistSoberHouseStore(result.store);
+      setOwnerDashboardStatus(
+        proofType === "CALL_LOG"
+          ? "Logged the sponsor call as completed."
+          : "Logged the sponsor call. Proof is still pending for this requirement.",
+      );
+    },
+    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+  );
+  const markOwnerDashboardHouseMeetingAttendance = useCallback(
+    async (residentId: string, nextStatus: "COMPLETED" | "MISSED") => {
+      const timestamp = new Date().toISOString();
+      const membership =
+        soberHouseStore.residentHouseMemberships.find(
+          (item) =>
+            item.residentId === residentId && item.status === "ACTIVE" && item.moveOutDate === null,
+        ) ?? null;
+      if (!membership) {
+        setOwnerDashboardStatus("Could not find an active house membership for that resident.");
+        return;
+      }
+      const now = new Date(timestamp);
+      const weekStart = new Date(now);
+      weekStart.setHours(0, 0, 0, 0);
+      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekEnd.getDate() + 7);
+      const dueMeetings = getHouseMeetingsInRange(
+        soberHouseStore,
+        membership.houseId,
+        weekStart.toISOString(),
+        weekEnd.toISOString(),
+      ).filter((meeting) => meeting.required);
+      const effectiveRules = getEffectiveRuleSetForScope(
+        soberHouseStore,
+        "HOUSE",
+        membership.houseId,
+        timestamp,
+      ).ruleSet;
+      const existingRecordIds = new Set(
+        soberHouseStore.houseMeetingAttendanceRecords
+          .filter((record) => record.residentId === residentId)
+          .map((record) => `${record.houseMeetingId ?? "none"}:${record.scheduledStartAt}`),
+      );
+      const selectedMeeting =
+        dueMeetings.find(
+          (meeting) => !existingRecordIds.has(`${meeting.id}:${meeting.startsAt}`),
+        ) ??
+        dueMeetings[0] ??
+        null;
+      const existingRecord =
+        selectedMeeting === null
+          ? null
+          : (soberHouseStore.houseMeetingAttendanceRecords.find(
+              (record) =>
+                record.residentId === residentId &&
+                record.houseMeetingId === selectedMeeting.id &&
+                record.scheduledStartAt === selectedMeeting.startsAt,
+            ) ?? null);
+      const result = upsertHouseMeetingAttendanceRecord(
+        soberHouseStore,
+        { id: devAuthUserId, name: devUserDisplayName },
+        {
+          id: existingRecord?.id,
+          residentId,
+          linkedUserId: membership.linkedUserId,
+          organizationId: membership.organizationId,
+          houseId: membership.houseId,
+          houseMeetingId: selectedMeeting?.id ?? null,
+          recurringObligationId: selectedMeeting?.recurringObligationId ?? null,
+          scheduledStartAt: selectedMeeting?.startsAt ?? timestamp,
+          status: nextStatus,
+          attendedAt: nextStatus === "COMPLETED" ? timestamp : null,
+          excusedAt: null,
+          excusedReason: null,
+          proofRequired: effectiveRules.support.requireHouseMeetingAcknowledgment,
+          proofProvided: false,
+          proofReference: null,
+          notes:
+            nextStatus === "COMPLETED"
+              ? "Marked attended from operator reporting."
+              : "Marked missed from operator reporting.",
+        },
+        timestamp,
+      );
+      await persistSoberHouseStore(result.store);
+      setOwnerDashboardStatus(
+        nextStatus === "COMPLETED"
+          ? "Marked the resident as having attended the house meeting."
+          : "Marked the resident as having missed the house meeting.",
       );
     },
     [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
@@ -16416,6 +16640,15 @@ export default function App() {
                       onOpenChat={openMessagesHub}
                       onCompileReportsNow={(houseIds) => {
                         void compileOwnerScopeReportsNow(houseIds);
+                      }}
+                      onMarkOneOnOneCompleted={(residentId) => {
+                        void markOwnerDashboardOneOnOneCompleted(residentId);
+                      }}
+                      onLogSponsorCallCompleted={(residentId) => {
+                        void logOwnerDashboardSponsorCallCompleted(residentId);
+                      }}
+                      onMarkHouseMeetingAttendance={(residentId, status) => {
+                        void markOwnerDashboardHouseMeetingAttendance(residentId, status);
                       }}
                       compileStatus={ownerDashboardStatus}
                     />
