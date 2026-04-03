@@ -649,18 +649,18 @@ export function OperatorDashboardClient(): JSX.Element {
     return (
       <main className="operator-auth-shell">
         <section className="operator-auth-card">
-          <p className="eyebrow">Authenticated operator session</p>
+          <p className="eyebrow">Authenticated dashboard session</p>
           <h1>Sober² Housing Control Plane</h1>
           <p className="muted-copy">
-            Load the live sober-housing organization dashboard with your DEV operator user id.
+            Load the live sober-housing organization dashboard with your DEV user id.
           </p>
           <label className="control-label">
-            DEV operator user id
+            DEV user id
             <input
               className="control-input"
               value={devUserId}
               onChange={(event) => setDevUserId(event.target.value)}
-              placeholder="org-admin-user"
+              placeholder="enduser-a1"
             />
           </label>
           <div className="action-row">

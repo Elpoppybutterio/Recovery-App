@@ -59,9 +59,7 @@ describe("operator live data adapter", () => {
   });
 
   it("uses the configured dashboard api url when present", () => {
-    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
-    expect(resolveDashboardApiUrl()).toBe("https://api.example.com");
-    vi.unstubAllEnvs();
+    expect(resolveDashboardApiUrl()).toBe("/api/operator/sober-house/control-plane");
   });
 
   it("returns unauthenticated when no dev user id is provided", async () => {
@@ -97,6 +95,12 @@ describe("operator live data adapter", () => {
       expect(result.snapshot.data.store.organization?.id).toBe("org-1");
     }
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.example.com/v1/operator/sober-house/control-plane?organizationId=org-1",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer DEV_org-admin-user" },
+      }),
+    );
   });
 
   it("returns forbidden when the live api denies org access", async () => {
