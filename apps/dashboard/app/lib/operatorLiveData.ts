@@ -52,9 +52,7 @@ export function buildDevOperatorAuthHeader(userId: string): Record<string, strin
 
 function buildSnapshotUrl(apiUrl: string, organizationId: string | null): string {
   const isAbsolute = apiUrl.startsWith("http://") || apiUrl.startsWith("https://");
-  const url = isAbsolute
-    ? new URL("/v1/operator/sober-house/control-plane", apiUrl)
-    : new URL(apiUrl, "http://dashboard.local");
+  const url = isAbsolute ? new URL(apiUrl) : new URL(apiUrl, "http://dashboard.local");
   if (organizationId) {
     url.searchParams.set("organizationId", organizationId);
   }

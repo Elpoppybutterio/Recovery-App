@@ -1,70 +1,112 @@
-import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
-function resolveOperatorApiBaseUrl(): string | null {
-  const configured = process.env.OPERATOR_API_BASE_URL?.trim();
-  return configured && configured.length > 0 ? configured : null;
+const CACHE_HEADERS = {
+  "Cache-Control": "no-store",
+} as const;
+
+function resolveUpstreamBaseUrl(): string | null {
+  const operatorApiBaseUrl = process.env.OPERATOR_API_BASE_URL?.trim();
+  if (operatorApiBaseUrl && operatorApiBaseUrl.length > 0) {
+    return operatorApiBaseUrl;
+  }
+
+  const publicApiUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (publicApiUrl && publicApiUrl.length > 0) {
+    return publicApiUrl;
+  }
+
+  return null;
 }
 
-function buildBackendUrl(request: NextRequest, operatorApiBaseUrl: string): string {
-  const apiUrl = new URL("/v1/operator/sober-house/control-plane", operatorApiBaseUrl);
-  const organizationId = request.nextUrl.searchParams.get("organizationId");
+function buildUpstreamUrl(request: Request, baseUrl: string): string {
+  const incomingUrl = new URL(request.url);
+  const upstreamUrl = new URL("/v1/operator/sober-house/control-plane", baseUrl);
+  const organizationId = incomingUrl.searchParams.get("organizationId");
   if (organizationId) {
-    apiUrl.searchParams.set("organizationId", organizationId);
+    upstreamUrl.searchParams.set("organizationId", organizationId);
   }
-  return apiUrl.toString();
+  return upstreamUrl.toString();
 }
 
-function buildForwardHeaders(request: NextRequest, includeJsonBody: boolean): Headers {
-  const headers = new Headers();
-  const authorization = request.headers.get("authorization");
-  if (authorization) {
-    headers.set("authorization", authorization);
-  }
-  if (includeJsonBody) {
-    headers.set("content-type", "application/json");
-  }
-  return headers;
+async function decodeUpstreamJson(response: Response): Promise<unknown> {
+  const bodyText = await response.text();
+  return bodyText.length > 0 ? (JSON.parse(bodyText) as unknown) : null;
 }
 
-async function proxyControlPlane(request: NextRequest): Promise<NextResponse> {
-  const includeJsonBody = request.method !== "GET" && request.method !== "HEAD";
-  const operatorApiBaseUrl = resolveOperatorApiBaseUrl();
-
-  if (!operatorApiBaseUrl) {
+async function proxyControlPlane(request: Request): Promise<Response> {
+  const upstreamBaseUrl = resolveUpstreamBaseUrl();
+  if (!upstreamBaseUrl) {
     return NextResponse.json(
       {
-        error: "operator_api_base_url_missing",
-        message: "OPERATOR_API_BASE_URL is required for the sober-house control-plane proxy route.",
+        error: "server_misconfigured",
+        message: "Dashboard operator proxy is missing an upstream API base URL.",
       },
-      { status: 500 },
+      {
+        status: 500,
+        headers: CACHE_HEADERS,
+      },
+    );
+  }
+
+  const upstreamHeaders = new Headers();
+  const authorization = request.headers.get("authorization");
+  if (authorization) {
+    upstreamHeaders.set("authorization", authorization);
+  }
+
+  const contentType = request.headers.get("content-type");
+  if (contentType) {
+    upstreamHeaders.set("content-type", contentType);
+  }
+
+  const requestBody =
+    request.method === "PUT" || request.method === "PATCH" ? await request.text() : undefined;
+
+  let upstreamResponse: Response;
+  try {
+    upstreamResponse = await fetch(buildUpstreamUrl(request, upstreamBaseUrl), {
+      method: request.method,
+      headers: upstreamHeaders,
+      body: requestBody,
+      cache: "no-store",
+    });
+  } catch {
+    return NextResponse.json(
+      {
+        error: "bad_gateway",
+        message: "Dashboard API could not reach upstream service.",
+      },
+      {
+        status: 502,
+        headers: CACHE_HEADERS,
+      },
     );
   }
 
   try {
-    const response = await fetch(buildBackendUrl(request, operatorApiBaseUrl), {
-      method: request.method,
-      headers: buildForwardHeaders(request, includeJsonBody),
-      body: includeJsonBody ? await request.text() : undefined,
-      cache: "no-store",
-    });
-
-    return new NextResponse(response.body, {
-      status: response.status,
-      headers: new Headers(response.headers),
+    const payload = await decodeUpstreamJson(upstreamResponse);
+    return NextResponse.json(payload, {
+      status: upstreamResponse.status,
+      headers: CACHE_HEADERS,
     });
   } catch {
     return NextResponse.json(
-      { error: "service_unavailable", message: "Dashboard API is unreachable." },
-      { status: 503 },
+      {
+        error: "bad_gateway",
+        message: "Dashboard API could not decode upstream response.",
+      },
+      {
+        status: 502,
+        headers: CACHE_HEADERS,
+      },
     );
   }
 }
 
-export async function GET(request: NextRequest): Promise<NextResponse> {
+export async function GET(request: Request): Promise<Response> {
   return proxyControlPlane(request);
 }
 
-export async function PUT(request: NextRequest): Promise<NextResponse> {
+export async function PUT(request: Request): Promise<Response> {
   return proxyControlPlane(request);
 }
