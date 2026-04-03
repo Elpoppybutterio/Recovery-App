@@ -1,3 +1,4 @@
+import type { SoberHouseLiveStoreSlice } from "@recovery/shared-types";
 import type {
   ComplianceEventRow,
   HouseRow,
@@ -42,7 +43,7 @@ type ControlPlaneSession = {
 export type OperatorControlPlaneSnapshotResponse = {
   session: ControlPlaneSession;
   data: {
-    store: Record<string, unknown>;
+    store: SoberHouseLiveStoreSlice & Record<string, unknown>;
     residentDirectory: ResidentDirectoryEntry[];
     roleDefaults: RoleDefaults;
   };
@@ -164,6 +165,8 @@ function createEmptyStore(): Record<string, unknown> {
     houseMeetings: [],
     oneOnOneSessions: [],
     houseChores: [],
+    alertAcknowledgementRecords: [],
+    scheduledItemCompletionRecords: [],
     houseAlertAnnouncements: [],
     alertPreferences: [],
     residentHousingProfile: null,
@@ -666,6 +669,8 @@ function buildStoreFromLiveData(input: {
       houseMeetings: recordArray(store.houseMeetings),
       oneOnOneSessions: recordArray(store.oneOnOneSessions),
       houseAlertAnnouncements: recordArray(store.houseAlertAnnouncements),
+      alertAcknowledgementRecords: recordArray(store.alertAcknowledgementRecords),
+      scheduledItemCompletionRecords: recordArray(store.scheduledItemCompletionRecords),
       alertPreferences: recordArray(store.alertPreferences),
       residentHousingProfile: isRecord(store.residentHousingProfile)
         ? store.residentHousingProfile
@@ -786,7 +791,7 @@ export async function buildOperatorControlPlaneSnapshot(input: {
       })),
     },
     data: {
-      store: hydrated.store,
+      store: hydrated.store as unknown as SoberHouseLiveStoreSlice & Record<string, unknown>,
       residentDirectory: hydrated.residentDirectory,
       roleDefaults: roleDefaultsFromHouses(houses),
     },

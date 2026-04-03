@@ -1,4 +1,15 @@
 import type { SignatureRef } from "../signatures/signatureStore";
+import type {
+  SoberHouseAlertAcknowledgementRecord as SharedAlertAcknowledgementRecord,
+  SoberHouseHouseChoreRecord as SharedHouseChore,
+  SoberHouseHouseMeetingRecord as SharedHouseMeeting,
+  SoberHouseLiveStoreSlice,
+  SoberHouseOneOnOneSessionRecord as SharedOneOnOneSession,
+  SoberHouseProofReviewRecord as SharedProofReviewRecord,
+  SoberHouseRecurringObligationRecord as SharedRecurringObligation,
+  SoberHouseResidentMembershipRecord as SharedResidentHouseMembership,
+  SoberHouseScheduledItemCompletionRecord as SharedScheduledItemCompletionRecord,
+} from "../../../../packages/shared-types/src/soberHouse";
 
 export const SOBER_HOUSE_SETTINGS_STORE_VERSION = 16 as const;
 
@@ -14,8 +25,14 @@ export type HouseType =
 export type StaffRole = "OWNER" | "HOUSE_MANAGER" | "ASSISTANT_MANAGER" | "RESIDENT" | "VIEWER";
 export type CurfewAlertBasis = "CLOCK_ONLY" | "ESTIMATED_TRAVEL_TIME" | "BOTH";
 export type ChoreFrequency = "DAILY" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
-export type ProofRequirement = "NONE" | "CHECKLIST" | "PHOTO" | "MANAGER_CONFIRMATION";
-export type ManagerConfirmationStatus = "NOT_REQUIRED" | "PENDING" | "CONFIRMED";
+export type ProofRequirement =
+  | "NONE"
+  | "CHECKLIST"
+  | "PHOTO"
+  | "MANAGER_CONFIRMATION"
+  | "SIGNATURE"
+  | "ACKNOWLEDGMENT";
+export type ManagerConfirmationStatus = "NOT_REQUIRED" | "PENDING" | "CONFIRMED" | "REJECTED";
 export type ManagerConfirmationHandoffMethod = "SHARE_SHEET" | "TEXT_MESSAGE";
 export type EventCompletionStatus = "SCHEDULED" | "COMPLETED" | "MISSED" | "EXCUSED";
 export type MeetingType =
@@ -62,6 +79,8 @@ export type SoberHouseEntityType =
   | "houseMeeting"
   | "oneOnOneSession"
   | "houseChore"
+  | "alertAcknowledgementRecord"
+  | "scheduledItemCompletionRecord"
   | "houseAlertAnnouncement"
   | "alertPreference"
   | "residentHousingProfile"
@@ -185,10 +204,13 @@ export type OperatorScheduledSummaryType =
 export type ProofReviewCategory =
   | "CHORES"
   | "HOUSE_MEETINGS"
+  | "ONE_ON_ONES"
+  | "ALERT_ACKNOWLEDGEMENTS"
   | "SPONSOR_CALLS"
   | "JOB_SEARCH"
   | "WORK";
 export type ProofReviewSourceRecordType =
+  | "SCHEDULED_ITEM_COMPLETION"
   | "CHORE_COMPLETION"
   | "HOUSE_MEETING_ATTENDANCE"
   | "SPONSOR_CALL"
@@ -622,122 +644,15 @@ export type ResidentHousingProfile = {
   updatedAt: string;
 };
 
-export type ResidentHouseMembership = {
-  id: string;
-  residentId: string;
-  linkedUserId: string;
-  organizationId: string | null;
-  houseId: string | null;
-  roomOrBed: string;
-  moveInDate: string;
-  moveOutDate: string | null;
-  isPrimary: boolean;
-  status: EntityStatus;
-  notes: string;
-  createdAt: string;
-  updatedAt: string;
-};
+export type ResidentHouseMembership = SharedResidentHouseMembership;
 
-export type RecurringObligation = {
-  id: string;
-  organizationId: string | null;
-  scopeType: HouseRuleScopeType;
-  houseId: string | null;
-  houseGroupId: string | null;
-  residentId: string | null;
-  linkedUserId: string | null;
-  obligationType: RecurringObligationType;
-  title: string;
-  detail: string;
-  locationLabel: string;
-  frequency: ScheduledFrequency;
-  weekday: ScheduledWeekdayCode | null;
-  weekdayList: ScheduledWeekdayCode[];
-  monthlyOrdinal: 1 | 2 | 3 | 4 | 5 | null;
-  scheduledDate: string | null;
-  timeLocalHhmm: string;
-  durationMinutes: number;
-  required: boolean;
-  reminderLeadMinutes: number;
-  inAppReminderEnabled: boolean;
-  addToCalendar: boolean;
-  accountabilityMethod: AccountabilityMethod;
-  status: EntityStatus;
-  createdAt: string;
-  updatedAt: string;
-};
+export type RecurringObligation = SharedRecurringObligation;
 
-export type HouseMeeting = {
-  id: string;
-  organizationId: string | null;
-  houseId: string | null;
-  recurringObligationId: string | null;
-  title: string;
-  description: string;
-  meetingKind: HouseMeetingKind;
-  locationLabel: string;
-  startsAt: string;
-  endsAt: string | null;
-  required: boolean;
-  reminderLeadMinutes: number;
-  inAppReminderEnabled: boolean;
-  addToCalendar: boolean;
-  acknowledgmentRequired: boolean;
-  status: EntityStatus;
-  createdAt: string;
-  updatedAt: string;
-};
+export type HouseMeeting = SharedHouseMeeting;
 
-export type OneOnOneSession = {
-  id: string;
-  organizationId: string | null;
-  houseId: string | null;
-  residentId: string;
-  linkedUserId: string;
-  staffAssignmentId: string | null;
-  recurringObligationId: string | null;
-  title: string;
-  notes: string;
-  scheduledAt: string;
-  endsAt: string | null;
-  required: boolean;
-  reminderLeadMinutes: number;
-  inAppReminderEnabled: boolean;
-  addToCalendar: boolean;
-  managerConfirmationRequired: boolean;
-  completionStatus: EventCompletionStatus;
-  completedAt: string | null;
-  completedByStaffAssignmentId: string | null;
-  excusedAt: string | null;
-  excusedReason: string | null;
-  status: EntityStatus;
-  createdAt: string;
-  updatedAt: string;
-};
+export type OneOnOneSession = SharedOneOnOneSession;
 
-export type HouseChore = {
-  id: string;
-  organizationId: string | null;
-  houseId: string | null;
-  residentId: string | null;
-  linkedUserId: string | null;
-  recurringObligationId: string | null;
-  title: string;
-  summary: string;
-  frequency: ChoreFrequency;
-  dueTimeLocalHhmm: string;
-  weekday: ScheduledWeekdayCode | null;
-  scheduledDate: string | null;
-  required: boolean;
-  proofRequirement: ProofRequirement[];
-  reminderLeadMinutes: number;
-  inAppReminderEnabled: boolean;
-  addToCalendar: boolean;
-  accountabilityRequired: boolean;
-  status: EntityStatus;
-  createdAt: string;
-  updatedAt: string;
-};
+export type HouseChore = SharedHouseChore;
 
 export type HouseAlertAnnouncement = {
   id: string;
@@ -757,6 +672,8 @@ export type HouseAlertAnnouncement = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type AlertAcknowledgementRecord = SharedAlertAcknowledgementRecord;
 
 export type ResidentRequirementProfile = {
   id: string;
@@ -849,6 +766,8 @@ export type ChoreCompletionRecord = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type ScheduledItemCompletionRecord = SharedScheduledItemCompletionRecord;
 
 export type SponsorCallRecord = {
   id: string;
@@ -992,28 +911,7 @@ export type ProofReviewHistoryEntry = {
   nextStatus: ProofReviewStatus;
 };
 
-export type ProofReviewRecord = {
-  id: string;
-  residentId: string;
-  linkedUserId: string;
-  houseId: string | null;
-  organizationId: string | null;
-  category: ProofReviewCategory;
-  sourceRecordType: ProofReviewSourceRecordType;
-  sourceRecordId: string;
-  linkedEnforcementRecordId: string | null;
-  proofRequired: boolean;
-  proofProvided: boolean;
-  proofReference: string | null;
-  evidenceItemIds: string[];
-  submittedAt: string | null;
-  status: ProofReviewStatus;
-  reviewedAt: string | null;
-  reviewedBy: AuditActor | null;
-  history: ProofReviewHistoryEntry[];
-  createdAt: string;
-  updatedAt: string;
-};
+export type ProofReviewRecord = SharedProofReviewRecord;
 
 export type ChatThread = {
   id: string;
@@ -1380,7 +1278,7 @@ export type ResidentWizardDraft = {
   updatedAt: string;
 };
 
-export type SoberHouseSettingsStore = {
+export type SoberHouseSettingsStore = SoberHouseLiveStoreSlice & {
   version: typeof SOBER_HOUSE_SETTINGS_STORE_VERSION;
   userAccessProfile: SoberHouseUserAccessProfile | null;
   organization: Organization | null;
@@ -1388,11 +1286,6 @@ export type SoberHouseSettingsStore = {
   houses: House[];
   staffAssignments: StaffAssignment[];
   houseRuleSets: HouseRuleSet[];
-  residentHouseMemberships: ResidentHouseMembership[];
-  recurringObligations: RecurringObligation[];
-  houseMeetings: HouseMeeting[];
-  oneOnOneSessions: OneOnOneSession[];
-  houseChores: HouseChore[];
   houseAlertAnnouncements: HouseAlertAnnouncement[];
   alertPreferences: AlertPreference[];
   residentHousingProfile: ResidentHousingProfile | null;
@@ -1414,7 +1307,6 @@ export type SoberHouseSettingsStore = {
   monthlyReports: MonthlyReport[];
   operatorReportExports: OperatorReportExportRecord[];
   scheduledSummaryRecords: ScheduledSummaryRecord[];
-  proofReviewRecords: ProofReviewRecord[];
   enforcementRecords: EnforcementRecord[];
   auditLogEntries: AuditLogEntry[];
 };

@@ -1,12 +1,25 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createDefaultSoberHouseSettingsStore } from "./defaults";
-import type { SoberHouseSettingsStore } from "./types";
+import type { ScheduledItemCompletionRecord, SoberHouseSettingsStore } from "./types";
 import { SOBER_HOUSE_SETTINGS_STORE_VERSION } from "./types";
 
 const SOBER_HOUSE_SETTINGS_STORAGE_KEY_PREFIX = "recovery:sober-house-settings:v1:";
 
 export function soberHouseSettingsStorageKey(userId: string): string {
   return `${SOBER_HOUSE_SETTINGS_STORAGE_KEY_PREFIX}${userId}`;
+}
+
+function isScheduledItemProofRequirement(
+  value: unknown,
+): value is ScheduledItemCompletionRecord["proofRequirement"][number] {
+  return (
+    value === "NONE" ||
+    value === "CHECKLIST" ||
+    value === "PHOTO" ||
+    value === "MANAGER_CONFIRMATION" ||
+    value === "SIGNATURE" ||
+    value === "ACKNOWLEDGMENT"
+  );
 }
 
 function normalizeStore(value: unknown): SoberHouseSettingsStore {
@@ -129,6 +142,55 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
             }))
           : [],
       }))
+    : [];
+  const alertAcknowledgementRecords = Array.isArray(candidate.alertAcknowledgementRecords)
+    ? candidate.alertAcknowledgementRecords.map(
+        (record): SoberHouseSettingsStore["alertAcknowledgementRecords"][number] => ({
+          ...record,
+          organizationId: record.organizationId ?? null,
+          houseId: record.houseId ?? null,
+          required: record.required ?? true,
+          status: record.status ?? (record.acknowledgedAt ? "ACKNOWLEDGED" : "PENDING"),
+          acknowledgedAt: record.acknowledgedAt ?? null,
+          note: record.note ?? "",
+        }),
+      )
+    : [];
+  const scheduledItemCompletionRecords = Array.isArray(candidate.scheduledItemCompletionRecords)
+    ? candidate.scheduledItemCompletionRecords.map(
+        (record): SoberHouseSettingsStore["scheduledItemCompletionRecords"][number] => ({
+          ...record,
+          organizationId: record.organizationId ?? null,
+          houseId: record.houseId ?? null,
+          recurringObligationId: record.recurringObligationId ?? null,
+          scheduledAt: record.scheduledAt ?? null,
+          status:
+            record.status ??
+            (record.completedAt ? "COMPLETED" : record.excusedAt ? "EXCUSED" : "SCHEDULED"),
+          completedAt: record.completedAt ?? null,
+          excusedAt: record.excusedAt ?? null,
+          excusedReason: record.excusedReason ?? null,
+          proofRequired: record.proofRequired ?? false,
+          proofRequirement: Array.isArray(record.proofRequirement)
+            ? record.proofRequirement.filter(isScheduledItemProofRequirement)
+            : record.proofRequirement
+              ? isScheduledItemProofRequirement(record.proofRequirement)
+                ? [record.proofRequirement]
+                : ["NONE"]
+              : ["NONE"],
+          proofProvided: record.proofProvided ?? false,
+          proofReference: record.proofReference ?? null,
+          submittedAt: record.submittedAt ?? record.completedAt ?? null,
+          managerConfirmationRequired: record.managerConfirmationRequired ?? false,
+          managerConfirmationStatus: record.managerConfirmationRequired
+            ? (record.managerConfirmationStatus ?? "PENDING")
+            : "NOT_REQUIRED",
+          managerConfirmationRequestedAt: record.managerConfirmationRequestedAt ?? null,
+          managerConfirmationRequestedVia: record.managerConfirmationRequestedVia ?? null,
+          managerConfirmedAt: record.managerConfirmedAt ?? null,
+          notes: record.notes ?? "",
+        }),
+      )
     : [];
   const enforcementRecords = Array.isArray(candidate.enforcementRecords)
     ? candidate.enforcementRecords.map((record) => ({
@@ -287,6 +349,8 @@ function normalizeStore(value: unknown): SoberHouseSettingsStore {
               : ["NONE"],
         }))
       : [],
+    alertAcknowledgementRecords,
+    scheduledItemCompletionRecords,
     houseAlertAnnouncements: Array.isArray(candidate.houseAlertAnnouncements)
       ? candidate.houseAlertAnnouncements
       : [],

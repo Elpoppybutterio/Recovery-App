@@ -336,7 +336,7 @@ export async function seedDevUsers(env: ApiEnv = loadApiEnv()): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (require.main === module) {
   seedDevUsers().catch((error) => {
     logger.error("dev.seed.failed", {
       error: error instanceof Error ? error.message : "unknown",
