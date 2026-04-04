@@ -1,4 +1,14 @@
-import type { SoberHouseLiveStoreSlice } from "@recovery/shared-types";
+import type {
+  SoberHouseAlertAcknowledgementRecord,
+  SoberHouseHouseChoreRecord,
+  SoberHouseHouseMeetingRecord,
+  SoberHouseLiveStoreSlice,
+  SoberHouseOneOnOneSessionRecord,
+  SoberHouseProofReviewRecord,
+  SoberHouseRecurringObligationRecord,
+  SoberHouseResidentMembershipRecord,
+  SoberHouseScheduledItemCompletionRecord,
+} from "@recovery/shared-types";
 import type {
   ComplianceEventRow,
   HouseRow,
@@ -84,10 +94,12 @@ type ControlPlaneSession = {
   }>;
 };
 
+type ControlPlaneStore = SoberHouseLiveStoreSlice & Record<string, unknown>;
+
 export type OperatorControlPlaneSnapshotResponse = {
   session: ControlPlaneSession;
   data: {
-    store: SoberHouseLiveStoreSlice & Record<string, unknown>;
+    store: ControlPlaneStore;
     residentDirectory: ResidentDirectoryEntry[];
     roleDefaults: RoleDefaults;
     residentLiveObligations: ResidentLiveObligationSnapshotRecord[];
@@ -205,7 +217,7 @@ function visibleHouseIdsForRole(
   operatorRole: OperatorWebRole,
   houses: HouseRow[],
   roleDefaults: RoleDefaults,
-  store: SoberHouseLiveStoreSlice & Record<string, unknown>,
+  store: ControlPlaneStore,
 ): Set<string> {
   if (operatorRole === "ORG_ADMIN") {
     return new Set(houses.map((house) => house.id));
@@ -337,7 +349,7 @@ function buildComplianceSummarySnapshot(input: {
   };
 }
 
-function createEmptyStore(): Record<string, unknown> {
+function createEmptyStore(): ControlPlaneStore {
   return {
     version: STORE_VERSION,
     userAccessProfile: null,
@@ -423,7 +435,9 @@ function buildHouseStoreRecord(
   };
 }
 
-function buildResidentMembership(profile: ParticipantProfileRow) {
+function buildResidentMembership(
+  profile: ParticipantProfileRow,
+): SoberHouseResidentMembershipRecord {
   const residentId = profile.user_id;
   return {
     id: `membership:${residentId}`,
@@ -440,6 +454,29 @@ function buildResidentMembership(profile: ParticipantProfileRow) {
     createdAt: profile.created_at,
     updatedAt: profile.updated_at,
   };
+}
+
+function defaultResidentLiveObligationTitle(
+  obligationType: ResidentLiveObligationSnapshotRecord["obligationType"],
+): string {
+  if (obligationType === "HOUSE_MEETING") {
+    return "House meeting";
+  }
+  if (obligationType === "ONE_ON_ONE") {
+    return "One-on-one session";
+  }
+  return "House chore";
+}
+
+function buildResidentLiveObligationTitle(input: {
+  obligation: ResidentHouseObligationRecord["obligation"];
+  obligationTitleById: Map<string, string>;
+}): string {
+  const mappedTitle = input.obligationTitleById.get(input.obligation.id);
+  if (typeof mappedTitle === "string" && mappedTitle.trim().length > 0) {
+    return mappedTitle;
+  }
+  return defaultResidentLiveObligationTitle(input.obligation.obligation_type);
 }
 
 function buildResidentDirectoryEntry(profile: ParticipantProfileRow): ResidentDirectoryEntry {
@@ -466,6 +503,7 @@ function buildResidentDirectoryEntry(profile: ParticipantProfileRow): ResidentDi
 function buildResidentLiveObligationSnapshotRecord(
   record: ResidentHouseObligationRecord,
   residentProfileByUserId: Map<string, ParticipantProfileRow>,
+  obligationTitleById: Map<string, string>,
 ): ResidentLiveObligationSnapshotRecord | null {
   const residentProfile = residentProfileByUserId.get(record.obligation.resident_user_id) ?? null;
   if (!residentProfile) {
@@ -479,12 +517,15 @@ function buildResidentLiveObligationSnapshotRecord(
 
   return {
     obligationId: record.obligation.id,
-    residentId: residentProfile.id,
+    residentId: residentProfile.user_id,
     residentUserId: record.obligation.resident_user_id,
     organizationId: record.obligation.organization_id,
     houseId: record.obligation.house_id,
     obligationType: record.obligation.obligation_type,
-    title: record.obligation.title,
+    title: buildResidentLiveObligationTitle({
+      obligation: record.obligation,
+      obligationTitleById,
+    }),
     scheduledAt: record.obligation.scheduled_at,
     dueAt: record.obligation.due_at,
     proofRequired: record.obligation.proof_required,
@@ -754,6 +795,10 @@ function accountabilityMethodForObligation(
   return "NONE";
 }
 
+function liveEntityStatusForObligation(obligation: ObligationRow): "ACTIVE" | "INACTIVE" {
+  return obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE";
+}
+
 function proofRequirementForCompliance(
   event: ComplianceEventRow,
 ): SoberHouseLiveProofRequirement[] {
@@ -884,6 +929,18 @@ function scheduledItemId(kind: SoberHouseLiveObligationKind, obligationId: strin
     return `live:one-on-one:${obligationId}`;
   }
   return `live:house-chore:${obligationId}`;
+}
+
+function scheduledItemTypeForKind(
+  kind: SoberHouseLiveObligationKind,
+): SoberHouseScheduledItemCompletionRecord["scheduledItemType"] {
+  if (kind === "HOUSE_MEETING") {
+    return "HOUSE_MEETING";
+  }
+  if (kind === "ONE_ON_ONE") {
+    return "ONE_ON_ONE_SESSION";
+  }
+  return "HOUSE_CHORE";
 }
 
 function relevantToOrganization(input: {
@@ -1032,6 +1089,49 @@ function buildSponsorCallRecords(
     });
 }
 
+function normalizeAlertAcknowledgementStatus(
+  value: unknown,
+): SoberHouseAlertAcknowledgementRecord["status"] {
+  if (value === "ACKNOWLEDGED" || value === "WAIVED") {
+    return value;
+  }
+  return "PENDING";
+}
+
+function normalizeAlertAcknowledgementRecords(
+  value: unknown,
+): SoberHouseAlertAcknowledgementRecord[] {
+  return recordArray(value)
+    .map((entry) => {
+      const id = stringOrNull(entry.id);
+      const residentId = stringOrNull(entry.residentId);
+      const linkedUserId = stringOrNull(entry.linkedUserId);
+      const alertId = stringOrNull(entry.alertId);
+      const createdAt = stringOrNull(entry.createdAt);
+      const updatedAt = stringOrNull(entry.updatedAt);
+
+      if (!id || !residentId || !linkedUserId || !alertId || !createdAt || !updatedAt) {
+        return null;
+      }
+
+      return {
+        id,
+        residentId,
+        linkedUserId,
+        organizationId: stringOrNull(entry.organizationId),
+        houseId: stringOrNull(entry.houseId),
+        alertId,
+        required: booleanOr(entry.required, true),
+        status: normalizeAlertAcknowledgementStatus(entry.status),
+        acknowledgedAt: stringOrNull(entry.acknowledgedAt),
+        note: stringOr(entry.note, ""),
+        createdAt,
+        updatedAt,
+      };
+    })
+    .filter((entry): entry is SoberHouseAlertAcknowledgementRecord => entry !== null);
+}
+
 async function resolveAvailableOrganizations(
   repositories: Repositories,
   actor: ActorContext,
@@ -1113,7 +1213,7 @@ function buildStoreFromLiveData(input: {
   violations: ViolationRow[];
   persistedStore: Record<string, unknown>;
   nowIso: string;
-}) {
+}): { store: ControlPlaneStore; residentDirectory: ResidentDirectoryEntry[] } {
   const base = createEmptyStore();
   const store = {
     ...base,
@@ -1160,7 +1260,7 @@ function buildStoreFromLiveData(input: {
   });
   const obligationById = new Map(liveObligations.map((obligation) => [obligation.id, obligation]));
 
-  const recurringObligations = liveObligations
+  const recurringObligations: SoberHouseRecurringObligationRecord[] = liveObligations
     .map((obligation) => {
       const kind = obligationKind(obligation);
       if (!kind) {
@@ -1191,14 +1291,14 @@ function buildStoreFromLiveData(input: {
         inAppReminderEnabled: false,
         addToCalendar: false,
         accountabilityMethod: accountabilityMethodForObligation(obligation),
-        status: obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE",
+        status: liveEntityStatusForObligation(obligation),
         createdAt: obligation.created_at,
         updatedAt: obligation.updated_at,
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  const baseHouseMeetings = liveObligations
+  const baseHouseMeetings: SoberHouseHouseMeetingRecord[] = liveObligations
     .map((obligation) => {
       if (obligationKind(obligation) !== "HOUSE_MEETING") {
         return null;
@@ -1217,7 +1317,7 @@ function buildStoreFromLiveData(input: {
         recurringObligationId: obligation.id,
         title: obligation.title,
         description: obligation.description ?? "",
-        meetingKind: "HOUSE_MEETING",
+        meetingKind: "HOUSE_MEETING" as const,
         locationLabel: "",
         startsAt: schedule.startAtIso,
         endsAt,
@@ -1226,14 +1326,14 @@ function buildStoreFromLiveData(input: {
         inAppReminderEnabled: false,
         addToCalendar: false,
         acknowledgmentRequired: false,
-        status: obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE",
+        status: liveEntityStatusForObligation(obligation),
         createdAt: obligation.created_at,
         updatedAt: obligation.updated_at,
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  const baseOneOnOneSessions = liveObligations
+  const baseOneOnOneSessions: SoberHouseOneOnOneSessionRecord[] = liveObligations
     .map((obligation) => {
       if (obligationKind(obligation) !== "ONE_ON_ONE") {
         return null;
@@ -1268,14 +1368,14 @@ function buildStoreFromLiveData(input: {
         completedByStaffAssignmentId: null,
         excusedAt: null,
         excusedReason: null,
-        status: obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE",
+        status: liveEntityStatusForObligation(obligation),
         createdAt: obligation.created_at,
         updatedAt: obligation.updated_at,
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  const houseChores = liveObligations
+  const houseChores: SoberHouseHouseChoreRecord[] = liveObligations
     .map((obligation) => {
       if (obligationKind(obligation) !== "CHORE") {
         return null;
@@ -1306,7 +1406,7 @@ function buildStoreFromLiveData(input: {
         inAppReminderEnabled: false,
         addToCalendar: false,
         accountabilityRequired: proofRequirementForObligation(obligation)[0] !== "NONE",
-        status: obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE",
+        status: liveEntityStatusForObligation(obligation),
         createdAt: obligation.created_at,
         updatedAt: obligation.updated_at,
       };
@@ -1326,8 +1426,8 @@ function buildStoreFromLiveData(input: {
 
   const choreCompletionRecords: Array<Record<string, unknown>> = [];
   const houseMeetingAttendanceRecords: Array<Record<string, unknown>> = [];
-  const scheduledItemCompletionRecords: Array<Record<string, unknown>> = [];
-  const proofReviewRecords: Array<Record<string, unknown>> = [];
+  const scheduledItemCompletionRecords: SoberHouseScheduledItemCompletionRecord[] = [];
+  const proofReviewRecords: SoberHouseProofReviewRecord[] = [];
   const latestOneOnOneEventByObligationId = new Map<string, ComplianceEventRow>();
 
   for (const event of relevantComplianceEvents) {
@@ -1352,7 +1452,7 @@ function buildStoreFromLiveData(input: {
       : proofRequirementForCompliance(event);
     const proofProvided = proofProvidedForComplianceEvent(event);
     const completionStatus = eventCompletionStatus(event);
-    const completionRecord = {
+    const completionRecord: SoberHouseScheduledItemCompletionRecord = {
       id: event.id,
       residentId: event.user_id,
       linkedUserId: event.user_id,
@@ -1366,12 +1466,7 @@ function buildStoreFromLiveData(input: {
         linkedObligation?.house_id ??
         residentProfileByUserId.get(event.user_id)?.house_id ??
         null,
-      scheduledItemType:
-        kind === "HOUSE_MEETING"
-          ? "HOUSE_MEETING"
-          : kind === "ONE_ON_ONE"
-            ? "ONE_ON_ONE_SESSION"
-            : "HOUSE_CHORE",
+      scheduledItemType: scheduledItemTypeForKind(kind),
       scheduledItemId: linkedObligation ? scheduledItemId(kind, linkedObligation.id) : event.id,
       recurringObligationId: linkedObligation?.id ?? null,
       scheduledAt: linkedObligation?.due_at ?? event.occurred_at,
@@ -1517,22 +1612,24 @@ function buildStoreFromLiveData(input: {
     });
   }
 
-  const oneOnOneSessions = baseOneOnOneSessions.map((session) => {
-    if (!session.recurringObligationId) {
-      return session;
-    }
-    const event = latestOneOnOneEventByObligationId.get(session.recurringObligationId);
-    if (!event) {
-      return session;
-    }
-    const completionStatus = eventCompletionStatus(event);
-    return {
-      ...session,
-      completionStatus,
-      completedAt: completionStatus === "COMPLETED" ? event.occurred_at : null,
-      updatedAt: event.created_at,
-    };
-  });
+  const oneOnOneSessions: SoberHouseOneOnOneSessionRecord[] = baseOneOnOneSessions.map(
+    (session) => {
+      if (!session.recurringObligationId) {
+        return session;
+      }
+      const event = latestOneOnOneEventByObligationId.get(session.recurringObligationId);
+      if (!event) {
+        return session;
+      }
+      const completionStatus = eventCompletionStatus(event);
+      return {
+        ...session,
+        completionStatus,
+        completedAt: completionStatus === "COMPLETED" ? event.occurred_at : null,
+        updatedAt: event.created_at,
+      };
+    },
+  );
 
   const liveViolations = input.violations
     .filter((violation) =>
@@ -1550,6 +1647,19 @@ function buildStoreFromLiveData(input: {
     (entry) => entry.organizationId === input.organization.id,
   );
   const sponsorCallRecords = buildSponsorCallRecords(store, relevantComplianceEvents);
+  const alertAcknowledgementRecords = normalizeAlertAcknowledgementRecords(
+    store.alertAcknowledgementRecords,
+  );
+  const soberHouseStoreSlice: SoberHouseLiveStoreSlice = {
+    residentHouseMemberships,
+    recurringObligations,
+    houseMeetings: baseHouseMeetings,
+    oneOnOneSessions,
+    houseChores,
+    alertAcknowledgementRecords,
+    scheduledItemCompletionRecords,
+    proofReviewRecords,
+  };
 
   return {
     store: {
@@ -1558,15 +1668,9 @@ function buildStoreFromLiveData(input: {
       version: STORE_VERSION,
       organization: buildOrganizationStoreRecord(input.organization, store, input.nowIso),
       houses: liveHouses,
-      residentHouseMemberships,
-      recurringObligations,
-      houseMeetings: baseHouseMeetings,
-      oneOnOneSessions,
-      houseChores,
-      scheduledItemCompletionRecords,
+      ...soberHouseStoreSlice,
       choreCompletionRecords,
       houseMeetingAttendanceRecords,
-      proofReviewRecords,
       sponsorCallRecords: mergeRecordsById(
         sponsorCallRecords,
         recordArray(store.sponsorCallRecords),
@@ -1576,7 +1680,6 @@ function buildStoreFromLiveData(input: {
       staffAssignments: recordArray(store.staffAssignments),
       houseRuleSets: recordArray(store.houseRuleSets),
       houseAlertAnnouncements: recordArray(store.houseAlertAnnouncements),
-      alertAcknowledgementRecords: recordArray(store.alertAcknowledgementRecords),
       alertPreferences: recordArray(store.alertPreferences),
       residentHousingProfile: isRecord(store.residentHousingProfile)
         ? store.residentHousingProfile
@@ -1690,9 +1793,16 @@ export async function buildOperatorControlPlaneSnapshot(input: {
       )
       .map((profile) => [profile.user_id, profile] as const),
   );
+  const liveObligationTitleById = new Map(
+    obligations.map((obligation) => [obligation.id, obligation.title] as const),
+  );
   const residentLiveObligations = residentObligations
     .map((record) =>
-      buildResidentLiveObligationSnapshotRecord(record, activeResidentProfileByUserId),
+      buildResidentLiveObligationSnapshotRecord(
+        record,
+        activeResidentProfileByUserId,
+        liveObligationTitleById,
+      ),
     )
     .filter((record): record is ResidentLiveObligationSnapshotRecord => record !== null)
     .sort((left, right) =>
@@ -1715,7 +1825,7 @@ export async function buildOperatorControlPlaneSnapshot(input: {
     selectedRole,
     houses,
     roleDefaults,
-    hydrated.store as SoberHouseLiveStoreSlice & Record<string, unknown>,
+    hydrated.store,
   );
 
   return {
@@ -1734,7 +1844,7 @@ export async function buildOperatorControlPlaneSnapshot(input: {
       })),
     },
     data: {
-      store: hydrated.store as unknown as SoberHouseLiveStoreSlice & Record<string, unknown>,
+      store: hydrated.store,
       residentDirectory: hydrated.residentDirectory,
       roleDefaults,
       residentLiveObligations,
