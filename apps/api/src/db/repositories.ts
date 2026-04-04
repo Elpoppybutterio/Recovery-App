@@ -14,6 +14,10 @@ import {
   participantTypeSchema,
   proofTypeSchema,
   Role,
+  soberHouseAlertAcknowledgementStatusSchema,
+  soberHouseEntityStatusSchema,
+  soberHouseEventCompletionStatusSchema,
+  soberHouseProofReviewStatusSchema,
   SponsorRepeatDay,
   SponsorRepeatRule,
   SponsorRepeatUnit,
@@ -30,6 +34,10 @@ import {
   type ParticipantProfileStatus,
   type ParticipantType,
   type ProofType,
+  type SoberHouseAlertAcknowledgementStatus,
+  type SoberHouseEntityStatus,
+  type SoberHouseEventCompletionStatus,
+  type SoberHouseProofReviewStatus,
   type VerificationStatus,
   type ViolationSeverity,
   type ViolationStatus,
@@ -302,6 +310,84 @@ export interface ParticipantProfileRow {
   updated_at: string;
 }
 
+export type SoberHouseObligationType = "HOUSE_MEETING" | "ONE_ON_ONE" | "CHORE";
+
+export interface ResidentHouseMembershipRow {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string;
+  resident_user_id: string;
+  status: SoberHouseEntityStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SoberHouseObligationRow {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string;
+  resident_user_id: string;
+  resident_house_membership_id: string | null;
+  obligation_type: SoberHouseObligationType;
+  scheduled_at: string;
+  due_at: string | null;
+  proof_required: boolean;
+  status: SoberHouseEntityStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SoberHouseCompletionRecordRow {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string;
+  resident_user_id: string;
+  obligation_id: string;
+  completion_status: SoberHouseEventCompletionStatus;
+  completed_at: string | null;
+  proof_metadata_json: unknown | null;
+  submitted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SoberHouseProofReviewRow {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string;
+  resident_user_id: string;
+  completion_record_id: string;
+  review_outcome: SoberHouseProofReviewStatus;
+  reviewer_user_id: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SoberHouseAlertAcknowledgementRow {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string | null;
+  resident_user_id: string;
+  alert_id: string;
+  status: SoberHouseAlertAcknowledgementStatus;
+  acknowledged_at: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResidentHouseObligationRecord {
+  obligation: SoberHouseObligationRow;
+  completion: SoberHouseCompletionRecordRow | null;
+  proofReview: SoberHouseProofReviewRow | null;
+}
+
 export interface ObligationRow {
   id: string;
   tenant_id: string;
@@ -388,6 +474,40 @@ export interface ParticipantComplianceEventInput {
 export interface RecordParticipantComplianceEventResult {
   event: ComplianceEventRow;
   violation: ViolationRow | null;
+}
+
+export interface RecordSoberHouseCompletionInput {
+  obligationId: string;
+  completionStatus: SoberHouseEventCompletionStatus;
+  completedAt?: Date | null;
+  proofMetadata?: Record<string, unknown> | null;
+  submittedAt?: Date | null;
+}
+
+export interface RecordSoberHouseCompletionResult {
+  completion: SoberHouseCompletionRecordRow;
+  proofReview: SoberHouseProofReviewRow | null;
+}
+
+export interface PendingSoberHouseProofReviewRecord {
+  review: SoberHouseProofReviewRow;
+  completion: SoberHouseCompletionRecordRow;
+  obligation: SoberHouseObligationRow;
+}
+
+export type SoberHouseProofReviewOutcome = Exclude<SoberHouseProofReviewStatus, "PENDING">;
+
+export interface UpdateSoberHouseProofReviewInput {
+  reviewOutcome: SoberHouseProofReviewOutcome;
+  reviewerUserId: string;
+  reviewedAt?: Date | null;
+}
+
+export interface AcknowledgeSoberHouseAlertInput {
+  organizationId: string;
+  houseId?: string | null;
+  acknowledgedAt?: Date | null;
+  note?: string | null;
 }
 
 export interface SponsorConfigRow {
@@ -599,6 +719,39 @@ function toParticipantProfileStatus(value: string): ParticipantProfileStatus | n
   return parsed.success ? parsed.data : null;
 }
 
+function toSoberHouseEntityStatus(value: string): SoberHouseEntityStatus | null {
+  const parsed = soberHouseEntityStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toSoberHouseObligationType(value: string): SoberHouseObligationType | null {
+  switch (value) {
+    case "HOUSE_MEETING":
+    case "ONE_ON_ONE":
+    case "CHORE":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function toSoberHouseCompletionStatus(value: string): SoberHouseEventCompletionStatus | null {
+  const parsed = soberHouseEventCompletionStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toSoberHouseProofReviewStatus(value: string): SoberHouseProofReviewStatus | null {
+  const parsed = soberHouseProofReviewStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function toSoberHouseAlertAcknowledgementStatus(
+  value: string,
+): SoberHouseAlertAcknowledgementStatus | null {
+  const parsed = soberHouseAlertAcknowledgementStatusSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 function toObligationType(value: string): ObligationType | null {
   const parsed = obligationTypeSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
@@ -799,6 +952,15 @@ function toJsonParam(value: unknown) {
   return JSON.stringify(value ?? {});
 }
 
+function shouldCreateSoberHouseProofReview(
+  obligation: Pick<SoberHouseObligationRow, "proof_required">,
+  proofMetadata: Record<string, unknown> | null | undefined,
+) {
+  return (
+    obligation.proof_required || Boolean(proofMetadata && Object.keys(proofMetadata).length > 0)
+  );
+}
+
 function inferGeoStatusFromCoordinates(
   lat: number | null,
   lng: number | null,
@@ -945,6 +1107,379 @@ function preferNearbyMeeting(
 }
 
 export function createRepositories(db: DbClient) {
+  async function syncResidentHouseMembership(
+    tenantId: string,
+    userId: string,
+    payload: {
+      participantType: ParticipantType;
+      organizationId?: string | null;
+      houseId?: string | null;
+      status: ParticipantProfileStatus;
+    },
+  ) {
+    if (
+      payload.participantType !== "resident_user" ||
+      !payload.organizationId ||
+      !payload.houseId
+    ) {
+      await db.query(
+        `
+        UPDATE resident_house_memberships
+        SET status = 'INACTIVE',
+            updated_at = NOW()
+        WHERE tenant_id = $1
+          AND resident_user_id = $2
+      `,
+        [tenantId, userId],
+      );
+      return;
+    }
+
+    await db.query(
+      `
+      UPDATE resident_house_memberships
+      SET status = 'INACTIVE',
+          updated_at = NOW()
+      WHERE tenant_id = $1
+        AND resident_user_id = $2
+        AND house_id <> $3
+    `,
+      [tenantId, userId, payload.houseId],
+    );
+
+    await db.query<ResidentHouseMembershipRow>(
+      `
+      INSERT INTO resident_house_memberships (
+        id,
+        tenant_id,
+        organization_id,
+        house_id,
+        resident_user_id,
+        status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (tenant_id, house_id, resident_user_id)
+      DO UPDATE SET
+        organization_id = EXCLUDED.organization_id,
+        status = EXCLUDED.status,
+        updated_at = NOW()
+      RETURNING
+        id,
+        tenant_id,
+        organization_id,
+        house_id,
+        resident_user_id,
+        status,
+        created_at,
+        updated_at
+    `,
+      [
+        `rhm:${tenantId}:${payload.houseId}:${userId}`,
+        tenantId,
+        payload.organizationId,
+        payload.houseId,
+        userId,
+        payload.status === "ACTIVE" ? "ACTIVE" : "INACTIVE",
+      ],
+    );
+  }
+
+  async function listResidentHouseMembershipRows(
+    tenantId: string,
+  ): Promise<ResidentHouseMembershipRow[]> {
+    const result = await db.query<ResidentHouseMembershipRow>(
+      `
+      SELECT
+        id,
+        tenant_id,
+        organization_id,
+        house_id,
+        resident_user_id,
+        status,
+        created_at,
+        updated_at
+      FROM resident_house_memberships
+      WHERE tenant_id = $1
+      ORDER BY updated_at DESC, created_at DESC
+    `,
+      [tenantId],
+    );
+
+    return result.rows
+      .map((row) => {
+        const status = toSoberHouseEntityStatus(String(row.status));
+        if (!status) {
+          return null;
+        }
+        return {
+          ...row,
+          status,
+        };
+      })
+      .filter((row): row is ResidentHouseMembershipRow => row !== null);
+  }
+
+  async function listSoberHouseObligationRows(
+    tenantId: string,
+  ): Promise<SoberHouseObligationRow[]> {
+    const result = await db.query<SoberHouseObligationRow>(
+      `
+      SELECT
+        id,
+        tenant_id,
+        organization_id,
+        house_id,
+        resident_user_id,
+        resident_house_membership_id,
+        obligation_type,
+        scheduled_at,
+        due_at,
+        proof_required,
+        status,
+        created_at,
+        updated_at
+      FROM sober_house_obligations
+      WHERE tenant_id = $1
+      ORDER BY COALESCE(due_at, scheduled_at) ASC, created_at DESC
+    `,
+      [tenantId],
+    );
+
+    return result.rows
+      .map((row) => {
+        const obligationType = toSoberHouseObligationType(String(row.obligation_type));
+        const status = toSoberHouseEntityStatus(String(row.status));
+        if (!obligationType || !status) {
+          return null;
+        }
+        return {
+          ...row,
+          obligation_type: obligationType,
+          status,
+        };
+      })
+      .filter((row): row is SoberHouseObligationRow => row !== null);
+  }
+
+  async function listSoberHouseCompletionRows(
+    tenantId: string,
+  ): Promise<SoberHouseCompletionRecordRow[]> {
+    const result = await db.query<SoberHouseCompletionRecordRow>(
+      `
+      SELECT
+        id,
+        tenant_id,
+        organization_id,
+        house_id,
+        resident_user_id,
+        obligation_id,
+        completion_status,
+        completed_at,
+        proof_metadata_json,
+        submitted_at,
+        created_at,
+        updated_at
+      FROM sober_house_completion_records
+      WHERE tenant_id = $1
+      ORDER BY COALESCE(submitted_at, completed_at, updated_at) DESC, created_at DESC
+    `,
+      [tenantId],
+    );
+
+    return result.rows
+      .map((row) => {
+        const completionStatus = toSoberHouseCompletionStatus(String(row.completion_status));
+        if (!completionStatus) {
+          return null;
+        }
+        return {
+          ...row,
+          completion_status: completionStatus,
+        };
+      })
+      .filter((row): row is SoberHouseCompletionRecordRow => row !== null);
+  }
+
+  async function listSoberHouseProofReviewRows(
+    tenantId: string,
+  ): Promise<SoberHouseProofReviewRow[]> {
+    const result = await db.query<SoberHouseProofReviewRow>(
+      `
+      SELECT
+        id,
+        tenant_id,
+        organization_id,
+        house_id,
+        resident_user_id,
+        completion_record_id,
+        review_outcome,
+        reviewer_user_id,
+        reviewed_at,
+        created_at,
+        updated_at
+      FROM sober_house_proof_reviews
+      WHERE tenant_id = $1
+      ORDER BY created_at DESC, updated_at DESC
+    `,
+      [tenantId],
+    );
+
+    return result.rows
+      .map((row) => {
+        const reviewOutcome = toSoberHouseProofReviewStatus(String(row.review_outcome));
+        if (!reviewOutcome) {
+          return null;
+        }
+        return {
+          ...row,
+          review_outcome: reviewOutcome,
+        };
+      })
+      .filter((row): row is SoberHouseProofReviewRow => row !== null);
+  }
+
+  async function listSoberHouseAlertAcknowledgementRows(
+    tenantId: string,
+  ): Promise<SoberHouseAlertAcknowledgementRow[]> {
+    const result = await db.query<SoberHouseAlertAcknowledgementRow>(
+      `
+      SELECT
+        id,
+        tenant_id,
+        organization_id,
+        house_id,
+        resident_user_id,
+        alert_id,
+        status,
+        acknowledged_at,
+        note,
+        created_at,
+        updated_at
+      FROM sober_house_alert_acknowledgements
+      WHERE tenant_id = $1
+      ORDER BY COALESCE(acknowledged_at, updated_at) DESC, created_at DESC
+    `,
+      [tenantId],
+    );
+
+    return result.rows
+      .map((row) => {
+        const status = toSoberHouseAlertAcknowledgementStatus(String(row.status));
+        if (!status) {
+          return null;
+        }
+        return {
+          ...row,
+          status,
+        };
+      })
+      .filter((row): row is SoberHouseAlertAcknowledgementRow => row !== null);
+  }
+
+  async function listResidentHouseObligationRecordsForTenant(
+    tenantId: string,
+    filters: {
+      residentUserId?: string;
+      organizationId?: string;
+      houseId?: string;
+      status?: SoberHouseEntityStatus;
+      obligationType?: SoberHouseObligationType;
+    } = {},
+  ): Promise<ResidentHouseObligationRecord[]> {
+    const [obligations, completions, proofReviews] = await Promise.all([
+      listSoberHouseObligationRows(tenantId),
+      listSoberHouseCompletionRows(tenantId),
+      listSoberHouseProofReviewRows(tenantId),
+    ]);
+
+    const completionByObligationId = new Map(
+      completions.map((completion) => [completion.obligation_id, completion] as const),
+    );
+    const proofReviewByCompletionId = new Map(
+      proofReviews.map((review) => [review.completion_record_id, review] as const),
+    );
+
+    return obligations
+      .filter((obligation) => {
+        if (filters.residentUserId && obligation.resident_user_id !== filters.residentUserId) {
+          return false;
+        }
+        if (filters.organizationId && obligation.organization_id !== filters.organizationId) {
+          return false;
+        }
+        if (filters.houseId && obligation.house_id !== filters.houseId) {
+          return false;
+        }
+        if (filters.status && obligation.status !== filters.status) {
+          return false;
+        }
+        if (filters.obligationType && obligation.obligation_type !== filters.obligationType) {
+          return false;
+        }
+        return true;
+      })
+      .map((obligation) => {
+        const completion = completionByObligationId.get(obligation.id) ?? null;
+        return {
+          obligation,
+          completion,
+          proofReview: completion ? (proofReviewByCompletionId.get(completion.id) ?? null) : null,
+        };
+      });
+  }
+
+  async function listPendingSoberHouseProofReviewRecordsForTenant(
+    tenantId: string,
+    filters: {
+      residentUserId?: string;
+      organizationId?: string;
+      houseId?: string;
+    } = {},
+  ): Promise<PendingSoberHouseProofReviewRecord[]> {
+    const [proofReviews, completions, obligations] = await Promise.all([
+      listSoberHouseProofReviewRows(tenantId),
+      listSoberHouseCompletionRows(tenantId),
+      listSoberHouseObligationRows(tenantId),
+    ]);
+
+    const completionById = new Map(
+      completions.map((completion) => [completion.id, completion] as const),
+    );
+    const obligationById = new Map(
+      obligations.map((obligation) => [obligation.id, obligation] as const),
+    );
+
+    return proofReviews
+      .filter((review) => review.review_outcome === "PENDING")
+      .map((review) => {
+        const completion = completionById.get(review.completion_record_id) ?? null;
+        const obligation = completion
+          ? (obligationById.get(completion.obligation_id) ?? null)
+          : null;
+        if (!completion || !obligation) {
+          return null;
+        }
+        return {
+          review,
+          completion,
+          obligation,
+        };
+      })
+      .filter((record): record is PendingSoberHouseProofReviewRecord => record !== null)
+      .filter((record) => {
+        if (filters.residentUserId && record.review.resident_user_id !== filters.residentUserId) {
+          return false;
+        }
+        if (filters.organizationId && record.review.organization_id !== filters.organizationId) {
+          return false;
+        }
+        if (filters.houseId && record.review.house_id !== filters.houseId) {
+          return false;
+        }
+        return true;
+      });
+  }
+
   return {
     async findActorByUserId(userId: string): Promise<ActorContext | null> {
       const userResult = await db.query<UserRow>(
@@ -1201,7 +1736,24 @@ export function createRepositories(db: DbClient) {
         ],
       );
 
-      return result.rows[0] ?? null;
+      const row = result.rows[0] ?? null;
+      if (!row) {
+        return null;
+      }
+
+      await syncResidentHouseMembership(tenantId, userId, payload);
+
+      const participantType = toParticipantType(String(row.participant_type));
+      const status = toParticipantProfileStatus(String(row.status));
+      if (!participantType || !status) {
+        return null;
+      }
+
+      return {
+        ...row,
+        participant_type: participantType,
+        status,
+      };
     },
 
     async getParticipantProfile(
@@ -1282,6 +1834,378 @@ export function createRepositories(db: DbClient) {
           };
         })
         .filter((row): row is ParticipantProfileRow => row !== null);
+    },
+
+    async listResidentHouseMemberships(
+      tenantId: string,
+      filters: {
+        residentUserId?: string;
+        organizationId?: string;
+        houseId?: string;
+        status?: SoberHouseEntityStatus;
+      } = {},
+    ): Promise<ResidentHouseMembershipRow[]> {
+      return (await listResidentHouseMembershipRows(tenantId)).filter((membership) => {
+        if (filters.residentUserId && membership.resident_user_id !== filters.residentUserId) {
+          return false;
+        }
+        if (filters.organizationId && membership.organization_id !== filters.organizationId) {
+          return false;
+        }
+        if (filters.houseId && membership.house_id !== filters.houseId) {
+          return false;
+        }
+        if (filters.status && membership.status !== filters.status) {
+          return false;
+        }
+        return true;
+      });
+    },
+
+    async listResidentHouseObligations(
+      tenantId: string,
+      filters: {
+        residentUserId?: string;
+        organizationId?: string;
+        houseId?: string;
+        status?: SoberHouseEntityStatus;
+        obligationType?: SoberHouseObligationType;
+      } = {},
+    ): Promise<ResidentHouseObligationRecord[]> {
+      return listResidentHouseObligationRecordsForTenant(tenantId, filters);
+    },
+
+    async recordSoberHouseCompletion(
+      tenantId: string,
+      residentUserId: string,
+      payload: RecordSoberHouseCompletionInput,
+    ): Promise<RecordSoberHouseCompletionResult | null> {
+      const obligation =
+        (
+          await listResidentHouseObligationRecordsForTenant(tenantId, {
+            residentUserId,
+          })
+        ).find((entry) => entry.obligation.id === payload.obligationId)?.obligation ?? null;
+
+      if (!obligation || obligation.resident_user_id !== residentUserId) {
+        return null;
+      }
+
+      const submittedAtIso =
+        payload.submittedAt?.toISOString() ??
+        (shouldCreateSoberHouseProofReview(obligation, payload.proofMetadata)
+          ? new Date().toISOString()
+          : null);
+
+      const existingCompletion =
+        (
+          await listResidentHouseObligationRecordsForTenant(tenantId, {
+            residentUserId,
+          })
+        ).find((entry) => entry.obligation.id === obligation.id)?.completion ?? null;
+
+      const completionResult = await db.query<SoberHouseCompletionRecordRow>(
+        `
+        INSERT INTO sober_house_completion_records (
+          id,
+          tenant_id,
+          organization_id,
+          house_id,
+          resident_user_id,
+          obligation_id,
+          completion_status,
+          completed_at,
+          proof_metadata_json,
+          submitted_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+        ON CONFLICT (tenant_id, obligation_id)
+        DO UPDATE SET
+          completion_status = EXCLUDED.completion_status,
+          completed_at = EXCLUDED.completed_at,
+          proof_metadata_json = EXCLUDED.proof_metadata_json,
+          submitted_at = EXCLUDED.submitted_at,
+          updated_at = NOW()
+        RETURNING
+          id,
+          tenant_id,
+          organization_id,
+          house_id,
+          resident_user_id,
+          obligation_id,
+          completion_status,
+          completed_at,
+          proof_metadata_json,
+          submitted_at,
+          created_at,
+          updated_at
+      `,
+        [
+          existingCompletion?.id ?? randomUUID(),
+          tenantId,
+          obligation.organization_id,
+          obligation.house_id,
+          residentUserId,
+          obligation.id,
+          payload.completionStatus,
+          payload.completedAt?.toISOString() ?? null,
+          JSON.stringify(payload.proofMetadata ?? null),
+          submittedAtIso,
+        ],
+      );
+
+      const completionRow = completionResult.rows[0] ?? null;
+      const completionStatus = completionRow
+        ? toSoberHouseCompletionStatus(String(completionRow.completion_status))
+        : null;
+      const completion =
+        completionRow && completionStatus
+          ? {
+              ...completionRow,
+              completion_status: completionStatus,
+            }
+          : null;
+
+      if (!completion) {
+        return null;
+      }
+
+      if (!shouldCreateSoberHouseProofReview(obligation, payload.proofMetadata)) {
+        return {
+          completion,
+          proofReview: null,
+        };
+      }
+
+      const existingReview =
+        (
+          await listPendingSoberHouseProofReviewRecordsForTenant(tenantId, {
+            residentUserId,
+            organizationId: obligation.organization_id,
+            houseId: obligation.house_id,
+          })
+        ).find((entry) => entry.completion.id === completion.id)?.review ??
+        (await listSoberHouseProofReviewRows(tenantId)).find(
+          (review) => review.completion_record_id === completion.id,
+        ) ??
+        null;
+
+      const reviewResult = await db.query<SoberHouseProofReviewRow>(
+        `
+        INSERT INTO sober_house_proof_reviews (
+          id,
+          tenant_id,
+          organization_id,
+          house_id,
+          resident_user_id,
+          completion_record_id,
+          review_outcome,
+          reviewer_user_id,
+          reviewed_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NULL, NULL)
+        ON CONFLICT (completion_record_id)
+        DO UPDATE SET
+          review_outcome = 'PENDING',
+          reviewer_user_id = NULL,
+          reviewed_at = NULL,
+          updated_at = NOW()
+        RETURNING
+          id,
+          tenant_id,
+          organization_id,
+          house_id,
+          resident_user_id,
+          completion_record_id,
+          review_outcome,
+          reviewer_user_id,
+          reviewed_at,
+          created_at,
+          updated_at
+      `,
+        [
+          existingReview?.id ?? randomUUID(),
+          tenantId,
+          obligation.organization_id,
+          obligation.house_id,
+          residentUserId,
+          completion.id,
+        ],
+      );
+
+      const reviewRow = reviewResult.rows[0] ?? null;
+      const reviewOutcome = reviewRow
+        ? toSoberHouseProofReviewStatus(String(reviewRow.review_outcome))
+        : null;
+      const proofReview =
+        reviewRow && reviewOutcome
+          ? {
+              ...reviewRow,
+              review_outcome: reviewOutcome,
+            }
+          : null;
+
+      return {
+        completion,
+        proofReview,
+      };
+    },
+
+    async listPendingSoberHouseProofReviews(
+      tenantId: string,
+      filters: {
+        residentUserId?: string;
+        organizationId?: string;
+        houseId?: string;
+      } = {},
+    ): Promise<PendingSoberHouseProofReviewRecord[]> {
+      return listPendingSoberHouseProofReviewRecordsForTenant(tenantId, filters);
+    },
+
+    async updateSoberHouseProofReviewOutcome(
+      tenantId: string,
+      reviewId: string,
+      payload: UpdateSoberHouseProofReviewInput,
+    ): Promise<SoberHouseProofReviewRow | null> {
+      const result = await db.query<SoberHouseProofReviewRow>(
+        `
+        UPDATE sober_house_proof_reviews
+        SET review_outcome = $1,
+            reviewer_user_id = $2,
+            reviewed_at = $3,
+            updated_at = NOW()
+        WHERE tenant_id = $4
+          AND id = $5
+        RETURNING
+          id,
+          tenant_id,
+          organization_id,
+          house_id,
+          resident_user_id,
+          completion_record_id,
+          review_outcome,
+          reviewer_user_id,
+          reviewed_at,
+          created_at,
+          updated_at
+      `,
+        [
+          payload.reviewOutcome,
+          payload.reviewerUserId,
+          (payload.reviewedAt ?? new Date()).toISOString(),
+          tenantId,
+          reviewId,
+        ],
+      );
+
+      const row = result.rows[0] ?? null;
+      const reviewOutcome = row ? toSoberHouseProofReviewStatus(String(row.review_outcome)) : null;
+      if (!row || !reviewOutcome) {
+        return null;
+      }
+
+      return {
+        ...row,
+        review_outcome: reviewOutcome,
+      };
+    },
+
+    async listSoberHouseAlertAcknowledgements(
+      tenantId: string,
+      filters: {
+        residentUserId?: string;
+        organizationId?: string;
+        houseId?: string;
+        status?: SoberHouseAlertAcknowledgementStatus;
+      } = {},
+    ): Promise<SoberHouseAlertAcknowledgementRow[]> {
+      return (await listSoberHouseAlertAcknowledgementRows(tenantId)).filter((acknowledgement) => {
+        if (filters.residentUserId && acknowledgement.resident_user_id !== filters.residentUserId) {
+          return false;
+        }
+        if (filters.organizationId && acknowledgement.organization_id !== filters.organizationId) {
+          return false;
+        }
+        if (filters.houseId && acknowledgement.house_id !== filters.houseId) {
+          return false;
+        }
+        if (filters.status && acknowledgement.status !== filters.status) {
+          return false;
+        }
+        return true;
+      });
+    },
+
+    async acknowledgeSoberHouseAlert(
+      tenantId: string,
+      residentUserId: string,
+      alertId: string,
+      payload: AcknowledgeSoberHouseAlertInput,
+    ): Promise<SoberHouseAlertAcknowledgementRow> {
+      const existing =
+        (await listSoberHouseAlertAcknowledgementRows(tenantId)).find(
+          (acknowledgement) =>
+            acknowledgement.resident_user_id === residentUserId &&
+            acknowledgement.alert_id === alertId,
+        ) ?? null;
+
+      const result = await db.query<SoberHouseAlertAcknowledgementRow>(
+        `
+        INSERT INTO sober_house_alert_acknowledgements (
+          id,
+          tenant_id,
+          organization_id,
+          house_id,
+          resident_user_id,
+          alert_id,
+          status,
+          acknowledged_at,
+          note
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'ACKNOWLEDGED', $7, $8)
+        ON CONFLICT (tenant_id, resident_user_id, alert_id)
+        DO UPDATE SET
+          organization_id = EXCLUDED.organization_id,
+          house_id = EXCLUDED.house_id,
+          status = 'ACKNOWLEDGED',
+          acknowledged_at = EXCLUDED.acknowledged_at,
+          note = EXCLUDED.note,
+          updated_at = NOW()
+        RETURNING
+          id,
+          tenant_id,
+          organization_id,
+          house_id,
+          resident_user_id,
+          alert_id,
+          status,
+          acknowledged_at,
+          note,
+          created_at,
+          updated_at
+      `,
+        [
+          existing?.id ?? randomUUID(),
+          tenantId,
+          payload.organizationId,
+          payload.houseId ?? null,
+          residentUserId,
+          alertId,
+          (payload.acknowledgedAt ?? new Date()).toISOString(),
+          payload.note ?? null,
+        ],
+      );
+
+      const row = result.rows[0];
+      const status = row ? toSoberHouseAlertAcknowledgementStatus(String(row.status)) : null;
+      if (!row || !status) {
+        throw new Error("Failed to acknowledge sober-house alert");
+      }
+
+      return {
+        ...row,
+        status,
+      };
     },
 
     async syncParticipantObligations(

@@ -206,10 +206,7 @@ import {
   type CommunicationMode,
 } from "./lib/communication/summary";
 import { createDefaultSoberHouseSettingsStore } from "./lib/soberHouse/defaults";
-import {
-  evaluateResidentCompliance,
-  statusToneForComplianceStatus,
-} from "./lib/soberHouse/compliance";
+import { evaluateResidentCompliance } from "./lib/soberHouse/compliance";
 import { buildSoberHouseResidentDashboardSummary } from "./lib/soberHouse/dashboard";
 import { currentMonthKey } from "./lib/soberHouse/monthlyWindow";
 import {
@@ -19424,10 +19421,11 @@ export default function App() {
                   <SoberHouseSettingsScreen
                     key={soberHouseSettingsScreenKey}
                     userId={devAuthUserId}
+                    apiUrl={apiUrl}
+                    authHeader={authHeader}
                     actorId={devAuthUserId}
                     actorName={devUserDisplayName}
                     viewerRole={appAccessRole}
-                    sponsorCallLogs={sponsorCallLogs}
                     adminLaunchContext={soberHouseAdminLaunchContext}
                     onBack={() => handleModeSelect("A")}
                   />

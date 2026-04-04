@@ -6,6 +6,10 @@ import {
   Permission,
   Role,
   locationPingSchema,
+  soberHouseOperatorProofReviewRequestSchema,
+  soberHouseResidentAlertAcknowledgementRequestSchema,
+  soberHouseResidentCompletionRequestSchema,
+  soberHouseResidentProofSubmissionRequestSchema,
   sponsorConfigSchema,
 } from "@recovery/shared-types";
 import Fastify from "fastify";
@@ -14,7 +18,12 @@ import { auditResponseIfNeeded, createAuditLogger } from "./audit";
 import { buildAuthenticateRequest } from "./auth";
 import type { DbPool } from "./db/client";
 import { createPostgresPool } from "./db/postgres";
-import { createRepositories, SignatureWindowError } from "./db/repositories";
+import {
+  createRepositories,
+  SignatureWindowError,
+  type ResidentHouseObligationRecord,
+  type SoberHouseAlertAcknowledgementRow,
+} from "./db/repositories";
 import { AccessDeniedError, createTenantRepositories } from "./db/tenantRepositories";
 import { loadApiEnv, type ApiEnv } from "./env";
 import { bigBookPagesQuerySchema, getBigBookPagesForRange } from "./literature/bigbook";
@@ -43,6 +52,10 @@ const operatorControlPlaneQuerySchema = z.object({
 
 const operatorControlPlaneBodySchema = z.object({
   store: z.unknown(),
+});
+
+const operatorSoberHouseProofReviewParamsSchema = z.object({
+  reviewId: z.string().min(1),
 });
 
 const meetingCreateBodySchema = z.object({
@@ -436,6 +449,19 @@ const participantViolationsQuerySchema = z.object({
   courtProgramId: z.string().min(1).optional(),
 });
 
+const soberHouseResidentObligationsQuerySchema = z.object({
+  status: z.enum(["ACTIVE", "INACTIVE"]).optional(),
+  obligationType: z.enum(["HOUSE_MEETING", "ONE_ON_ONE", "CHORE"]).optional(),
+});
+
+const soberHouseResidentObligationParamsSchema = z.object({
+  obligationId: z.string().min(1),
+});
+
+const soberHouseResidentAlertParamsSchema = z.object({
+  alertId: z.string().min(1),
+});
+
 const WARNING_DISTANCE_FEET = 200;
 const FEET_TO_METERS = 0.3048;
 const MILES_TO_METERS = 1609.344;
@@ -470,6 +496,63 @@ function isDevAuthHeader(value: string | undefined): boolean {
     return false;
   }
   return /^Bearer DEV_[A-Za-z0-9_-]+$/.test(value.trim());
+}
+
+function toResidentSoberHouseObligationPayload(record: ResidentHouseObligationRecord) {
+  return {
+    obligationId: record.obligation.id,
+    organizationId: record.obligation.organization_id,
+    houseId: record.obligation.house_id,
+    residentUserId: record.obligation.resident_user_id,
+    obligationType: record.obligation.obligation_type,
+    scheduledAt: record.obligation.scheduled_at,
+    dueAt: record.obligation.due_at,
+    proofRequired: record.obligation.proof_required,
+    obligationStatus: record.obligation.status,
+    completionRecordId: record.completion?.id ?? null,
+    completionStatus: record.completion?.completion_status ?? null,
+    completedAt: record.completion?.completed_at ?? null,
+    proofReviewId: record.proofReview?.id ?? null,
+    proofReviewOutcome: record.proofReview?.review_outcome ?? null,
+    reviewedAt: record.proofReview?.reviewed_at ?? null,
+    createdAt: record.obligation.created_at,
+    updatedAt: record.completion?.updated_at ?? record.obligation.updated_at,
+  };
+}
+
+function toResidentSoberHouseStatusPayload(record: ResidentHouseObligationRecord) {
+  return {
+    obligationId: record.obligation.id,
+    obligationType: record.obligation.obligation_type,
+    obligationStatus: record.obligation.status,
+    scheduledAt: record.obligation.scheduled_at,
+    dueAt: record.obligation.due_at,
+    completionStatus: record.completion?.completion_status ?? null,
+    proofRequired: record.obligation.proof_required,
+    proofSubmitted:
+      Boolean(record.completion?.submitted_at) ||
+      Boolean(
+        record.completion?.proof_metadata_json &&
+        typeof record.completion.proof_metadata_json === "object",
+      ),
+    proofReviewOutcome: record.proofReview?.review_outcome ?? null,
+    reviewedAt: record.proofReview?.reviewed_at ?? null,
+  };
+}
+
+function toResidentAlertAcknowledgementPayload(record: SoberHouseAlertAcknowledgementRow) {
+  return {
+    acknowledgementId: record.id,
+    organizationId: record.organization_id,
+    houseId: record.house_id,
+    residentUserId: record.resident_user_id,
+    alertId: record.alert_id,
+    status: record.status,
+    acknowledgedAt: record.acknowledged_at,
+    note: record.note,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
+  };
 }
 
 export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date } = {}) {
@@ -924,6 +1007,91 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
     },
   );
 
+  app.patch(
+    "/v1/operator/sober-house/proof-reviews/:reviewId",
+    {
+      preHandler: [authenticateRequest],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedParams = operatorSoberHouseProofReviewParamsSchema.safeParse(
+        request.params ?? {},
+      );
+      const parsedBody = soberHouseOperatorProofReviewRequestSchema.safeParse(request.body);
+      if (!parsedParams.success || !parsedBody.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          details: {
+            params: parsedParams.success ? undefined : parsedParams.error.flatten(),
+            body: parsedBody.success ? undefined : parsedBody.error.flatten(),
+          },
+        });
+        return;
+      }
+
+      try {
+        const reviewed = await tenantRepositories.soberHouseOperator.reviewPendingProof(
+          actor,
+          parsedParams.data.reviewId,
+          {
+            reviewOutcome: parsedBody.data.reviewOutcome,
+            reviewedAt: parsedBody.data.reviewedAt
+              ? new Date(parsedBody.data.reviewedAt)
+              : new Date(),
+          },
+        );
+        if (!reviewed) {
+          reply
+            .code(404)
+            .send({ error: "not_found", message: "Pending sober-house proof review not found" });
+          return;
+        }
+
+        await app.auditLogger.log({
+          tenantId: actor.tenantId,
+          actorUserId: actor.userId,
+          action: "sober_house.proof_review.reviewed",
+          subjectType: "sober_house_proof_review",
+          subjectId: reviewed.review.id,
+          metadata: {
+            obligationId: reviewed.obligation.id,
+            residentUserId: reviewed.review.resident_user_id,
+            organizationId: reviewed.review.organization_id,
+            houseId: reviewed.review.house_id,
+            completionRecordId: reviewed.review.completion_record_id,
+            reviewOutcome: reviewed.review.review_outcome,
+            note: parsedBody.data.note?.trim() || null,
+          },
+        });
+
+        return {
+          proofReview: {
+            reviewId: reviewed.review.id,
+            obligationId: reviewed.obligation.id,
+            residentUserId: reviewed.review.resident_user_id,
+            organizationId: reviewed.review.organization_id,
+            houseId: reviewed.review.house_id,
+            completionRecordId: reviewed.review.completion_record_id,
+            reviewOutcome: reviewed.review.review_outcome,
+            reviewedAt: reviewed.review.reviewed_at,
+            reviewerUserId: reviewed.review.reviewer_user_id,
+          },
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
   app.put(
     "/v1/me/participant-profile",
     {
@@ -1121,6 +1289,341 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
           parsedQuery.data,
         ),
       };
+    },
+  );
+
+  app.get(
+    "/v1/me/sober-house/obligations",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedQuery = soberHouseResidentObligationsQuerySchema.safeParse(request.query ?? {});
+      if (!parsedQuery.success) {
+        reply.code(400).send({ error: "bad_request", issues: parsedQuery.error.flatten() });
+        return;
+      }
+
+      try {
+        const obligations = await tenantRepositories.soberHouseResident.listSelfObligations(actor, {
+          status: parsedQuery.data.status,
+          obligationType: parsedQuery.data.obligationType,
+        });
+        return {
+          obligations: obligations.map(toResidentSoberHouseObligationPayload),
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get(
+    "/v1/me/sober-house/obligations/status",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      try {
+        const status = await tenantRepositories.soberHouseResident.listSelfStatus(actor);
+        return {
+          obligationStatuses: status.obligations.map(toResidentSoberHouseStatusPayload),
+          alertAcknowledgements: status.alertAcknowledgements.map(
+            toResidentAlertAcknowledgementPayload,
+          ),
+          pendingProofReviews: status.pendingProofReviews.map((entry) => ({
+            reviewId: entry.review.id,
+            completionRecordId: entry.completion.id,
+            obligationId: entry.obligation.id,
+            obligationType: entry.obligation.obligation_type,
+            reviewOutcome: entry.review.review_outcome,
+            submittedAt: entry.completion.submitted_at,
+            createdAt: entry.review.created_at,
+          })),
+        };
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/v1/me/sober-house/obligations/:obligationId/chore-completion",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+      config: {
+        audit: {
+          action: "sober_house.resident.chore_completion.write",
+          subjectType: "sober_house_obligation",
+          subjectIdFrom: "param:obligationId",
+          sensitiveRead: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedParams = soberHouseResidentObligationParamsSchema.safeParse(request.params ?? {});
+      const parsedBody = soberHouseResidentCompletionRequestSchema.safeParse(request.body ?? {});
+      if (!parsedParams.success || !parsedBody.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          details: {
+            params: parsedParams.success ? undefined : parsedParams.error.flatten(),
+            body: parsedBody.success ? undefined : parsedBody.error.flatten(),
+          },
+        });
+        return;
+      }
+
+      try {
+        const result = await tenantRepositories.soberHouseResident.completeSelfChore(
+          actor,
+          parsedParams.data.obligationId,
+          {
+            completedAt: parsedBody.data.completedAt
+              ? new Date(parsedBody.data.completedAt)
+              : undefined,
+            submittedAt: parsedBody.data.submittedAt
+              ? new Date(parsedBody.data.submittedAt)
+              : undefined,
+            proofMetadata: parsedBody.data.proofMetadata ?? null,
+          },
+        );
+        if (!result) {
+          reply.code(404).send({ error: "not_found", message: "Chore obligation not found" });
+          return;
+        }
+        reply.code(201).send({
+          completion: result.completion,
+          proofReview: result.proofReview,
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/v1/me/sober-house/obligations/:obligationId/one-on-one-completion",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+      config: {
+        audit: {
+          action: "sober_house.resident.one_on_one_completion.write",
+          subjectType: "sober_house_obligation",
+          subjectIdFrom: "param:obligationId",
+          sensitiveRead: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedParams = soberHouseResidentObligationParamsSchema.safeParse(request.params ?? {});
+      const parsedBody = soberHouseResidentCompletionRequestSchema.safeParse(request.body ?? {});
+      if (!parsedParams.success || !parsedBody.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          details: {
+            params: parsedParams.success ? undefined : parsedParams.error.flatten(),
+            body: parsedBody.success ? undefined : parsedBody.error.flatten(),
+          },
+        });
+        return;
+      }
+
+      try {
+        const result = await tenantRepositories.soberHouseResident.completeSelfOneOnOne(
+          actor,
+          parsedParams.data.obligationId,
+          {
+            completedAt: parsedBody.data.completedAt
+              ? new Date(parsedBody.data.completedAt)
+              : undefined,
+            submittedAt: parsedBody.data.submittedAt
+              ? new Date(parsedBody.data.submittedAt)
+              : undefined,
+            proofMetadata: parsedBody.data.proofMetadata ?? null,
+          },
+        );
+        if (!result) {
+          reply.code(404).send({ error: "not_found", message: "One-on-one obligation not found" });
+          return;
+        }
+        reply.code(201).send({
+          completion: result.completion,
+          proofReview: result.proofReview,
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/v1/me/sober-house/obligations/:obligationId/proof",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+      config: {
+        audit: {
+          action: "sober_house.resident.proof_submission.write",
+          subjectType: "sober_house_obligation",
+          subjectIdFrom: "param:obligationId",
+          sensitiveRead: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedParams = soberHouseResidentObligationParamsSchema.safeParse(request.params ?? {});
+      const parsedBody = soberHouseResidentProofSubmissionRequestSchema.safeParse(
+        request.body ?? {},
+      );
+      if (!parsedParams.success || !parsedBody.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          details: {
+            params: parsedParams.success ? undefined : parsedParams.error.flatten(),
+            body: parsedBody.success ? undefined : parsedBody.error.flatten(),
+          },
+        });
+        return;
+      }
+
+      try {
+        const result = await tenantRepositories.soberHouseResident.submitSelfProof(
+          actor,
+          parsedParams.data.obligationId,
+          {
+            completedAt: parsedBody.data.completedAt
+              ? new Date(parsedBody.data.completedAt)
+              : undefined,
+            submittedAt: parsedBody.data.submittedAt
+              ? new Date(parsedBody.data.submittedAt)
+              : undefined,
+            proofMetadata: parsedBody.data.proofMetadata,
+          },
+        );
+        if (!result) {
+          reply.code(404).send({ error: "not_found", message: "Sober-house obligation not found" });
+          return;
+        }
+        reply.code(201).send({
+          completion: result.completion,
+          proofReview: result.proofReview,
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/v1/me/sober-house/alerts/:alertId/acknowledgements",
+    {
+      preHandler: [authenticateRequest, requireRole(Role.END_USER)],
+      config: {
+        audit: {
+          action: "sober_house.resident.alert_acknowledgement.write",
+          subjectType: "sober_house_alert",
+          subjectIdFrom: "param:alertId",
+          sensitiveRead: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.actor;
+      if (!actor) {
+        reply.code(401).send({ error: "unauthorized", message: "Missing actor context" });
+        return;
+      }
+
+      const parsedParams = soberHouseResidentAlertParamsSchema.safeParse(request.params ?? {});
+      const parsedBody = soberHouseResidentAlertAcknowledgementRequestSchema.safeParse(
+        request.body ?? {},
+      );
+      if (!parsedParams.success || !parsedBody.success) {
+        reply.code(400).send({
+          error: "bad_request",
+          details: {
+            params: parsedParams.success ? undefined : parsedParams.error.flatten(),
+            body: parsedBody.success ? undefined : parsedBody.error.flatten(),
+          },
+        });
+        return;
+      }
+
+      try {
+        const acknowledgement = await tenantRepositories.soberHouseResident.acknowledgeSelfAlert(
+          actor,
+          parsedParams.data.alertId,
+          {
+            acknowledgedAt: parsedBody.data.acknowledgedAt
+              ? new Date(parsedBody.data.acknowledgedAt)
+              : undefined,
+            note: parsedBody.data.note ?? null,
+          },
+        );
+        if (!acknowledgement) {
+          reply.code(404).send({ error: "not_found", message: "House alert not found" });
+          return;
+        }
+        reply.code(201).send({
+          acknowledgement: toResidentAlertAcknowledgementPayload(acknowledgement),
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          reply.code(403).send({ error: "forbidden", message: error.message });
+          return;
+        }
+        throw error;
+      }
     },
   );
 

@@ -6,6 +6,9 @@ import {
   type ParticipantProfileStatus,
   type ParticipantType,
   type ProofType,
+  type SoberHouseAlertAcknowledgementStatus,
+  type SoberHouseEntityStatus,
+  type SoberHouseEventCompletionStatus,
   type VerificationStatus,
   ComplianceEventType,
   IncidentType,
@@ -19,11 +22,17 @@ import {
 import type { ActorContext } from "../domain/actor";
 import type {
   ExclusionZoneType,
+  MeetingGuideNearbyFilters,
   ObligationSnapshotInput,
   ParticipantComplianceEventInput,
   ParticipantProfileRow,
-  MeetingGuideNearbyFilters,
+  PendingSoberHouseProofReviewRecord,
+  RecordSoberHouseCompletionResult,
+  ResidentHouseObligationRecord,
   Repositories,
+  SoberHouseAlertAcknowledgementRow,
+  SoberHouseObligationType,
+  SoberHouseProofReviewRow,
   SupervisorAttendanceFilters,
   SupervisorLiveLocationFilters,
   SupervisorIncidentFilters,
@@ -100,6 +109,25 @@ function isProfileVisibleToScope(
     return true;
   }
   return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function recordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+async function requireResidentParticipantProfile(
+  repositories: Repositories,
+  actor: ActorContext,
+): Promise<ParticipantProfileRow> {
+  const profile = await repositories.getParticipantProfile(actor.tenantId, actor.userId);
+  if (!profile || profile.participant_type !== "resident_user") {
+    throw new AccessDeniedError("Resident sober-house access is required.");
+  }
+  return profile;
 }
 
 export function createTenantRepositories(repositories: Repositories) {
@@ -733,6 +761,239 @@ export function createTenantRepositories(repositories: Repositories) {
               scope.courtProgramIds.includes(violation.court_program_id))
           );
         });
+      },
+    },
+    soberHouseResident: {
+      async listSelfObligations(
+        actor: ActorContext,
+        filters: {
+          status?: SoberHouseEntityStatus;
+          obligationType?: SoberHouseObligationType;
+        } = {},
+      ): Promise<ResidentHouseObligationRecord[]> {
+        const profile = await requireResidentParticipantProfile(repositories, actor);
+        return repositories.listResidentHouseObligations(actor.tenantId, {
+          residentUserId: actor.userId,
+          organizationId: profile.organization_id ?? undefined,
+          houseId: profile.house_id ?? undefined,
+          status: filters.status,
+          obligationType: filters.obligationType,
+        });
+      },
+      async completeSelfChore(
+        actor: ActorContext,
+        obligationId: string,
+        payload: {
+          completedAt?: Date | null;
+          submittedAt?: Date | null;
+          proofMetadata?: Record<string, unknown> | null;
+        },
+      ): Promise<RecordSoberHouseCompletionResult | null> {
+        const profile = await requireResidentParticipantProfile(repositories, actor);
+        const obligation = (
+          await repositories.listResidentHouseObligations(actor.tenantId, {
+            residentUserId: actor.userId,
+            organizationId: profile.organization_id ?? undefined,
+            houseId: profile.house_id ?? undefined,
+            obligationType: "CHORE",
+            status: "ACTIVE",
+          })
+        ).find((entry) => entry.obligation.id === obligationId)?.obligation;
+        if (!obligation) {
+          return null;
+        }
+        return repositories.recordSoberHouseCompletion(actor.tenantId, actor.userId, {
+          obligationId,
+          completionStatus: "COMPLETED",
+          completedAt: payload.completedAt ?? new Date(),
+          submittedAt: payload.submittedAt ?? null,
+          proofMetadata: payload.proofMetadata ?? null,
+        });
+      },
+      async completeSelfOneOnOne(
+        actor: ActorContext,
+        obligationId: string,
+        payload: {
+          completedAt?: Date | null;
+          submittedAt?: Date | null;
+          proofMetadata?: Record<string, unknown> | null;
+        },
+      ): Promise<RecordSoberHouseCompletionResult | null> {
+        const profile = await requireResidentParticipantProfile(repositories, actor);
+        const obligation = (
+          await repositories.listResidentHouseObligations(actor.tenantId, {
+            residentUserId: actor.userId,
+            organizationId: profile.organization_id ?? undefined,
+            houseId: profile.house_id ?? undefined,
+            obligationType: "ONE_ON_ONE",
+            status: "ACTIVE",
+          })
+        ).find((entry) => entry.obligation.id === obligationId)?.obligation;
+        if (!obligation) {
+          return null;
+        }
+        return repositories.recordSoberHouseCompletion(actor.tenantId, actor.userId, {
+          obligationId,
+          completionStatus: "COMPLETED",
+          completedAt: payload.completedAt ?? new Date(),
+          submittedAt: payload.submittedAt ?? null,
+          proofMetadata: payload.proofMetadata ?? null,
+        });
+      },
+      async submitSelfProof(
+        actor: ActorContext,
+        obligationId: string,
+        payload: {
+          completedAt?: Date | null;
+          submittedAt?: Date | null;
+          proofMetadata: Record<string, unknown>;
+        },
+      ): Promise<RecordSoberHouseCompletionResult | null> {
+        const profile = await requireResidentParticipantProfile(repositories, actor);
+        const obligationRecord = (
+          await repositories.listResidentHouseObligations(actor.tenantId, {
+            residentUserId: actor.userId,
+            organizationId: profile.organization_id ?? undefined,
+            houseId: profile.house_id ?? undefined,
+          })
+        ).find((entry) => entry.obligation.id === obligationId);
+        if (!obligationRecord) {
+          return null;
+        }
+        return repositories.recordSoberHouseCompletion(actor.tenantId, actor.userId, {
+          obligationId,
+          completionStatus:
+            obligationRecord.completion?.completion_status ??
+            (payload.completedAt ? "COMPLETED" : "SCHEDULED"),
+          completedAt: payload.completedAt ?? null,
+          submittedAt: payload.submittedAt ?? new Date(),
+          proofMetadata: payload.proofMetadata,
+        });
+      },
+      async acknowledgeSelfAlert(
+        actor: ActorContext,
+        alertId: string,
+        payload: { acknowledgedAt?: Date | null; note?: string | null },
+      ): Promise<SoberHouseAlertAcknowledgementRow | null> {
+        const profile = await requireResidentParticipantProfile(repositories, actor);
+        if (!profile.organization_id) {
+          return null;
+        }
+
+        const configValue = await repositories.getTenantConfigValue(
+          actor.tenantId,
+          `sober_house.control_plane.${profile.organization_id}`,
+        );
+        const store =
+          isRecord(configValue) && isRecord(configValue.store)
+            ? configValue.store
+            : isRecord(configValue)
+              ? configValue
+              : null;
+        const announcement =
+          recordArray(store?.houseAlertAnnouncements).find((entry) => entry.id === alertId) ?? null;
+        if (!announcement) {
+          return null;
+        }
+
+        if (
+          typeof announcement.organizationId === "string" &&
+          announcement.organizationId !== profile.organization_id
+        ) {
+          return null;
+        }
+        if (typeof announcement.houseId === "string" && announcement.houseId !== profile.house_id) {
+          return null;
+        }
+
+        return repositories.acknowledgeSoberHouseAlert(actor.tenantId, actor.userId, alertId, {
+          organizationId: profile.organization_id,
+          houseId: profile.house_id,
+          acknowledgedAt: payload.acknowledgedAt ?? new Date(),
+          note: payload.note ?? null,
+        });
+      },
+      async listSelfStatus(actor: ActorContext): Promise<{
+        obligations: ResidentHouseObligationRecord[];
+        pendingProofReviews: PendingSoberHouseProofReviewRecord[];
+        alertAcknowledgements: SoberHouseAlertAcknowledgementRow[];
+      }> {
+        const profile = await requireResidentParticipantProfile(repositories, actor);
+        const [obligations, pendingProofReviews, alertAcknowledgements] = await Promise.all([
+          repositories.listResidentHouseObligations(actor.tenantId, {
+            residentUserId: actor.userId,
+            organizationId: profile.organization_id ?? undefined,
+            houseId: profile.house_id ?? undefined,
+          }),
+          repositories.listPendingSoberHouseProofReviews(actor.tenantId, {
+            residentUserId: actor.userId,
+            organizationId: profile.organization_id ?? undefined,
+            houseId: profile.house_id ?? undefined,
+          }),
+          repositories.listSoberHouseAlertAcknowledgements(actor.tenantId, {
+            residentUserId: actor.userId,
+            organizationId: profile.organization_id ?? undefined,
+            houseId: profile.house_id ?? undefined,
+          }),
+        ]);
+        return {
+          obligations,
+          pendingProofReviews,
+          alertAcknowledgements,
+        };
+      },
+    },
+    soberHouseOperator: {
+      async reviewPendingProof(
+        actor: ActorContext,
+        reviewId: string,
+        payload: {
+          reviewOutcome: "APPROVED" | "REJECTED";
+          reviewedAt?: Date | null;
+        },
+      ): Promise<{
+        review: SoberHouseProofReviewRow;
+        completion: PendingSoberHouseProofReviewRecord["completion"];
+        obligation: PendingSoberHouseProofReviewRecord["obligation"];
+      } | null> {
+        const scope = await resolveParticipantAccessScope(repositories, actor);
+        if (!scope.isPlatformOwner && scope.organizationIds.length === 0) {
+          throw new AccessDeniedError("Protected sober-house organization scope is required.");
+        }
+
+        const pendingReview =
+          (await repositories.listPendingSoberHouseProofReviews(actor.tenantId)).find(
+            (record) => record.review.id === reviewId,
+          ) ?? null;
+        if (!pendingReview) {
+          return null;
+        }
+
+        if (
+          !scope.isPlatformOwner &&
+          !scope.organizationIds.includes(pendingReview.review.organization_id)
+        ) {
+          throw new AccessDeniedError("This proof review is outside your sober-house scope.");
+        }
+
+        const updatedReview = await repositories.updateSoberHouseProofReviewOutcome(
+          actor.tenantId,
+          reviewId,
+          {
+            reviewOutcome: payload.reviewOutcome,
+            reviewerUserId: actor.userId,
+            reviewedAt: payload.reviewedAt ?? new Date(),
+          },
+        );
+        if (!updatedReview) {
+          return null;
+        }
+
+        return {
+          review: updatedReview,
+          completion: pendingReview.completion,
+          obligation: pendingReview.obligation,
+        };
       },
     },
     notificationEvents: {

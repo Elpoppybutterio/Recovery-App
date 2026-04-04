@@ -2,8 +2,10 @@ import type { SoberHouseLiveStoreSlice } from "@recovery/shared-types";
 import type {
   ComplianceEventRow,
   HouseRow,
+  ObligationRow,
   OrganizationRow,
   ParticipantProfileRow,
+  ResidentHouseObligationRecord,
   Repositories,
   UserAccessContext,
   ViolationRow,
@@ -24,6 +26,48 @@ type ResidentDirectoryEntry = {
 };
 
 type RoleDefaults = Record<OperatorWebRole, { houseId: string | null }>;
+
+type ResidentLiveObligationSnapshotRecord = {
+  obligationId: string;
+  residentId: string;
+  residentUserId: string;
+  organizationId: string;
+  houseId: string;
+  obligationType: "HOUSE_MEETING" | "ONE_ON_ONE" | "CHORE";
+  title: string;
+  scheduledAt: string;
+  dueAt: string | null;
+  proofRequired: boolean;
+  obligationStatus: "ACTIVE" | "INACTIVE";
+  completionRecordId: string | null;
+  completionStatus: "SCHEDULED" | "COMPLETED" | "MISSED" | "EXCUSED" | null;
+  completedAt: string | null;
+  submittedAt: string | null;
+  proofSubmitted: boolean;
+  proofReviewId: string | null;
+  proofReviewOutcome: "PENDING" | "APPROVED" | "REJECTED" | "FOLLOW_UP_REQUIRED" | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ComplianceSummaryCounts = {
+  dueTodayCount: number;
+  completedTodayCount: number;
+  overdueCount: number;
+  pendingReviewCount: number;
+  rejectedProofCount: number;
+};
+
+type HouseComplianceSummaryRecord = ComplianceSummaryCounts & {
+  houseId: string;
+  houseName: string;
+};
+
+type ComplianceSummarySnapshot = {
+  organization: ComplianceSummaryCounts;
+  houses: HouseComplianceSummaryRecord[];
+};
 
 type ControlPlaneSession = {
   authMode: "DEV_BEARER";
@@ -46,6 +90,8 @@ export type OperatorControlPlaneSnapshotResponse = {
     store: SoberHouseLiveStoreSlice & Record<string, unknown>;
     residentDirectory: ResidentDirectoryEntry[];
     roleDefaults: RoleDefaults;
+    residentLiveObligations: ResidentLiveObligationSnapshotRecord[];
+    complianceSummary: ComplianceSummarySnapshot;
   };
   generatedAt: string;
 };
@@ -75,6 +121,10 @@ function numberOr(value: unknown, fallback: number): number {
 
 function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function hasObjectKeys(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length > 0;
 }
 
 function booleanOr(value: unknown, fallback: boolean): boolean {
@@ -148,6 +198,142 @@ function roleDefaultsFromHouses(houses: HouseRow[]): RoleDefaults {
     ORG_ADMIN: { houseId: null },
     HOUSE_MANAGER: { houseId: firstHouseId },
     STAFF_VIEWER: { houseId: firstHouseId },
+  };
+}
+
+function visibleHouseIdsForRole(
+  operatorRole: OperatorWebRole,
+  houses: HouseRow[],
+  roleDefaults: RoleDefaults,
+  store: SoberHouseLiveStoreSlice & Record<string, unknown>,
+): Set<string> {
+  if (operatorRole === "ORG_ADMIN") {
+    return new Set(houses.map((house) => house.id));
+  }
+
+  const targetHouseId = roleDefaults[operatorRole].houseId;
+  if (!targetHouseId) {
+    return new Set();
+  }
+
+  if (operatorRole === "HOUSE_MANAGER") {
+    const assignments = recordArray(store.staffAssignments);
+    const matchingAssignment = assignments.find(
+      (entry) =>
+        stringOr(entry.role, "") === "HOUSE_MANAGER" &&
+        stringArray(entry.assignedHouseIds).includes(targetHouseId),
+    );
+    return new Set(stringArray(matchingAssignment?.assignedHouseIds, [targetHouseId]));
+  }
+
+  return new Set([targetHouseId]);
+}
+
+function emptyComplianceSummaryCounts(): ComplianceSummaryCounts {
+  return {
+    dueTodayCount: 0,
+    completedTodayCount: 0,
+    overdueCount: 0,
+    pendingReviewCount: 0,
+    rejectedProofCount: 0,
+  };
+}
+
+function isoDateKey(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed.toISOString().slice(0, 10);
+}
+
+function isResolvedResidentLiveObligation(
+  completionStatus: ResidentLiveObligationSnapshotRecord["completionStatus"],
+): boolean {
+  return completionStatus === "COMPLETED" || completionStatus === "EXCUSED";
+}
+
+function buildComplianceSummaryCounts(
+  obligations: ResidentLiveObligationSnapshotRecord[],
+  nowIso: string,
+): ComplianceSummaryCounts {
+  const todayKey = isoDateKey(nowIso);
+
+  return obligations.reduce<ComplianceSummaryCounts>((summary, obligation) => {
+    const dueAnchor = obligation.dueAt ?? obligation.scheduledAt;
+    const dueToday =
+      obligation.obligationStatus === "ACTIVE" &&
+      !isResolvedResidentLiveObligation(obligation.completionStatus) &&
+      isoDateKey(dueAnchor) === todayKey;
+
+    if (dueToday) {
+      summary.dueTodayCount += 1;
+    }
+
+    if (
+      obligation.completionStatus === "COMPLETED" &&
+      isoDateKey(obligation.completedAt) === todayKey
+    ) {
+      summary.completedTodayCount += 1;
+    }
+
+    if (
+      obligation.obligationStatus === "ACTIVE" &&
+      !isResolvedResidentLiveObligation(obligation.completionStatus) &&
+      dueAnchor < nowIso
+    ) {
+      summary.overdueCount += 1;
+    }
+
+    if (obligation.proofReviewOutcome === "PENDING") {
+      summary.pendingReviewCount += 1;
+    }
+
+    if (obligation.proofReviewOutcome === "REJECTED") {
+      summary.rejectedProofCount += 1;
+    }
+
+    return summary;
+  }, emptyComplianceSummaryCounts());
+}
+
+function buildComplianceSummarySnapshot(input: {
+  obligations: ResidentLiveObligationSnapshotRecord[];
+  houses: HouseRow[];
+  visibleHouseIds: Set<string>;
+  nowIso: string;
+}): ComplianceSummarySnapshot {
+  const obligationsByHouseId = new Map<string, ResidentLiveObligationSnapshotRecord[]>();
+
+  input.obligations.forEach((obligation) => {
+    if (!input.visibleHouseIds.has(obligation.houseId)) {
+      return;
+    }
+    const current = obligationsByHouseId.get(obligation.houseId) ?? [];
+    current.push(obligation);
+    obligationsByHouseId.set(obligation.houseId, current);
+  });
+
+  const houses = input.houses
+    .filter((house) => input.visibleHouseIds.has(house.id))
+    .map((house) => ({
+      houseId: house.id,
+      houseName: house.name,
+      ...buildComplianceSummaryCounts(obligationsByHouseId.get(house.id) ?? [], input.nowIso),
+    }));
+
+  const visibleObligations = input.obligations.filter((obligation) =>
+    input.visibleHouseIds.has(obligation.houseId),
+  );
+
+  return {
+    organization: buildComplianceSummaryCounts(visibleObligations, input.nowIso),
+    houses,
   };
 }
 
@@ -237,32 +423,26 @@ function buildHouseStoreRecord(
   };
 }
 
-function buildResidentMembership(
-  profile: ParticipantProfileRow,
-  persisted?: Record<string, unknown>,
-) {
+function buildResidentMembership(profile: ParticipantProfileRow) {
   const residentId = profile.user_id;
   return {
-    id: stringOr(persisted?.id, `membership:${residentId}`),
+    id: `membership:${residentId}`,
     residentId,
     linkedUserId: profile.user_id,
     organizationId: profile.organization_id,
     houseId: profile.house_id,
-    roomOrBed: stringOr(persisted?.roomOrBed, ""),
-    moveInDate: stringOr(persisted?.moveInDate, profile.created_at.slice(0, 10)),
-    moveOutDate: stringOrNull(persisted?.moveOutDate),
-    isPrimary: booleanOr(persisted?.isPrimary, true),
+    roomOrBed: "",
+    moveInDate: profile.created_at.slice(0, 10),
+    moveOutDate: null,
+    isPrimary: true,
     status: profile.status === "INACTIVE" ? "INACTIVE" : "ACTIVE",
-    notes: stringOr(persisted?.notes, ""),
-    createdAt: stringOr(persisted?.createdAt, profile.created_at),
-    updatedAt: stringOr(persisted?.updatedAt, profile.updated_at),
+    notes: "",
+    createdAt: profile.created_at,
+    updatedAt: profile.updated_at,
   };
 }
 
-function buildResidentDirectoryEntry(
-  profile: ParticipantProfileRow,
-  persistedMembership?: Record<string, unknown>,
-): ResidentDirectoryEntry {
+function buildResidentDirectoryEntry(profile: ParticipantProfileRow): ResidentDirectoryEntry {
   return {
     residentId: profile.user_id,
     linkedUserId: profile.user_id,
@@ -271,19 +451,461 @@ function buildResidentDirectoryEntry(
         ? profile.display_name
         : prettifyUserLabel(profile.user_id),
     phaseLabel:
-      typeof persistedMembership?.programPhaseOnEntry === "string" &&
-      persistedMembership.programPhaseOnEntry.length > 0
-        ? persistedMembership.programPhaseOnEntry
-        : profile.status === "ACTIVE"
-          ? "Active"
-          : profile.status === "PENDING"
-            ? "Pending"
-            : profile.status === "PAUSED"
-              ? "Paused"
-              : "Inactive",
+      profile.status === "ACTIVE"
+        ? "Active"
+        : profile.status === "PENDING"
+          ? "Pending"
+          : profile.status === "PAUSED"
+            ? "Paused"
+            : "Inactive",
     assignedStaffAssignmentId: null,
     houseId: profile.house_id ?? "",
   };
+}
+
+function buildResidentLiveObligationSnapshotRecord(
+  record: ResidentHouseObligationRecord,
+  residentProfileByUserId: Map<string, ParticipantProfileRow>,
+): ResidentLiveObligationSnapshotRecord | null {
+  const residentProfile = residentProfileByUserId.get(record.obligation.resident_user_id) ?? null;
+  if (!residentProfile) {
+    return null;
+  }
+
+  const proofSubmitted =
+    record.completion?.submitted_at !== null ||
+    record.completion?.completed_at !== null ||
+    hasObjectKeys(record.completion?.proof_metadata_json);
+
+  return {
+    obligationId: record.obligation.id,
+    residentId: residentProfile.id,
+    residentUserId: record.obligation.resident_user_id,
+    organizationId: record.obligation.organization_id,
+    houseId: record.obligation.house_id,
+    obligationType: record.obligation.obligation_type,
+    title: record.obligation.title,
+    scheduledAt: record.obligation.scheduled_at,
+    dueAt: record.obligation.due_at,
+    proofRequired: record.obligation.proof_required,
+    obligationStatus: record.obligation.status,
+    completionRecordId: record.completion?.id ?? null,
+    completionStatus: record.completion?.completion_status ?? null,
+    completedAt: record.completion?.completed_at ?? null,
+    submittedAt: record.completion?.submitted_at ?? null,
+    proofSubmitted,
+    proofReviewId: record.proofReview?.id ?? null,
+    proofReviewOutcome: record.proofReview?.review_outcome ?? null,
+    reviewedAt: record.proofReview?.reviewed_at ?? null,
+    createdAt: record.obligation.created_at,
+    updatedAt:
+      record.proofReview?.updated_at ??
+      record.completion?.updated_at ??
+      record.obligation.updated_at,
+  };
+}
+
+type SoberHouseLiveObligationKind = "HOUSE_MEETING" | "ONE_ON_ONE" | "CHORE";
+type SoberHouseLiveProofRequirement =
+  | "NONE"
+  | "CHECKLIST"
+  | "PHOTO"
+  | "MANAGER_CONFIRMATION"
+  | "SIGNATURE"
+  | "ACKNOWLEDGMENT";
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
+function parseScheduledFrequency(
+  value: unknown,
+): "ONCE" | "DAILY" | "WEEKLY" | "BIWEEKLY" | "MONTHLY" | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toUpperCase().replace(/-/g, "_");
+  if (
+    normalized === "ONCE" ||
+    normalized === "DAILY" ||
+    normalized === "WEEKLY" ||
+    normalized === "BIWEEKLY" ||
+    normalized === "MONTHLY"
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function parseWeekdayCode(
+  value: unknown,
+): "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN" | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toUpperCase().slice(0, 3);
+  if (
+    normalized === "MON" ||
+    normalized === "TUE" ||
+    normalized === "WED" ||
+    normalized === "THU" ||
+    normalized === "FRI" ||
+    normalized === "SAT" ||
+    normalized === "SUN"
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function weekdayListFromRecurrence(
+  recurrence: Record<string, unknown> | null,
+): Array<"MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN"> {
+  if (!recurrence) {
+    return [];
+  }
+  const values = Array.isArray(recurrence.weekdayList)
+    ? recurrence.weekdayList
+    : Array.isArray(recurrence.weekdays)
+      ? recurrence.weekdays
+      : Array.isArray(recurrence.repeatDays)
+        ? recurrence.repeatDays
+        : [];
+  return values
+    .map((entry) => parseWeekdayCode(entry))
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+}
+
+function monthlyOrdinalFromRecurrence(
+  recurrence: Record<string, unknown> | null,
+): 1 | 2 | 3 | 4 | 5 | null {
+  const value =
+    recurrence?.monthlyOrdinal ?? recurrence?.monthOrdinal ?? recurrence?.ordinal ?? null;
+  return value === 1 || value === 2 || value === 3 || value === 4 || value === 5 ? value : null;
+}
+
+function dueDatePart(isoValue: string | null): string | null {
+  return typeof isoValue === "string" && isoValue.length >= 10 ? isoValue.slice(0, 10) : null;
+}
+
+function dueTimePart(isoValue: string | null): string | null {
+  return typeof isoValue === "string" && isoValue.length >= 16 ? isoValue.slice(11, 16) : null;
+}
+
+function isoFromDateAndTime(datePart: string, timeLocalHhmm: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart) || !/^\d{2}:\d{2}$/.test(timeLocalHhmm)) {
+    return null;
+  }
+  return `${datePart}T${timeLocalHhmm}:00.000Z`;
+}
+
+function jsDayFromWeekday(weekday: "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN"): number {
+  switch (weekday) {
+    case "MON":
+      return 1;
+    case "TUE":
+      return 2;
+    case "WED":
+      return 3;
+    case "THU":
+      return 4;
+    case "FRI":
+      return 5;
+    case "SAT":
+      return 6;
+    case "SUN":
+      return 0;
+  }
+}
+
+function nextRecurringOccurrenceIso(input: {
+  nowIso: string;
+  frequency: "ONCE" | "DAILY" | "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+  weekdayList: Array<"MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN">;
+  monthlyOrdinal: 1 | 2 | 3 | 4 | 5 | null;
+  scheduledDate: string | null;
+  timeLocalHhmm: string;
+}): string | null {
+  const now = new Date(input.nowIso);
+  if (Number.isNaN(now.getTime())) {
+    return null;
+  }
+
+  if (input.frequency === "ONCE") {
+    return input.scheduledDate
+      ? isoFromDateAndTime(input.scheduledDate, input.timeLocalHhmm)
+      : null;
+  }
+
+  if (input.frequency === "DAILY") {
+    const today = dueDatePart(now.toISOString());
+    return today ? isoFromDateAndTime(today, input.timeLocalHhmm) : null;
+  }
+
+  const primaryWeekday = input.weekdayList[0] ?? null;
+  if (!primaryWeekday) {
+    return null;
+  }
+
+  if (input.frequency === "MONTHLY" && input.monthlyOrdinal) {
+    for (let monthOffset = 0; monthOffset < 4; monthOffset += 1) {
+      const monthStart = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + monthOffset, 1, 0, 0, 0, 0),
+      );
+      const firstWeekdayOffset =
+        (jsDayFromWeekday(primaryWeekday) + 7 - monthStart.getUTCDay()) % 7;
+      const candidate = new Date(monthStart);
+      candidate.setUTCDate(
+        candidate.getUTCDate() + firstWeekdayOffset + (input.monthlyOrdinal - 1) * 7,
+      );
+      if (candidate.getUTCMonth() !== monthStart.getUTCMonth()) {
+        continue;
+      }
+      const candidateIso = isoFromDateAndTime(
+        candidate.toISOString().slice(0, 10),
+        input.timeLocalHhmm,
+      );
+      if (candidateIso && new Date(candidateIso).getTime() >= now.getTime()) {
+        return candidateIso;
+      }
+    }
+    return null;
+  }
+
+  const weekIncrement = input.frequency === "BIWEEKLY" ? 14 : 7;
+  const base = new Date(now);
+  base.setUTCHours(0, 0, 0, 0);
+  for (let dayOffset = 0; dayOffset < 28; dayOffset += 1) {
+    const candidate = new Date(base);
+    candidate.setUTCDate(candidate.getUTCDate() + dayOffset);
+    if (candidate.getUTCDay() !== jsDayFromWeekday(primaryWeekday)) {
+      continue;
+    }
+    const diffDays = Math.floor((candidate.getTime() - base.getTime()) / (24 * 60 * 60 * 1000));
+    if (weekIncrement > 7 && diffDays % weekIncrement !== 0) {
+      continue;
+    }
+    const candidateIso = isoFromDateAndTime(
+      candidate.toISOString().slice(0, 10),
+      input.timeLocalHhmm,
+    );
+    if (candidateIso && new Date(candidateIso).getTime() >= now.getTime()) {
+      return candidateIso;
+    }
+  }
+
+  return null;
+}
+
+function obligationKind(obligation: ObligationRow): SoberHouseLiveObligationKind | null {
+  if (obligation.obligation_type === "meeting_attendance") {
+    return "HOUSE_MEETING";
+  }
+  if (obligation.obligation_type === "treatment_session") {
+    return "ONE_ON_ONE";
+  }
+  if (obligation.obligation_type === "chore") {
+    return "CHORE";
+  }
+  return null;
+}
+
+function proofRequirementForObligation(
+  obligation: ObligationRow,
+): SoberHouseLiveProofRequirement[] {
+  if (obligation.requires_signature) {
+    return ["SIGNATURE"];
+  }
+  if (!obligation.requires_proof) {
+    return ["NONE"];
+  }
+  if (
+    obligation.proof_type === "photo" ||
+    obligation.proof_type === "selfie" ||
+    obligation.proof_type === "document_upload"
+  ) {
+    return ["PHOTO"];
+  }
+  if (
+    obligation.proof_type === "staff_verification" ||
+    obligation.proof_type === "officer_verification"
+  ) {
+    return ["MANAGER_CONFIRMATION"];
+  }
+  return ["CHECKLIST"];
+}
+
+function accountabilityMethodForObligation(
+  obligation: ObligationRow,
+): "NONE" | "CHECKLIST" | "SIGNATURE" | "PHOTO" | "MANAGER_CONFIRMATION" {
+  const proofRequirement = proofRequirementForObligation(obligation)[0] ?? "NONE";
+  if (proofRequirement === "SIGNATURE") {
+    return "SIGNATURE";
+  }
+  if (proofRequirement === "PHOTO") {
+    return "PHOTO";
+  }
+  if (proofRequirement === "MANAGER_CONFIRMATION") {
+    return "MANAGER_CONFIRMATION";
+  }
+  if (proofRequirement === "CHECKLIST") {
+    return "CHECKLIST";
+  }
+  return "NONE";
+}
+
+function proofRequirementForCompliance(
+  event: ComplianceEventRow,
+): SoberHouseLiveProofRequirement[] {
+  if (event.signature_present) {
+    return ["SIGNATURE"];
+  }
+  if (!event.proof_type) {
+    return ["NONE"];
+  }
+  if (
+    event.proof_type === "photo" ||
+    event.proof_type === "selfie" ||
+    event.proof_type === "document_upload"
+  ) {
+    return ["PHOTO"];
+  }
+  if (event.proof_type === "staff_verification" || event.proof_type === "officer_verification") {
+    return ["MANAGER_CONFIRMATION"];
+  }
+  return ["CHECKLIST"];
+}
+
+function proofProvidedForComplianceEvent(event: ComplianceEventRow): boolean {
+  return (
+    typeof event.proof_uri === "string" ||
+    event.signature_present === true ||
+    event.verification_status === "SUBMITTED" ||
+    event.verification_status === "VERIFIED" ||
+    event.verification_status === "REJECTED" ||
+    event.verification_status === "WAIVED"
+  );
+}
+
+function eventCompletionStatus(
+  event: ComplianceEventRow,
+): "SCHEDULED" | "COMPLETED" | "MISSED" | "EXCUSED" {
+  if (
+    event.event_type === "CHORE_COMPLETED" ||
+    event.event_type === "MEETING_ATTENDED" ||
+    event.event_type === "TREATMENT_SESSION_ATTENDED"
+  ) {
+    return "COMPLETED";
+  }
+  if (
+    event.event_type === "CHORE_MISSED" ||
+    event.event_type === "MEETING_MISSED" ||
+    event.event_type === "TREATMENT_SESSION_MISSED"
+  ) {
+    return "MISSED";
+  }
+  return "SCHEDULED";
+}
+
+function proofReviewStatusForEvent(
+  event: ComplianceEventRow,
+): "PENDING" | "APPROVED" | "REJECTED" | "FOLLOW_UP_REQUIRED" {
+  if (event.verification_status === "VERIFIED" || event.verification_status === "WAIVED") {
+    return "APPROVED";
+  }
+  if (event.verification_status === "REJECTED") {
+    return "REJECTED";
+  }
+  if (event.event_status === "MISSED") {
+    return "FOLLOW_UP_REQUIRED";
+  }
+  return "PENDING";
+}
+
+function liveScopeType(obligation: ObligationRow): "ORGANIZATION" | "HOUSE_GROUP" | "HOUSE" {
+  return obligation.house_id ? "HOUSE" : "ORGANIZATION";
+}
+
+function normalizeObligationSchedule(obligation: ObligationRow, nowIso: string) {
+  const recurrence = recordOrNull(obligation.recurrence_json);
+  const weekdayList = weekdayListFromRecurrence(recurrence);
+  const weekday =
+    parseWeekdayCode(recurrence?.weekday ?? recurrence?.dayOfWeek ?? null) ??
+    weekdayList[0] ??
+    null;
+  const frequency =
+    parseScheduledFrequency(recurrence?.frequency ?? recurrence?.repeatUnit ?? null) ??
+    (obligation.due_at ? "ONCE" : "WEEKLY");
+  const scheduledDate =
+    (typeof recurrence?.scheduledDate === "string" ? recurrence.scheduledDate : null) ??
+    dueDatePart(obligation.due_at);
+  const timeLocalHhmm =
+    (typeof recurrence?.timeLocalHhmm === "string" ? recurrence.timeLocalHhmm : null) ??
+    dueTimePart(obligation.due_at) ??
+    "00:00";
+  const durationMinutes =
+    typeof recurrence?.durationMinutes === "number" && Number.isFinite(recurrence.durationMinutes)
+      ? recurrence.durationMinutes
+      : 60;
+  const reminderLeadMinutes =
+    typeof recurrence?.reminderLeadMinutes === "number" &&
+    Number.isFinite(recurrence.reminderLeadMinutes)
+      ? recurrence.reminderLeadMinutes
+      : 30;
+  const startAtIso =
+    obligation.due_at ??
+    nextRecurringOccurrenceIso({
+      nowIso,
+      frequency,
+      weekdayList: weekday ? (weekdayList.length > 0 ? weekdayList : [weekday]) : weekdayList,
+      monthlyOrdinal: monthlyOrdinalFromRecurrence(recurrence),
+      scheduledDate,
+      timeLocalHhmm,
+    });
+
+  return {
+    frequency,
+    weekday,
+    weekdayList: weekday ? (weekdayList.length > 0 ? weekdayList : [weekday]) : weekdayList,
+    monthlyOrdinal: monthlyOrdinalFromRecurrence(recurrence),
+    scheduledDate,
+    timeLocalHhmm,
+    durationMinutes,
+    reminderLeadMinutes,
+    startAtIso,
+  };
+}
+
+function scheduledItemId(kind: SoberHouseLiveObligationKind, obligationId: string): string {
+  if (kind === "HOUSE_MEETING") {
+    return `live:house-meeting:${obligationId}`;
+  }
+  if (kind === "ONE_ON_ONE") {
+    return `live:one-on-one:${obligationId}`;
+  }
+  return `live:house-chore:${obligationId}`;
+}
+
+function relevantToOrganization(input: {
+  organizationId: string;
+  selectedHouseIds: Set<string>;
+  residentProfileByUserId: Map<string, ParticipantProfileRow>;
+  organizationIdValue: string | null;
+  houseIdValue: string | null;
+  userIdValue: string | null;
+}): boolean {
+  if (input.organizationIdValue === input.organizationId) {
+    return true;
+  }
+  if (input.houseIdValue && input.selectedHouseIds.has(input.houseIdValue)) {
+    return true;
+  }
+  if (!input.userIdValue) {
+    return false;
+  }
+  return (
+    input.residentProfileByUserId.get(input.userIdValue)?.organization_id === input.organizationId
+  );
 }
 
 function mapViolationRuleType(
@@ -367,99 +989,6 @@ function buildViolationStoreRecord(violation: ViolationRow) {
   };
 }
 
-function proofRequirementForCompliance(
-  event: ComplianceEventRow,
-): Array<"NONE" | "CHECKLIST" | "PHOTO" | "MANAGER_CONFIRMATION"> {
-  if (!event.proof_type) {
-    return ["NONE"];
-  }
-  if (
-    event.proof_type === "photo" ||
-    event.proof_type === "selfie" ||
-    event.proof_type === "document_upload"
-  ) {
-    return ["PHOTO"];
-  }
-  if (event.proof_type === "staff_verification" || event.proof_type === "officer_verification") {
-    return ["MANAGER_CONFIRMATION"];
-  }
-  return ["CHECKLIST"];
-}
-
-function buildSoberHouseChoreRecords(
-  persistedStore: Record<string, unknown>,
-  complianceEvents: ComplianceEventRow[],
-) {
-  const persistedChores = recordArray(persistedStore.houseChores);
-  const persistedCompletions = recordArray(persistedStore.choreCompletionRecords);
-  const choreEvents = complianceEvents.filter((event) => event.event_type === "CHORE_COMPLETED");
-
-  const houseChores = choreEvents.map((event) => {
-    const existing = persistedChores.find(
-      (entry) => entry.id === `api:chore:${event.obligation_id ?? event.id}`,
-    );
-    return {
-      id: stringOr(existing?.id, `api:chore:${event.obligation_id ?? event.id}`),
-      organizationId: event.organization_id,
-      houseId: event.house_id,
-      residentId: event.user_id,
-      linkedUserId: event.user_id,
-      recurringObligationId: null,
-      title:
-        typeof event.metadata_json === "object" &&
-        event.metadata_json !== null &&
-        typeof (event.metadata_json as Record<string, unknown>).title === "string"
-          ? String((event.metadata_json as Record<string, unknown>).title)
-          : "Chore",
-      summary: "",
-      frequency: "WEEKLY",
-      dueTimeLocalHhmm: "18:00",
-      weekday: null,
-      scheduledDate: event.occurred_at.slice(0, 10),
-      required: true,
-      proofRequirement: proofRequirementForCompliance(event),
-      reminderLeadMinutes: 30,
-      inAppReminderEnabled: false,
-      addToCalendar: false,
-      accountabilityRequired: false,
-      status: "ACTIVE",
-      createdAt: stringOr(existing?.createdAt, event.created_at),
-      updatedAt: event.created_at,
-    };
-  });
-
-  const choreCompletionRecords = choreEvents.map((event) => {
-    const existing = persistedCompletions.find((entry) => entry.id === event.id);
-    const proofProvided =
-      typeof event.proof_uri === "string" ||
-      event.signature_present === true ||
-      event.verification_status === "SUBMITTED" ||
-      event.verification_status === "VERIFIED";
-    return {
-      id: event.id,
-      residentId: event.user_id,
-      linkedUserId: event.user_id,
-      organizationId: event.organization_id,
-      houseId: event.house_id,
-      houseChoreId: `api:chore:${event.obligation_id ?? event.id}`,
-      completedAt: event.occurred_at,
-      proofRequirement: proofRequirementForCompliance(event),
-      proofProvided,
-      proofReference: typeof event.proof_uri === "string" ? event.proof_uri : null,
-      managerConfirmationRequired: false,
-      managerConfirmationStatus: "NOT_REQUIRED",
-      managerConfirmationRequestedAt: null,
-      managerConfirmationRequestedVia: null,
-      managerConfirmedAt: null,
-      notes: "",
-      createdAt: stringOr(existing?.createdAt, event.created_at),
-      updatedAt: event.created_at,
-    };
-  });
-
-  return { houseChores, choreCompletionRecords };
-}
-
 function buildSponsorCallRecords(
   persistedStore: Record<string, unknown>,
   complianceEvents: ComplianceEventRow[],
@@ -521,10 +1050,7 @@ async function resolveAvailableOrganizations(
     }));
   }
 
-  const scoped = new Map<
-    string,
-    { organizationId: string; organizationName: string; operatorRole: OperatorWebRole }
-  >();
+  const scopedRoles = new Map<string, OperatorWebRole>();
   for (const grant of accessContext.grants) {
     if (!grant.organizationId) {
       continue;
@@ -533,26 +1059,26 @@ async function resolveAvailableOrganizations(
     if (!operatorRole) {
       continue;
     }
-    const current = scoped.get(grant.organizationId);
+    const current = scopedRoles.get(grant.organizationId);
     const nextRole =
-      current && operatorRolePriority(current.operatorRole) >= operatorRolePriority(operatorRole)
-        ? current.operatorRole
+      current && operatorRolePriority(current) >= operatorRolePriority(operatorRole)
+        ? current
         : operatorRole;
-    scoped.set(grant.organizationId, {
-      organizationId: grant.organizationId,
-      organizationName: grant.organizationName ?? grant.organizationId,
-      operatorRole: nextRole,
-    });
+    scopedRoles.set(grant.organizationId, nextRole);
   }
 
-  return Array.from(scoped.values()).map((entry) => ({
-    organization: {
-      id: entry.organizationId,
-      tenant_id: actor.tenantId,
-      name: entry.organizationName,
-      created_at: new Date().toISOString(),
-    },
-    operatorRole: entry.operatorRole,
+  if (scopedRoles.size === 0) {
+    return [];
+  }
+
+  const organizations = await repositories.listOrganizations(
+    actor.tenantId,
+    Array.from(scopedRoles.keys()),
+  );
+
+  return organizations.map((organization) => ({
+    organization,
+    operatorRole: scopedRoles.get(organization.id) ?? "STAFF_VIEWER",
   }));
 }
 
@@ -582,6 +1108,7 @@ function buildStoreFromLiveData(input: {
   organization: OrganizationRow;
   houses: HouseRow[];
   participantProfiles: ParticipantProfileRow[];
+  obligations: ObligationRow[];
   complianceEvents: ComplianceEventRow[];
   violations: ViolationRow[];
   persistedStore: Record<string, unknown>;
@@ -593,7 +1120,6 @@ function buildStoreFromLiveData(input: {
     ...(isRecord(input.persistedStore) ? input.persistedStore : {}),
   };
   const persistedHouses = recordArray(store.houses);
-  const persistedMemberships = recordArray(store.residentHouseMemberships);
   const liveHouses = input.houses.map((house) =>
     buildHouseStoreRecord(
       input.organization.id,
@@ -601,48 +1127,429 @@ function buildStoreFromLiveData(input: {
       persistedHouses.find((entry) => entry.id === house.id),
     ),
   );
-  const extraPersistedHouses = persistedHouses.filter(
-    (entry) =>
-      typeof entry.id === "string" &&
-      typeof entry.organizationId === "string" &&
-      entry.organizationId === input.organization.id &&
-      !liveHouses.some((house) => house.id === entry.id),
-  );
   const activeProfiles = input.participantProfiles.filter(
     (profile) =>
       profile.organization_id === input.organization.id &&
       profile.participant_type === "resident_user",
   );
   const residentHouseMemberships = activeProfiles.map((profile) =>
-    buildResidentMembership(
-      profile,
-      persistedMemberships.find(
-        (entry) => entry.residentId === profile.user_id || entry.linkedUserId === profile.user_id,
-      ),
-    ),
+    buildResidentMembership(profile),
   );
-  const residentDirectory = activeProfiles.map((profile) =>
-    buildResidentDirectoryEntry(
-      profile,
-      persistedMemberships.find(
-        (entry) => entry.residentId === profile.user_id || entry.linkedUserId === profile.user_id,
-      ),
-    ),
+  const residentDirectory = activeProfiles.map((profile) => buildResidentDirectoryEntry(profile));
+  const residentProfileByUserId = new Map(
+    activeProfiles.map((profile) => [profile.user_id, profile]),
   );
+  const selectedHouseIds = new Set(
+    liveHouses
+      .map((house) => house.id)
+      .filter((houseId): houseId is string => typeof houseId === "string"),
+  );
+
+  const liveObligations = input.obligations.filter((obligation) => {
+    if (!residentProfileByUserId.has(obligation.user_id)) {
+      return false;
+    }
+    return relevantToOrganization({
+      organizationId: input.organization.id,
+      selectedHouseIds,
+      residentProfileByUserId,
+      organizationIdValue: obligation.organization_id,
+      houseIdValue: obligation.house_id,
+      userIdValue: obligation.user_id,
+    });
+  });
+  const obligationById = new Map(liveObligations.map((obligation) => [obligation.id, obligation]));
+
+  const recurringObligations = liveObligations
+    .map((obligation) => {
+      const kind = obligationKind(obligation);
+      if (!kind) {
+        return null;
+      }
+      const schedule = normalizeObligationSchedule(obligation, input.nowIso);
+      return {
+        id: obligation.id,
+        organizationId: obligation.organization_id,
+        scopeType: liveScopeType(obligation),
+        houseId: obligation.house_id,
+        houseGroupId: null,
+        residentId: obligation.user_id,
+        linkedUserId: obligation.user_id,
+        obligationType: kind,
+        title: obligation.title,
+        detail: obligation.description ?? "",
+        locationLabel: "",
+        frequency: schedule.frequency,
+        weekday: schedule.weekday,
+        weekdayList: schedule.weekdayList,
+        monthlyOrdinal: schedule.monthlyOrdinal,
+        scheduledDate: schedule.scheduledDate,
+        timeLocalHhmm: schedule.timeLocalHhmm,
+        durationMinutes: schedule.durationMinutes,
+        required: obligation.status === "ACTIVE",
+        reminderLeadMinutes: schedule.reminderLeadMinutes,
+        inAppReminderEnabled: false,
+        addToCalendar: false,
+        accountabilityMethod: accountabilityMethodForObligation(obligation),
+        status: obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE",
+        createdAt: obligation.created_at,
+        updatedAt: obligation.updated_at,
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+
+  const baseHouseMeetings = liveObligations
+    .map((obligation) => {
+      if (obligationKind(obligation) !== "HOUSE_MEETING") {
+        return null;
+      }
+      const schedule = normalizeObligationSchedule(obligation, input.nowIso);
+      if (!schedule.startAtIso) {
+        return null;
+      }
+      const endsAt = new Date(
+        new Date(schedule.startAtIso).getTime() + schedule.durationMinutes * 60_000,
+      ).toISOString();
+      return {
+        id: scheduledItemId("HOUSE_MEETING", obligation.id),
+        organizationId: obligation.organization_id,
+        houseId: obligation.house_id,
+        recurringObligationId: obligation.id,
+        title: obligation.title,
+        description: obligation.description ?? "",
+        meetingKind: "HOUSE_MEETING",
+        locationLabel: "",
+        startsAt: schedule.startAtIso,
+        endsAt,
+        required: obligation.status === "ACTIVE",
+        reminderLeadMinutes: schedule.reminderLeadMinutes,
+        inAppReminderEnabled: false,
+        addToCalendar: false,
+        acknowledgmentRequired: false,
+        status: obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE",
+        createdAt: obligation.created_at,
+        updatedAt: obligation.updated_at,
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+
+  const baseOneOnOneSessions = liveObligations
+    .map((obligation) => {
+      if (obligationKind(obligation) !== "ONE_ON_ONE") {
+        return null;
+      }
+      const schedule = normalizeObligationSchedule(obligation, input.nowIso);
+      if (!schedule.startAtIso) {
+        return null;
+      }
+      const endsAt = new Date(
+        new Date(schedule.startAtIso).getTime() + schedule.durationMinutes * 60_000,
+      ).toISOString();
+      return {
+        id: scheduledItemId("ONE_ON_ONE", obligation.id),
+        organizationId: obligation.organization_id,
+        houseId: obligation.house_id,
+        residentId: obligation.user_id,
+        linkedUserId: obligation.user_id,
+        staffAssignmentId: null,
+        recurringObligationId: obligation.id,
+        title: obligation.title,
+        notes: obligation.description ?? "",
+        scheduledAt: schedule.startAtIso,
+        endsAt,
+        required: obligation.status === "ACTIVE",
+        reminderLeadMinutes: schedule.reminderLeadMinutes,
+        inAppReminderEnabled: false,
+        addToCalendar: false,
+        managerConfirmationRequired:
+          proofRequirementForObligation(obligation)[0] === "MANAGER_CONFIRMATION",
+        completionStatus: "SCHEDULED" as const,
+        completedAt: null,
+        completedByStaffAssignmentId: null,
+        excusedAt: null,
+        excusedReason: null,
+        status: obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE",
+        createdAt: obligation.created_at,
+        updatedAt: obligation.updated_at,
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+
+  const houseChores = liveObligations
+    .map((obligation) => {
+      if (obligationKind(obligation) !== "CHORE") {
+        return null;
+      }
+      const schedule = normalizeObligationSchedule(obligation, input.nowIso);
+      return {
+        id: scheduledItemId("CHORE", obligation.id),
+        organizationId: obligation.organization_id,
+        houseId: obligation.house_id,
+        residentId: obligation.user_id,
+        linkedUserId: obligation.user_id,
+        recurringObligationId: obligation.id,
+        title: obligation.title,
+        summary: obligation.description ?? "",
+        frequency:
+          schedule.frequency === "DAILY" ||
+          schedule.frequency === "WEEKLY" ||
+          schedule.frequency === "BIWEEKLY" ||
+          schedule.frequency === "MONTHLY"
+            ? schedule.frequency
+            : "WEEKLY",
+        dueTimeLocalHhmm: schedule.timeLocalHhmm,
+        weekday: schedule.weekday,
+        scheduledDate: schedule.scheduledDate,
+        required: obligation.status === "ACTIVE",
+        proofRequirement: proofRequirementForObligation(obligation),
+        reminderLeadMinutes: schedule.reminderLeadMinutes,
+        inAppReminderEnabled: false,
+        addToCalendar: false,
+        accountabilityRequired: proofRequirementForObligation(obligation)[0] !== "NONE",
+        status: obligation.status === "CANCELED" ? "INACTIVE" : "ACTIVE",
+        createdAt: obligation.created_at,
+        updatedAt: obligation.updated_at,
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+
+  const relevantComplianceEvents = input.complianceEvents.filter((event) =>
+    relevantToOrganization({
+      organizationId: input.organization.id,
+      selectedHouseIds,
+      residentProfileByUserId,
+      organizationIdValue: event.organization_id,
+      houseIdValue: event.house_id,
+      userIdValue: event.user_id,
+    }),
+  );
+
+  const choreCompletionRecords: Array<Record<string, unknown>> = [];
+  const houseMeetingAttendanceRecords: Array<Record<string, unknown>> = [];
+  const scheduledItemCompletionRecords: Array<Record<string, unknown>> = [];
+  const proofReviewRecords: Array<Record<string, unknown>> = [];
+  const latestOneOnOneEventByObligationId = new Map<string, ComplianceEventRow>();
+
+  for (const event of relevantComplianceEvents) {
+    const linkedObligation =
+      (event.obligation_id ? (obligationById.get(event.obligation_id) ?? null) : null) ?? null;
+    const kind = linkedObligation?.id
+      ? obligationKind(linkedObligation)
+      : event.event_type === "CHORE_COMPLETED" || event.event_type === "CHORE_MISSED"
+        ? "CHORE"
+        : event.event_type === "MEETING_ATTENDED" || event.event_type === "MEETING_MISSED"
+          ? "HOUSE_MEETING"
+          : event.event_type === "TREATMENT_SESSION_ATTENDED" ||
+              event.event_type === "TREATMENT_SESSION_MISSED"
+            ? "ONE_ON_ONE"
+            : null;
+    if (!kind) {
+      continue;
+    }
+
+    const proofRequirement = linkedObligation
+      ? proofRequirementForObligation(linkedObligation)
+      : proofRequirementForCompliance(event);
+    const proofProvided = proofProvidedForComplianceEvent(event);
+    const completionStatus = eventCompletionStatus(event);
+    const completionRecord = {
+      id: event.id,
+      residentId: event.user_id,
+      linkedUserId: event.user_id,
+      organizationId:
+        event.organization_id ??
+        linkedObligation?.organization_id ??
+        residentProfileByUserId.get(event.user_id)?.organization_id ??
+        null,
+      houseId:
+        event.house_id ??
+        linkedObligation?.house_id ??
+        residentProfileByUserId.get(event.user_id)?.house_id ??
+        null,
+      scheduledItemType:
+        kind === "HOUSE_MEETING"
+          ? "HOUSE_MEETING"
+          : kind === "ONE_ON_ONE"
+            ? "ONE_ON_ONE_SESSION"
+            : "HOUSE_CHORE",
+      scheduledItemId: linkedObligation ? scheduledItemId(kind, linkedObligation.id) : event.id,
+      recurringObligationId: linkedObligation?.id ?? null,
+      scheduledAt: linkedObligation?.due_at ?? event.occurred_at,
+      status: completionStatus,
+      completedAt: completionStatus === "COMPLETED" ? event.occurred_at : null,
+      excusedAt: null,
+      excusedReason: null,
+      proofRequired: proofRequirement[0] !== "NONE",
+      proofRequirement,
+      proofProvided,
+      proofReference: typeof event.proof_uri === "string" ? event.proof_uri : null,
+      submittedAt: proofProvided ? event.occurred_at : null,
+      managerConfirmationRequired: proofRequirement[0] === "MANAGER_CONFIRMATION",
+      managerConfirmationStatus:
+        proofRequirement[0] === "MANAGER_CONFIRMATION"
+          ? event.verification_status === "VERIFIED"
+            ? "CONFIRMED"
+            : "PENDING"
+          : "NOT_REQUIRED",
+      managerConfirmationRequestedAt: null,
+      managerConfirmationRequestedVia: null,
+      managerConfirmedAt: event.verification_status === "VERIFIED" ? event.verified_at : null,
+      notes: "",
+      createdAt: event.created_at,
+      updatedAt: event.created_at,
+    };
+    scheduledItemCompletionRecords.push(completionRecord);
+
+    if (kind === "CHORE") {
+      choreCompletionRecords.push({
+        id: event.id,
+        residentId: event.user_id,
+        linkedUserId: event.user_id,
+        organizationId: completionRecord.organizationId,
+        houseId: completionRecord.houseId,
+        houseChoreId: linkedObligation ? scheduledItemId("CHORE", linkedObligation.id) : null,
+        completedAt: completionStatus === "COMPLETED" ? event.occurred_at : event.occurred_at,
+        proofRequirement,
+        proofProvided,
+        proofReference: completionRecord.proofReference,
+        managerConfirmationRequired: completionRecord.managerConfirmationRequired,
+        managerConfirmationStatus: completionRecord.managerConfirmationStatus,
+        managerConfirmationRequestedAt: null,
+        managerConfirmationRequestedVia: null,
+        managerConfirmedAt: completionRecord.managerConfirmedAt,
+        notes: "",
+        createdAt: event.created_at,
+        updatedAt: event.created_at,
+      });
+    }
+
+    if (kind === "HOUSE_MEETING") {
+      houseMeetingAttendanceRecords.push({
+        id: event.id,
+        residentId: event.user_id,
+        linkedUserId: event.user_id,
+        organizationId: completionRecord.organizationId,
+        houseId: completionRecord.houseId,
+        houseMeetingId: linkedObligation
+          ? scheduledItemId("HOUSE_MEETING", linkedObligation.id)
+          : null,
+        recurringObligationId: linkedObligation?.id ?? null,
+        scheduledStartAt: linkedObligation?.due_at ?? event.occurred_at,
+        status: completionStatus,
+        attendedAt: completionStatus === "COMPLETED" ? event.occurred_at : null,
+        excusedAt: null,
+        excusedReason: null,
+        proofRequired: completionRecord.proofRequired,
+        proofProvided,
+        proofReference: completionRecord.proofReference,
+        notes: "",
+        createdAt: event.created_at,
+        updatedAt: event.created_at,
+      });
+    }
+
+    if (kind === "ONE_ON_ONE" && linkedObligation?.id) {
+      const existing = latestOneOnOneEventByObligationId.get(linkedObligation.id);
+      if (
+        !existing ||
+        new Date(existing.occurred_at).getTime() < new Date(event.occurred_at).getTime()
+      ) {
+        latestOneOnOneEventByObligationId.set(linkedObligation.id, event);
+      }
+    }
+
+    const proofReviewRequired = completionRecord.proofRequired || proofProvided;
+    if (!proofReviewRequired) {
+      continue;
+    }
+
+    const reviewCategory =
+      kind === "HOUSE_MEETING"
+        ? "HOUSE_MEETINGS"
+        : kind === "ONE_ON_ONE"
+          ? "ONE_ON_ONES"
+          : "CHORES";
+    const sourceRecordType =
+      kind === "HOUSE_MEETING"
+        ? "HOUSE_MEETING_ATTENDANCE"
+        : kind === "CHORE"
+          ? "CHORE_COMPLETION"
+          : "SCHEDULED_ITEM_COMPLETION";
+    proofReviewRecords.push({
+      id: `proof-review:${event.id}`,
+      residentId: event.user_id,
+      linkedUserId: event.user_id,
+      houseId: completionRecord.houseId,
+      organizationId: completionRecord.organizationId,
+      category: reviewCategory,
+      sourceRecordType,
+      sourceRecordId: event.id,
+      linkedEnforcementRecordId: null,
+      proofRequired: completionRecord.proofRequired,
+      proofProvided,
+      proofReference: completionRecord.proofReference,
+      evidenceItemIds: [],
+      submittedAt: completionRecord.submittedAt,
+      status: proofReviewStatusForEvent(event),
+      reviewedAt: event.verified_at,
+      reviewedBy: event.verified_by_role
+        ? {
+            id: event.verified_by_role,
+            name: event.verified_by_role,
+          }
+        : null,
+      history: [
+        {
+          id: `proof-review-history:${event.id}:created`,
+          createdAt: event.created_at,
+          actor: {
+            id: event.created_by_role ?? "SYSTEM",
+            name: event.created_by_role ?? "SYSTEM",
+          },
+          action: "CREATED",
+          note: "",
+          previousStatus: null,
+          nextStatus: proofReviewStatusForEvent(event),
+        },
+      ],
+      createdAt: event.created_at,
+      updatedAt: event.created_at,
+    });
+  }
+
+  const oneOnOneSessions = baseOneOnOneSessions.map((session) => {
+    if (!session.recurringObligationId) {
+      return session;
+    }
+    const event = latestOneOnOneEventByObligationId.get(session.recurringObligationId);
+    if (!event) {
+      return session;
+    }
+    const completionStatus = eventCompletionStatus(event);
+    return {
+      ...session,
+      completionStatus,
+      completedAt: completionStatus === "COMPLETED" ? event.occurred_at : null,
+      updatedAt: event.created_at,
+    };
+  });
+
   const liveViolations = input.violations
-    .filter((violation) => violation.organization_id === input.organization.id)
+    .filter((violation) =>
+      relevantToOrganization({
+        organizationId: input.organization.id,
+        selectedHouseIds,
+        residentProfileByUserId,
+        organizationIdValue: violation.organization_id,
+        houseIdValue: violation.house_id,
+        userIdValue: violation.user_id,
+      }),
+    )
     .map(buildViolationStoreRecord);
   const persistedViolations = recordArray(store.violations).filter(
     (entry) => entry.organizationId === input.organization.id,
   );
-  const { houseChores, choreCompletionRecords } = buildSoberHouseChoreRecords(
-    store,
-    input.complianceEvents.filter((event) => event.organization_id === input.organization.id),
-  );
-  const sponsorCallRecords = buildSponsorCallRecords(
-    store,
-    input.complianceEvents.filter((event) => event.organization_id === input.organization.id),
-  );
+  const sponsorCallRecords = buildSponsorCallRecords(store, relevantComplianceEvents);
 
   return {
     store: {
@@ -650,13 +1557,16 @@ function buildStoreFromLiveData(input: {
       ...store,
       version: STORE_VERSION,
       organization: buildOrganizationStoreRecord(input.organization, store, input.nowIso),
-      houses: [...liveHouses, ...extraPersistedHouses],
+      houses: liveHouses,
       residentHouseMemberships,
-      houseChores: mergeRecordsById(houseChores, recordArray(store.houseChores)),
-      choreCompletionRecords: mergeRecordsById(
-        choreCompletionRecords,
-        recordArray(store.choreCompletionRecords),
-      ),
+      recurringObligations,
+      houseMeetings: baseHouseMeetings,
+      oneOnOneSessions,
+      houseChores,
+      scheduledItemCompletionRecords,
+      choreCompletionRecords,
+      houseMeetingAttendanceRecords,
+      proofReviewRecords,
       sponsorCallRecords: mergeRecordsById(
         sponsorCallRecords,
         recordArray(store.sponsorCallRecords),
@@ -665,12 +1575,8 @@ function buildStoreFromLiveData(input: {
       houseGroups: recordArray(store.houseGroups),
       staffAssignments: recordArray(store.staffAssignments),
       houseRuleSets: recordArray(store.houseRuleSets),
-      recurringObligations: recordArray(store.recurringObligations),
-      houseMeetings: recordArray(store.houseMeetings),
-      oneOnOneSessions: recordArray(store.oneOnOneSessions),
       houseAlertAnnouncements: recordArray(store.houseAlertAnnouncements),
       alertAcknowledgementRecords: recordArray(store.alertAcknowledgementRecords),
-      scheduledItemCompletionRecords: recordArray(store.scheduledItemCompletionRecords),
       alertPreferences: recordArray(store.alertPreferences),
       residentHousingProfile: isRecord(store.residentHousingProfile)
         ? store.residentHousingProfile
@@ -682,7 +1588,6 @@ function buildStoreFromLiveData(input: {
         ? store.residentConsentRecord
         : null,
       residentWizardDraft: isRecord(store.residentWizardDraft) ? store.residentWizardDraft : null,
-      houseMeetingAttendanceRecords: recordArray(store.houseMeetingAttendanceRecords),
       jobApplicationRecords: recordArray(store.jobApplicationRecords),
       workVerificationRecords: recordArray(store.workVerificationRecords),
       correctiveActions: recordArray(store.correctiveActions),
@@ -694,7 +1599,6 @@ function buildStoreFromLiveData(input: {
       monthlyReports: recordArray(store.monthlyReports),
       operatorReportExports: recordArray(store.operatorReportExports),
       scheduledSummaryRecords: recordArray(store.scheduledSummaryRecords),
-      proofReviewRecords: recordArray(store.proofReviewRecords),
       enforcementRecords: recordArray(store.enforcementRecords),
       auditLogEntries: recordArray(store.auditLogEntries),
     },
@@ -745,7 +1649,14 @@ export async function buildOperatorControlPlaneSnapshot(input: {
         ? persistedConfig
         : createEmptyStore();
 
-  const [houses, participantProfiles, complianceEvents, violations] = await Promise.all([
+  const [
+    houses,
+    participantProfiles,
+    obligations,
+    complianceEvents,
+    violations,
+    residentObligations,
+  ] = await Promise.all([
     input.repositories.listHouses(input.actor.tenantId, {
       organizationId: selectedOrganization.organization.id,
     }),
@@ -756,24 +1667,56 @@ export async function buildOperatorControlPlaneSnapshot(input: {
           (profile) => profile.organization_id === selectedOrganization.organization.id,
         ),
       ),
+    input.repositories.listObligations(input.actor.tenantId, {
+      organizationId: selectedOrganization.organization.id,
+    }),
     input.repositories.listComplianceEvents(input.actor.tenantId, {
       organizationId: selectedOrganization.organization.id,
     }),
     input.repositories.listViolations(input.actor.tenantId, {
       organizationId: selectedOrganization.organization.id,
     }),
+    input.repositories.listResidentHouseObligations(input.actor.tenantId, {
+      organizationId: selectedOrganization.organization.id,
+    }),
   ]);
+
+  const activeResidentProfileByUserId = new Map(
+    participantProfiles
+      .filter(
+        (profile) =>
+          profile.organization_id === selectedOrganization.organization.id &&
+          profile.participant_type === "resident_user",
+      )
+      .map((profile) => [profile.user_id, profile] as const),
+  );
+  const residentLiveObligations = residentObligations
+    .map((record) =>
+      buildResidentLiveObligationSnapshotRecord(record, activeResidentProfileByUserId),
+    )
+    .filter((record): record is ResidentLiveObligationSnapshotRecord => record !== null)
+    .sort((left, right) =>
+      (left.dueAt ?? left.scheduledAt).localeCompare(right.dueAt ?? right.scheduledAt),
+    );
 
   const hydrated = buildStoreFromLiveData({
     organization: selectedOrganization.organization,
     houses,
     participantProfiles,
+    obligations,
     complianceEvents,
     violations,
     persistedStore,
     nowIso: input.nowIso,
   });
   const selectedRole = defaultOperatorRole(selectedOrganization.operatorRole);
+  const roleDefaults = roleDefaultsFromHouses(houses);
+  const visibleHouseIds = visibleHouseIdsForRole(
+    selectedRole,
+    houses,
+    roleDefaults,
+    hydrated.store as SoberHouseLiveStoreSlice & Record<string, unknown>,
+  );
 
   return {
     session: {
@@ -793,7 +1736,14 @@ export async function buildOperatorControlPlaneSnapshot(input: {
     data: {
       store: hydrated.store as unknown as SoberHouseLiveStoreSlice & Record<string, unknown>,
       residentDirectory: hydrated.residentDirectory,
-      roleDefaults: roleDefaultsFromHouses(houses),
+      roleDefaults,
+      residentLiveObligations,
+      complianceSummary: buildComplianceSummarySnapshot({
+        obligations: residentLiveObligations,
+        houses,
+        visibleHouseIds,
+        nowIso: input.nowIso,
+      }),
     },
     generatedAt: input.nowIso,
   };

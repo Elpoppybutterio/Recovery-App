@@ -1,5 +1,6 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, Share, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, StyleSheet, Text, TextInput, View } from "react-native";
 import { loadAttendanceRecords, loadMeetingAttendanceLogs } from "../lib/attendance/storage";
 import { getCurrentLocation, type LocationReadResult } from "../lib/services/locationService";
 import {
@@ -7,80 +8,35 @@ import {
   getEvaluationsNeedingAttention,
   statusToneForComplianceStatus,
 } from "../lib/soberHouse/compliance";
-import { createEntityId } from "../lib/soberHouse/defaults";
 import {
-  upsertChoreCompletionRecord,
-  upsertHouseMeetingAttendanceRecord,
-  upsertJobApplicationRecord,
-  upsertWorkVerificationRecord,
-} from "../lib/soberHouse/mutations";
-import {
-  attachSoberHouseRoutineProof,
-  buildSoberHouseRoutineSummary,
-  type SoberHouseRoutineTask,
-} from "../lib/soberHouse/routine";
-import {
-  choreRequiresManagerConfirmation,
-  choreRequiresPhotoProof,
-  formatChoreProofModeLabel,
-  resolveChoreProofMode,
-} from "../lib/soberHouse/proof";
-import {
-  getHouseById,
-  getHouseChoresForResident,
-  getRuleSetForHouse,
-} from "../lib/soberHouse/selectors";
-import type {
-  AuditActor,
-  ComplianceEvaluation,
-  HouseChore,
-  ManagerConfirmationHandoffMethod,
-  SoberHouseSettingsStore,
-} from "../lib/soberHouse/types";
+  acknowledgeResidentSoberHouseAlert,
+  completeResidentSoberHouseChore,
+  completeResidentSoberHouseOneOnOne,
+  loadResidentSoberHouseObligationsWithCache,
+  submitResidentSoberHouseProof,
+  type ResidentSoberHouseObligationViewModel,
+  type ResidentSoberHouseObligationsSnapshot,
+} from "../lib/soberHouse/liveObligations";
+import { getActiveHouseAlertAnnouncements, getHouseById } from "../lib/soberHouse/selectors";
+import type { ComplianceEvaluation, SoberHouseSettingsStore } from "../lib/soberHouse/types";
 import { colors, radius, spacing, typography } from "../lib/theme/tokens";
 import { AppButton } from "../lib/ui/AppButton";
 import { GlassCard } from "../lib/ui/GlassCard";
 
-type OptionalImagePickerModule = {
-  requestCameraPermissionsAsync: () => Promise<{ granted: boolean }>;
-  launchCameraAsync: (options: {
-    mediaTypes: unknown;
-    allowsEditing: boolean;
-    quality: number;
-  }) => Promise<{ canceled: boolean; assets?: Array<{ uri?: string | null }> }>;
-  MediaTypeOptions: {
-    Images: unknown;
-  };
-};
-
-let imagePickerModulePromise: Promise<OptionalImagePickerModule | null> | null = null;
-
-async function loadImagePickerModule(): Promise<OptionalImagePickerModule | null> {
-  if (!imagePickerModulePromise) {
-    imagePickerModulePromise = import("expo-image-picker")
-      .then((module) => module as OptionalImagePickerModule)
-      .catch(() => null);
-  }
-  return imagePickerModulePromise;
-}
-
-type PersistOptions = {
-  showStatus?: boolean;
-};
-
 type Props = {
   userId: string;
+  apiUrl: string;
+  authHeader: string | null;
   store: SoberHouseSettingsStore;
-  actor: AuditActor;
   isSaving: boolean;
-  sponsorCallLogs: Array<{ id: string; atIso: string; success: boolean }>;
   readOnly?: boolean;
   onOpenSetupCompletion?: (ruleType: ComplianceEvaluation["ruleType"]) => void;
-  onPersist: (
-    nextStore: SoberHouseSettingsStore,
-    successMessage: string,
-    options?: PersistOptions,
-  ) => Promise<void>;
+};
+
+type ProofComposerState = {
+  obligationId: string;
+  obligationType: ResidentSoberHouseObligationViewModel["obligationType"];
+  title: string;
 };
 
 function formatStatusLabel(status: ComplianceEvaluation["status"]): string {
@@ -148,19 +104,6 @@ function labelForRule(ruleType: ComplianceEvaluation["ruleType"]): string {
   }
 }
 
-function choreSubmitLabel(task: SoberHouseRoutineTask): string {
-  switch (task.proofMode) {
-    case "PHOTO":
-      return "Complete with photo";
-    case "MANAGER_CONFIRMATION":
-      return "Submit for manager review";
-    case "PHOTO_MANAGER_CONFIRMATION":
-      return "Submit proof for manager review";
-    default:
-      return task.actionLabel ?? "Post completion";
-  }
-}
-
 function attentionToneLabel(status: ComplianceEvaluation["status"]): string {
   switch (status) {
     case "violation":
@@ -174,8 +117,8 @@ function attentionToneLabel(status: ComplianceEvaluation["status"]): string {
   }
 }
 
-function routineStatusPalette(task: SoberHouseRoutineTask) {
-  if (task.status === "completed") {
+function obligationStatusPalette(item: ResidentSoberHouseObligationViewModel) {
+  if (item.isCompletedToday) {
     return {
       borderColor: "rgba(25, 135, 84, 0.35)",
       backgroundColor: "rgba(25, 135, 84, 0.12)",
@@ -183,7 +126,7 @@ function routineStatusPalette(task: SoberHouseRoutineTask) {
       pillText: "#8AF2BA",
     };
   }
-  if (task.status === "overdue") {
+  if (item.isOverdue) {
     return {
       borderColor: "rgba(239, 68, 68, 0.35)",
       backgroundColor: "rgba(239, 68, 68, 0.10)",
@@ -191,7 +134,7 @@ function routineStatusPalette(task: SoberHouseRoutineTask) {
       pillText: "#FFB4B4",
     };
   }
-  if (task.status === "setup") {
+  if (item.reviewPending) {
     return {
       borderColor: "rgba(245, 158, 11, 0.35)",
       backgroundColor: "rgba(245, 158, 11, 0.10)",
@@ -199,7 +142,7 @@ function routineStatusPalette(task: SoberHouseRoutineTask) {
       pillText: "#F8D47A",
     };
   }
-  if (task.status === "pending") {
+  if (item.isDueToday) {
     return {
       borderColor: "rgba(59, 130, 246, 0.35)",
       backgroundColor: "rgba(59, 130, 246, 0.10)",
@@ -212,6 +155,31 @@ function routineStatusPalette(task: SoberHouseRoutineTask) {
     backgroundColor: "rgba(255, 255, 255, 0.05)",
     pillBackground: "rgba(148, 163, 184, 0.18)",
     pillText: colors.textSecondary,
+  };
+}
+
+function alertTonePalette(severity: "INFO" | "ACTION_REQUIRED" | "URGENT") {
+  if (severity === "URGENT") {
+    return {
+      borderColor: "rgba(239, 68, 68, 0.35)",
+      backgroundColor: "rgba(239, 68, 68, 0.10)",
+      pillBackground: "rgba(239, 68, 68, 0.18)",
+      pillText: "#FFB4B4",
+    };
+  }
+  if (severity === "ACTION_REQUIRED") {
+    return {
+      borderColor: "rgba(245, 158, 11, 0.35)",
+      backgroundColor: "rgba(245, 158, 11, 0.10)",
+      pillBackground: "rgba(245, 158, 11, 0.18)",
+      pillText: "#F8D47A",
+    };
+  }
+  return {
+    borderColor: "rgba(59, 130, 246, 0.35)",
+    backgroundColor: "rgba(59, 130, 246, 0.10)",
+    pillBackground: "rgba(59, 130, 246, 0.18)",
+    pillText: "#BFDBFE",
   };
 }
 
@@ -267,15 +235,86 @@ function ComplianceRow({
   );
 }
 
+function LiveObligationRow({
+  item,
+  readOnly,
+  busy,
+  onComplete,
+  onOpenProofComposer,
+}: {
+  item: ResidentSoberHouseObligationViewModel;
+  readOnly: boolean;
+  busy: boolean;
+  onComplete: (item: ResidentSoberHouseObligationViewModel) => void;
+  onOpenProofComposer: (item: ResidentSoberHouseObligationViewModel) => void;
+}) {
+  const palette = obligationStatusPalette(item);
+  const canComplete =
+    item.isActive &&
+    !item.reviewPending &&
+    (item.obligationType === "CHORE" || item.obligationType === "ONE_ON_ONE");
+  const canSubmitProof = item.isActive && !item.reviewPending && !item.proofSubmitted;
+
+  return (
+    <View
+      style={[
+        styles.routineItem,
+        {
+          borderColor: palette.borderColor,
+          backgroundColor: palette.backgroundColor,
+        },
+      ]}
+    >
+      <View style={styles.routineHeader}>
+        <View style={styles.routineCopy}>
+          <Text style={styles.routineTitle}>{item.title}</Text>
+          <Text style={styles.routineDetail}>{item.detail}</Text>
+        </View>
+        <View style={[styles.statusPill, { backgroundColor: palette.pillBackground }]}>
+          <Text style={[styles.statusPillText, { color: palette.pillText }]}>
+            {item.primaryStatusLabel}
+          </Text>
+        </View>
+      </View>
+      <View style={styles.routineMetaRow}>
+        {item.metaBadges.map((badge) => (
+          <Text key={`${item.id}-${badge}`} style={styles.routineMeta}>
+            {badge}
+          </Text>
+        ))}
+      </View>
+      {!readOnly && (canComplete || canSubmitProof) ? (
+        <View style={styles.inlineActions}>
+          {canComplete ? (
+            <AppButton
+              title={item.obligationType === "CHORE" ? "Complete chore" : "Complete one-on-one"}
+              variant="secondary"
+              onPress={() => onComplete(item)}
+              disabled={busy}
+            />
+          ) : null}
+          {canSubmitProof ? (
+            <AppButton
+              title="Submit proof"
+              variant="secondary"
+              onPress={() => onOpenProofComposer(item)}
+              disabled={busy}
+            />
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 export function SoberHouseComplianceSection({
   userId,
+  apiUrl,
+  authHeader,
   store,
-  actor,
   isSaving,
-  sponsorCallLogs,
   readOnly = false,
   onOpenSetupCompletion,
-  onPersist,
 }: Props) {
   const [attendanceRecords, setAttendanceRecords] = useState<
     Awaited<ReturnType<typeof loadAttendanceRecords>>
@@ -284,13 +323,18 @@ export function SoberHouseComplianceSection({
     Awaited<ReturnType<typeof loadMeetingAttendanceLogs>>
   >([]);
   const [locationResult, setLocationResult] = useState<LocationReadResult | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [composerTaskId, setComposerTaskId] = useState<string | null>(null);
-  const [composerNotes, setComposerNotes] = useState("");
-  const [composerEmployerName, setComposerEmployerName] = useState("");
-  const [composerProofUris, setComposerProofUris] = useState<string[]>([]);
-  const [composerManagerHandoffMethod, setComposerManagerHandoffMethod] =
-    useState<ManagerConfirmationHandoffMethod | null>(null);
+  const [liveSnapshot, setLiveSnapshot] = useState<ResidentSoberHouseObligationsSnapshot | null>(
+    null,
+  );
+  const [liveLoading, setLiveLoading] = useState(true);
+  const [liveRefreshing, setLiveRefreshing] = useState(false);
+  const [liveNotice, setLiveNotice] = useState<string | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [activeActionKey, setActiveActionKey] = useState<string | null>(null);
+  const [proofComposer, setProofComposer] = useState<ProofComposerState | null>(null);
+  const [proofNote, setProofNote] = useState("");
 
   const refreshContext = useCallback(
     async (requestPermission: boolean) => {
@@ -306,21 +350,57 @@ export function SoberHouseComplianceSection({
     [userId],
   );
 
+  const refreshLiveObligations = useCallback(
+    async (showBlockingLoader: boolean) => {
+      if (!authHeader) {
+        setLiveSnapshot(null);
+        setLiveLoading(false);
+        setLiveRefreshing(false);
+        setLiveNotice(null);
+        setLiveError("Sign in to load live sober-house obligations.");
+        return;
+      }
+
+      if (showBlockingLoader) {
+        setLiveLoading(true);
+      } else {
+        setLiveRefreshing(true);
+      }
+
+      const result = await loadResidentSoberHouseObligationsWithCache({
+        storage: AsyncStorage,
+        identityKey: authHeader,
+        apiUrl,
+        authHeader,
+      });
+
+      if (result.ok) {
+        setLiveSnapshot(result.snapshot);
+        setLiveNotice(result.notice);
+        setLiveError(null);
+      } else {
+        setLiveSnapshot(null);
+        setLiveNotice(null);
+        setLiveError(result.notice);
+      }
+
+      setLiveLoading(false);
+      setLiveRefreshing(false);
+    },
+    [apiUrl, authHeader],
+  );
+
   useEffect(() => {
     void refreshContext(false);
   }, [refreshContext]);
 
   useEffect(() => {
-    setComposerTaskId(null);
-    setComposerNotes("");
-    setComposerEmployerName("");
-    setComposerProofUris([]);
-    setComposerManagerHandoffMethod(null);
-  }, [store]);
+    void refreshLiveObligations(true);
+  }, [refreshLiveObligations]);
 
   const nowIso = useMemo(
     () => new Date().toISOString(),
-    [attendanceRecords, locationResult?.coords, meetingAttendanceLogs, store, sponsorCallLogs],
+    [attendanceRecords, locationResult?.coords, meetingAttendanceLogs, store],
   );
   const summary = useMemo(
     () =>
@@ -333,17 +413,7 @@ export function SoberHouseComplianceSection({
       }),
     [attendanceRecords, locationResult?.coords, meetingAttendanceLogs, nowIso, store],
   );
-  const routineSummary = useMemo(
-    () =>
-      buildSoberHouseRoutineSummary({
-        store,
-        nowIso,
-        attendanceRecords,
-        meetingAttendanceLogs,
-        sponsorCallLogs,
-      }),
-    [attendanceRecords, meetingAttendanceLogs, nowIso, sponsorCallLogs, store],
-  );
+  const routineSummary = useMemo(() => liveSnapshot, [liveSnapshot]);
   const attentionItems = useMemo(
     () => (summary ? getEvaluationsNeedingAttention(summary) : []),
     [summary],
@@ -353,349 +423,157 @@ export function SoberHouseComplianceSection({
     return housing ? `${housing.firstName} ${housing.lastName}`.trim() : "Resident";
   }, [store.residentHousingProfile]);
   const housingProfile = store.residentHousingProfile;
-  const ruleSet = useMemo(() => {
-    const houseId = housingProfile?.houseId;
-    return houseId ? getRuleSetForHouse(store, houseId, nowIso) : null;
-  }, [housingProfile?.houseId, nowIso, store]);
   const house = useMemo(() => {
     const houseId = housingProfile?.houseId;
     return houseId ? getHouseById(store, houseId) : null;
   }, [housingProfile?.houseId, store]);
-  const explicitChoreLookup = useMemo(() => {
-    if (!housingProfile?.houseId || !housingProfile.residentId) {
-      return new Map<string, HouseChore>();
-    }
-    return new Map(
-      getHouseChoresForResident(store, housingProfile.residentId, housingProfile.houseId).map(
-        (chore) => [chore.id, chore],
+  const activeAnnouncements = useMemo(
+    () => getActiveHouseAlertAnnouncements(store, housingProfile?.houseId ?? null, nowIso),
+    [housingProfile?.houseId, nowIso, store],
+  );
+  const acknowledgedAlertIds = useMemo(
+    () =>
+      new Set(
+        routineSummary?.alertAcknowledgements
+          .filter((entry) => entry.status === "ACKNOWLEDGED")
+          .map((entry) => entry.alertId) ?? [],
       ),
-    );
-  }, [housingProfile?.houseId, housingProfile?.residentId, store]);
-  const activeComposerTask = useMemo(
-    () => routineSummary?.tasks.find((task) => task.id === composerTaskId) ?? null,
-    [composerTaskId, routineSummary?.tasks],
+    [routineSummary?.alertAcknowledgements],
   );
 
-  const clearComposer = useCallback(() => {
-    setComposerTaskId(null);
-    setComposerNotes("");
-    setComposerEmployerName("");
-    setComposerProofUris([]);
-    setComposerManagerHandoffMethod(null);
-  }, []);
-
-  const captureProofPhoto = useCallback(async () => {
-    const imagePickerModule = await loadImagePickerModule();
-    if (!imagePickerModule) {
-      setStatusMessage(
-        "Photo capture needs the latest soberai dev build. Rebuild to enable camera proof.",
-      );
-      return;
-    }
-    try {
-      const permission = await imagePickerModule.requestCameraPermissionsAsync();
-      if (!permission.granted) {
-        setStatusMessage("Camera access is required to attach proof.");
-        return;
-      }
-      const result = await imagePickerModule.launchCameraAsync({
-        mediaTypes: imagePickerModule.MediaTypeOptions.Images,
-        allowsEditing: true,
-        quality: 0.7,
-      });
-      if (result.canceled) {
-        return;
-      }
-      const asset = result.assets?.[0];
-      if (!asset?.uri) {
-        setStatusMessage("Unable to attach the captured photo.");
-        return;
-      }
-      setComposerProofUris((current) => [...current, asset.uri as string]);
-      setStatusMessage("Proof photo attached.");
-    } catch {
-      setStatusMessage("Photo proof is unavailable on this device right now.");
-    }
-  }, []);
-
-  const shareTaskWithManager = useCallback(
-    async (task: SoberHouseRoutineTask) => {
-      if (!housingProfile) {
-        setStatusMessage("Resident housing must be configured before sharing with a manager.");
-        return;
-      }
-      const proofBits =
-        composerProofUris.length > 0
-          ? `Attached proof photos: ${composerProofUris.length}.`
-          : "No proof photos attached yet.";
-      const message = [
-        `${residentName} submitted a sober-house ${task.kind.replaceAll("_", " ")} update.`,
-        `Task: ${task.title}.`,
-        proofBits,
-        composerNotes.trim() ? `Notes: ${composerNotes.trim()}` : null,
-        house?.name ? `House: ${house.name}.` : null,
-        "Manager confirmation is still required.",
-      ]
-        .filter(Boolean)
-        .join(" ");
+  const runResidentAction = useCallback(
+    async (actionKey: string, action: () => Promise<void>, successMessage: string) => {
+      setActiveActionKey(actionKey);
+      setActionStatus(null);
+      setActionError(null);
 
       try {
-        const result = await Share.share({
-          title: `${task.title} manager handoff`,
-          message,
+        await action();
+        await refreshLiveObligations(false);
+        setActionStatus(successMessage);
+      } catch (error) {
+        setActionError(
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Resident action failed.",
+        );
+      } finally {
+        setActiveActionKey(null);
+      }
+    },
+    [refreshLiveObligations],
+  );
+
+  const handleCompleteObligation = useCallback(
+    (item: ResidentSoberHouseObligationViewModel) => {
+      if (!authHeader) {
+        setActionError("Sign in to continue.");
+        return;
+      }
+
+      const timestamp = new Date().toISOString();
+      if (item.obligationType === "CHORE") {
+        void runResidentAction(
+          `complete:${item.id}`,
+          () =>
+            completeResidentSoberHouseChore({
+              apiUrl,
+              authHeader,
+              obligationId: item.id,
+              payload: { completedAt: timestamp },
+            }),
+          "Chore completion saved.",
+        );
+        return;
+      }
+
+      if (item.obligationType === "ONE_ON_ONE") {
+        void runResidentAction(
+          `complete:${item.id}`,
+          () =>
+            completeResidentSoberHouseOneOnOne({
+              apiUrl,
+              authHeader,
+              obligationId: item.id,
+              payload: { completedAt: timestamp },
+            }),
+          "One-on-one completion saved.",
+        );
+      }
+    },
+    [apiUrl, authHeader, runResidentAction],
+  );
+
+  const handleOpenProofComposer = useCallback((item: ResidentSoberHouseObligationViewModel) => {
+    setProofComposer({
+      obligationId: item.id,
+      obligationType: item.obligationType,
+      title: item.title,
+    });
+    setProofNote("");
+    setActionStatus(null);
+    setActionError(null);
+  }, []);
+
+  const handleSubmitProof = useCallback(() => {
+    if (!proofComposer || !authHeader) {
+      setActionError("Sign in to continue.");
+      return;
+    }
+    const note = proofNote.trim();
+    if (!note) {
+      setActionError("Add a short proof note before submitting.");
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    void runResidentAction(
+      `proof:${proofComposer.obligationId}`,
+      async () => {
+        await submitResidentSoberHouseProof({
+          apiUrl,
+          authHeader,
+          obligationId: proofComposer.obligationId,
+          payload: {
+            submittedAt: timestamp,
+            proofMetadata: {
+              source: "ios_resident_note",
+              note,
+              obligationType: proofComposer.obligationType,
+            },
+          },
         });
-        if (result.action === Share.dismissedAction) {
-          setStatusMessage("Manager handoff canceled.");
-          return;
-        }
-        setComposerManagerHandoffMethod("SHARE_SHEET");
-        setStatusMessage("Opened the manager handoff share sheet.");
-      } catch {
-        setStatusMessage("Manager handoff is unavailable on this device right now.");
-      }
-    },
-    [composerNotes, composerProofUris.length, house?.name, housingProfile, residentName],
-  );
-
-  const persistChoreCompletion = useCallback(
-    async (task: SoberHouseRoutineTask) => {
-      if (!housingProfile || !ruleSet) {
-        setStatusMessage("Set up a resident housing profile before logging chores.");
-        return;
-      }
-      const chore = task.houseChoreId ? (explicitChoreLookup.get(task.houseChoreId) ?? null) : null;
-      const proofRequirement = chore?.proofRequirement ?? ruleSet.chores.proofRequirement;
-      const requiresPhotoProof = choreRequiresPhotoProof(proofRequirement);
-      const requiresManagerConfirmation = choreRequiresManagerConfirmation(proofRequirement);
-      if (requiresPhotoProof && composerProofUris.length === 0) {
-        setStatusMessage("Attach chore proof before marking this task complete.");
-        return;
-      }
-      const now = new Date().toISOString();
-      const completionRecordId = createEntityId("chore-completion");
-      const result = upsertChoreCompletionRecord(
-        store,
-        actor,
-        {
-          id: completionRecordId,
-          residentId: housingProfile.residentId,
-          linkedUserId: housingProfile.linkedUserId,
-          organizationId: housingProfile.organizationId,
-          houseId: housingProfile.houseId,
-          houseChoreId: task.houseChoreId,
-          completedAt: now,
-          proofRequirement,
-          proofProvided: composerProofUris.length > 0,
-          proofReference: composerProofUris[0] ?? null,
-          managerConfirmationRequired: requiresManagerConfirmation,
-          managerConfirmationStatus: requiresManagerConfirmation ? "PENDING" : "NOT_REQUIRED",
-          managerConfirmationRequestedAt: composerManagerHandoffMethod ? now : null,
-          managerConfirmationRequestedVia: composerManagerHandoffMethod,
-          managerConfirmedAt: null,
-          notes: composerNotes.trim(),
-        },
-        now,
-      );
-      const nextStore = attachSoberHouseRoutineProof({
-        store: result.store,
-        actor,
-        housingProfile,
-        task,
-        proofUris: composerProofUris,
-        timestamp: now,
-        completionRecordId,
-        completionRecordType: "CHORE",
-      });
-      await onPersist(
-        nextStore,
-        requiresManagerConfirmation
-          ? "Chore proof submitted. Awaiting manager confirmation."
-          : "Chore completion posted.",
-      );
-      clearComposer();
-      setStatusMessage(
-        requiresManagerConfirmation
-          ? "Chore proof submitted and waiting on manager confirmation."
-          : "Chore completion posted.",
-      );
-      await refreshContext(false);
-    },
-    [
-      actor,
-      clearComposer,
-      composerManagerHandoffMethod,
-      composerNotes,
-      composerProofUris,
-      explicitChoreLookup,
-      housingProfile,
-      onPersist,
-      refreshContext,
-      ruleSet,
-      store,
-    ],
-  );
-
-  const persistJobApplication = useCallback(
-    async (task: SoberHouseRoutineTask) => {
-      if (!housingProfile) {
-        setStatusMessage("Set up a resident housing profile before logging job search progress.");
-        return;
-      }
-      if (!composerEmployerName.trim()) {
-        setStatusMessage("Employer or application target is required.");
-        return;
-      }
-      if (task.requiresProof && composerProofUris.length === 0) {
-        setStatusMessage("Attach application proof before marking this task complete.");
-        return;
-      }
-      const now = new Date().toISOString();
-      const jobApplicationId = createEntityId("job-application");
-      const result = upsertJobApplicationRecord(
-        store,
-        actor,
-        {
-          id: jobApplicationId,
-          residentId: housingProfile.residentId,
-          linkedUserId: housingProfile.linkedUserId,
-          organizationId: housingProfile.organizationId,
-          houseId: housingProfile.houseId,
-          employerName: composerEmployerName.trim(),
-          appliedAt: now,
-          proofProvided: composerProofUris.length > 0,
-          proofReference: composerProofUris[0] ?? null,
-          notes: composerNotes.trim(),
-        },
-        now,
-      );
-      const nextStore = attachSoberHouseRoutineProof({
-        store: result.store,
-        actor,
-        housingProfile,
-        task,
-        proofUris: composerProofUris,
-        timestamp: now,
-        completionRecordId: jobApplicationId,
-        completionRecordType: "JOB_APPLICATION",
-      });
-      await onPersist(nextStore, "Job application posted.");
-      clearComposer();
-      setStatusMessage("Job application posted.");
-    },
-    [
-      actor,
-      clearComposer,
-      composerEmployerName,
-      composerNotes,
-      composerProofUris,
-      housingProfile,
-      onPersist,
-      store,
-    ],
-  );
-
-  const persistWorkVerification = useCallback(async () => {
-    if (!housingProfile) {
-      setStatusMessage("Set up a resident housing profile before logging work verification.");
-      return;
-    }
-    const now = new Date().toISOString();
-    const result = upsertWorkVerificationRecord(
-      store,
-      actor,
-      {
-        residentId: housingProfile.residentId,
-        linkedUserId: housingProfile.linkedUserId,
-        organizationId: housingProfile.organizationId,
-        houseId: housingProfile.houseId,
-        verifiedAt: now,
-        verificationMethod: "SELF_REPORTED",
-        notes: composerNotes.trim(),
+        setProofComposer(null);
+        setProofNote("");
       },
-      now,
+      "Proof submission saved.",
     );
-    await onPersist(result.store, "Work accountability posted.");
-    clearComposer();
-    setStatusMessage("Work accountability posted.");
-  }, [actor, clearComposer, composerNotes, housingProfile, onPersist, store]);
+  }, [apiUrl, authHeader, proofComposer, proofNote, runResidentAction]);
 
-  const persistHouseMeetingAttendance = useCallback(
-    async (task: SoberHouseRoutineTask) => {
-      if (!housingProfile || !task.houseMeetingId || !task.dueAtIso) {
-        setStatusMessage("Unable to mark this house meeting complete.");
+  const handleAcknowledgeAlert = useCallback(
+    (alertId: string) => {
+      if (!authHeader) {
+        setActionError("Sign in to continue.");
         return;
       }
-      const now = new Date().toISOString();
-      const result = upsertHouseMeetingAttendanceRecord(
-        store,
-        actor,
-        {
-          residentId: housingProfile.residentId,
-          linkedUserId: housingProfile.linkedUserId,
-          organizationId: housingProfile.organizationId,
-          houseId: housingProfile.houseId,
-          houseMeetingId: task.houseMeetingId,
-          recurringObligationId: task.recurringObligationId,
-          scheduledStartAt: task.dueAtIso,
-          status: "COMPLETED",
-          attendedAt: now,
-          excusedAt: null,
-          excusedReason: null,
-          proofRequired: false,
-          proofProvided: false,
-          proofReference: null,
-          notes: "",
-        },
-        now,
+
+      const timestamp = new Date().toISOString();
+      void runResidentAction(
+        `alert:${alertId}`,
+        () =>
+          acknowledgeResidentSoberHouseAlert({
+            apiUrl,
+            authHeader,
+            alertId,
+            payload: { acknowledgedAt: timestamp },
+          }),
+        "Alert acknowledgement saved.",
       );
-      await onPersist(result.store, "House meeting attendance posted.");
-      setStatusMessage("House meeting attendance posted.");
     },
-    [actor, housingProfile, onPersist, store],
+    [apiUrl, authHeader, runResidentAction],
   );
 
-  const handleTaskAction = useCallback(
-    async (task: SoberHouseRoutineTask) => {
-      if (readOnly || isSaving) {
-        return;
-      }
-      if (task.kind === "house_meeting") {
-        await persistHouseMeetingAttendance(task);
-        return;
-      }
-      if (
-        task.kind === "chores" ||
-        task.kind === "job_applications" ||
-        task.kind === "work_verification"
-      ) {
-        setComposerTaskId((current) => (current === task.id ? null : task.id));
-        setComposerNotes("");
-        setComposerEmployerName("");
-        setComposerProofUris([]);
-        setComposerManagerHandoffMethod(null);
-      }
-    },
-    [isSaving, persistHouseMeetingAttendance, readOnly],
-  );
-
-  const handleComposerSubmit = useCallback(async () => {
-    if (!activeComposerTask) {
-      return;
-    }
-    if (activeComposerTask.kind === "chores") {
-      await persistChoreCompletion(activeComposerTask);
-      return;
-    }
-    if (activeComposerTask.kind === "job_applications") {
-      await persistJobApplication(activeComposerTask);
-      return;
-    }
-    if (activeComposerTask.kind === "work_verification") {
-      await persistWorkVerification();
-    }
-  }, [activeComposerTask, persistChoreCompletion, persistJobApplication, persistWorkVerification]);
-
-  if (!summary || !routineSummary) {
+  if (!summary) {
     return (
       <GlassCard style={styles.card}>
         <Text style={styles.sectionTitle}>Sober House Routine</Text>
@@ -712,40 +590,77 @@ export function SoberHouseComplianceSection({
       <GlassCard style={styles.card} strong>
         <View style={styles.headerRow}>
           <View style={styles.headerCopy}>
-            <Text style={styles.sectionTitle}>Sober House Routine</Text>
+            <Text style={styles.sectionTitle}>Live Sober House Obligations</Text>
             <Text style={styles.sectionMeta}>
-              {residentName} • {house?.name ?? routineSummary.houseName} • Inherited tasks stay
-              locked on and are driven by effective sober-house rules.
+              {residentName} • {house?.name ?? "Assigned house"} • Resident obligation reads now
+              come from the soberai backend.
             </Text>
           </View>
           <AppButton
             title="Refresh"
             variant="secondary"
-            onPress={() => void refreshContext(true)}
+            onPress={() => {
+              void refreshContext(false);
+              void refreshLiveObligations(false);
+            }}
             disabled={isSaving}
           />
         </View>
-        <View style={styles.progressRow}>
-          <View style={styles.progressMetric}>
-            <Text style={styles.progressValue}>{routineSummary.percentComplete}%</Text>
-            <Text style={styles.progressLabel}>Complete</Text>
+        {liveLoading && !routineSummary ? (
+          <View style={styles.loadingWrap}>
+            <ActivityIndicator color={colors.textPrimary} />
+            <Text style={styles.sectionMeta}>Loading live obligations...</Text>
           </View>
-          <View style={styles.progressMetric}>
-            <Text style={styles.progressValue}>{routineSummary.openRequiredCount}</Text>
-            <Text style={styles.progressLabel}>Open</Text>
+        ) : liveError && !routineSummary ? (
+          <View style={styles.emptyStateWrap}>
+            <Text style={styles.sectionMeta}>{liveError}</Text>
+            <View style={styles.inlineActions}>
+              <AppButton
+                title="Retry"
+                variant="secondary"
+                onPress={() => void refreshLiveObligations(true)}
+                disabled={isSaving}
+              />
+            </View>
           </View>
-          <View style={styles.progressMetric}>
-            <Text style={styles.progressValue}>{routineSummary.overdueCount}</Text>
-            <Text style={styles.progressLabel}>Overdue</Text>
-          </View>
-        </View>
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: `${routineSummary.percentComplete}%` }]} />
-        </View>
-        <Text style={styles.sectionMeta}>
-          {routineSummary.completedRequiredCount}/{routineSummary.totalRequiredCount} required tasks
-          complete across your current house routine window.
-        </Text>
+        ) : routineSummary ? (
+          <>
+            <View style={styles.progressRow}>
+              <View style={styles.progressMetric}>
+                <Text style={styles.progressValue}>{routineSummary.summary.active}</Text>
+                <Text style={styles.progressLabel}>Active</Text>
+              </View>
+              <View style={styles.progressMetric}>
+                <Text style={styles.progressValue}>{routineSummary.summary.dueToday}</Text>
+                <Text style={styles.progressLabel}>Due Today</Text>
+              </View>
+              <View style={styles.progressMetric}>
+                <Text style={styles.progressValue}>{routineSummary.summary.overdue}</Text>
+                <Text style={styles.progressLabel}>Overdue</Text>
+              </View>
+              <View style={styles.progressMetric}>
+                <Text style={styles.progressValue}>{routineSummary.summary.reviewPending}</Text>
+                <Text style={styles.progressLabel}>Review Pending</Text>
+              </View>
+              <View style={styles.progressMetric}>
+                <Text style={styles.progressValue}>{routineSummary.summary.completedToday}</Text>
+                <Text style={styles.progressLabel}>Completed Today</Text>
+              </View>
+            </View>
+            <Text style={styles.sectionMeta}>
+              {routineSummary.source === "offline_cache"
+                ? "Showing the last saved live snapshot from this device."
+                : "Showing the latest obligation read returned by the backend."}{" "}
+              Synced {formatIso(routineSummary.fetchedAt)}.
+            </Text>
+            {liveRefreshing ? (
+              <Text style={styles.sectionMeta}>Refreshing live obligations...</Text>
+            ) : null}
+            {liveNotice ? <Text style={styles.offlineNotice}>{liveNotice}</Text> : null}
+            {actionStatus ? <Text style={styles.successNotice}>{actionStatus}</Text> : null}
+            {actionError ? <Text style={styles.errorNotice}>{actionError}</Text> : null}
+          </>
+        ) : null}
       </GlassCard>
 
       {!readOnly ? (
@@ -799,171 +714,152 @@ export function SoberHouseComplianceSection({
       ) : null}
 
       <GlassCard style={styles.card}>
-        <Text style={styles.sectionTitle}>Checklist</Text>
+        <Text style={styles.sectionTitle}>Resident Obligation Queue</Text>
         <Text style={styles.sectionMeta}>
-          Required items below come from organization defaults, house-group templates, and house
-          overrides. Residents cannot disable them.
+          Active, due-today, overdue, review-pending, and completed-today sections below are read
+          from the live sober-house obligation APIs, and the first resident completion/proof actions
+          now post back to the backend from this screen.
         </Text>
-        {routineSummary.tasks.map((task) => {
-          const palette = routineStatusPalette(task);
-          const isComposerOpen = composerTaskId === task.id;
-          return (
-            <View
-              key={task.id}
-              style={[
-                styles.routineItem,
-                {
-                  borderColor: palette.borderColor,
-                  backgroundColor: palette.backgroundColor,
-                },
-              ]}
-            >
-              <View style={styles.routineHeader}>
-                <View style={styles.routineCopy}>
-                  <Text style={styles.routineTitle}>{task.title}</Text>
-                  <Text style={styles.routineDetail}>{task.detail}</Text>
+        {liveLoading && !routineSummary ? (
+          <View style={styles.loadingWrap}>
+            <ActivityIndicator color={colors.textPrimary} />
+            <Text style={styles.sectionMeta}>Loading resident obligations...</Text>
+          </View>
+        ) : liveError && !routineSummary ? (
+          <View style={styles.emptyStateWrap}>
+            <Text style={styles.sectionMeta}>{liveError}</Text>
+          </View>
+        ) : routineSummary ? (
+          <View style={styles.sectionStack}>
+            {routineSummary.sections.map((section) => (
+              <View key={section.id} style={styles.liveSectionWrap}>
+                <View style={styles.liveSectionHeader}>
+                  <Text style={styles.liveSectionTitle}>{section.title}</Text>
+                  <Text style={styles.liveSectionCount}>{section.items.length}</Text>
                 </View>
-                <View style={[styles.statusPill, { backgroundColor: palette.pillBackground }]}>
-                  <Text style={[styles.statusPillText, { color: palette.pillText }]}>
-                    {task.statusLabel}
-                  </Text>
-                </View>
-              </View>
-              <View style={styles.routineMetaRow}>
-                <Text style={styles.routineMeta}>Locked</Text>
-                <Text style={styles.routineMeta}>{task.sourceLabel}</Text>
-                {task.dueLabel ? <Text style={styles.routineMeta}>Due {task.dueLabel}</Text> : null}
-                {task.proofLabel ? <Text style={styles.routineMeta}>{task.proofLabel}</Text> : null}
-              </View>
-              {task.kind === "chores" && task.status === "pending" ? (
-                <Text style={styles.sectionMeta}>
-                  Proof is on file, but this chore still needs manager confirmation before it counts
-                  as complete.
-                </Text>
-              ) : null}
-              {task.countsTowardProgress ? (
-                <Text style={styles.routineProgressText}>
-                  Progress {task.completedCount}/{task.requiredCount}
-                </Text>
-              ) : null}
-              {!readOnly && task.actionLabel && task.status !== "completed" ? (
-                <View style={styles.inlineActions}>
-                  <AppButton
-                    title={task.actionLabel ?? "Open"}
-                    variant="secondary"
-                    onPress={() => void handleTaskAction(task)}
-                    disabled={isSaving}
-                  />
-                </View>
-              ) : null}
-              {isComposerOpen ? (
-                <View style={styles.composerWrap}>
-                  {task.kind === "job_applications" ? (
-                    <TextInput
-                      style={styles.input}
-                      value={composerEmployerName}
-                      onChangeText={setComposerEmployerName}
-                      placeholder="Employer or application target"
-                      placeholderTextColor="rgba(245,243,255,0.45)"
-                    />
-                  ) : null}
-                  <TextInput
-                    style={[styles.input, styles.multilineInput]}
-                    value={composerNotes}
-                    onChangeText={setComposerNotes}
-                    placeholder={
-                      task.kind === "work_verification"
-                        ? "Shift notes or accountability summary"
-                        : "Optional notes"
-                    }
-                    placeholderTextColor="rgba(245,243,255,0.45)"
-                    multiline
-                  />
-                  {task.requiresProof ? (
-                    <>
-                      <Text style={styles.sectionMeta}>
-                        {composerProofUris.length > 0
-                          ? `${composerProofUris.length} proof photo${composerProofUris.length === 1 ? "" : "s"} attached.`
-                          : "Add proof photos to satisfy this house requirement."}
-                      </Text>
-                      <View style={styles.inlineActions}>
-                        <AppButton
-                          title={composerProofUris.length > 0 ? "Add another photo" : "Take photo"}
-                          variant="secondary"
-                          onPress={() => void captureProofPhoto()}
-                          disabled={isSaving}
-                        />
-                      </View>
-                      {composerProofUris.length > 0 ? (
-                        <View style={styles.proofList}>
-                          {composerProofUris.map((uri, index) => (
-                            <View key={`${uri}-${index}`} style={styles.proofRow}>
-                              <Text style={styles.proofLabel}>Proof {index + 1}</Text>
-                              <Text style={styles.proofUri} numberOfLines={1}>
-                                {uri}
-                              </Text>
-                              <Pressable
-                                onPress={() =>
-                                  setComposerProofUris((current) =>
-                                    current.filter((_, proofIndex) => proofIndex !== index),
-                                  )
-                                }
-                              >
-                                <Text style={styles.removeProofText}>Remove</Text>
-                              </Pressable>
-                            </View>
-                          ))}
-                        </View>
-                      ) : (
-                        <Text style={styles.sectionMeta}>No proof photos attached yet.</Text>
-                      )}
-                    </>
-                  ) : null}
-                  {task.kind === "chores" && task.managerConfirmationRequired ? (
-                    <>
-                      <Text style={styles.sectionMeta}>
-                        This chore stays pending until a manager confirms the submission.
-                      </Text>
-                      {!task.requiresProof || composerProofUris.length > 0 ? (
-                        <View style={styles.inlineActions}>
-                          <AppButton
-                            title={
-                              composerManagerHandoffMethod
-                                ? "Shared with manager"
-                                : "Text / share to manager"
-                            }
-                            variant="secondary"
-                            onPress={() => void shareTaskWithManager(task)}
-                            disabled={isSaving}
-                          />
-                        </View>
-                      ) : null}
-                    </>
-                  ) : null}
-                  <View style={styles.buttonRow}>
-                    <AppButton
-                      title={
-                        task.kind === "chores"
-                          ? choreSubmitLabel(task)
-                          : (task.actionLabel ?? "Post completion")
+                {section.items.length === 0 ? (
+                  <Text style={styles.sectionMeta}>{section.emptyMessage}</Text>
+                ) : (
+                  section.items.map((item) => (
+                    <LiveObligationRow
+                      key={`${section.id}-${item.id}`}
+                      item={item}
+                      readOnly={readOnly}
+                      busy={
+                        activeActionKey === `complete:${item.id}` ||
+                        activeActionKey === `proof:${item.id}`
                       }
-                      onPress={() => void handleComposerSubmit()}
-                      disabled={isSaving}
+                      onComplete={handleCompleteObligation}
+                      onOpenProofComposer={handleOpenProofComposer}
                     />
-                    <View style={styles.buttonSpacer} />
-                    <AppButton
-                      title="Cancel"
-                      variant="secondary"
-                      onPress={clearComposer}
-                      disabled={isSaving}
-                    />
-                  </View>
-                </View>
-              ) : null}
-            </View>
-          );
-        })}
+                  ))
+                )}
+              </View>
+            ))}
+          </View>
+        ) : null}
       </GlassCard>
+
+      {!readOnly && proofComposer ? (
+        <GlassCard style={styles.card}>
+          <Text style={styles.sectionTitle}>Submit Proof</Text>
+          <Text style={styles.sectionMeta}>
+            Add a short note describing the proof for {proofComposer.title.toLowerCase()}.
+          </Text>
+          <TextInput
+            style={[styles.input, styles.multilineInput]}
+            value={proofNote}
+            onChangeText={setProofNote}
+            placeholder="Proof note"
+            placeholderTextColor="rgba(245,243,255,0.45)"
+            multiline
+          />
+          <View style={styles.inlineActions}>
+            <AppButton
+              title="Send proof"
+              onPress={handleSubmitProof}
+              disabled={activeActionKey === `proof:${proofComposer.obligationId}` || isSaving}
+            />
+            <AppButton
+              title="Cancel"
+              variant="secondary"
+              onPress={() => {
+                setProofComposer(null);
+                setProofNote("");
+              }}
+              disabled={activeActionKey === `proof:${proofComposer.obligationId}` || isSaving}
+            />
+          </View>
+        </GlassCard>
+      ) : null}
+
+      {!readOnly ? (
+        <GlassCard style={styles.card}>
+          <Text style={styles.sectionTitle}>Active House Alerts</Text>
+          <Text style={styles.sectionMeta}>
+            Alert acknowledgements post to the live resident endpoint. Alert list display still
+            comes from the current sober-house store until a resident alert read endpoint exists.
+          </Text>
+          {activeAnnouncements.length === 0 ? (
+            <Text style={styles.sectionMeta}>No active house alerts right now.</Text>
+          ) : (
+            activeAnnouncements.map((announcement) => {
+              const palette = alertTonePalette(announcement.severity);
+              const acknowledged = acknowledgedAlertIds.has(announcement.id);
+              return (
+                <View
+                  key={announcement.id}
+                  style={[
+                    styles.routineItem,
+                    {
+                      borderColor: palette.borderColor,
+                      backgroundColor: palette.backgroundColor,
+                    },
+                  ]}
+                >
+                  <View style={styles.routineHeader}>
+                    <View style={styles.routineCopy}>
+                      <Text style={styles.routineTitle}>{announcement.title}</Text>
+                      <Text style={styles.routineDetail}>{announcement.body}</Text>
+                    </View>
+                    <View style={[styles.statusPill, { backgroundColor: palette.pillBackground }]}>
+                      <Text style={[styles.statusPillText, { color: palette.pillText }]}>
+                        {announcement.severity === "ACTION_REQUIRED"
+                          ? "Action required"
+                          : announcement.severity === "URGENT"
+                            ? "Urgent"
+                            : "Info"}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={styles.routineMetaRow}>
+                    <Text style={styles.routineMeta}>
+                      {announcement.acknowledgmentRequired
+                        ? acknowledged
+                          ? "Acknowledged"
+                          : "Acknowledgement required"
+                        : "Acknowledgement optional"}
+                    </Text>
+                    <Text style={styles.routineMeta}>
+                      Started {formatIso(announcement.startsAt)}
+                    </Text>
+                  </View>
+                  {announcement.acknowledgmentRequired && !acknowledged ? (
+                    <View style={styles.inlineActions}>
+                      <AppButton
+                        title="Acknowledge"
+                        variant="secondary"
+                        onPress={() => handleAcknowledgeAlert(announcement.id)}
+                        disabled={activeActionKey === `alert:${announcement.id}` || isSaving}
+                      />
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })
+          )}
+        </GlassCard>
+      ) : null}
 
       <GlassCard style={styles.card}>
         <Text style={styles.sectionTitle}>Requirement Status</Text>
@@ -987,7 +883,7 @@ export function SoberHouseComplianceSection({
         ))}
       </GlassCard>
 
-      {!readOnly && statusMessage ? <Text style={styles.inlineStatus}>{statusMessage}</Text> : null}
+      {liveError && routineSummary ? <Text style={styles.inlineStatus}>{liveError}</Text> : null}
     </>
   );
 }
@@ -1044,16 +940,35 @@ const styles = StyleSheet.create({
     fontSize: typography.small,
     fontWeight: "600",
   },
-  progressTrack: {
-    height: 10,
-    borderRadius: radius.pill,
-    backgroundColor: "rgba(148,163,184,0.18)",
-    overflow: "hidden",
+  loadingWrap: {
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+    alignItems: "flex-start",
   },
-  progressFill: {
-    height: "100%",
-    borderRadius: radius.pill,
-    backgroundColor: "#8AF2BA",
+  emptyStateWrap: {
+    gap: spacing.sm,
+  },
+  sectionStack: {
+    gap: spacing.lg,
+  },
+  liveSectionWrap: {
+    gap: spacing.sm,
+  },
+  liveSectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: spacing.sm,
+  },
+  liveSectionTitle: {
+    color: colors.textPrimary,
+    fontSize: typography.body,
+    fontWeight: "700",
+  },
+  liveSectionCount: {
+    color: colors.textSecondary,
+    fontSize: typography.small,
+    fontWeight: "700",
   },
   routineItem: {
     borderWidth: 1,
@@ -1093,39 +1008,19 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     letterSpacing: 0.4,
   },
-  routineProgressText: {
-    color: colors.textSecondary,
-    fontSize: typography.small,
-    fontWeight: "600",
-  },
-  composerWrap: {
-    gap: spacing.sm,
-    paddingTop: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(148,163,184,0.18)",
-  },
-  proofList: {
-    gap: spacing.xs,
-  },
-  proofRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-  },
-  proofLabel: {
+  input: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
     color: colors.textPrimary,
-    fontSize: typography.small,
-    fontWeight: "700",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    minHeight: 48,
   },
-  proofUri: {
-    flex: 1,
-    color: colors.textSecondary,
-    fontSize: typography.small,
-  },
-  removeProofText: {
-    color: "#FFB4B4",
-    fontSize: typography.small,
-    fontWeight: "700",
+  multilineInput: {
+    minHeight: 88,
+    textAlignVertical: "top",
   },
   complianceRow: {
     gap: spacing.sm,
@@ -1189,19 +1084,20 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: spacing.sm,
   },
-  input: {
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.14)",
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    color: colors.textPrimary,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    minHeight: 48,
+  offlineNotice: {
+    color: "#F8D47A",
+    fontSize: typography.small,
+    lineHeight: 20,
   },
-  multilineInput: {
-    minHeight: 88,
-    textAlignVertical: "top",
+  successNotice: {
+    color: "#8AF2BA",
+    fontSize: typography.small,
+    lineHeight: 20,
+  },
+  errorNotice: {
+    color: "#FFB4B4",
+    fontSize: typography.small,
+    lineHeight: 20,
   },
   attentionRow: {
     gap: spacing.sm,

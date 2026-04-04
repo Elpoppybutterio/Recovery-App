@@ -11,6 +11,10 @@ import type {
   ParticipantProfileStatus,
   ParticipantType,
   ProofType,
+  SoberHouseAlertAcknowledgementStatus,
+  SoberHouseEntityStatus,
+  SoberHouseEventCompletionStatus,
+  SoberHouseProofReviewStatus,
   VerificationStatus,
   ViolationSeverity,
   ViolationStatus,
@@ -226,6 +230,76 @@ type ParticipantProfile = {
   updated_at: string;
 };
 
+type ResidentHouseMembership = {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string;
+  resident_user_id: string;
+  status: SoberHouseEntityStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+type SoberHouseObligation = {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string;
+  resident_user_id: string;
+  resident_house_membership_id: string | null;
+  obligation_type: "HOUSE_MEETING" | "ONE_ON_ONE" | "CHORE";
+  scheduled_at: string;
+  due_at: string | null;
+  proof_required: boolean;
+  status: SoberHouseEntityStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+type SoberHouseCompletionRecord = {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string;
+  resident_user_id: string;
+  obligation_id: string;
+  completion_status: SoberHouseEventCompletionStatus;
+  completed_at: string | null;
+  proof_metadata_json: unknown | null;
+  submitted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type SoberHouseProofReview = {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string;
+  resident_user_id: string;
+  completion_record_id: string;
+  review_outcome: SoberHouseProofReviewStatus;
+  reviewer_user_id: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type SoberHouseAlertAcknowledgement = {
+  id: string;
+  tenant_id: string;
+  organization_id: string;
+  house_id: string | null;
+  resident_user_id: string;
+  alert_id: string;
+  status: SoberHouseAlertAcknowledgementStatus;
+  acknowledged_at: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type Obligation = {
   id: string;
   tenant_id: string;
@@ -356,6 +430,11 @@ export class InMemoryDb implements DbPool {
   private lastKnownLocations: LastKnownLocation[] = [];
   private complianceEvents: ComplianceEvent[] = [];
   private participantProfiles: ParticipantProfile[] = [];
+  private residentHouseMemberships: ResidentHouseMembership[] = [];
+  private soberHouseObligations: SoberHouseObligation[] = [];
+  private soberHouseCompletionRecords: SoberHouseCompletionRecord[] = [];
+  private soberHouseProofReviews: SoberHouseProofReview[] = [];
+  private soberHouseAlertAcknowledgements: SoberHouseAlertAcknowledgement[] = [];
   private obligations: Obligation[] = [];
   private violations: Violation[] = [];
   private sponsorConfigs: SponsorConfig[] = [];
@@ -445,6 +524,91 @@ export class InMemoryDb implements DbPool {
         ...record,
       },
       ...this.participantProfiles.filter((entry) => entry.user_id !== record.user_id),
+    ];
+  }
+
+  addResidentHouseMembership(
+    record: Omit<ResidentHouseMembership, "created_at" | "updated_at"> & {
+      created_at?: string;
+      updated_at?: string;
+    },
+  ) {
+    const nowIso = new Date().toISOString();
+    this.residentHouseMemberships = [
+      {
+        created_at: record.created_at ?? nowIso,
+        updated_at: record.updated_at ?? nowIso,
+        ...record,
+      },
+      ...this.residentHouseMemberships.filter((entry) => entry.id !== record.id),
+    ];
+  }
+
+  addSoberHouseObligation(
+    record: Omit<SoberHouseObligation, "created_at" | "updated_at"> & {
+      created_at?: string;
+      updated_at?: string;
+    },
+  ) {
+    const nowIso = new Date().toISOString();
+    this.soberHouseObligations = [
+      {
+        created_at: record.created_at ?? nowIso,
+        updated_at: record.updated_at ?? nowIso,
+        ...record,
+      },
+      ...this.soberHouseObligations.filter((entry) => entry.id !== record.id),
+    ];
+  }
+
+  addSoberHouseCompletionRecord(
+    record: Omit<SoberHouseCompletionRecord, "created_at" | "updated_at"> & {
+      created_at?: string;
+      updated_at?: string;
+    },
+  ) {
+    const nowIso = new Date().toISOString();
+    this.soberHouseCompletionRecords = [
+      {
+        created_at: record.created_at ?? nowIso,
+        updated_at: record.updated_at ?? nowIso,
+        ...record,
+      },
+      ...this.soberHouseCompletionRecords.filter((entry) => entry.id !== record.id),
+    ];
+  }
+
+  addSoberHouseProofReview(
+    record: Omit<SoberHouseProofReview, "created_at" | "updated_at"> & {
+      created_at?: string;
+      updated_at?: string;
+    },
+  ) {
+    const nowIso = new Date().toISOString();
+    this.soberHouseProofReviews = [
+      {
+        created_at: record.created_at ?? nowIso,
+        updated_at: record.updated_at ?? nowIso,
+        ...record,
+      },
+      ...this.soberHouseProofReviews.filter((entry) => entry.id !== record.id),
+    ];
+  }
+
+  addSoberHouseAlertAcknowledgement(
+    record: Omit<SoberHouseAlertAcknowledgement, "created_at" | "updated_at"> & {
+      created_at?: string;
+      updated_at?: string;
+    },
+  ) {
+    const nowIso = new Date().toISOString();
+    this.soberHouseAlertAcknowledgements = [
+      {
+        created_at: record.created_at ?? nowIso,
+        updated_at: record.updated_at ?? nowIso,
+        ...record,
+      },
+      ...this.soberHouseAlertAcknowledgements.filter((entry) => entry.id !== record.id),
     ];
   }
 
@@ -742,6 +906,347 @@ export class InMemoryDb implements DbPool {
       return {
         rowCount: rows.length,
         rows,
+      };
+    }
+
+    if (
+      normalized.includes("update resident_house_memberships") &&
+      normalized.includes("set status = 'inactive'") &&
+      normalized.includes("and house_id <> $3")
+    ) {
+      const [tenantId, residentUserId, houseId] = params as [string, string, string];
+      this.residentHouseMemberships = this.residentHouseMemberships.map((entry) =>
+        entry.tenant_id === tenantId &&
+        entry.resident_user_id === residentUserId &&
+        entry.house_id !== houseId
+          ? {
+              ...entry,
+              status: "INACTIVE",
+              updated_at: new Date().toISOString(),
+            }
+          : entry,
+      );
+      return { rowCount: 0, rows: [] };
+    }
+
+    if (
+      normalized.includes("update resident_house_memberships") &&
+      normalized.includes("set status = 'inactive'") &&
+      !normalized.includes("and house_id <> $3")
+    ) {
+      const [tenantId, residentUserId] = params as [string, string];
+      this.residentHouseMemberships = this.residentHouseMemberships.map((entry) =>
+        entry.tenant_id === tenantId && entry.resident_user_id === residentUserId
+          ? {
+              ...entry,
+              status: "INACTIVE",
+              updated_at: new Date().toISOString(),
+            }
+          : entry,
+      );
+      return { rowCount: 0, rows: [] };
+    }
+
+    if (normalized.includes("insert into resident_house_memberships")) {
+      const [id, tenantId, organizationId, houseId, residentUserId, status] = params as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        SoberHouseEntityStatus,
+      ];
+      const nowIso = new Date().toISOString();
+      const existingIndex = this.residentHouseMemberships.findIndex(
+        (entry) =>
+          entry.tenant_id === tenantId &&
+          entry.house_id === houseId &&
+          entry.resident_user_id === residentUserId,
+      );
+      const existing = existingIndex >= 0 ? this.residentHouseMemberships[existingIndex] : null;
+      const row: ResidentHouseMembership = {
+        id: existing?.id ?? id,
+        tenant_id: tenantId,
+        organization_id: organizationId,
+        house_id: houseId,
+        resident_user_id: residentUserId,
+        status,
+        created_at: existing?.created_at ?? nowIso,
+        updated_at: nowIso,
+      };
+      if (existingIndex >= 0) {
+        this.residentHouseMemberships[existingIndex] = row;
+      } else {
+        this.residentHouseMemberships.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from resident_house_memberships") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by updated_at desc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.residentHouseMemberships
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const updatedCompare = right.updated_at.localeCompare(left.updated_at);
+          if (updatedCompare !== 0) {
+            return updatedCompare;
+          }
+          return right.created_at.localeCompare(left.created_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("from sober_house_obligations") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by coalesce(due_at, scheduled_at) asc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.soberHouseObligations
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const leftOrder = left.due_at ?? left.scheduled_at;
+          const rightOrder = right.due_at ?? right.scheduled_at;
+          const orderCompare = leftOrder.localeCompare(rightOrder);
+          if (orderCompare !== 0) {
+            return orderCompare;
+          }
+          return right.created_at.localeCompare(left.created_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (normalized.includes("insert into sober_house_completion_records")) {
+      const [
+        id,
+        tenantId,
+        organizationId,
+        houseId,
+        residentUserId,
+        obligationId,
+        completionStatus,
+        completedAt,
+        proofMetadataJson,
+        submittedAt,
+      ] = params as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        SoberHouseEventCompletionStatus,
+        string | null,
+        string,
+        string | null,
+      ];
+      const nowIso = new Date().toISOString();
+      const existingIndex = this.soberHouseCompletionRecords.findIndex(
+        (entry) => entry.tenant_id === tenantId && entry.obligation_id === obligationId,
+      );
+      const existing = existingIndex >= 0 ? this.soberHouseCompletionRecords[existingIndex] : null;
+      const row: SoberHouseCompletionRecord = {
+        id: existing?.id ?? id,
+        tenant_id: tenantId,
+        organization_id: organizationId,
+        house_id: houseId,
+        resident_user_id: residentUserId,
+        obligation_id: obligationId,
+        completion_status: completionStatus,
+        completed_at: completedAt,
+        proof_metadata_json: JSON.parse(proofMetadataJson) as unknown,
+        submitted_at: submittedAt,
+        created_at: existing?.created_at ?? nowIso,
+        updated_at: nowIso,
+      };
+      if (existingIndex >= 0) {
+        this.soberHouseCompletionRecords[existingIndex] = row;
+      } else {
+        this.soberHouseCompletionRecords.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from sober_house_completion_records") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by coalesce(submitted_at, completed_at, updated_at) desc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.soberHouseCompletionRecords
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const leftOrder = left.submitted_at ?? left.completed_at ?? left.updated_at;
+          const rightOrder = right.submitted_at ?? right.completed_at ?? right.updated_at;
+          const orderCompare = rightOrder.localeCompare(leftOrder);
+          if (orderCompare !== 0) {
+            return orderCompare;
+          }
+          return right.created_at.localeCompare(left.created_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (normalized.includes("insert into sober_house_proof_reviews")) {
+      const [id, tenantId, organizationId, houseId, residentUserId, completionRecordId] =
+        params as [string, string, string, string, string, string];
+      const nowIso = new Date().toISOString();
+      const existingIndex = this.soberHouseProofReviews.findIndex(
+        (entry) => entry.completion_record_id === completionRecordId,
+      );
+      const existing = existingIndex >= 0 ? this.soberHouseProofReviews[existingIndex] : null;
+      const row: SoberHouseProofReview = {
+        id: existing?.id ?? id,
+        tenant_id: tenantId,
+        organization_id: organizationId,
+        house_id: houseId,
+        resident_user_id: residentUserId,
+        completion_record_id: completionRecordId,
+        review_outcome: "PENDING",
+        reviewer_user_id: null,
+        reviewed_at: null,
+        created_at: existing?.created_at ?? nowIso,
+        updated_at: nowIso,
+      };
+      if (existingIndex >= 0) {
+        this.soberHouseProofReviews[existingIndex] = row;
+      } else {
+        this.soberHouseProofReviews.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from sober_house_proof_reviews") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by created_at desc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.soberHouseProofReviews
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const createdCompare = right.created_at.localeCompare(left.created_at);
+          if (createdCompare !== 0) {
+            return createdCompare;
+          }
+          return right.updated_at.localeCompare(left.updated_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (
+      normalized.includes("update sober_house_proof_reviews") &&
+      normalized.includes("set review_outcome = $1")
+    ) {
+      const [reviewOutcome, reviewerUserId, reviewedAt, tenantId, reviewId] = params as [
+        SoberHouseProofReviewStatus,
+        string,
+        string,
+        string,
+        string,
+      ];
+      const review = this.soberHouseProofReviews.find(
+        (entry) => entry.tenant_id === tenantId && entry.id === reviewId,
+      );
+      if (!review) {
+        return { rowCount: 0, rows: [] };
+      }
+      review.review_outcome = reviewOutcome;
+      review.reviewer_user_id = reviewerUserId;
+      review.reviewed_at = reviewedAt;
+      review.updated_at = new Date().toISOString();
+      return {
+        rowCount: 1,
+        rows: [{ ...review } as Row],
+      };
+    }
+
+    if (
+      normalized.includes("from sober_house_alert_acknowledgements") &&
+      normalized.includes("where tenant_id = $1") &&
+      normalized.includes("order by coalesce(acknowledged_at, updated_at) desc")
+    ) {
+      const [tenantId] = params as [string];
+      const rows = this.soberHouseAlertAcknowledgements
+        .filter((entry) => entry.tenant_id === tenantId)
+        .sort((left, right) => {
+          const leftOrder = left.acknowledged_at ?? left.updated_at;
+          const rightOrder = right.acknowledged_at ?? right.updated_at;
+          const orderCompare = rightOrder.localeCompare(leftOrder);
+          if (orderCompare !== 0) {
+            return orderCompare;
+          }
+          return right.created_at.localeCompare(left.created_at);
+        })
+        .map((entry) => ({ ...entry })) as Row[];
+      return {
+        rowCount: rows.length,
+        rows,
+      };
+    }
+
+    if (normalized.includes("insert into sober_house_alert_acknowledgements")) {
+      const [id, tenantId, organizationId, houseId, residentUserId, alertId, acknowledgedAt, note] =
+        params as [string, string, string, string | null, string, string, string, string | null];
+      const nowIso = new Date().toISOString();
+      const existingIndex = this.soberHouseAlertAcknowledgements.findIndex(
+        (entry) =>
+          entry.tenant_id === tenantId &&
+          entry.resident_user_id === residentUserId &&
+          entry.alert_id === alertId,
+      );
+      const existing =
+        existingIndex >= 0 ? this.soberHouseAlertAcknowledgements[existingIndex] : null;
+      const row: SoberHouseAlertAcknowledgement = {
+        id: existing?.id ?? id,
+        tenant_id: tenantId,
+        organization_id: organizationId,
+        house_id: houseId,
+        resident_user_id: residentUserId,
+        alert_id: alertId,
+        status: "ACKNOWLEDGED",
+        acknowledged_at: acknowledgedAt,
+        note,
+        created_at: existing?.created_at ?? nowIso,
+        updated_at: nowIso,
+      };
+      if (existingIndex >= 0) {
+        this.soberHouseAlertAcknowledgements[existingIndex] = row;
+      } else {
+        this.soberHouseAlertAcknowledgements.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
       };
     }
 

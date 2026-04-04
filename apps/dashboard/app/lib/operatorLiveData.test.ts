@@ -45,6 +45,51 @@ function createSnapshotPayload() {
         HOUSE_MANAGER: { houseId: null },
         STAFF_VIEWER: { houseId: null },
       },
+      residentLiveObligations: [
+        {
+          obligationId: "obl-1",
+          residentId: "resident-1",
+          residentUserId: "enduser-a1",
+          organizationId: "org-1",
+          houseId: "house-1",
+          obligationType: "CHORE",
+          title: "Kitchen reset",
+          scheduledAt: "2026-04-02T18:00:00.000Z",
+          dueAt: "2026-04-02T18:00:00.000Z",
+          proofRequired: true,
+          obligationStatus: "ACTIVE",
+          completionRecordId: "completion-1",
+          completionStatus: "COMPLETED",
+          completedAt: "2026-04-02T18:05:00.000Z",
+          submittedAt: "2026-04-02T18:05:00.000Z",
+          proofSubmitted: true,
+          proofReviewId: "review-1",
+          proofReviewOutcome: "PENDING",
+          reviewedAt: null,
+          createdAt: "2026-04-02T12:00:00.000Z",
+          updatedAt: "2026-04-02T18:05:00.000Z",
+        },
+      ],
+      complianceSummary: {
+        organization: {
+          dueTodayCount: 0,
+          completedTodayCount: 1,
+          overdueCount: 0,
+          pendingReviewCount: 1,
+          rejectedProofCount: 0,
+        },
+        houses: [
+          {
+            houseId: "house-1",
+            houseName: "Maple House",
+            dueTodayCount: 0,
+            completedTodayCount: 1,
+            overdueCount: 0,
+            pendingReviewCount: 1,
+            rejectedProofCount: 0,
+          },
+        ],
+      },
     },
     generatedAt: "2026-04-02T12:00:00.000Z",
   };
@@ -93,6 +138,8 @@ describe("operator live data adapter", () => {
     if (result.status === "ready") {
       expect(result.snapshot.session.organizationName).toBe("Bright Path Recovery");
       expect(result.snapshot.data.store.organization?.id).toBe("org-1");
+      expect(result.snapshot.data.residentLiveObligations[0]?.proofReviewOutcome).toBe("PENDING");
+      expect(result.snapshot.data.complianceSummary?.organization.pendingReviewCount).toBe(1);
     }
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl).toHaveBeenCalledWith(

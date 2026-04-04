@@ -91,10 +91,11 @@ import { getResidentSetupState } from "../lib/soberHouse/resident";
 
 type SoberHouseSettingsScreenProps = {
   userId: string;
+  apiUrl: string;
+  authHeader: string | null;
   actorId: string;
   actorName: string;
   viewerRole: AppAccessRole;
-  sponsorCallLogs: Array<{ id: string; atIso: string; success: boolean }>;
   onBack: () => void;
   adminLaunchContext?: SoberHouseAdminLaunchContext | null;
 };
@@ -977,10 +978,11 @@ function SetupModuleCard({
 
 export function SoberHouseSettingsScreen({
   userId,
+  apiUrl,
+  authHeader,
   actorId,
   actorName,
   viewerRole,
-  sponsorCallLogs,
   onBack,
   adminLaunchContext = null,
 }: SoberHouseSettingsScreenProps) {
@@ -2719,14 +2721,13 @@ export function SoberHouseSettingsScreen({
           </GlassCard>
           <SoberHouseComplianceSection
             userId={userId}
+            apiUrl={apiUrl}
+            authHeader={authHeader}
             store={store}
-            actor={actor}
             isSaving={isSaving}
-            sponsorCallLogs={sponsorCallLogs}
             onOpenSetupCompletion={(ruleType) =>
               openResidentSetup(residentSetupStepForRule(ruleType))
             }
-            onPersist={persistStore}
           />
         </>
       ) : null}

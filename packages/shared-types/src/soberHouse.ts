@@ -443,6 +443,102 @@ export const soberHouseProofReviewRecordSchema = z.object({
 
 export type SoberHouseProofReviewRecord = z.infer<typeof soberHouseProofReviewRecordSchema>;
 
+export const soberHouseResidentActionObligationTypeSchema = z.enum([
+  "HOUSE_MEETING",
+  "ONE_ON_ONE",
+  "CHORE",
+]);
+
+export type SoberHouseResidentActionObligationType = z.infer<
+  typeof soberHouseResidentActionObligationTypeSchema
+>;
+
+export const soberHouseResidentCompletionRequestSchema = z.object({
+  completedAt: isoTimestampSchema.optional(),
+  submittedAt: isoTimestampSchema.optional(),
+  proofMetadata: z.record(z.unknown()).nullable().optional(),
+});
+
+export type SoberHouseResidentCompletionRequest = z.infer<
+  typeof soberHouseResidentCompletionRequestSchema
+>;
+
+export const soberHouseResidentProofSubmissionRequestSchema = z.object({
+  completedAt: isoTimestampSchema.optional(),
+  submittedAt: isoTimestampSchema.optional(),
+  proofMetadata: z.record(z.unknown()),
+});
+
+export type SoberHouseResidentProofSubmissionRequest = z.infer<
+  typeof soberHouseResidentProofSubmissionRequestSchema
+>;
+
+export const soberHouseResidentAlertAcknowledgementRequestSchema = z.object({
+  acknowledgedAt: isoTimestampSchema.optional(),
+  note: z.string().optional(),
+});
+
+export type SoberHouseResidentAlertAcknowledgementRequest = z.infer<
+  typeof soberHouseResidentAlertAcknowledgementRequestSchema
+>;
+
+export const soberHouseOperatorProofReviewOutcomeSchema = z.enum(["APPROVED", "REJECTED"]);
+
+export type SoberHouseOperatorProofReviewOutcome = z.infer<
+  typeof soberHouseOperatorProofReviewOutcomeSchema
+>;
+
+export const soberHouseOperatorProofReviewRequestSchema = z.object({
+  reviewOutcome: soberHouseOperatorProofReviewOutcomeSchema,
+  reviewedAt: isoTimestampSchema.optional(),
+  note: z.string().trim().max(280).optional(),
+});
+
+export type SoberHouseOperatorProofReviewRequest = z.infer<
+  typeof soberHouseOperatorProofReviewRequestSchema
+>;
+
+export const soberHouseResidentObligationRecordSchema = z.object({
+  obligationId: z.string().min(1),
+  organizationId: z.string().min(1),
+  houseId: z.string().min(1),
+  residentUserId: z.string().min(1),
+  obligationType: soberHouseResidentActionObligationTypeSchema,
+  scheduledAt: isoTimestampSchema,
+  dueAt: nullableIsoTimestampSchema,
+  proofRequired: z.boolean(),
+  obligationStatus: soberHouseEntityStatusSchema,
+  completionRecordId: z.string().min(1).nullable(),
+  completionStatus: soberHouseEventCompletionStatusSchema.nullable(),
+  completedAt: nullableIsoTimestampSchema,
+  proofReviewId: z.string().min(1).nullable(),
+  proofReviewOutcome: soberHouseProofReviewStatusSchema.nullable(),
+  reviewedAt: nullableIsoTimestampSchema,
+  createdAt: isoTimestampSchema,
+  updatedAt: isoTimestampSchema,
+});
+
+export type SoberHouseResidentObligationRecord = z.infer<
+  typeof soberHouseResidentObligationRecordSchema
+>;
+
+export const soberHouseResidentObligationStatusRecordSchema = z.object({
+  obligationId: z.string().min(1),
+  obligationType: soberHouseResidentActionObligationTypeSchema,
+  obligationStatus: soberHouseEntityStatusSchema,
+  scheduledAt: isoTimestampSchema,
+  dueAt: nullableIsoTimestampSchema,
+  completionStatus: soberHouseEventCompletionStatusSchema.nullable(),
+  proofRequired: z.boolean(),
+  proofSubmitted: z.boolean(),
+  proofReviewOutcome: soberHouseProofReviewStatusSchema.nullable(),
+  reviewedAt: nullableIsoTimestampSchema,
+});
+
+export type SoberHouseResidentObligationStatusRecord = z.infer<
+  typeof soberHouseResidentObligationStatusRecordSchema
+>;
+
 /**
  * Shared sober-house live-loop contract.
  *

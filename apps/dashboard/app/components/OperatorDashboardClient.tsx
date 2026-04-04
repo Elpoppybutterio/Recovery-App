@@ -23,11 +23,13 @@ import {
   buildSoberHouseOperatorReportDocument,
 } from "../../../mobile/lib/soberHouse/reportingExports";
 import {
+  buildDevOperatorAuthHeader,
   loadOperatorLiveSnapshot,
   persistOperatorLiveSnapshot,
   resolveDashboardApiUrl,
   type OperatorLiveSession,
 } from "../lib/operatorLiveData";
+import { reviewOperatorSoberHouseProof } from "../lib/operatorProofReviews";
 import { buildPrintableOperatorReportHtml } from "../lib/reportPrint";
 import {
   buildOperatorWebViewModel,
@@ -68,6 +70,34 @@ const REPORT_TYPE_OPTIONS: Array<{ id: ReportType; label: string }> = [
 
 function formatPercent(value: number | null): string {
   return value === null ? "Not tracked" : `${Math.round(value)}%`;
+}
+
+function formatDashboardDate(value: string | null): string {
+  if (!value) {
+    return "Not scheduled";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatLiveObligationTypeLabel(value: "HOUSE_MEETING" | "ONE_ON_ONE" | "CHORE"): string {
+  switch (value) {
+    case "ONE_ON_ONE":
+      return "One-on-one";
+    case "HOUSE_MEETING":
+      return "House meeting";
+    case "CHORE":
+    default:
+      return "Chore";
+  }
 }
 
 function downloadTextFile(fileName: string, contents: string, mimeType: string) {
@@ -145,6 +175,11 @@ export function OperatorDashboardClient(): JSX.Element {
   const [loadRequestKey, setLoadRequestKey] = useState(0);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [liveReviewState, setLiveReviewState] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle",
+  );
+  const [liveReviewMessage, setLiveReviewMessage] = useState<string | null>(null);
+  const [activeLiveReviewId, setActiveLiveReviewId] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<OperatorNavSection>("overview");
   const [role, setRole] = useState<OperatorWebRole>("ORG_ADMIN");
   const [selectedHouseId, setSelectedHouseId] = useState<string | null>(null);
@@ -643,6 +678,60 @@ export function OperatorDashboardClient(): JSX.Element {
       new Date().toISOString(),
     ).store;
     void applyStoreUpdate(nextStore);
+  };
+
+  const reloadLiveSnapshot = async () => {
+    const result = await loadOperatorLiveSnapshot({
+      apiUrl: resolveDashboardApiUrl(),
+      devUserId: requestedDevUserId.trim(),
+      organizationId: selectedOrganizationId,
+    });
+    if (result.status !== "ready") {
+      throw new Error(result.message);
+    }
+    setSessionStore(result.snapshot.data);
+    setLiveSession(result.snapshot.session);
+    setRole(result.snapshot.session.operatorRole);
+  };
+
+  const handleReviewLiveProof = async (
+    reviewId: string,
+    reviewOutcome: "APPROVED" | "REJECTED",
+  ) => {
+    const authHeader = buildDevOperatorAuthHeader(requestedDevUserId.trim()).Authorization;
+    const notePrompt =
+      reviewOutcome === "REJECTED" ? window.prompt("Add a short rejection note (optional)") : "";
+    if (reviewOutcome === "REJECTED" && notePrompt === null) {
+      return;
+    }
+
+    setActiveLiveReviewId(reviewId);
+    setLiveReviewState("saving");
+    setLiveReviewMessage(null);
+
+    try {
+      await reviewOperatorSoberHouseProof({
+        reviewId,
+        authHeader,
+        payload: {
+          reviewOutcome,
+          reviewedAt: new Date().toISOString(),
+          note: notePrompt?.trim() || undefined,
+        },
+      });
+      await reloadLiveSnapshot();
+      setLiveReviewState("saved");
+      setLiveReviewMessage(
+        reviewOutcome === "APPROVED" ? "Live proof approved." : "Live proof rejected.",
+      );
+    } catch (error) {
+      setLiveReviewState("error");
+      setLiveReviewMessage(
+        error instanceof Error ? error.message : "Unable to update live proof review.",
+      );
+    } finally {
+      setActiveLiveReviewId(null);
+    }
   };
 
   if (loadState !== "ready" || !sessionStore || !liveSession) {
@@ -1246,6 +1335,95 @@ export function OperatorDashboardClient(): JSX.Element {
 
         {activeSection === "proof" ? (
           <section className="section-stack">
+            <article className="panel-card">
+              <div className="panel-header">
+                <div>
+                  <p className="section-label">Live resident execution</p>
+                  <h3>Pending sober-house proof reviews from real resident submissions</h3>
+                </div>
+              </div>
+              <div className="metric-grid compact">
+                <div className="metric-card">
+                  <span className="metric-label">Due today</span>
+                  <strong>{viewModel.liveComplianceSummary.dueTodayCount}</strong>
+                </div>
+                <div className="metric-card">
+                  <span className="metric-label">Completed today</span>
+                  <strong>{viewModel.liveComplianceSummary.completedTodayCount}</strong>
+                </div>
+                <div className="metric-card">
+                  <span className="metric-label">Pending review</span>
+                  <strong>{viewModel.liveComplianceSummary.pendingReviewCount}</strong>
+                </div>
+                <div className="metric-card">
+                  <span className="metric-label">Overdue</span>
+                  <strong>{viewModel.liveComplianceSummary.overdueCount}</strong>
+                </div>
+                <div className="metric-card">
+                  <span className="metric-label">Rejected proof</span>
+                  <strong>{viewModel.liveComplianceSummary.rejectedProofCount}</strong>
+                </div>
+              </div>
+              {liveReviewMessage ? (
+                <p className={liveReviewState === "error" ? "error-copy" : "muted-copy"}>
+                  {liveReviewMessage}
+                </p>
+              ) : null}
+              <div className="mini-list">
+                {viewModel.livePendingReviewQueue.length === 0 ? (
+                  <div className="empty-state">
+                    No live resident submissions are waiting on proof review right now.
+                  </div>
+                ) : (
+                  viewModel.livePendingReviewQueue.map((item) => (
+                    <div key={item.obligationId} className="mini-row static">
+                      <div>
+                        <strong>
+                          {item.residentName} • {item.title}
+                        </strong>
+                        <p>
+                          {item.houseName} • {formatLiveObligationTypeLabel(item.obligationType)} •{" "}
+                          submitted {formatDashboardDate(item.submittedAt ?? item.completedAt)}
+                        </p>
+                        <p>{item.detail}</p>
+                        <div className="action-row">
+                          <button
+                            className="action-button primary"
+                            onClick={() =>
+                              void handleReviewLiveProof(item.proofReviewId!, "APPROVED")
+                            }
+                            disabled={activeLiveReviewId === item.proofReviewId}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            className="action-button secondary"
+                            onClick={() =>
+                              void handleReviewLiveProof(item.proofReviewId!, "REJECTED")
+                            }
+                            disabled={activeLiveReviewId === item.proofReviewId}
+                          >
+                            Reject
+                          </button>
+                          <button
+                            className="action-button secondary"
+                            onClick={() => {
+                              setSelectedResidentId(item.residentId);
+                              setActiveSection("residents");
+                            }}
+                            disabled={activeLiveReviewId === item.proofReviewId}
+                          >
+                            View resident
+                          </button>
+                        </div>
+                      </div>
+                      <span className={`risk-pill ${item.statusTone}`}>{item.statusLabel}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </article>
+
             <article className="panel-card">
               <div className="panel-header">
                 <div>
@@ -1962,6 +2140,60 @@ export function OperatorDashboardClient(): JSX.Element {
                                 <span className="metric-label">Follow-up</span>
                                 <strong>{resident.proofSummary?.followUpCount ?? 0}</strong>
                               </div>
+                            </div>
+                          </div>
+
+                          <div className="subpanel">
+                            <h4>Live obligation execution</h4>
+                            <div className="metric-grid compact">
+                              <div className="metric-card">
+                                <span className="metric-label">Active</span>
+                                <strong>{resident.liveObligationSummary.activeCount}</strong>
+                              </div>
+                              <div className="metric-card">
+                                <span className="metric-label">Pending review</span>
+                                <strong>{resident.liveObligationSummary.reviewPendingCount}</strong>
+                              </div>
+                              <div className="metric-card">
+                                <span className="metric-label">Rejected</span>
+                                <strong>{resident.liveObligationSummary.rejectedCount}</strong>
+                              </div>
+                              <div className="metric-card">
+                                <span className="metric-label">Overdue</span>
+                                <strong>{resident.liveObligationSummary.overdueCount}</strong>
+                              </div>
+                            </div>
+                            <div className="mini-list">
+                              {resident.liveObligations.length === 0 ? (
+                                <div className="empty-state">
+                                  No live sober-house obligations are currently visible for this
+                                  resident.
+                                </div>
+                              ) : (
+                                resident.liveObligations.map((item) => (
+                                  <div key={item.obligationId} className="mini-row static">
+                                    <div>
+                                      <strong>
+                                        {item.title} •{" "}
+                                        {formatLiveObligationTypeLabel(item.obligationType)}
+                                      </strong>
+                                      <p>{item.detail}</p>
+                                      <p>
+                                        Due {formatDashboardDate(item.dueAt ?? item.scheduledAt)} •
+                                        Completion{" "}
+                                        {item.completionStatus
+                                          ?.toLowerCase()
+                                          .replaceAll("_", " ") ?? "not started"}{" "}
+                                        • Proof{" "}
+                                        {item.proofSubmitted ? "submitted" : "not submitted"}
+                                      </p>
+                                    </div>
+                                    <span className={`risk-pill ${item.statusTone}`}>
+                                      {item.statusLabel}
+                                    </span>
+                                  </div>
+                                ))
+                              )}
                             </div>
                           </div>
 

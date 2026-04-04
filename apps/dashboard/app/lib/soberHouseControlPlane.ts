@@ -112,10 +112,72 @@ export type ResidentLookupFilters = {
 export type OperatorEnforcementQueueFilters = EnforcementQueueFilters;
 export type OperatorProofQueueFilters = ProofReviewQueueFilters;
 
+export type OperatorResidentLiveObligation = {
+  obligationId: string;
+  residentId: string;
+  residentUserId: string;
+  organizationId: string;
+  houseId: string;
+  obligationType: "HOUSE_MEETING" | "ONE_ON_ONE" | "CHORE";
+  title: string;
+  scheduledAt: string;
+  dueAt: string | null;
+  proofRequired: boolean;
+  obligationStatus: "ACTIVE" | "INACTIVE";
+  completionRecordId: string | null;
+  completionStatus: "SCHEDULED" | "COMPLETED" | "MISSED" | "EXCUSED" | null;
+  completedAt: string | null;
+  submittedAt: string | null;
+  proofSubmitted: boolean;
+  proofReviewId: string | null;
+  proofReviewOutcome: "PENDING" | "APPROVED" | "REJECTED" | "FOLLOW_UP_REQUIRED" | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OperatorResidentLiveObligationSummary = {
+  totalCount: number;
+  activeCount: number;
+  overdueCount: number;
+  reviewPendingCount: number;
+  approvedCount: number;
+  rejectedCount: number;
+  followUpCount: number;
+  completedCount: number;
+};
+
+export type OperatorLiveComplianceSummary = {
+  dueTodayCount: number;
+  completedTodayCount: number;
+  overdueCount: number;
+  pendingReviewCount: number;
+  rejectedProofCount: number;
+};
+
+export type OperatorHouseComplianceSummary = OperatorLiveComplianceSummary & {
+  houseId: string;
+  houseName: string;
+};
+
+export type OperatorResidentLiveObligationView = OperatorResidentLiveObligation & {
+  residentName: string;
+  houseName: string;
+  statusLabel: string;
+  statusTone: "compliant" | "warning" | "noncompliant" | "critical";
+  detail: string;
+  isOverdue: boolean;
+};
+
 export type OperatorControlPlaneDataSource = {
   store: SoberHouseSettingsStore & SoberHouseLiveStoreSlice;
   residentDirectory: ResidentDirectoryEntry[];
   roleDefaults: Record<OperatorWebRole, { houseId: string | null }>;
+  residentLiveObligations: OperatorResidentLiveObligation[];
+  complianceSummary?: {
+    organization: OperatorLiveComplianceSummary;
+    houses: OperatorHouseComplianceSummary[];
+  };
 };
 
 function prettifyProofRequirement(proofRequirement: ProofRequirement[]): string {
@@ -131,6 +193,14 @@ function prettifyProofRequirement(proofRequirement: ProofRequirement[]): string 
         .join(" "),
     )
     .join(" + ");
+}
+
+function prettifyUserLabel(value: string): string {
+  return value
+    .split(/[-_\s]+/)
+    .filter((segment) => segment.length > 0)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
 }
 
 function formatSource(source: "ORGANIZATION" | "HOUSE_GROUP" | "HOUSE"): RuleSourceLabel {
@@ -1134,6 +1204,17 @@ function buildDemoStore(): OperatorControlPlaneDataSource {
       HOUSE_MANAGER: { houseId: mapleHouseId },
       STAFF_VIEWER: { houseId: cedarHouseId },
     },
+    residentLiveObligations: [],
+    complianceSummary: {
+      organization: {
+        dueTodayCount: 0,
+        completedTodayCount: 0,
+        overdueCount: 0,
+        pendingReviewCount: 0,
+        rejectedProofCount: 0,
+      },
+      houses: [],
+    },
   };
 }
 
@@ -1144,6 +1225,11 @@ export function getOperatorWebDemoStore(): OperatorControlPlaneDataSource {
 }
 
 export function createOperatorWebSessionStore(): OperatorControlPlaneDataSource {
+  const complianceSummary = DEMO_STORE.complianceSummary ?? {
+    organization: emptyLiveComplianceSummary(),
+    houses: [],
+  };
+
   return {
     store: cloneSoberHouseStore(DEMO_STORE.store),
     residentDirectory: DEMO_STORE.residentDirectory.map((entry) => ({ ...entry })),
@@ -1151,6 +1237,11 @@ export function createOperatorWebSessionStore(): OperatorControlPlaneDataSource 
       ORG_ADMIN: { ...DEMO_STORE.roleDefaults.ORG_ADMIN },
       HOUSE_MANAGER: { ...DEMO_STORE.roleDefaults.HOUSE_MANAGER },
       STAFF_VIEWER: { ...DEMO_STORE.roleDefaults.STAFF_VIEWER },
+    },
+    residentLiveObligations: DEMO_STORE.residentLiveObligations.map((entry) => ({ ...entry })),
+    complianceSummary: {
+      organization: { ...complianceSummary.organization },
+      houses: complianceSummary.houses.map((entry) => ({ ...entry })),
     },
   };
 }
@@ -1384,6 +1475,260 @@ export function filterOperatorResidents(
   });
 }
 
+function isCompletedLiveObligation(
+  status: OperatorResidentLiveObligation["completionStatus"],
+): boolean {
+  return status === "COMPLETED" || status === "EXCUSED";
+}
+
+function isOverdueLiveObligation(record: OperatorResidentLiveObligation, nowIso: string): boolean {
+  if (record.obligationStatus !== "ACTIVE" || isCompletedLiveObligation(record.completionStatus)) {
+    return false;
+  }
+  const dueAt = record.dueAt ?? record.scheduledAt;
+  const dueMs = new Date(dueAt).getTime();
+  const nowMs = new Date(nowIso).getTime();
+  return Number.isFinite(dueMs) && Number.isFinite(nowMs) && dueMs < nowMs;
+}
+
+function formatLiveObligationType(value: OperatorResidentLiveObligation["obligationType"]): string {
+  switch (value) {
+    case "ONE_ON_ONE":
+      return "One-on-one";
+    case "HOUSE_MEETING":
+      return "House meeting";
+    case "CHORE":
+    default:
+      return "Chore";
+  }
+}
+
+function formatLiveDate(value: string | null): string {
+  if (!value) {
+    return "Not scheduled";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function buildLiveObligationStatusMeta(
+  record: OperatorResidentLiveObligation,
+  nowIso: string,
+): Pick<OperatorResidentLiveObligationView, "statusLabel" | "statusTone" | "detail" | "isOverdue"> {
+  const overdue = isOverdueLiveObligation(record, nowIso);
+  if (record.proofReviewOutcome === "PENDING") {
+    return {
+      statusLabel: "Review pending",
+      statusTone: "warning",
+      detail: `Submitted ${formatLiveDate(record.submittedAt ?? record.completedAt)} and waiting on proof review.`,
+      isOverdue: overdue,
+    };
+  }
+  if (record.proofReviewOutcome === "APPROVED") {
+    return {
+      statusLabel: "Proof approved",
+      statusTone: "compliant",
+      detail: `Reviewed ${formatLiveDate(record.reviewedAt)} after resident submission.`,
+      isOverdue: overdue,
+    };
+  }
+  if (record.proofReviewOutcome === "REJECTED") {
+    return {
+      statusLabel: "Proof rejected",
+      statusTone: "critical",
+      detail: `Rejected ${formatLiveDate(record.reviewedAt)}. Resident follow-up is still needed.`,
+      isOverdue: overdue,
+    };
+  }
+  if (record.proofReviewOutcome === "FOLLOW_UP_REQUIRED") {
+    return {
+      statusLabel: "Follow-up required",
+      statusTone: "noncompliant",
+      detail: `Proof was returned for follow-up on ${formatLiveDate(record.reviewedAt)}.`,
+      isOverdue: overdue,
+    };
+  }
+  if (record.completionStatus === "COMPLETED") {
+    return {
+      statusLabel: "Completed",
+      statusTone: "compliant",
+      detail: `Completed ${formatLiveDate(record.completedAt)}.${record.proofRequired && !record.proofSubmitted ? " Proof is still missing." : ""}`,
+      isOverdue: overdue,
+    };
+  }
+  if (record.completionStatus === "MISSED") {
+    return {
+      statusLabel: "Missed",
+      statusTone: "critical",
+      detail: `Marked missed for ${formatLiveDate(record.dueAt ?? record.scheduledAt)}.`,
+      isOverdue: overdue,
+    };
+  }
+  if (overdue) {
+    return {
+      statusLabel: "Overdue",
+      statusTone: "critical",
+      detail: `Due ${formatLiveDate(record.dueAt ?? record.scheduledAt)} and still open.`,
+      isOverdue: true,
+    };
+  }
+  if (record.obligationStatus === "ACTIVE") {
+    return {
+      statusLabel: "Active",
+      statusTone: "warning",
+      detail: `Due ${formatLiveDate(record.dueAt ?? record.scheduledAt)} • ${formatLiveObligationType(record.obligationType)}.`,
+      isOverdue: false,
+    };
+  }
+  return {
+    statusLabel: "Inactive",
+    statusTone: "warning",
+    detail: `${formatLiveObligationType(record.obligationType)} is no longer active.`,
+    isOverdue: false,
+  };
+}
+
+function compareLiveObligations(
+  left: OperatorResidentLiveObligationView,
+  right: OperatorResidentLiveObligationView,
+): number {
+  const leftAt = left.dueAt ?? left.scheduledAt;
+  const rightAt = right.dueAt ?? right.scheduledAt;
+  return leftAt.localeCompare(rightAt);
+}
+
+function buildLiveObligationView(
+  record: OperatorResidentLiveObligation,
+  store: SoberHouseSettingsStore,
+  residentDirectory: ResidentDirectoryEntry[],
+  nowIso: string,
+): OperatorResidentLiveObligationView {
+  const resident =
+    residentDirectory.find((entry) => entry.residentId === record.residentId) ?? null;
+  const house = getHouseById(store, record.houseId);
+  return {
+    ...record,
+    residentName: resident?.fullName ?? prettifyUserLabel(record.residentUserId),
+    houseName: house?.name ?? "Unassigned",
+    ...buildLiveObligationStatusMeta(record, nowIso),
+  };
+}
+
+function buildLiveObligationSummary(
+  items: OperatorResidentLiveObligationView[],
+): OperatorResidentLiveObligationSummary {
+  return items.reduce<OperatorResidentLiveObligationSummary>(
+    (summary, item) => {
+      summary.totalCount += 1;
+      if (item.obligationStatus === "ACTIVE") {
+        summary.activeCount += 1;
+      }
+      if (item.isOverdue) {
+        summary.overdueCount += 1;
+      }
+      if (item.proofReviewOutcome === "PENDING") {
+        summary.reviewPendingCount += 1;
+      }
+      if (item.proofReviewOutcome === "APPROVED") {
+        summary.approvedCount += 1;
+      }
+      if (item.proofReviewOutcome === "REJECTED") {
+        summary.rejectedCount += 1;
+      }
+      if (item.proofReviewOutcome === "FOLLOW_UP_REQUIRED") {
+        summary.followUpCount += 1;
+      }
+      if (isCompletedLiveObligation(item.completionStatus)) {
+        summary.completedCount += 1;
+      }
+      return summary;
+    },
+    {
+      totalCount: 0,
+      activeCount: 0,
+      overdueCount: 0,
+      reviewPendingCount: 0,
+      approvedCount: 0,
+      rejectedCount: 0,
+      followUpCount: 0,
+      completedCount: 0,
+    },
+  );
+}
+
+function emptyLiveComplianceSummary(): OperatorLiveComplianceSummary {
+  return {
+    dueTodayCount: 0,
+    completedTodayCount: 0,
+    overdueCount: 0,
+    pendingReviewCount: 0,
+    rejectedProofCount: 0,
+  };
+}
+
+function sumLiveComplianceSummaries(
+  items: OperatorHouseComplianceSummary[],
+): OperatorLiveComplianceSummary {
+  return items.reduce<OperatorLiveComplianceSummary>((summary, item) => {
+    summary.dueTodayCount += item.dueTodayCount;
+    summary.completedTodayCount += item.completedTodayCount;
+    summary.overdueCount += item.overdueCount;
+    summary.pendingReviewCount += item.pendingReviewCount;
+    summary.rejectedProofCount += item.rejectedProofCount;
+    return summary;
+  }, emptyLiveComplianceSummary());
+}
+
+function fallbackLiveComplianceSummary(
+  items: OperatorResidentLiveObligationView[],
+  nowIso: string,
+): OperatorLiveComplianceSummary {
+  const todayKey = new Date(nowIso).toISOString().slice(0, 10);
+
+  return items.reduce<OperatorLiveComplianceSummary>((summary, item) => {
+    const dueAnchor = item.dueAt ?? item.scheduledAt;
+    const dueAnchorKey = new Date(dueAnchor).toISOString().slice(0, 10);
+
+    if (
+      item.obligationStatus === "ACTIVE" &&
+      !isCompletedLiveObligation(item.completionStatus) &&
+      dueAnchorKey === todayKey
+    ) {
+      summary.dueTodayCount += 1;
+    }
+
+    if (
+      item.completionStatus === "COMPLETED" &&
+      item.completedAt &&
+      new Date(item.completedAt).toISOString().slice(0, 10) === todayKey
+    ) {
+      summary.completedTodayCount += 1;
+    }
+
+    if (item.isOverdue) {
+      summary.overdueCount += 1;
+    }
+
+    if (item.proofReviewOutcome === "PENDING") {
+      summary.pendingReviewCount += 1;
+    }
+
+    if (item.proofReviewOutcome === "REJECTED") {
+      summary.rejectedProofCount += 1;
+    }
+
+    return summary;
+  }, emptyLiveComplianceSummary());
+}
+
 export function buildOperatorWebViewModel(input: {
   storeOverride?: OperatorControlPlaneDataSource;
   role: OperatorWebRole;
@@ -1399,7 +1744,14 @@ export function buildOperatorWebViewModel(input: {
   reportResidentId: string | null;
 }) {
   const source = input.storeOverride ?? DEMO_STORE;
-  const { store, residentDirectory, roleDefaults } = source;
+  const {
+    store,
+    residentDirectory,
+    roleDefaults,
+    residentLiveObligations = [],
+  } = source as OperatorControlPlaneDataSource & {
+    residentLiveObligations?: OperatorResidentLiveObligation[];
+  };
   const visibleHouseIds = visibleHouseIdsForRole(store, input.role, roleDefaults);
   const summary = buildSoberHouseOperatorReportingSummary({ store, nowIso: NOW_ISO });
   const enforcementSummary = buildSoberHouseEnforcementSummary({ store, nowIso: NOW_ISO });
@@ -1476,6 +1828,27 @@ export function buildOperatorWebViewModel(input: {
   const selectedResidentDirectory =
     selectedResident &&
     residentDirectory.find((entry) => entry.residentId === selectedResident.residentId);
+  const visibleResidentLiveObligations = residentLiveObligations
+    .filter((record) => visibleHouseIds.has(record.houseId))
+    .map((record) => buildLiveObligationView(record, store, residentDirectory, NOW_ISO))
+    .sort(compareLiveObligations);
+  const scopedHouseComplianceSummaries = (source.complianceSummary?.houses ?? []).filter(
+    (entry) =>
+      visibleHouseIds.has(entry.houseId) &&
+      (!input.selectedHouseId || entry.houseId === input.selectedHouseId),
+  );
+  const liveComplianceSummary =
+    scopedHouseComplianceSummaries.length > 0 || input.selectedHouseId
+      ? sumLiveComplianceSummaries(scopedHouseComplianceSummaries)
+      : fallbackLiveComplianceSummary(visibleResidentLiveObligations, NOW_ISO);
+  const livePendingReviewQueue = visibleResidentLiveObligations.filter(
+    (record) => record.proofReviewOutcome === "PENDING",
+  );
+  const selectedResidentLiveObligations = selectedResident
+    ? visibleResidentLiveObligations.filter(
+        (record) => record.residentId === selectedResident.residentId,
+      )
+    : [];
 
   const assignedStaffByHouse = new Map<string, StaffAssignment[]>();
   store.staffAssignments.forEach((assignment) => {
@@ -1526,6 +1899,8 @@ export function buildOperatorWebViewModel(input: {
         .filter((house) => house !== undefined),
     },
     organizationProofSummary: proofSummary.organizationSummary,
+    liveComplianceSummary,
+    liveObligationSummary: buildLiveObligationSummary(visibleResidentLiveObligations),
     houses: houseReports,
     residents: residentReports.map((resident) => ({
       ...resident,
@@ -1541,6 +1916,7 @@ export function buildOperatorWebViewModel(input: {
     ),
     enforcementQueue,
     proofQueue,
+    livePendingReviewQueue,
     selectedAction,
     selectedProofItem,
     selectedHouse,
@@ -1594,6 +1970,8 @@ export function buildOperatorWebViewModel(input: {
               ),
             ].sort((left, right) => right.at.localeCompare(left.at)),
             proofSummary: proofSummary.residentSummaries.get(selectedResident.residentId) ?? null,
+            liveObligations: selectedResidentLiveObligations,
+            liveObligationSummary: buildLiveObligationSummary(selectedResidentLiveObligations),
           }
         : null,
     reportPreview,

@@ -1,6 +1,12 @@
 "use client";
 
-import type { OperatorControlPlaneDataSource, OperatorWebRole } from "./soberHouseControlPlane";
+import type {
+  OperatorControlPlaneDataSource,
+  OperatorHouseComplianceSummary,
+  OperatorLiveComplianceSummary,
+  OperatorResidentLiveObligation,
+  OperatorWebRole,
+} from "./soberHouseControlPlane";
 
 export type OperatorLiveSession = {
   authMode: "DEV_BEARER";
@@ -33,6 +39,134 @@ type FetchLike = typeof fetch;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function parseResidentLiveObligations(value: unknown): OperatorResidentLiveObligation[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(isRecord)
+    .map((entry) => {
+      const obligationId = readString(entry.obligationId);
+      const residentId = readString(entry.residentId);
+      const residentUserId = readString(entry.residentUserId);
+      const organizationId = readString(entry.organizationId);
+      const houseId = readString(entry.houseId);
+      const obligationType = entry.obligationType;
+      const title = readString(entry.title);
+      const scheduledAt = readString(entry.scheduledAt);
+      const createdAt = readString(entry.createdAt);
+      const updatedAt = readString(entry.updatedAt);
+
+      if (
+        !obligationId ||
+        !residentId ||
+        !residentUserId ||
+        !organizationId ||
+        !houseId ||
+        !title ||
+        !scheduledAt ||
+        !createdAt ||
+        !updatedAt ||
+        (obligationType !== "HOUSE_MEETING" &&
+          obligationType !== "ONE_ON_ONE" &&
+          obligationType !== "CHORE")
+      ) {
+        return null;
+      }
+
+      return {
+        obligationId,
+        residentId,
+        residentUserId,
+        organizationId,
+        houseId,
+        obligationType,
+        title,
+        scheduledAt,
+        dueAt: typeof entry.dueAt === "string" ? entry.dueAt : null,
+        proofRequired: entry.proofRequired === true,
+        obligationStatus: entry.obligationStatus === "INACTIVE" ? "INACTIVE" : "ACTIVE",
+        completionRecordId:
+          typeof entry.completionRecordId === "string" ? entry.completionRecordId : null,
+        completionStatus:
+          entry.completionStatus === "SCHEDULED" ||
+          entry.completionStatus === "COMPLETED" ||
+          entry.completionStatus === "MISSED" ||
+          entry.completionStatus === "EXCUSED"
+            ? entry.completionStatus
+            : null,
+        completedAt: typeof entry.completedAt === "string" ? entry.completedAt : null,
+        submittedAt: typeof entry.submittedAt === "string" ? entry.submittedAt : null,
+        proofSubmitted: entry.proofSubmitted === true,
+        proofReviewId: typeof entry.proofReviewId === "string" ? entry.proofReviewId : null,
+        proofReviewOutcome:
+          entry.proofReviewOutcome === "PENDING" ||
+          entry.proofReviewOutcome === "APPROVED" ||
+          entry.proofReviewOutcome === "REJECTED" ||
+          entry.proofReviewOutcome === "FOLLOW_UP_REQUIRED"
+            ? entry.proofReviewOutcome
+            : null,
+        reviewedAt: typeof entry.reviewedAt === "string" ? entry.reviewedAt : null,
+        createdAt,
+        updatedAt,
+      } satisfies OperatorResidentLiveObligation;
+    })
+    .filter((entry): entry is OperatorResidentLiveObligation => entry !== null);
+}
+
+function emptyComplianceSummary(): OperatorLiveComplianceSummary {
+  return {
+    dueTodayCount: 0,
+    completedTodayCount: 0,
+    overdueCount: 0,
+    pendingReviewCount: 0,
+    rejectedProofCount: 0,
+  };
+}
+
+function parseComplianceSummaryCounts(value: unknown): OperatorLiveComplianceSummary {
+  if (!isRecord(value)) {
+    return emptyComplianceSummary();
+  }
+
+  return {
+    dueTodayCount: typeof value.dueTodayCount === "number" ? value.dueTodayCount : 0,
+    completedTodayCount:
+      typeof value.completedTodayCount === "number" ? value.completedTodayCount : 0,
+    overdueCount: typeof value.overdueCount === "number" ? value.overdueCount : 0,
+    pendingReviewCount: typeof value.pendingReviewCount === "number" ? value.pendingReviewCount : 0,
+    rejectedProofCount: typeof value.rejectedProofCount === "number" ? value.rejectedProofCount : 0,
+  };
+}
+
+function parseHouseComplianceSummaries(value: unknown): OperatorHouseComplianceSummary[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(isRecord)
+    .map((entry) => {
+      const houseId = readString(entry.houseId);
+      const houseName = readString(entry.houseName);
+      if (!houseId || !houseName) {
+        return null;
+      }
+
+      return {
+        houseId,
+        houseName,
+        ...parseComplianceSummaryCounts(entry),
+      } satisfies OperatorHouseComplianceSummary;
+    })
+    .filter((entry): entry is OperatorHouseComplianceSummary => entry !== null);
 }
 
 export function resolveDashboardApiUrl(): string {
@@ -68,6 +202,18 @@ function parseSnapshot(payload: unknown): OperatorLiveSnapshot | null {
   const residentDirectory = Array.isArray(payload.data.residentDirectory)
     ? payload.data.residentDirectory
     : [];
+  const residentLiveObligations = parseResidentLiveObligations(
+    payload.data.residentLiveObligations,
+  );
+  const complianceSummary = isRecord(payload.data.complianceSummary)
+    ? {
+        organization: parseComplianceSummaryCounts(payload.data.complianceSummary.organization),
+        houses: parseHouseComplianceSummaries(payload.data.complianceSummary.houses),
+      }
+    : {
+        organization: emptyComplianceSummary(),
+        houses: [],
+      };
   const store = isRecord(payload.data.store) ? payload.data.store : null;
   if (!store) {
     return null;
@@ -128,6 +274,8 @@ function parseSnapshot(payload: unknown): OperatorLiveSnapshot | null {
       store: store as OperatorControlPlaneDataSource["store"],
       residentDirectory: residentDirectory as OperatorControlPlaneDataSource["residentDirectory"],
       roleDefaults: roleDefaults as OperatorControlPlaneDataSource["roleDefaults"],
+      residentLiveObligations,
+      complianceSummary,
     },
     generatedAt:
       typeof payload.generatedAt === "string" ? payload.generatedAt : new Date().toISOString(),
