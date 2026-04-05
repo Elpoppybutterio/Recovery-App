@@ -300,6 +300,27 @@ export function OperatorDashboardClient(): JSX.Element {
     };
   }, [loadRequestKey, requestedDevUserId, selectedOrganizationId]);
 
+  const clearOperatorSession = (message: string) => {
+    setDevUserId("");
+    setRequestedDevUserId("");
+    setSelectedOrganizationId(null);
+    setSessionStore(null);
+    setLiveSession(null);
+    setLoadState("unauthenticated");
+    setLoadMessage(message);
+    setSaveState("idle");
+    setSaveMessage(null);
+    setLiveReviewState("idle");
+    setLiveReviewMessage(null);
+    setActiveLiveReviewId(null);
+    setActiveSection("overview");
+    setRole("ORG_ADMIN");
+    setSelectedHouseId(null);
+    setSelectedResidentId(null);
+    setSelectedActionId(null);
+    setSelectedProofItemId(null);
+  };
+
   const applyStoreUpdate = async (nextStore: OperatorControlPlaneDataSource["store"]) => {
     if (!sessionStore) {
       return;
@@ -767,15 +788,7 @@ export function OperatorDashboardClient(): JSX.Element {
             {requestedDevUserId ? (
               <button
                 className="action-button secondary"
-                onClick={() => {
-                  setDevUserId("");
-                  setRequestedDevUserId("");
-                  setSelectedOrganizationId(null);
-                  setSessionStore(null);
-                  setLiveSession(null);
-                  setLoadState("unauthenticated");
-                  setLoadMessage("Signed out of the operator control plane.");
-                }}
+                onClick={() => clearOperatorSession("Signed out of the operator control plane.")}
               >
                 Clear session
               </button>
@@ -829,6 +842,23 @@ export function OperatorDashboardClient(): JSX.Element {
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="sidebar-block">
+          <p className="sidebar-label">Session</p>
+          <p className="sidebar-copy subtle">DEV_{requestedDevUserId.trim()}</p>
+          <div className="action-row">
+            <button
+              className="action-button secondary"
+              onClick={() =>
+                clearOperatorSession(
+                  "Signed out of the operator control plane. Enter a different DEV user id to continue.",
+                )
+              }
+            >
+              Sign out
+            </button>
+          </div>
         </div>
 
         <div className="sidebar-block">
