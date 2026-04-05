@@ -264,6 +264,54 @@ function isoDateKey(value: string | null): string | null {
   return parsed.toISOString().slice(0, 10);
 }
 
+function normalizeIsoTimestamp(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? trimmed : parsed.toISOString();
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+  return null;
+}
+
+function normalizeRequiredIsoTimestamp(primary: unknown, fallback: unknown): string {
+  return (
+    normalizeIsoTimestamp(primary) ?? normalizeIsoTimestamp(fallback) ?? new Date(0).toISOString()
+  );
+}
+
+function compareTimestampValues(left: unknown, right: unknown): number {
+  const leftIso = normalizeIsoTimestamp(left);
+  const rightIso = normalizeIsoTimestamp(right);
+
+  if (leftIso === rightIso) {
+    return 0;
+  }
+  if (leftIso === null) {
+    return 1;
+  }
+  if (rightIso === null) {
+    return -1;
+  }
+
+  const leftMs = Date.parse(leftIso);
+  const rightMs = Date.parse(rightIso);
+  if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) {
+    return leftMs - rightMs;
+  }
+
+  return leftIso < rightIso ? -1 : 1;
+}
+
 function isResolvedResidentLiveObligation(
   completionStatus: ResidentLiveObligationSnapshotRecord["completionStatus"],
 ): boolean {
@@ -514,6 +562,11 @@ function buildResidentLiveObligationSnapshotRecord(
     record.completion?.submitted_at !== null ||
     record.completion?.completed_at !== null ||
     hasObjectKeys(record.completion?.proof_metadata_json);
+  const scheduledAt = normalizeRequiredIsoTimestamp(
+    record.obligation.scheduled_at,
+    record.obligation.created_at,
+  );
+  const dueAt = normalizeIsoTimestamp(record.obligation.due_at);
 
   return {
     obligationId: record.obligation.id,
@@ -526,23 +579,25 @@ function buildResidentLiveObligationSnapshotRecord(
       obligation: record.obligation,
       obligationTitleById,
     }),
-    scheduledAt: record.obligation.scheduled_at,
-    dueAt: record.obligation.due_at,
+    scheduledAt,
+    dueAt,
     proofRequired: record.obligation.proof_required,
     obligationStatus: record.obligation.status,
     completionRecordId: record.completion?.id ?? null,
     completionStatus: record.completion?.completion_status ?? null,
-    completedAt: record.completion?.completed_at ?? null,
-    submittedAt: record.completion?.submitted_at ?? null,
+    completedAt: normalizeIsoTimestamp(record.completion?.completed_at),
+    submittedAt: normalizeIsoTimestamp(record.completion?.submitted_at),
     proofSubmitted,
     proofReviewId: record.proofReview?.id ?? null,
     proofReviewOutcome: record.proofReview?.review_outcome ?? null,
-    reviewedAt: record.proofReview?.reviewed_at ?? null,
-    createdAt: record.obligation.created_at,
-    updatedAt:
+    reviewedAt: normalizeIsoTimestamp(record.proofReview?.reviewed_at),
+    createdAt: normalizeRequiredIsoTimestamp(record.obligation.created_at, scheduledAt),
+    updatedAt: normalizeRequiredIsoTimestamp(
       record.proofReview?.updated_at ??
-      record.completion?.updated_at ??
-      record.obligation.updated_at,
+        record.completion?.updated_at ??
+        record.obligation.updated_at,
+      record.obligation.updated_at ?? record.obligation.created_at,
+    ),
   };
 }
 
@@ -1805,9 +1860,16 @@ export async function buildOperatorControlPlaneSnapshot(input: {
       ),
     )
     .filter((record): record is ResidentLiveObligationSnapshotRecord => record !== null)
-    .sort((left, right) =>
-      (left.dueAt ?? left.scheduledAt).localeCompare(right.dueAt ?? right.scheduledAt),
-    );
+    .sort((left, right) => {
+      const dueCompare = compareTimestampValues(
+        left.dueAt ?? left.scheduledAt,
+        right.dueAt ?? right.scheduledAt,
+      );
+      if (dueCompare !== 0) {
+        return dueCompare;
+      }
+      return compareTimestampValues(right.createdAt, left.createdAt);
+    });
 
   const hydrated = buildStoreFromLiveData({
     organization: selectedOrganization.organization,

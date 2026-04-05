@@ -272,6 +272,48 @@ type SoberHouseCompletionRecord = {
   updated_at: string;
 };
 
+function normalizeSortableTimestamp(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? trimmed : parsed.toISOString();
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+  return null;
+}
+
+function compareSortableTimestamps(left: unknown, right: unknown): number {
+  const leftIso = normalizeSortableTimestamp(left);
+  const rightIso = normalizeSortableTimestamp(right);
+
+  if (leftIso === rightIso) {
+    return 0;
+  }
+  if (leftIso === null) {
+    return 1;
+  }
+  if (rightIso === null) {
+    return -1;
+  }
+
+  const leftMs = Date.parse(leftIso);
+  const rightMs = Date.parse(rightIso);
+  if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) {
+    return leftMs - rightMs;
+  }
+
+  return leftIso < rightIso ? -1 : 1;
+}
+
 type SoberHouseProofReview = {
   id: string;
   tenant_id: string;
@@ -1018,11 +1060,11 @@ export class InMemoryDb implements DbPool {
         .sort((left, right) => {
           const leftOrder = left.due_at ?? left.scheduled_at;
           const rightOrder = right.due_at ?? right.scheduled_at;
-          const orderCompare = leftOrder.localeCompare(rightOrder);
+          const orderCompare = compareSortableTimestamps(leftOrder, rightOrder);
           if (orderCompare !== 0) {
             return orderCompare;
           }
-          return right.created_at.localeCompare(left.created_at);
+          return compareSortableTimestamps(right.created_at, left.created_at);
         })
         .map((entry) => ({ ...entry })) as Row[];
       return {
@@ -1437,11 +1479,11 @@ export class InMemoryDb implements DbPool {
         .sort((left, right) => {
           const leftOrder = left.due_at ?? left.updated_at;
           const rightOrder = right.due_at ?? right.updated_at;
-          const dueCompare = leftOrder.localeCompare(rightOrder);
+          const dueCompare = compareSortableTimestamps(leftOrder, rightOrder);
           if (dueCompare !== 0) {
             return dueCompare;
           }
-          return right.created_at.localeCompare(left.created_at);
+          return compareSortableTimestamps(right.created_at, left.created_at);
         })
         .map((entry) => ({ ...entry })) as Row[];
       return {

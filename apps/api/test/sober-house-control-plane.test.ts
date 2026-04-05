@@ -806,4 +806,99 @@ describe("sober-house control plane access", () => {
     await app.close();
     await db.end?.();
   });
+
+  it("normalizes mixed runtime dueAt and scheduledAt shapes before sorting live obligations", async () => {
+    db.addParticipantProfile({
+      user_id: "enduser-a1",
+      tenant_id: "tenant-a",
+      participant_type: "resident_user",
+      organization_id: "org-alpine",
+      house_id: "house-alpine-1",
+      court_program_id: null,
+      status: "ACTIVE",
+    });
+    db.addResidentHouseMembership({
+      id: "membership-a1",
+      tenant_id: "tenant-a",
+      organization_id: "org-alpine",
+      house_id: "house-alpine-1",
+      resident_user_id: "enduser-a1",
+      status: "ACTIVE",
+    });
+    db.addSoberHouseObligation({
+      id: "sho-date-object",
+      tenant_id: "tenant-a",
+      organization_id: "org-alpine",
+      house_id: "house-alpine-1",
+      resident_user_id: "enduser-a1",
+      resident_house_membership_id: "membership-a1",
+      obligation_type: "CHORE",
+      scheduled_at: new Date("2026-04-04T08:00:00.000Z") as unknown as string,
+      due_at: new Date("2026-04-04T09:00:00.000Z") as unknown as string,
+      proof_required: false,
+      status: "ACTIVE",
+    });
+    db.addSoberHouseObligation({
+      id: "sho-string",
+      tenant_id: "tenant-a",
+      organization_id: "org-alpine",
+      house_id: "house-alpine-1",
+      resident_user_id: "enduser-a1",
+      resident_house_membership_id: "membership-a1",
+      obligation_type: "HOUSE_MEETING",
+      scheduled_at: "2026-04-04T10:00:00.000Z",
+      due_at: "2026-04-04T11:00:00.000Z",
+      proof_required: true,
+      status: "ACTIVE",
+    });
+    db.addSoberHouseObligation({
+      id: "sho-date-scheduled-only",
+      tenant_id: "tenant-a",
+      organization_id: "org-alpine",
+      house_id: "house-alpine-1",
+      resident_user_id: "enduser-a1",
+      resident_house_membership_id: "membership-a1",
+      obligation_type: "ONE_ON_ONE",
+      scheduled_at: new Date("2026-04-04T12:00:00.000Z") as unknown as string,
+      due_at: null,
+      proof_required: false,
+      status: "ACTIVE",
+    });
+
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/operator/sober-house/control-plane?organizationId=org-alpine",
+      headers: {
+        authorization: "Bearer DEV_demo",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      data: {
+        residentLiveObligations: [
+          expect.objectContaining({
+            obligationId: "sho-date-object",
+            scheduledAt: "2026-04-04T08:00:00.000Z",
+            dueAt: "2026-04-04T09:00:00.000Z",
+          }),
+          expect.objectContaining({
+            obligationId: "sho-string",
+            scheduledAt: "2026-04-04T10:00:00.000Z",
+            dueAt: "2026-04-04T11:00:00.000Z",
+          }),
+          expect.objectContaining({
+            obligationId: "sho-date-scheduled-only",
+            scheduledAt: "2026-04-04T12:00:00.000Z",
+            dueAt: null,
+          }),
+        ],
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
 });
