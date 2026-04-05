@@ -9,6 +9,7 @@
     "start": "node dist/server.js",
     "db:migrate": "tsx src/scripts/migrate.ts",
     "db:seed": "tsx src/scripts/seed-dev.ts",
+    "db:seed:sober-house-demo": "tsx src/scripts/seed-sober-house-demo.ts",
     "meetings:geo:backfill": "tsx src/scripts/backfill-meeting-geo.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
