@@ -901,4 +901,47 @@ describe("sober-house control plane access", () => {
     await app.close();
     await db.end?.();
   });
+
+  it("normalizes participant profile created_at and updated_at before building resident memberships", async () => {
+    db.addParticipantProfile({
+      user_id: "enduser-a1",
+      tenant_id: "tenant-a",
+      participant_type: "resident_user",
+      organization_id: "org-alpine",
+      house_id: "house-alpine-1",
+      court_program_id: null,
+      status: "ACTIVE",
+      created_at: new Date("2026-04-01T15:30:00.000Z") as unknown as string,
+      updated_at: new Date("2026-04-02T09:45:00.000Z") as unknown as string,
+    });
+
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/operator/sober-house/control-plane?organizationId=org-alpine",
+      headers: {
+        authorization: "Bearer DEV_demo",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      data: {
+        store: {
+          residentHouseMemberships: [
+            expect.objectContaining({
+              residentId: "enduser-a1",
+              moveInDate: "2026-04-01",
+              createdAt: "2026-04-01T15:30:00.000Z",
+              updatedAt: "2026-04-02T09:45:00.000Z",
+            }),
+          ],
+        },
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
 });

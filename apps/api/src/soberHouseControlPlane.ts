@@ -487,6 +487,8 @@ function buildResidentMembership(
   profile: ParticipantProfileRow,
 ): SoberHouseResidentMembershipRecord {
   const residentId = profile.user_id;
+  const createdAt = normalizeRequiredIsoTimestamp(profile.created_at, profile.updated_at);
+  const updatedAt = normalizeRequiredIsoTimestamp(profile.updated_at, profile.created_at);
   return {
     id: `membership:${residentId}`,
     residentId,
@@ -494,13 +496,13 @@ function buildResidentMembership(
     organizationId: profile.organization_id,
     houseId: profile.house_id,
     roomOrBed: "",
-    moveInDate: profile.created_at.slice(0, 10),
+    moveInDate: isoDateKey(createdAt) ?? new Date(0).toISOString().slice(0, 10),
     moveOutDate: null,
     isPrimary: true,
     status: profile.status === "INACTIVE" ? "INACTIVE" : "ACTIVE",
     notes: "",
-    createdAt: profile.created_at,
-    updatedAt: profile.updated_at,
+    createdAt,
+    updatedAt,
   };
 }
 
