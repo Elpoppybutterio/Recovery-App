@@ -2656,6 +2656,12 @@ export default function App() {
   const selectedDay = dayOptions[selectedDayOffset] ?? dayOptions[0];
   const meetingsSearchOrigin = mapBoundaryCenter ?? currentLocation;
   const routineDateKey = useMemo(() => dateKeyForRoutines(new Date(clockTickMs)), [clockTickMs]);
+  const previousRoutineDateKeyRef = useRef(routineDateKey);
+  const logRoutinesDebug = useCallback((event: string, details: Record<string, unknown>) => {
+    if (__DEV__) {
+      console.log(`[routines] ${event}`, details);
+    }
+  }, []);
 
   const normalizedSponsorName = useMemo(() => sponsorName.trim(), [sponsorName]);
   const sponsorPhoneE164 = useMemo(
@@ -5714,6 +5720,13 @@ export default function App() {
     ) => {
       setRoutinesStore((current) => {
         const next = updater(current);
+        logRoutinesDebug("config.persist_request", {
+          userId: devAuthUserId,
+          enabledItemIds: next.morningTemplate.items
+            .filter((item) => item.enabled)
+            .map((item) => item.id),
+          morningDayCount: Object.keys(next.morningByDate).length,
+        });
         void saveRoutinesStore(devAuthUserId, next).catch(() => {
           setRoutinesStatus("Failed to persist routines data.");
         });
@@ -5723,7 +5736,7 @@ export default function App() {
         setRoutinesStatus(statusMessage);
       }
     },
-    [devAuthUserId],
+    [devAuthUserId, logRoutinesDebug],
   );
 
   const updateMorningTemplate = useCallback(
@@ -5847,6 +5860,24 @@ export default function App() {
       routinesStore.morningTemplate.items.some((item) => item.id === itemId && item.enabled),
     [routinesStore.morningTemplate.items],
   );
+
+  useEffect(() => {
+    const previousDateKey = previousRoutineDateKeyRef.current;
+    if (previousDateKey === routineDateKey) {
+      return;
+    }
+
+    previousRoutineDateKeyRef.current = routineDateKey;
+    logRoutinesDebug("day_rollover", {
+      previousDateKey,
+      nextDateKey: routineDateKey,
+      enabledItemIds: routinesStore.morningTemplate.items
+        .filter((item) => item.enabled)
+        .map((item) => item.id),
+      previousCompletedAt: getMorningDayState(routinesStore, previousDateKey).completedAt,
+      nextCompletedAt: getMorningDayState(routinesStore, routineDateKey).completedAt,
+    });
+  }, [logRoutinesDebug, routineDateKey, routinesStore]);
 
   const resolveMorningReadRequiredSeconds = useCallback(
     (itemId: string): number => {
@@ -13469,6 +13500,7 @@ export default function App() {
             profileRaw,
             ninetyDayGoalRaw,
             sponsorEnabledAtRaw,
+            loadedRoutinesStore,
           ] = await Promise.all([
             AsyncStorage.getItem(modeStorage),
             AsyncStorage.getItem(sponsorUiPrefsStorage),
@@ -13477,6 +13509,7 @@ export default function App() {
             AsyncStorage.getItem(profileStorage),
             AsyncStorage.getItem(ninetyDayGoalStorage),
             AsyncStorage.getItem(sponsorEnabledAtStorage),
+            loadRoutinesStore(devAuthUserId),
           ]);
           const seededDefaults = applySeededRecoveryDefaults({
             setupCompleteRaw,
@@ -13497,6 +13530,13 @@ export default function App() {
           if (enableSponsorApiSync && !hasLocalSponsorProfile) {
             await fetchSponsorConfig();
           }
+          setRoutinesStore(loadedRoutinesStore);
+          logRoutinesDebug("hydrate.safe_mode_loaded", {
+            userId: devAuthUserId,
+            enabledItemIds: loadedRoutinesStore.morningTemplate.items
+              .filter((item) => item.enabled)
+              .map((item) => item.id),
+          });
           await refreshMeetings();
           setMeetingsStatus(
             recoveredModeFromPreviousCrash
@@ -13920,6 +13960,12 @@ export default function App() {
         }
 
         setRoutinesStore(loadedRoutinesStore);
+        logRoutinesDebug("hydrate.loaded", {
+          userId: devAuthUserId,
+          enabledItemIds: loadedRoutinesStore.morningTemplate.items
+            .filter((item) => item.enabled)
+            .map((item) => item.id),
+        });
         bootstrapCompletedSuccessfully = true;
       } catch {
         setAttendanceStatus("Unable to load local attendance history.");
@@ -13967,6 +14013,7 @@ export default function App() {
     devAuthUserId,
     enableSponsorApiSync,
     fetchSponsorConfig,
+    logRoutinesDebug,
     applySeededRecoveryDefaults,
     hydratePersistedRecoverySettings,
     readCurrentLocation,

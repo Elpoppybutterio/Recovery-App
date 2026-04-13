@@ -483,6 +483,35 @@ function buildHouseStoreRecord(
   };
 }
 
+function buildPersistedOnlyHouseStoreRecord(
+  organizationId: string,
+  persistedHouse: Record<string, unknown>,
+  nowIso: string,
+) {
+  const id = stringOr(persistedHouse.id, "");
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    organizationId,
+    houseGroupId: stringOrNull(persistedHouse.houseGroupId),
+    name: stringOr(persistedHouse.name, "Untitled house"),
+    address: stringOr(persistedHouse.address, ""),
+    phone: stringOr(persistedHouse.phone, ""),
+    geofenceCenterLat: numberOrNull(persistedHouse.geofenceCenterLat),
+    geofenceCenterLng: numberOrNull(persistedHouse.geofenceCenterLng),
+    geofenceRadiusFeetDefault: numberOr(persistedHouse.geofenceRadiusFeetDefault, 200),
+    houseTypes: stringArray(persistedHouse.houseTypes, ["OTHER"]),
+    bedCount: numberOr(persistedHouse.bedCount, 0),
+    notes: stringOr(persistedHouse.notes, ""),
+    status: stringOr(persistedHouse.status, "ACTIVE"),
+    createdAt: stringOr(persistedHouse.createdAt, nowIso),
+    updatedAt: stringOr(persistedHouse.updatedAt, nowIso),
+  };
+}
+
 function buildResidentMembership(
   profile: ParticipantProfileRow,
 ): SoberHouseResidentMembershipRecord {
@@ -1284,6 +1313,23 @@ function buildStoreFromLiveData(input: {
       persistedHouses.find((entry) => entry.id === house.id),
     ),
   );
+  const liveHouseIds = new Set(
+    liveHouses
+      .map((house) => house.id)
+      .filter((houseId): houseId is string => typeof houseId === "string" && houseId.length > 0),
+  );
+  const persistedOnlyHouses = persistedHouses
+    .filter((entry) => {
+      const id = stringOr(entry.id, "");
+      if (!id || liveHouseIds.has(id)) {
+        return false;
+      }
+      const organizationId = stringOrNull(entry.organizationId);
+      return organizationId === null || organizationId === input.organization.id;
+    })
+    .map((entry) => buildPersistedOnlyHouseStoreRecord(input.organization.id, entry, input.nowIso))
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  const mergedHouses = [...liveHouses, ...persistedOnlyHouses];
   const activeProfiles = input.participantProfiles.filter(
     (profile) =>
       profile.organization_id === input.organization.id &&
@@ -1297,7 +1343,7 @@ function buildStoreFromLiveData(input: {
     activeProfiles.map((profile) => [profile.user_id, profile]),
   );
   const selectedHouseIds = new Set(
-    liveHouses
+    mergedHouses
       .map((house) => house.id)
       .filter((houseId): houseId is string => typeof houseId === "string"),
   );
@@ -1724,7 +1770,7 @@ function buildStoreFromLiveData(input: {
       ...store,
       version: STORE_VERSION,
       organization: buildOrganizationStoreRecord(input.organization, store, input.nowIso),
-      houses: liveHouses,
+      houses: mergedHouses,
       ...soberHouseStoreSlice,
       choreCompletionRecords,
       houseMeetingAttendanceRecords,

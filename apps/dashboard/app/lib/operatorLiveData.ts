@@ -37,6 +37,12 @@ export type OperatorLiveLoadResult =
 
 type FetchLike = typeof fetch;
 
+function debugOperatorLiveData(event: string, details: Record<string, unknown>) {
+  if (typeof window !== "undefined" && process.env.NODE_ENV !== "production") {
+    console.log(`[dashboard][control-plane] ${event}`, details);
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -298,6 +304,11 @@ export async function loadOperatorLiveSnapshot(input: {
   }
 
   try {
+    debugOperatorLiveData("load.request", {
+      apiUrl: input.apiUrl,
+      organizationId: input.organizationId,
+      devUserId: normalizedUserId,
+    });
     const response = await fetchImpl(buildSnapshotUrl(input.apiUrl, input.organizationId), {
       headers: buildDevOperatorAuthHeader(normalizedUserId),
       cache: "no-store",
@@ -335,6 +346,11 @@ export async function loadOperatorLiveSnapshot(input: {
       };
     }
 
+    debugOperatorLiveData("load.success", {
+      organizationId: snapshot.session.organizationId,
+      houseCount: snapshot.data.store.houses.length,
+      houseIds: snapshot.data.store.houses.map((house) => house.id),
+    });
     return {
       status: "ready",
       snapshot,
@@ -355,6 +371,12 @@ export async function persistOperatorLiveSnapshot(input: {
   store: OperatorControlPlaneDataSource["store"];
 }): Promise<OperatorLiveSnapshot> {
   const fetchImpl = input.fetchImpl ?? fetch;
+  debugOperatorLiveData("save.request", {
+    apiUrl: input.apiUrl,
+    organizationId: input.organizationId,
+    houseCount: input.store.houses.length,
+    houseIds: input.store.houses.map((house) => house.id),
+  });
   const response = await fetchImpl(buildSnapshotUrl(input.apiUrl, input.organizationId), {
     method: "PUT",
     headers: {
@@ -374,5 +396,10 @@ export async function persistOperatorLiveSnapshot(input: {
   if (!snapshot) {
     throw new Error("Dashboard API returned an invalid sober-house snapshot.");
   }
+  debugOperatorLiveData("save.success", {
+    organizationId: snapshot.session.organizationId,
+    houseCount: snapshot.data.store.houses.length,
+    houseIds: snapshot.data.store.houses.map((house) => house.id),
+  });
   return snapshot;
 }
