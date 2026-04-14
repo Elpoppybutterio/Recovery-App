@@ -22,7 +22,7 @@ function isScheduledItemProofRequirement(
   );
 }
 
-function normalizeStore(value: unknown): SoberHouseSettingsStore {
+export function normalizeSoberHouseSettingsStore(value: unknown): SoberHouseSettingsStore {
   if (!value || typeof value !== "object") {
     return createDefaultSoberHouseSettingsStore();
   }
@@ -505,7 +505,7 @@ export async function loadSoberHouseSettingsStore(
       return createDefaultSoberHouseSettingsStore();
     }
 
-    return normalizeStore(JSON.parse(raw));
+    return normalizeSoberHouseSettingsStore(JSON.parse(raw));
   } catch {
     return createDefaultSoberHouseSettingsStore();
   }

@@ -21,6 +21,25 @@ function createSnapshotPayload() {
     createdAt: "2026-04-02T12:00:00.000Z",
     updatedAt: "2026-04-02T12:00:00.000Z",
   };
+  store.houses = [
+    {
+      id: "house-1",
+      organizationId: "org-1",
+      houseGroupId: null,
+      name: "Maple House",
+      address: "123 Main St",
+      phone: "",
+      geofenceCenterLat: null,
+      geofenceCenterLng: null,
+      geofenceRadiusFeetDefault: 200,
+      houseTypes: ["MEN"],
+      bedCount: 12,
+      notes: "",
+      status: "ACTIVE",
+      createdAt: "2026-04-02T12:00:00.000Z",
+      updatedAt: "2026-04-02T12:00:00.000Z",
+    },
+  ];
   return {
     session: {
       operatorUserId: "org-admin-user",
@@ -138,6 +157,7 @@ describe("operator live data adapter", () => {
     if (result.status === "ready") {
       expect(result.snapshot.session.organizationName).toBe("Bright Path Recovery");
       expect(result.snapshot.data.store.organization?.id).toBe("org-1");
+      expect(result.snapshot.data.store.houses.map((house) => house.id)).toEqual(["house-1"]);
       expect(result.snapshot.data.residentLiveObligations[0]?.proofReviewOutcome).toBe("PENDING");
       expect(result.snapshot.data.complianceSummary?.organization.pendingReviewCount).toBe(1);
     }

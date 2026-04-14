@@ -87,6 +87,10 @@ import {
   loadSoberHouseSettingsStore,
   saveSoberHouseSettingsStore,
 } from "../lib/soberHouse/storage";
+import {
+  loadOperatorControlPlaneSnapshot,
+  persistOperatorControlPlaneSnapshot,
+} from "../lib/soberHouse/controlPlaneClient";
 import { getResidentSetupState } from "../lib/soberHouse/resident";
 
 type SoberHouseSettingsScreenProps = {
@@ -987,10 +991,13 @@ export function SoberHouseSettingsScreen({
   adminLaunchContext = null,
 }: SoberHouseSettingsScreenProps) {
   const actor = useMemo<AuditActor>(() => ({ id: actorId, name: actorName }), [actorId, actorName]);
+  const canSyncControlPlane =
+    canManageSoberHouseHierarchy(viewerRole) && apiUrl.trim().length > 0 && Boolean(authHeader);
   const [store, setStore] = useState<SoberHouseSettingsStore | null>(null);
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [activeOrganizationId, setActiveOrganizationId] = useState<string | null>(null);
   const [adminModule, setAdminModule] = useState<AdminModule>(() =>
     resolveInitialAdminModule(viewerRole, adminLaunchContext),
   );
@@ -1046,11 +1053,33 @@ export function SoberHouseSettingsScreen({
 
     async function load() {
       setLoading(true);
-      const nextStore = await loadSoberHouseSettingsStore(userId);
+      const localStore = await loadSoberHouseSettingsStore(userId);
+      let nextStore = localStore;
+      let resolvedOrganizationId = localStore.organization?.id ?? null;
+
+      if (canSyncControlPlane && authHeader) {
+        try {
+          const snapshot = await loadOperatorControlPlaneSnapshot({
+            apiUrl,
+            authHeader,
+            organizationId: resolvedOrganizationId,
+          });
+          nextStore = snapshot.store;
+          resolvedOrganizationId = snapshot.organizationId;
+          await saveSoberHouseSettingsStore(userId, nextStore);
+        } catch (error) {
+          setStatusMessage(
+            error instanceof Error && error.message.trim().length > 0
+              ? `${error.message} Using the last local sober-house snapshot on this device.`
+              : "Unable to load the live sober-house control plane. Using the last local snapshot instead.",
+          );
+        }
+      }
       if (!active) {
         return;
       }
 
+      setActiveOrganizationId(resolvedOrganizationId);
       setStore(nextStore);
       setAccessDraft(createAccessDraft(nextStore.userAccessProfile));
       setOrganizationDraft(createOrganizationDraft(nextStore.organization));
@@ -1117,7 +1146,7 @@ export function SoberHouseSettingsScreen({
     return () => {
       active = false;
     };
-  }, [adminLaunchContext, userId, viewerRole]);
+  }, [adminLaunchContext, apiUrl, authHeader, canSyncControlPlane, userId, viewerRole]);
 
   const openResidentSetup = useCallback((entryStep: ResidentOnboardingStep | null = null) => {
     setResidentSetupEntryStep(entryStep);
@@ -1233,18 +1262,49 @@ export function SoberHouseSettingsScreen({
     ) => {
       setIsSaving(true);
       try {
-        await saveSoberHouseSettingsStore(userId, nextStore);
-        setStore(nextStore);
+        let storeToPersist = nextStore;
+        let resolvedOrganizationId = activeOrganizationId;
+
+        if (canManageSoberHouseHierarchy(viewerRole)) {
+          if (!apiUrl.trim() || !authHeader) {
+            throw new Error(
+              "Sober-house admin changes require a live authenticated backend session.",
+            );
+          }
+
+          if (!resolvedOrganizationId) {
+            throw new Error(
+              "Missing sober-house organization scope for backend sync. Reload the admin screen and try again.",
+            );
+          }
+
+          const snapshot = await persistOperatorControlPlaneSnapshot({
+            apiUrl,
+            authHeader,
+            organizationId: resolvedOrganizationId,
+            store: nextStore,
+          });
+          storeToPersist = snapshot.store;
+          resolvedOrganizationId = snapshot.organizationId;
+        }
+
+        await saveSoberHouseSettingsStore(userId, storeToPersist);
+        setActiveOrganizationId(resolvedOrganizationId ?? storeToPersist.organization?.id ?? null);
+        setStore(storeToPersist);
         if (options?.showStatus !== false) {
           setStatusMessage(successMessage);
         }
-      } catch {
-        setStatusMessage("Unable to save sober house settings locally.");
+      } catch (error) {
+        setStatusMessage(
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Unable to save sober-house settings.",
+        );
       } finally {
         setIsSaving(false);
       }
     },
-    [userId],
+    [activeOrganizationId, apiUrl, authHeader, userId, viewerRole],
   );
 
   const saveOrganization = useCallback(async () => {

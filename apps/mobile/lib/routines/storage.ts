@@ -13,6 +13,79 @@ import type {
 
 const ROUTINES_STORAGE_KEY_PREFIX = "recovery:routines:v1:";
 
+function debugRoutinesStorage(event: string, details: Record<string, unknown>) {
+  if (typeof __DEV__ !== "undefined" && __DEV__) {
+    console.log(`[routines][storage] ${event}`, details);
+  }
+}
+
+function hasOwnBooleanEnabled(value: unknown): value is { enabled: boolean } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.prototype.hasOwnProperty.call(value, "enabled") &&
+    typeof (value as { enabled?: unknown }).enabled === "boolean"
+  );
+}
+
+function hasLegacyMorningHistoryForItem(
+  morningByDate: RecoveryRoutinesStore["morningByDate"] | null | undefined,
+  itemId: string,
+): boolean {
+  if (!morningByDate || typeof morningByDate !== "object") {
+    return false;
+  }
+
+  return Object.values(morningByDate).some((day) => {
+    const completedByItemId =
+      day &&
+      typeof day === "object" &&
+      day.completedByItemId &&
+      typeof day.completedByItemId === "object"
+        ? day.completedByItemId
+        : null;
+    return Boolean(completedByItemId && itemId in completedByItemId);
+  });
+}
+
+function inferLegacyEnabledValue(input: {
+  parsedItem: Record<string, unknown> | undefined;
+  defaultItem: Record<string, unknown>;
+  morningByDate: RecoveryRoutinesStore["morningByDate"] | null | undefined;
+}): boolean {
+  const { parsedItem, defaultItem, morningByDate } = input;
+  if (!parsedItem) {
+    return false;
+  }
+  if (hasOwnBooleanEnabled(parsedItem)) {
+    return parsedItem.enabled;
+  }
+
+  const itemId = typeof defaultItem.id === "string" ? defaultItem.id : "";
+  if (itemId && hasLegacyMorningHistoryForItem(morningByDate, itemId)) {
+    return true;
+  }
+
+  const voiceText = typeof parsedItem.voiceText === "string" ? parsedItem.voiceText.trim() : "";
+  if (voiceText.length > 0) {
+    return true;
+  }
+
+  const detail = typeof parsedItem.detail === "string" ? parsedItem.detail.trim() : "";
+  if (detail.length > 0) {
+    return true;
+  }
+
+  const readerUrl = typeof parsedItem.readerUrl === "string" ? parsedItem.readerUrl.trim() : "";
+  const defaultReaderUrl =
+    typeof defaultItem.readerUrl === "string" ? defaultItem.readerUrl.trim() : "";
+  if (readerUrl.length > 0 && readerUrl !== defaultReaderUrl) {
+    return true;
+  }
+
+  return false;
+}
+
 export function routinesStorageKey(userId: string): string {
   return `${ROUTINES_STORAGE_KEY_PREFIX}${userId}`;
 }
@@ -29,11 +102,21 @@ export async function loadRoutinesStore(userId: string): Promise<RecoveryRoutine
   try {
     const raw = await AsyncStorage.getItem(key);
     if (!raw) {
-      return createDefaultRoutinesStore();
+      const defaultStore = createDefaultRoutinesStore();
+      debugRoutinesStorage("load.miss", {
+        userId,
+        enabledCount: defaultStore.morningTemplate.items.filter((item) => item.enabled).length,
+      });
+      return defaultStore;
     }
     const parsed = JSON.parse(raw) as RecoveryRoutinesStore;
     if (!parsed || parsed.version !== 1) {
-      return createDefaultRoutinesStore();
+      const defaultStore = createDefaultRoutinesStore();
+      debugRoutinesStorage("load.invalid_version", {
+        userId,
+        version: parsed?.version ?? null,
+      });
+      return defaultStore;
     }
     const defaultStore = createDefaultRoutinesStore();
     const mergedMorningTemplate = {
@@ -61,7 +144,11 @@ export async function loadRoutinesStore(userId: string): Promise<RecoveryRoutine
         title: defaultItem.title,
         readerLabel: defaultItem.readerLabel ?? parsedItem?.readerLabel,
         readerUrl: normalizedReaderUrl,
-        enabled: parsedItem?.enabled === true,
+        enabled: inferLegacyEnabledValue({
+          parsedItem: parsedItem as Record<string, unknown> | undefined,
+          defaultItem: defaultItem as Record<string, unknown>,
+          morningByDate: parsed.morningByDate ?? {},
+        }),
       };
     });
     const dailyReflectionsLink =
@@ -70,7 +157,7 @@ export async function loadRoutinesStore(userId: string): Promise<RecoveryRoutine
         ? mergedMorningTemplate.dailyReflectionsLink
         : DAILY_REFLECTIONS_URL;
 
-    return {
+    const normalizedStore = {
       ...defaultStore,
       ...parsed,
       morningTemplate: {
@@ -81,8 +168,18 @@ export async function loadRoutinesStore(userId: string): Promise<RecoveryRoutine
       morningByDate: parsed.morningByDate ?? {},
       nightlyByDate: parsed.nightlyByDate ?? {},
     };
+    debugRoutinesStorage("load.hit", {
+      userId,
+      enabledCount: normalizedStore.morningTemplate.items.filter((item) => item.enabled).length,
+      morningDayCount: Object.keys(normalizedStore.morningByDate).length,
+    });
+    return normalizedStore;
   } catch {
-    return createDefaultRoutinesStore();
+    const defaultStore = createDefaultRoutinesStore();
+    debugRoutinesStorage("load.error", {
+      userId,
+    });
+    return defaultStore;
   }
 }
 
@@ -91,6 +188,11 @@ export async function saveRoutinesStore(
   value: RecoveryRoutinesStore,
 ): Promise<void> {
   const key = routinesStorageKey(userId);
+  debugRoutinesStorage("save", {
+    userId,
+    enabledCount: value.morningTemplate.items.filter((item) => item.enabled).length,
+    morningDayCount: Object.keys(value.morningByDate).length,
+  });
   await AsyncStorage.setItem(key, JSON.stringify(value));
 }
 

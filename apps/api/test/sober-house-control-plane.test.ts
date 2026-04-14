@@ -104,6 +104,99 @@ describe("sober-house control plane access", () => {
     await db.end?.();
   });
 
+  it("returns houses that exist only in persisted control-plane config after a mobile-style save", async () => {
+    const app = createTestApp(db);
+
+    const updateResponse = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane?organizationId=org-alpine",
+      headers: {
+        authorization: "Bearer DEV_enduser-a1",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-alpine",
+            name: "Alpine Recovery Housing",
+            primaryContactName: "",
+            primaryPhone: "",
+            primaryEmail: "",
+            notes: "persisted from mobile",
+            status: "ACTIVE",
+            createdAt: "2026-04-02T12:00:00.000Z",
+            updatedAt: "2026-04-02T12:00:00.000Z",
+          },
+          houses: [
+            {
+              id: "house-alpine-1",
+              organizationId: "org-alpine",
+              houseGroupId: null,
+              name: "Alpine House 1",
+              address: "",
+              phone: "",
+              geofenceCenterLat: null,
+              geofenceCenterLng: null,
+              geofenceRadiusFeetDefault: 200,
+              houseTypes: ["OTHER"],
+              bedCount: 0,
+              notes: "",
+              status: "ACTIVE",
+              createdAt: "2026-04-02T12:00:00.000Z",
+              updatedAt: "2026-04-02T12:00:00.000Z",
+            },
+            {
+              id: "house-mobile-1",
+              organizationId: "org-alpine",
+              houseGroupId: null,
+              name: "Mobile Created House",
+              address: "123 Main St",
+              phone: "(555) 555-0000",
+              geofenceCenterLat: 45.7833,
+              geofenceCenterLng: -108.5007,
+              geofenceRadiusFeetDefault: 200,
+              houseTypes: ["MEN"],
+              bedCount: 12,
+              notes: "created from mobile",
+              status: "ACTIVE",
+              createdAt: "2026-04-02T12:00:00.000Z",
+              updatedAt: "2026-04-02T12:00:00.000Z",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/operator/sober-house/control-plane?organizationId=org-alpine",
+      headers: {
+        authorization: "Bearer DEV_enduser-a1",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      data: {
+        store: {
+          houses: Array<{ id: string; name: string }>;
+        };
+      };
+    };
+
+    expect(payload.data.store.houses.map((entry) => entry.id)).toEqual(
+      expect.arrayContaining(["house-alpine-1", "house-mobile-1"]),
+    );
+    expect(payload.data.store.houses.find((entry) => entry.id === "house-mobile-1")?.name).toBe(
+      "Mobile Created House",
+    );
+
+    await app.close();
+    await db.end?.();
+  });
+
   it("honors organizationId when a user can switch between organizations", async () => {
     db.addOrganization({
       id: "org-birch",
@@ -293,7 +386,7 @@ describe("sober-house control plane access", () => {
     await db.end?.();
   });
 
-  it("assembles the first live sober-house loop from DB-backed rows instead of persisted fake arrays", async () => {
+  it("merges DB-backed sober-house rows with persisted control-plane houses", async () => {
     db.addParticipantProfile({
       user_id: "enduser-a1",
       tenant_id: "tenant-a",
@@ -532,7 +625,10 @@ describe("sober-house control plane access", () => {
     };
 
     expect(payload.data.store.organization.notes).toBe("persisted compatibility data");
-    expect(payload.data.store.houses.map((entry) => entry.id)).toEqual(["house-alpine-1"]);
+    expect(payload.data.store.houses.map((entry) => entry.id)).toEqual([
+      "house-alpine-1",
+      "fake-house",
+    ]);
     expect(payload.data.store.residentHouseMemberships.map((entry) => entry.residentId)).toEqual([
       "enduser-a1",
     ]);
