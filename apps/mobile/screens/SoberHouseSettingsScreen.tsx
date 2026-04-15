@@ -1272,7 +1272,7 @@ export function SoberHouseSettingsScreen({
             );
           }
 
-          if (!resolvedOrganizationId) {
+          if (!resolvedOrganizationId && !storeToPersist.organization?.name.trim()) {
             throw new Error(
               "Missing sober-house organization scope for backend sync. Reload the admin screen and try again.",
             );
@@ -1281,7 +1281,7 @@ export function SoberHouseSettingsScreen({
           const snapshot = await persistOperatorControlPlaneSnapshot({
             apiUrl,
             authHeader,
-            organizationId: resolvedOrganizationId,
+            organizationId: resolvedOrganizationId ?? storeToPersist.organization?.id ?? null,
             store: nextStore,
           });
           storeToPersist = snapshot.store;

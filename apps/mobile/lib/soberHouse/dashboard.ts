@@ -4,7 +4,9 @@ import { isChoreCompletionVerified } from "./proof";
 import {
   getActiveHouseAlertAnnouncements,
   getChatReceiptForMessageAndUser,
+  getHouseById,
   getHouseChoresForResident,
+  getHouseGroupById,
   getHouseMeetingsInRange,
   getRuleSetForHouse,
   getUpcomingHouseMeetings,
@@ -83,6 +85,13 @@ export type SoberHouseResidentDashboardSummary = {
   complianceSnapshotTile: SoberHouseDashboardTileSummary;
   houseScheduleTile: SoberHouseDashboardTileSummary;
   tiles: SoberHouseDashboardTileSummary[];
+};
+
+export type ResidentAssignmentDisplayContext = {
+  residentName: string;
+  organizationName: string;
+  houseName: string;
+  groupName: string | null;
 };
 
 type SummaryContext = {
@@ -262,6 +271,28 @@ function formatTimeLabel(hhmm: string): string {
   const meridiem = hour >= 12 ? "PM" : "AM";
   const hour12 = hour % 12 === 0 ? 12 : hour % 12;
   return `${hour12}:${String(minute).padStart(2, "0")} ${meridiem}`;
+}
+
+export function buildResidentAssignmentDisplayContext(
+  store: SoberHouseSettingsStore,
+  fallbackDisplayName: string | null = null,
+): ResidentAssignmentDisplayContext {
+  const housing = store.residentHousingProfile;
+  const residentName = `${housing?.firstName ?? ""} ${housing?.lastName ?? ""}`.trim();
+  const resolvedHouseId = housing?.houseId ?? store.userAccessProfile?.houseId ?? null;
+  const house = resolvedHouseId ? getHouseById(store, resolvedHouseId) : null;
+  const group = house?.houseGroupId ? getHouseGroupById(store, house.houseGroupId) : null;
+
+  return {
+    residentName:
+      residentName ||
+      fallbackDisplayName?.trim() ||
+      store.userAccessProfile?.linkedUserId ||
+      "Resident",
+    organizationName: store.organization?.name ?? "No organization selected",
+    houseName: house?.name ?? "Not assigned",
+    groupName: group?.name ?? null,
+  };
 }
 
 function formatDateTimeLabel(timestamp: string): string {

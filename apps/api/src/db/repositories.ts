@@ -1645,6 +1645,55 @@ export function createRepositories(db: DbClient) {
       return result.rows.filter((row) => (allowedIds ? allowedIds.has(row.id) : true));
     },
 
+    async upsertOrganization(
+      tenantId: string,
+      payload: { id: string; name: string },
+    ): Promise<OrganizationRow> {
+      const result = await db.query<OrganizationRow>(
+        `
+        INSERT INTO organizations (id, tenant_id, name)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (tenant_id, id) DO UPDATE
+        SET name = EXCLUDED.name
+        RETURNING
+          id,
+          tenant_id,
+          name,
+          created_at
+      `,
+        [payload.id, tenantId, payload.name],
+      );
+
+      return result.rows[0] as OrganizationRow;
+    },
+
+    async grantOrganizationRole(
+      tenantId: string,
+      payload: {
+        userId: string;
+        role: "org_admin" | "house_manager" | "resident_user";
+        organizationId: string;
+        grantedByUserId: string;
+      },
+    ): Promise<void> {
+      await db.query(
+        `
+        INSERT INTO user_roles (
+          tenant_id,
+          user_id,
+          role,
+          organization_id,
+          court_program_id,
+          is_active,
+          granted_by_user_id
+        )
+        VALUES ($1, $2, $3, $4, NULL, TRUE, $5)
+        ON CONFLICT DO NOTHING
+      `,
+        [tenantId, payload.userId, payload.role, payload.organizationId, payload.grantedByUserId],
+      );
+    },
+
     async listHouses(
       tenantId: string,
       filters: { organizationId?: string } = {},

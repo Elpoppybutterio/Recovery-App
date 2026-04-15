@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPlatformOwnerGrantSql,
+  canBootstrapSingleSoberHouseOrganization,
   canManageCourtHierarchy,
   canManageSoberHouseHierarchy,
   canViewCourtParticipantExperience,
   canViewSoberHouseResidentExperience,
   deriveProtectedOrgAccessGateState,
   deriveAppAccessRole,
+  listGrantedOrganizationScopes,
   parseAccessContextResponse,
 } from "../lib/access";
 import { getSetupFlowSteps, inferOnboardingPath } from "../lib/onboarding";
@@ -161,6 +163,35 @@ describe("protected access gating", () => {
       isPlatformOwner: false,
     },
   });
+  const bootstrapOrgAdminAccessContext = parseAccessContextResponse({
+    user: {
+      userId: "kacy-admin",
+      tenantId: "tenant-a",
+      email: "kacy@example.com",
+      displayName: "Kacy Housing Admin",
+      createdAt: "2026-03-26T00:00:00.000Z",
+    },
+    grants: [
+      {
+        id: "6",
+        role: "org_admin",
+        organizationId: null,
+        organizationName: null,
+        courtProgramId: null,
+        courtProgramName: null,
+        courtProgramJurisdiction: null,
+        grantedAt: "2026-03-26T00:00:00.000Z",
+        revokedAt: null,
+      },
+    ],
+    capabilities: {
+      participantRoles: [],
+      protectedRoles: ["org_admin"],
+      canManageOrganizations: true,
+      canManageCourtPrograms: false,
+      isPlatformOwner: false,
+    },
+  });
 
   it("does not grant sober-house admin access from the onboarding splash alone", () => {
     const role = deriveAppAccessRole({
@@ -219,6 +250,13 @@ describe("protected access gating", () => {
 
     expect(canManageSoberHouseHierarchy(role)).toBe(true);
     expect(canManageCourtHierarchy(role)).toBe(true);
+  });
+
+  it("identifies bootstrap-eligible org admins without scoped organizations", () => {
+    expect(canBootstrapSingleSoberHouseOrganization(bootstrapOrgAdminAccessContext)).toBe(true);
+    expect(listGrantedOrganizationScopes(bootstrapOrgAdminAccessContext, ["org_admin"])).toEqual(
+      [],
+    );
   });
 
   it("keeps the protected org gate in auth-required mode until sign-in proves the account is unauthorized", () => {

@@ -1268,6 +1268,42 @@ async function resolveAvailableOrganizations(
   }));
 }
 
+function canBootstrapSingleOrganization(accessContext: UserAccessContext): boolean {
+  if (accessContext.capabilities.isPlatformOwner) {
+    return false;
+  }
+
+  return accessContext.grants.some(
+    (grant) =>
+      grant.role === "org_admin" && grant.organizationId === null && grant.revokedAt === null,
+  );
+}
+
+function slugifyOrganizationName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+function parseOrganizationBootstrapCandidate(store: unknown): { id: string; name: string } | null {
+  if (!isRecord(store) || !isRecord(store.organization)) {
+    return null;
+  }
+
+  const name = stringOr(store.organization.name, "").trim();
+  if (!name) {
+    return null;
+  }
+
+  const requestedId = stringOr(store.organization.id, "").trim();
+  return {
+    id: requestedId || `org-${slugifyOrganizationName(name) || "sober-house"}`,
+    name,
+  };
+}
+
 function mergeRecordsById(
   primary: Array<Record<string, unknown>>,
   secondary: Array<Record<string, unknown>>,
@@ -1970,16 +2006,61 @@ export async function buildOperatorControlPlaneSnapshot(input: {
 }
 
 export async function persistOperatorControlPlaneStore(input: {
+  repositories: Repositories;
   tenantRepositories: TenantRepositories;
   actor: ActorContext;
-  organizationId: string;
+  organizationId?: string | null;
   store: unknown;
-}): Promise<void> {
+}): Promise<{ organizationId: string }> {
+  const accessContext = await input.repositories.findAccessContextByUserId(input.actor.userId);
+  if (!accessContext) {
+    throw new AccessDeniedError("Missing protected access context.");
+  }
+
+  const availableOrganizations = await resolveAvailableOrganizations(
+    input.repositories,
+    input.actor,
+    accessContext,
+  );
+  let organizationId =
+    availableOrganizations.find((entry) => entry.organization.id === input.organizationId)
+      ?.organization.id ??
+    availableOrganizations[0]?.organization.id ??
+    null;
+
+  if (!organizationId) {
+    if (!canBootstrapSingleOrganization(accessContext)) {
+      throw new AccessDeniedError(
+        "No sober-housing organization access is available for this account.",
+      );
+    }
+
+    const candidate = parseOrganizationBootstrapCandidate(input.store);
+    if (!candidate) {
+      throw new AccessDeniedError(
+        "Organization name is required before the first org can be created.",
+      );
+    }
+
+    const organization = await input.repositories.upsertOrganization(
+      input.actor.tenantId,
+      candidate,
+    );
+    await input.repositories.grantOrganizationRole(input.actor.tenantId, {
+      userId: input.actor.userId,
+      role: "org_admin",
+      organizationId: organization.id,
+      grantedByUserId: input.actor.userId,
+    });
+    organizationId = organization.id;
+  }
+
   await input.tenantRepositories.tenantConfig.upsert(
     input.actor,
-    controlPlaneConfigKey(input.organizationId),
+    controlPlaneConfigKey(organizationId),
     {
       store: input.store,
     },
   );
+  return { organizationId };
 }

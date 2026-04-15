@@ -106,6 +106,7 @@ import {
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import {
   buildPlatformOwnerGrantSql,
+  canBootstrapSingleSoberHouseOrganization,
   canManageCourtHierarchy,
   canManageSoberHouseHierarchy,
   canViewCourtParticipantExperience,
@@ -113,6 +114,7 @@ import {
   canViewSoberHouseResidentExperience,
   courtEntryLabel,
   deriveAppAccessRole,
+  listGrantedOrganizationScopes,
   parseAccessContextResponse,
   soberHouseEntryLabel,
   type AccessContext,
@@ -207,7 +209,14 @@ import {
 } from "./lib/communication/summary";
 import { createDefaultSoberHouseSettingsStore } from "./lib/soberHouse/defaults";
 import { evaluateResidentCompliance } from "./lib/soberHouse/compliance";
-import { buildSoberHouseResidentDashboardSummary } from "./lib/soberHouse/dashboard";
+import {
+  buildResidentAssignmentDisplayContext,
+  buildSoberHouseResidentDashboardSummary,
+} from "./lib/soberHouse/dashboard";
+import {
+  loadOperatorControlPlaneSnapshot,
+  persistOperatorControlPlaneSnapshot,
+} from "./lib/soberHouse/controlPlaneClient";
 import { currentMonthKey } from "./lib/soberHouse/monthlyWindow";
 import {
   applyHouseDefaultsToResidentDraft,
@@ -2508,6 +2517,7 @@ export default function App() {
   const [wizardSupervisionMode, setWizardSupervisionMode] =
     useState<SetupSupervisionMode>("INDEPENDENT");
   const [wizardSoberHouseId, setWizardSoberHouseId] = useState<string | null>(null);
+  const [residentOrganizationStatus, setResidentOrganizationStatus] = useState<string | null>(null);
   const [wizardJusticeTrack, setWizardJusticeTrack] = useState<SetupJusticeTrack>("NONE");
   const [wizardCourtProgramName, setWizardCourtProgramName] = useState("");
   const [wizardCourtSupervisorName, setWizardCourtSupervisorName] = useState("");
@@ -2865,6 +2875,35 @@ export default function App() {
       ),
     [protectedOrgSetupAuthorized],
   );
+  const residentOrganizationOptions = useMemo(
+    () => listGrantedOrganizationScopes(serverAccessContext, ["resident_user"]),
+    [serverAccessContext],
+  );
+  const residentProfileDisplayName = useMemo(() => {
+    const enteredName = `${wizardResidentFirstName} ${wizardResidentLastName}`.trim();
+    if (enteredName.length > 0) {
+      return enteredName;
+    }
+
+    const storedName = `${soberHouseStore.residentHousingProfile?.firstName ?? ""} ${
+      soberHouseStore.residentHousingProfile?.lastName ?? ""
+    }`.trim();
+    return storedName.length > 0 ? storedName : null;
+  }, [
+    soberHouseStore.residentHousingProfile?.firstName,
+    soberHouseStore.residentHousingProfile?.lastName,
+    wizardResidentFirstName,
+    wizardResidentLastName,
+  ]);
+  const residentParticipantOrganizationId =
+    soberHouseStore.organization?.id ?? residentOrganizationOptions[0]?.organizationId ?? null;
+  const participantSyncHouseId =
+    effectiveParticipantOnboardingPath === "SOBER_HOUSE_RESIDENT"
+      ? (wizardSoberHouseId ??
+        soberHouseAccessProfile?.houseId ??
+        soberHouseStore.residentHousingProfile?.houseId ??
+        null)
+      : (soberHouseAccessProfile?.houseId ?? null);
   const participantProfileSyncPayload = useMemo(
     () =>
       buildParticipantProfileSyncPayload({
@@ -2873,15 +2912,20 @@ export default function App() {
         appAccessRole,
         accessContext: serverAccessContext,
         soberHouseRole: soberHouseAccessProfile?.role,
-        houseId: soberHouseAccessProfile?.houseId ?? null,
+        residentDisplayName: residentProfileDisplayName,
+        residentOrganizationId: residentParticipantOrganizationId,
+        houseId: participantSyncHouseId,
       }),
     [
       appAccessRole,
       effectiveParticipantOnboardingPath,
+      participantSyncHouseId,
+      residentParticipantOrganizationId,
+      residentProfileDisplayName,
       serverAccessContext,
       setupComplete,
-      soberHouseAccessProfile?.houseId,
       soberHouseAccessProfile?.role,
+      soberHouseStore.residentHousingProfile?.houseId,
     ],
   );
   const participantObligationSnapshotPayloads = useMemo(
@@ -2892,7 +2936,9 @@ export default function App() {
         appAccessRole,
         accessContext: serverAccessContext,
         soberHouseRole: soberHouseAccessProfile?.role,
-        houseId: soberHouseAccessProfile?.houseId ?? null,
+        residentDisplayName: residentProfileDisplayName,
+        residentOrganizationId: residentParticipantOrganizationId,
+        houseId: participantSyncHouseId,
         sponsor: {
           sponsorCallAvailable,
           sponsorName: normalizedSponsorName,
@@ -2940,10 +2986,12 @@ export default function App() {
       appAccessRole,
       effectiveParticipantOnboardingPath,
       normalizedSponsorName,
+      participantSyncHouseId,
       recurringServiceCommitments,
+      residentParticipantOrganizationId,
+      residentProfileDisplayName,
       serverAccessContext,
       setupComplete,
-      soberHouseAccessProfile?.houseId,
       soberHouseAccessProfile?.role,
       soberHouseEffectiveHouseMeetings,
       soberHouseEffectiveRules,
@@ -2995,6 +3043,14 @@ export default function App() {
         new Date(clockTickMs).toISOString(),
       )
     : null;
+  useEffect(() => {
+    if (
+      wizardSoberHouseId &&
+      !soberHouseStore.houses.some((house) => house.id === wizardSoberHouseId)
+    ) {
+      setWizardSoberHouseId(null);
+    }
+  }, [soberHouseStore.houses, wizardSoberHouseId]);
   const wizardRequiresSponsorDetails =
     wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" &&
     (wizardSelectedSoberHouseRules?.sponsorContact.enabled ?? false);
@@ -3034,6 +3090,10 @@ export default function App() {
   );
   const soberHouseProtectedAdminSessionRequired =
     canManageSoberHouseHierarchy(appAccessRole) && soberHouseRequiresDeviceUnlock;
+  const canBootstrapSingleHousingOrganization = useMemo(
+    () => canBootstrapSingleSoberHouseOrganization(serverAccessContext),
+    [serverAccessContext],
+  );
   const lockSoberHouseAccess = useCallback((status: string | null = null) => {
     setSoberHouseUnlocked(false);
     setSoberHouseUnlockStatus(status);
@@ -4240,6 +4300,14 @@ export default function App() {
       soberHouseComplianceSummary,
       dashboardNextFiveMeetings,
     ],
+  );
+  const residentAssignmentDisplayContext = useMemo(
+    () =>
+      buildResidentAssignmentDisplayContext(
+        soberHouseStore,
+        residentProfileDisplayName ?? serverAccessContext?.user.displayName ?? devUserDisplayName,
+      ),
+    [devUserDisplayName, residentProfileDisplayName, serverAccessContext, soberHouseStore],
   );
   const soberHouseResidentSetupState = useMemo(
     () => getResidentSetupState(soberHouseStore, currentAccessUserId),
@@ -7124,6 +7192,91 @@ export default function App() {
     },
     [devAuthUserId],
   );
+  const loadResidentOrganizationScope = useCallback(
+    async (organizationId: string) => {
+      if (!apiUrl || !authHeader) {
+        setResidentOrganizationStatus("Sign in to load sober housing organizations.");
+        return;
+      }
+
+      setResidentOrganizationStatus("Loading sober housing organization...");
+      try {
+        const snapshot = await loadOperatorControlPlaneSnapshot({
+          apiUrl,
+          authHeader,
+          organizationId,
+        });
+        const timestamp = new Date().toISOString();
+        let nextStore: SoberHouseSettingsStore = {
+          ...snapshot.store,
+          residentHousingProfile: null,
+          residentRequirementProfile: null,
+          residentConsentRecord: null,
+          residentWizardDraft: null,
+        };
+        nextStore = upsertUserAccessProfile(
+          nextStore,
+          { id: devAuthUserId, name: devUserDisplayName },
+          {
+            id: nextStore.userAccessProfile?.id,
+            linkedUserId: devAuthUserId,
+            role: "HOUSE_RESIDENT",
+            organizationId: snapshot.organizationId,
+            houseId: null,
+            houseGroupId: null,
+            status: "ACTIVE",
+          },
+          timestamp,
+        ).store;
+        await persistSoberHouseStore(nextStore);
+        setWizardSoberHouseId((current) =>
+          current && nextStore.houses.some((house) => house.id === current) ? current : null,
+        );
+        setResidentOrganizationStatus(`${snapshot.organizationName} loaded.`);
+      } catch (error) {
+        setResidentOrganizationStatus(
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Unable to load sober housing organization.",
+        );
+      }
+    },
+    [apiUrl, authHeader, devAuthUserId, devUserDisplayName, persistSoberHouseStore],
+  );
+  useEffect(() => {
+    if (!apiUrl || !authHeader || residentOrganizationOptions.length === 0) {
+      return;
+    }
+
+    const activeOrganizationId = soberHouseStore.organization?.id ?? null;
+    const preferredOrganizationId =
+      residentOrganizationOptions.find((entry) => entry.organizationId === activeOrganizationId)
+        ?.organizationId ??
+      residentOrganizationOptions[0]?.organizationId ??
+      null;
+
+    if (!preferredOrganizationId) {
+      return;
+    }
+
+    const hasScopedStore =
+      activeOrganizationId === preferredOrganizationId &&
+      soberHouseStore.houses.some(
+        (house) => (house.organizationId ?? preferredOrganizationId) === preferredOrganizationId,
+      );
+    if (hasScopedStore) {
+      return;
+    }
+
+    void loadResidentOrganizationScope(preferredOrganizationId);
+  }, [
+    apiUrl,
+    authHeader,
+    loadResidentOrganizationScope,
+    residentOrganizationOptions,
+    soberHouseStore.houses,
+    soberHouseStore.organization?.id,
+  ]);
   const persistSoberHouseInteraction = useCallback(
     async (
       nextStore: SoberHouseSettingsStore,
@@ -10157,6 +10310,15 @@ export default function App() {
         }
       }
       if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
+        if (!canBootstrapSingleHousingOrganization) {
+          setSetupError(
+            soberHouseStore.organization?.name
+              ? `This account already manages ${soberHouseStore.organization.name}. Open the sober-house admin hub from Settings instead of creating another organization.`
+              : "This account already manages one sober-housing organization. Open the sober-house admin hub from Settings instead of creating another organization.",
+          );
+          setSetupStep(2);
+          return;
+        }
         if (!wizardOrganizationName.trim()) {
           setSetupError("Enter your organization name.");
           setSetupStep(2);
@@ -10519,6 +10681,36 @@ export default function App() {
           soberHouseTimestamp,
         ).store;
       }
+
+      if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
+        if (!apiUrl || !authHeader) {
+          setSetupError(
+            "A live authenticated backend session is required to create a sober housing organization.",
+          );
+          setSetupStep(2);
+          return;
+        }
+
+        try {
+          const snapshot = await persistOperatorControlPlaneSnapshot({
+            apiUrl,
+            authHeader,
+            organizationId: nextSoberHouseStore.organization?.id ?? null,
+            store: nextSoberHouseStore,
+          });
+          nextSoberHouseStore = snapshot.store;
+          await refreshServerAccessContext();
+        } catch (error) {
+          setSetupError(
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : "Unable to create the sober housing organization.",
+          );
+          setSetupStep(2);
+          return;
+        }
+      }
+
       await persistSoberHouseStore(nextSoberHouseStore);
       setParticipantTrackState(nextParticipantTrackState);
       const legacyTrackState = buildLegacyWizardStateFromTracks(nextParticipantTrackState);
@@ -10592,6 +10784,8 @@ export default function App() {
       setSetupFinishing(false);
     }
   }, [
+    apiUrl,
+    authHeader,
     cancelNotificationBucket,
     completeSetupIntoDashboard,
     devAuthUserId,
@@ -10614,6 +10808,7 @@ export default function App() {
     soberHouseStore,
     sobrietyDateInput,
     sobrietyDateIso,
+    refreshServerAccessContext,
     sponsorEnabledAtIso,
     wizardOrganizationName,
     wizardOrganizationNotes,
@@ -10650,6 +10845,7 @@ export default function App() {
     sponsorEnabled,
     sponsorActive,
     sponsorKneesSuggested,
+    canBootstrapSingleHousingOrganization,
     syncHomeGroupBirthdayConfig,
     recoverySubstances,
     ninetyDayGoalTarget,
@@ -15441,15 +15637,23 @@ export default function App() {
                         {wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
                           <>
                             <Text style={styles.sectionMeta}>
-                              Verified admin access is active for this account. Complete the
-                              organization bootstrap below.
+                              {canBootstrapSingleHousingOrganization
+                                ? "Verified admin access is active for this account. Complete the organization bootstrap below."
+                                : "Verified admin access is active for this account. This account already manages one sober-housing organization, so additional organization creation is disabled."}
                             </Text>
+                            {!canBootstrapSingleHousingOrganization &&
+                            soberHouseStore.organization?.name ? (
+                              <Text style={styles.sectionMeta}>
+                                Current organization: {soberHouseStore.organization.name}
+                              </Text>
+                            ) : null}
                             <Text style={styles.label}>Organization name</Text>
                             <TextInput
                               style={styles.input}
                               value={wizardOrganizationName}
                               onChangeText={setWizardOrganizationName}
                               placeholder="Serenity Homes"
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                             <Text style={styles.label}>Primary contact name</Text>
                             <TextInput
@@ -15457,6 +15661,7 @@ export default function App() {
                               value={wizardOrganizationPrimaryContactName}
                               onChangeText={setWizardOrganizationPrimaryContactName}
                               placeholder="Owner / operator"
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                             <Text style={styles.label}>Primary phone</Text>
                             <TextInput
@@ -15467,6 +15672,7 @@ export default function App() {
                               }
                               placeholder="(555) 555-1234"
                               keyboardType="phone-pad"
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                             <Text style={styles.label}>Primary email</Text>
                             <TextInput
@@ -15476,6 +15682,7 @@ export default function App() {
                               placeholder="owner@example.com"
                               autoCapitalize="none"
                               keyboardType="email-address"
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                             <Text style={styles.label}>Notes</Text>
                             <TextInput
@@ -15484,6 +15691,7 @@ export default function App() {
                               onChangeText={setWizardOrganizationNotes}
                               placeholder="Optional organization notes"
                               multiline
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                           </>
                         ) : (
@@ -16441,6 +16649,54 @@ export default function App() {
                       <>
                         {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
                           <>
+                            {residentOrganizationOptions.length > 0 ? (
+                              <>
+                                <Text style={styles.label}>
+                                  Select your sober housing organization
+                                </Text>
+                                <View style={styles.chipRow}>
+                                  {residentOrganizationOptions.map((scope) => (
+                                    <Pressable
+                                      key={scope.organizationId}
+                                      style={[
+                                        styles.chip,
+                                        soberHouseStore.organization?.id === scope.organizationId
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
+                                      onPress={() => {
+                                        if (
+                                          soberHouseStore.organization?.id === scope.organizationId
+                                        ) {
+                                          return;
+                                        }
+                                        void loadResidentOrganizationScope(scope.organizationId);
+                                      }}
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          soberHouseStore.organization?.id === scope.organizationId
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {scope.organizationName}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+                                <Text style={styles.sectionMeta}>
+                                  Current organization:{" "}
+                                  {soberHouseStore.organization?.name ?? "Not selected"}
+                                </Text>
+                                {residentOrganizationStatus ? (
+                                  <Text style={styles.sectionMeta}>
+                                    {residentOrganizationStatus}
+                                  </Text>
+                                ) : null}
+                              </>
+                            ) : null}
                             <Text style={styles.label}>Select your sober house</Text>
                             <View style={styles.chipRow}>
                               {soberHouseStore.houses.map((house) => (
@@ -16468,6 +16724,14 @@ export default function App() {
                             <Text style={styles.sectionMeta}>
                               This resident setup only collects participant-facing details and house
                               requirements.
+                            </Text>
+                            <Text style={styles.sectionMeta}>
+                              House group:{" "}
+                              {wizardSelectedSoberHouse?.houseGroupId
+                                ? (soberHouseStore.houseGroups.find(
+                                    (group) => group.id === wizardSelectedSoberHouse.houseGroupId,
+                                  )?.name ?? "Unassigned")
+                                : "Unassigned"}
                             </Text>
                             <Text style={styles.label}>Resident first name</Text>
                             <TextInput
@@ -18406,7 +18670,16 @@ export default function App() {
                     <GlassCard style={styles.card} strong>
                       <Text style={styles.sectionTitle}>Sober House Program Requirements</Text>
                       <Text style={styles.sectionMeta}>
-                        Assigned house: {soberHouseAssignedHouse?.name ?? "Not assigned"}
+                        Resident: {residentAssignmentDisplayContext.residentName}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Organization: {residentAssignmentDisplayContext.organizationName}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Assigned house: {residentAssignmentDisplayContext.houseName}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        House group: {residentAssignmentDisplayContext.groupName ?? "Unassigned"}
                       </Text>
                       <Text style={styles.sectionMeta}>
                         Meetings per week:{" "}

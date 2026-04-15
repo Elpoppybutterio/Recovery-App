@@ -197,6 +197,134 @@ describe("sober-house control plane access", () => {
     await db.end?.();
   });
 
+  it("lets an approved housing admin bootstrap a first sober-housing organization", async () => {
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane",
+      headers: {
+        authorization: "Bearer DEV_kacy-admin",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-a-sober-start-homes",
+            name: "A Sober Start Homes",
+            primaryContactName: "Kacy Housing Admin",
+            primaryPhone: "(555) 555-1000",
+            primaryEmail: "kacy@example.com",
+            notes: "Created from mobile",
+            status: "ACTIVE",
+            createdAt: "2026-04-12T12:00:00.000Z",
+            updatedAt: "2026-04-12T12:00:00.000Z",
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      session: {
+        operatorUserId: "kacy-admin",
+        organizationName: "A Sober Start Homes",
+        availableOrganizations: [
+          {
+            organizationName: "A Sober Start Homes",
+            operatorRole: "ORG_ADMIN",
+          },
+        ],
+      },
+      data: {
+        store: {
+          organization: {
+            name: "A Sober Start Homes",
+            primaryEmail: "kacy@example.com",
+          },
+        },
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("prevents a non-platform housing admin from creating a second organization", async () => {
+    const app = createTestApp(db);
+
+    const firstResponse = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane",
+      headers: {
+        authorization: "Bearer DEV_kacy-admin",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-a-sober-start-homes",
+            name: "A Sober Start Homes",
+            primaryContactName: "Kacy Housing Admin",
+            primaryPhone: "(555) 555-1000",
+            primaryEmail: "kacy@example.com",
+            notes: "Created from mobile",
+            status: "ACTIVE",
+            createdAt: "2026-04-12T12:00:00.000Z",
+            updatedAt: "2026-04-12T12:00:00.000Z",
+          },
+        },
+      },
+    });
+    expect(firstResponse.statusCode).toBe(200);
+
+    const secondResponse = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane",
+      headers: {
+        authorization: "Bearer DEV_kacy-admin",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-second-attempt",
+            name: "Second Chance Homes",
+            primaryContactName: "Kacy Housing Admin",
+            primaryPhone: "(555) 555-1000",
+            primaryEmail: "kacy@example.com",
+            notes: "Should not create a second org",
+            status: "ACTIVE",
+            createdAt: "2026-04-12T12:10:00.000Z",
+            updatedAt: "2026-04-12T12:10:00.000Z",
+          },
+        },
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json()).toMatchObject({
+      session: {
+        organizationName: "A Sober Start Homes",
+        availableOrganizations: [
+          {
+            organizationName: "A Sober Start Homes",
+          },
+        ],
+      },
+      data: {
+        store: {
+          organization: {
+            name: "A Sober Start Homes",
+          },
+        },
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
+
   it("honors organizationId when a user can switch between organizations", async () => {
     db.addOrganization({
       id: "org-birch",

@@ -977,24 +977,18 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
       }
 
       try {
-        const snapshot = await buildOperatorControlPlaneSnapshot({
+        const persisted = await persistOperatorControlPlaneStore({
           repositories,
           tenantRepositories,
           actor,
           organizationId: parsedQuery.data.organizationId ?? null,
-          nowIso: now().toISOString(),
-        });
-        await persistOperatorControlPlaneStore({
-          tenantRepositories,
-          actor,
-          organizationId: snapshot.session.organizationId,
           store: parsedBody.data.store,
         });
         return await buildOperatorControlPlaneSnapshot({
           repositories,
           tenantRepositories,
           actor,
-          organizationId: snapshot.session.organizationId,
+          organizationId: persisted.organizationId,
           nowIso: now().toISOString(),
         });
       } catch (error) {

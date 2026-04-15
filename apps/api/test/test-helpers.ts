@@ -66,10 +66,28 @@ export async function seedCoreFixtures(db: InMemoryDb) {
     display_name: "Demo",
   });
   db.addUser({
+    id: "kacy-admin",
+    tenant_id: "tenant-a",
+    email: "kacy-admin@example.com",
+    display_name: "Kacy Housing Admin",
+  });
+  db.addUser({
+    id: "jason-admin",
+    tenant_id: "tenant-a",
+    email: "jason-admin@example.com",
+    display_name: "Jason SaaS Admin",
+  });
+  db.addUser({
     id: "enduser-a1",
     tenant_id: "tenant-a",
     email: "enduser-a1@example.com",
     display_name: "End User A1",
+  });
+  db.addUser({
+    id: "resident-user",
+    tenant_id: "tenant-a",
+    email: "resident-user@example.com",
+    display_name: "Riley Resident",
   });
   db.addUser({
     id: "enduser-a2",
@@ -180,10 +198,32 @@ export async function seedCoreFixtures(db: InMemoryDb) {
     organization_id: "org-alpine",
     granted_by_user_id: "admin-a",
   });
+  db.addUserRole({ tenant_id: "tenant-a", user_id: "kacy-admin", role: Role.ADMIN });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "kacy-admin",
+    role: "org_admin",
+    granted_by_user_id: "admin-a",
+  });
+  db.addUserRole({ tenant_id: "tenant-a", user_id: "jason-admin", role: Role.ADMIN });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "jason-admin",
+    role: "platform_owner",
+    granted_by_user_id: "admin-a",
+  });
   db.addUserRole({ tenant_id: "tenant-a", user_id: "enduser-a1", role: Role.END_USER });
   db.addUserRole({
     tenant_id: "tenant-a",
     user_id: "enduser-a1",
+    role: "resident_user",
+    organization_id: "org-alpine",
+    granted_by_user_id: "admin-a",
+  });
+  db.addUserRole({ tenant_id: "tenant-a", user_id: "resident-user", role: Role.END_USER });
+  db.addUserRole({
+    tenant_id: "tenant-a",
+    user_id: "resident-user",
     role: "resident_user",
     organization_id: "org-alpine",
     granted_by_user_id: "admin-a",

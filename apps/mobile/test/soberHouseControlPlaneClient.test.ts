@@ -114,6 +114,48 @@ describe("mobile sober-house control plane client", () => {
     );
   });
 
+  it("allows the first organization bootstrap save without an organizationId query param", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify(createSnapshotPayload()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+
+    const store = createDefaultSoberHouseSettingsStore();
+    store.organization = {
+      id: "org-sober-start",
+      name: "A Sober Start Homes",
+      primaryContactName: "Kacy Housing Admin",
+      primaryPhone: "(555) 555-1000",
+      primaryEmail: "kacy@example.com",
+      notes: "",
+      status: "ACTIVE",
+      createdAt: "2026-04-12T12:00:00.000Z",
+      updatedAt: "2026-04-12T12:00:00.000Z",
+    };
+
+    await persistOperatorControlPlaneSnapshot({
+      apiUrl: "https://sober-ai-api.onrender.com",
+      authHeader: "Bearer DEV_kacy-admin",
+      organizationId: null,
+      store,
+      fetchImpl,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://sober-ai-api.onrender.com/v1/operator/sober-house/control-plane",
+      expect.objectContaining({
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer DEV_kacy-admin",
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  });
+
   it("fails loudly when the remote save is rejected", async () => {
     const fetchImpl = vi.fn(
       async () =>

@@ -98,6 +98,41 @@ const DEV_USERS: DevUserSeed[] = [
     roles: [Role.ADMIN],
   },
   {
+    id: "resident-user",
+    tenantId: "tenant-a",
+    email: "resident-user@example.com",
+    displayName: "Riley Resident",
+    roles: [Role.END_USER],
+  },
+  {
+    id: "organization-user",
+    tenantId: "tenant-a",
+    email: "organization-user@example.com",
+    displayName: "Olivia Operator",
+    roles: [Role.ADMIN],
+  },
+  {
+    id: "platform-user",
+    tenantId: "tenant-a",
+    email: "platform-user@example.com",
+    displayName: "Parker Platform",
+    roles: [Role.ADMIN],
+  },
+  {
+    id: "kacy-admin",
+    tenantId: "tenant-a",
+    email: "kacy-admin@example.com",
+    displayName: "Kacy Housing Admin",
+    roles: [Role.ADMIN],
+  },
+  {
+    id: "jason-admin",
+    tenantId: "tenant-a",
+    email: "jason-admin@example.com",
+    displayName: "Jason SaaS Admin",
+    roles: [Role.ADMIN],
+  },
+  {
     id: "enduser-a1",
     tenantId: "tenant-a",
     email: "enduser-a1@example.com",
@@ -156,6 +191,18 @@ const ACCESS_GRANTS: AccessGrantSeed[] = [
   },
   {
     tenantId: "tenant-a",
+    userId: "platform-user",
+    role: "platform_owner",
+    grantedByUserId: "admin-a",
+  },
+  {
+    tenantId: "tenant-a",
+    userId: "jason-admin",
+    role: "platform_owner",
+    grantedByUserId: "admin-a",
+  },
+  {
+    tenantId: "tenant-a",
     userId: "supervisor-a",
     role: "court_supervisor",
     courtProgramId: "court-boulder",
@@ -170,9 +217,29 @@ const ACCESS_GRANTS: AccessGrantSeed[] = [
   },
   {
     tenantId: "tenant-a",
+    userId: "resident-user",
+    role: "resident_user",
+    organizationId: "org-alpine",
+    grantedByUserId: "admin-a",
+  },
+  {
+    tenantId: "tenant-a",
     userId: "enduser-a2",
     role: "court_participant",
     courtProgramId: "court-boulder",
+    grantedByUserId: "admin-a",
+  },
+  {
+    tenantId: "tenant-a",
+    userId: "organization-user",
+    role: "org_admin",
+    organizationId: "org-alpine",
+    grantedByUserId: "admin-a",
+  },
+  {
+    tenantId: "tenant-a",
+    userId: "kacy-admin",
+    role: "org_admin",
     grantedByUserId: "admin-a",
   },
   ...ORGANIZATIONS.filter((organization) => organization.tenantId === "tenant-a").map(
@@ -307,6 +374,7 @@ export async function seedDevUsers(env: ApiEnv = loadApiEnv()): Promise<void> {
       )
       VALUES
         ('enduser-a1', 'tenant-a', 'resident_user', 'org-alpine', 'house-alpine-1', NULL, 'ACTIVE'),
+        ('resident-user', 'tenant-a', 'resident_user', 'org-alpine', 'house-alpine-1', NULL, 'ACTIVE'),
         ('enduser-a2', 'tenant-a', 'court_participant', NULL, NULL, 'court-boulder', 'ACTIVE')
       ON CONFLICT (user_id) DO UPDATE
       SET participant_type = EXCLUDED.participant_type,

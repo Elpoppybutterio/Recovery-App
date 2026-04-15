@@ -1293,6 +1293,64 @@ export class InMemoryDb implements DbPool {
     }
 
     if (
+      normalized.includes("insert into organizations") &&
+      normalized.includes("on conflict (tenant_id, id) do update")
+    ) {
+      const [id, tenantId, name] = params as [string, string, string];
+      const existingIndex = this.organizations.findIndex(
+        (entry) => entry.id === id && entry.tenant_id === tenantId,
+      );
+      const existing = existingIndex >= 0 ? this.organizations[existingIndex] : null;
+      const row: Organization = {
+        id,
+        tenant_id: tenantId,
+        name,
+        created_at: existing?.created_at ?? new Date().toISOString(),
+      };
+      if (existingIndex >= 0) {
+        this.organizations[existingIndex] = row;
+      } else {
+        this.organizations.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (normalized.includes("insert into user_roles") && normalized.includes("organization_id")) {
+      const [tenantId, userId, role, organizationId, grantedByUserId] = params as [
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+      ];
+      const duplicate = this.userRoles.find(
+        (entry) =>
+          entry.tenant_id === tenantId &&
+          entry.user_id === userId &&
+          entry.role === role &&
+          (entry.organization_id ?? null) === (organizationId ?? null) &&
+          entry.is_active !== false &&
+          entry.revoked_at === null,
+      );
+      if (!duplicate) {
+        this.addUserRole({
+          tenant_id: tenantId,
+          user_id: userId,
+          role,
+          organization_id: organizationId,
+          granted_by_user_id: grantedByUserId,
+        });
+      }
+      return {
+        rowCount: duplicate ? 0 : 1,
+        rows: [],
+      };
+    }
+
+    if (
       normalized.includes("from organizations") &&
       normalized.includes("where tenant_id = $1") &&
       normalized.includes("order by name asc")
