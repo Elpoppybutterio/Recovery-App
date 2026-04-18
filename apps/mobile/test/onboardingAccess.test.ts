@@ -259,6 +259,28 @@ describe("protected access gating", () => {
     );
   });
 
+  it("treats signed-in users with no existing organization scope as bootstrap-eligible", () => {
+    const accessContext = parseAccessContextResponse({
+      user: {
+        userId: "fresh-bootstrap-admin",
+        tenantId: "tenant-a",
+        email: "fresh-bootstrap-admin@dev.soberai.local",
+        displayName: "Fresh Bootstrap Admin",
+        createdAt: "2026-04-17T00:00:00.000Z",
+      },
+      grants: [],
+      capabilities: {
+        participantRoles: [],
+        protectedRoles: [],
+        canManageOrganizations: false,
+        canManageCourtPrograms: false,
+        isPlatformOwner: false,
+      },
+    });
+
+    expect(canBootstrapSingleSoberHouseOrganization(accessContext)).toBe(true);
+  });
+
   it("keeps the protected org gate in auth-required mode until sign-in proves the account is unauthorized", () => {
     expect(
       deriveProtectedOrgAccessGateState({

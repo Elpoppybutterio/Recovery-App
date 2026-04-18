@@ -1273,6 +1273,13 @@ function canBootstrapSingleOrganization(accessContext: UserAccessContext): boole
     return false;
   }
 
+  const hasExistingOrganizationScope = accessContext.grants.some(
+    (grant) => grant.organizationId !== null && grant.revokedAt === null,
+  );
+  if (!hasExistingOrganizationScope) {
+    return true;
+  }
+
   return accessContext.grants.some(
     (grant) =>
       grant.role === "org_admin" && grant.organizationId === null && grant.revokedAt === null,
@@ -1287,7 +1294,24 @@ function slugifyOrganizationName(name: string): string {
     .slice(0, 48);
 }
 
-function parseOrganizationBootstrapCandidate(store: unknown): { id: string; name: string } | null {
+function trimmedStringOrNull(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseOrganizationBootstrapCandidate(store: unknown): {
+  organization: { id: string; name: string };
+  operatorProfile: {
+    displayName: string | null;
+    email: string | null;
+    phone: string | null;
+    notes: string | null;
+  };
+} | null {
   if (!isRecord(store) || !isRecord(store.organization)) {
     return null;
   }
@@ -1299,8 +1323,16 @@ function parseOrganizationBootstrapCandidate(store: unknown): { id: string; name
 
   const requestedId = stringOr(store.organization.id, "").trim();
   return {
-    id: requestedId || `org-${slugifyOrganizationName(name) || "sober-house"}`,
-    name,
+    organization: {
+      id: requestedId || `org-${slugifyOrganizationName(name) || "sober-house"}`,
+      name,
+    },
+    operatorProfile: {
+      displayName: trimmedStringOrNull(store.organization.primaryContactName),
+      email: trimmedStringOrNull(store.organization.primaryEmail),
+      phone: trimmedStringOrNull(store.organization.primaryPhone),
+      notes: trimmedStringOrNull(store.organization.notes),
+    },
   };
 }
 
@@ -2044,8 +2076,12 @@ export async function persistOperatorControlPlaneStore(input: {
 
     const organization = await input.repositories.upsertOrganization(
       input.actor.tenantId,
-      candidate,
+      candidate.organization,
     );
+    await input.repositories.updateUserProfile(input.actor.tenantId, input.actor.userId, {
+      email: candidate.operatorProfile.email,
+      displayName: candidate.operatorProfile.displayName,
+    });
     await input.repositories.grantOrganizationRole(input.actor.tenantId, {
       userId: input.actor.userId,
       role: "org_admin",

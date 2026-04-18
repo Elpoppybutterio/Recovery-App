@@ -1570,6 +1570,57 @@ export class InMemoryDb implements DbPool {
       };
     }
 
+    if (
+      normalized.includes("update users") &&
+      normalized.includes("display_name = coalesce($4, display_name)")
+    ) {
+      const [tenantId, userId, email, displayName] = params as [
+        string,
+        string,
+        string | null,
+        string | null,
+      ];
+      const user = this.users.find((entry) => entry.tenant_id === tenantId && entry.id === userId);
+      if (!user) {
+        return { rowCount: 0, rows: [] };
+      }
+
+      user.email = email ?? user.email;
+      user.display_name = displayName ?? user.display_name;
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: user.id,
+            tenant_id: user.tenant_id,
+            email: user.email,
+            display_name: user.display_name,
+            created_at: user.created_at,
+          } as Row,
+        ],
+      };
+    }
+
+    if (
+      normalized.includes("insert into users") &&
+      normalized.includes("values ($1, $2, $3, $4)") &&
+      normalized.includes("returning")
+    ) {
+      const [userId, tenantId, email, displayName] = params as [string, string, string, string];
+      const row = {
+        id: userId,
+        tenant_id: tenantId,
+        email,
+        display_name: displayName,
+        created_at: new Date().toISOString(),
+      };
+      this.addUser(row);
+      return {
+        rowCount: 1,
+        rows: [row as Row],
+      };
+    }
+
     if (normalized.includes("update users set supervision_enabled = $1")) {
       const [enabled, supervisionEndDate, tenantId, userId] = params as [
         boolean,

@@ -228,6 +228,7 @@ describe("sober-house control plane access", () => {
     expect(response.json()).toMatchObject({
       session: {
         operatorUserId: "kacy-admin",
+        operatorDisplayName: "Kacy Housing Admin",
         organizationName: "A Sober Start Homes",
         availableOrganizations: [
           {
@@ -244,6 +245,29 @@ describe("sober-house control plane access", () => {
           },
         },
       },
+    });
+
+    const accessContextResponse = await app.inject({
+      method: "GET",
+      url: "/v1/me/access-context",
+      headers: {
+        authorization: "Bearer DEV_kacy-admin",
+      },
+    });
+
+    expect(accessContextResponse.statusCode).toBe(200);
+    expect(accessContextResponse.json()).toMatchObject({
+      user: {
+        userId: "kacy-admin",
+        displayName: "Kacy Housing Admin",
+        email: "kacy@example.com",
+      },
+      grants: expect.arrayContaining([
+        expect.objectContaining({
+          role: "org_admin",
+          organizationName: "A Sober Start Homes",
+        }),
+      ]),
     });
 
     await app.close();
@@ -318,6 +342,80 @@ describe("sober-house control plane access", () => {
             name: "A Sober Start Homes",
           },
         },
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("lets an unseeded dev user bootstrap a first sober-housing organization and gains org access", async () => {
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane",
+      headers: {
+        authorization: "Bearer DEV_fresh-bootstrap-admin",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-a-sober-start",
+            name: "A Sober Start",
+            primaryContactName: "Kacy Keith",
+            primaryPhone: "(406) 697-4767",
+            primaryEmail: "keithkacy1@gmail.com",
+            notes: "Created from bootstrap flow",
+            status: "ACTIVE",
+            createdAt: "2026-04-17T00:00:00.000Z",
+            updatedAt: "2026-04-17T00:00:00.000Z",
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      session: {
+        operatorUserId: "fresh-bootstrap-admin",
+        operatorDisplayName: "Kacy Keith",
+        organizationName: "A Sober Start",
+      },
+      data: {
+        store: {
+          organization: {
+            name: "A Sober Start",
+            primaryEmail: "keithkacy1@gmail.com",
+          },
+        },
+      },
+    });
+
+    const accessContextResponse = await app.inject({
+      method: "GET",
+      url: "/v1/me/access-context",
+      headers: {
+        authorization: "Bearer DEV_fresh-bootstrap-admin",
+      },
+    });
+
+    expect(accessContextResponse.statusCode).toBe(200);
+    expect(accessContextResponse.json()).toMatchObject({
+      user: {
+        userId: "fresh-bootstrap-admin",
+        displayName: "Kacy Keith",
+        email: "keithkacy1@gmail.com",
+      },
+      grants: expect.arrayContaining([
+        expect.objectContaining({
+          role: "org_admin",
+          organizationName: "A Sober Start",
+        }),
+      ]),
+      capabilities: {
+        canManageOrganizations: true,
       },
     });
 

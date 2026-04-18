@@ -177,6 +177,13 @@ export function canBootstrapSingleSoberHouseOrganization(
     return false;
   }
 
+  const hasExistingOrganizationScope = accessContext.grants.some(
+    (grant) => grant.organizationId !== null && grant.revokedAt === null,
+  );
+  if (!hasExistingOrganizationScope) {
+    return true;
+  }
+
   return accessContext.grants.some(
     (grant) =>
       grant.role === "org_admin" && grant.organizationId === null && grant.revokedAt === null,

@@ -590,6 +590,7 @@ export function buildApp(options: { db?: DbPool; env?: ApiEnv; now?: () => Date 
 
   const authenticateRequest = buildAuthenticateRequest(repositories, {
     enableDevAuth: env.ENABLE_DEV_AUTH,
+    defaultDevTenantId: env.ENABLE_DEV_AUTH ? "tenant-a" : undefined,
   });
 
   const configuredMeetingGuideFeeds = parseConfiguredMeetingGuideFeeds(

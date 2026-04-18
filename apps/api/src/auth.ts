@@ -14,6 +14,7 @@ export function buildAuthenticateRequest(
   repositories: Repositories,
   options: {
     enableDevAuth: boolean;
+    defaultDevTenantId?: string;
   },
 ) {
   return async function authenticateRequest(request: FastifyRequest, reply: FastifyReply) {
@@ -33,7 +34,11 @@ export function buildAuthenticateRequest(
     }
 
     const userId = parsed.data.slice("Bearer DEV_".length);
-    const actor = await repositories.findActorByUserId(userId);
+    let actor = await repositories.findActorByUserId(userId);
+    if (!actor && options.defaultDevTenantId) {
+      await repositories.ensureDevUserProfile(options.defaultDevTenantId, userId);
+      actor = await repositories.findActorByUserId(userId);
+    }
     if (!actor) {
       unauthorized(reply, "Unknown development user");
       return;

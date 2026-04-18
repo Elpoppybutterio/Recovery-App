@@ -948,6 +948,23 @@ function uniqueAccessRoles(roles: AccessGrantRole[]): AccessGrantRole[] {
   return Array.from(new Set(roles));
 }
 
+function prettifyDevUserDisplayName(userId: string): string {
+  return userId
+    .split(/[-_\s]+/)
+    .filter((segment) => segment.length > 0)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function buildDevUserEmail(userId: string): string {
+  const normalized = userId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${normalized || "dev-user"}@dev.soberai.local`;
+}
+
 function toJsonParam(value: unknown) {
   return JSON.stringify(value ?? {});
 }
@@ -1522,6 +1539,108 @@ export function createRepositories(db: DbClient) {
         LIMIT 1
       `,
         [userId],
+      );
+
+      return result.rows[0] ?? null;
+    },
+
+    async ensureDevUserProfile(
+      tenantId: string,
+      userId: string,
+      payload: {
+        email?: string | null;
+        displayName?: string | null;
+      } = {},
+    ): Promise<UserProfileRow> {
+      const existing = await db.query<UserProfileRow>(
+        `
+        SELECT id, tenant_id, email, display_name, created_at
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+        [userId],
+      );
+
+      const email = payload.email?.trim() || buildDevUserEmail(userId);
+      const displayName = payload.displayName?.trim() || prettifyDevUserDisplayName(userId);
+
+      if (existing.rows[0]) {
+        const current = existing.rows[0];
+        if (
+          current.email === email &&
+          current.display_name === displayName &&
+          current.tenant_id === tenantId
+        ) {
+          return current;
+        }
+
+        const updated = await db.query<UserProfileRow>(
+          `
+          UPDATE users
+          SET
+            email = COALESCE($3, email),
+            display_name = COALESCE($4, display_name)
+          WHERE tenant_id = $1
+            AND id = $2
+          RETURNING
+            id,
+            tenant_id,
+            email,
+            display_name,
+            created_at
+        `,
+          [current.tenant_id, userId, email, displayName],
+        );
+        return (updated.rows[0] ?? current) as UserProfileRow;
+      }
+
+      const inserted = await db.query<UserProfileRow>(
+        `
+        INSERT INTO users (
+          id,
+          tenant_id,
+          email,
+          display_name
+        )
+        VALUES ($1, $2, $3, $4)
+        RETURNING
+          id,
+          tenant_id,
+          email,
+          display_name,
+          created_at
+      `,
+        [userId, tenantId, email, displayName],
+      );
+
+      return inserted.rows[0] as UserProfileRow;
+    },
+
+    async updateUserProfile(
+      tenantId: string,
+      userId: string,
+      payload: {
+        email?: string | null;
+        displayName?: string | null;
+      },
+    ): Promise<UserProfileRow | null> {
+      const result = await db.query<UserProfileRow>(
+        `
+        UPDATE users
+        SET
+          email = COALESCE($3, email),
+          display_name = COALESCE($4, display_name)
+        WHERE tenant_id = $1
+          AND id = $2
+        RETURNING
+          id,
+          tenant_id,
+          email,
+          display_name,
+          created_at
+      `,
+        [tenantId, userId, payload.email ?? null, payload.displayName ?? null],
       );
 
       return result.rows[0] ?? null;
