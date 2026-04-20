@@ -422,7 +422,6 @@ describe("sober-house control plane access", () => {
     await app.close();
     await db.end?.();
   });
-
   it("honors organizationId when a user can switch between organizations", async () => {
     db.addOrganization({
       id: "org-birch",

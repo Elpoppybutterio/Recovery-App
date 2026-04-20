@@ -155,7 +155,6 @@ describe("mobile sober-house control plane client", () => {
       }),
     );
   });
-
   it("fails loudly when the remote save is rejected", async () => {
     const fetchImpl = vi.fn(
       async () =>
