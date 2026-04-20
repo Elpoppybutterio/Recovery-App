@@ -1268,6 +1268,74 @@ async function resolveAvailableOrganizations(
   }));
 }
 
+function canBootstrapSingleOrganization(accessContext: UserAccessContext): boolean {
+  if (accessContext.capabilities.isPlatformOwner) {
+    return false;
+  }
+
+  const hasExistingOrganizationScope = accessContext.grants.some(
+    (grant) => grant.organizationId !== null && grant.revokedAt === null,
+  );
+  if (!hasExistingOrganizationScope) {
+    return true;
+  }
+
+  return accessContext.grants.some(
+    (grant) =>
+      grant.role === "org_admin" && grant.organizationId === null && grant.revokedAt === null,
+  );
+}
+
+function slugifyOrganizationName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+function trimmedStringOrNull(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseOrganizationBootstrapCandidate(store: unknown): {
+  organization: { id: string; name: string };
+  operatorProfile: {
+    displayName: string | null;
+    email: string | null;
+    phone: string | null;
+    notes: string | null;
+  };
+} | null {
+  if (!isRecord(store) || !isRecord(store.organization)) {
+    return null;
+  }
+
+  const name = stringOr(store.organization.name, "").trim();
+  if (!name) {
+    return null;
+  }
+
+  const requestedId = stringOr(store.organization.id, "").trim();
+  return {
+    organization: {
+      id: requestedId || `org-${slugifyOrganizationName(name) || "sober-house"}`,
+      name,
+    },
+    operatorProfile: {
+      displayName: trimmedStringOrNull(store.organization.primaryContactName),
+      email: trimmedStringOrNull(store.organization.primaryEmail),
+      phone: trimmedStringOrNull(store.organization.primaryPhone),
+      notes: trimmedStringOrNull(store.organization.notes),
+    },
+  };
+}
+
 function mergeRecordsById(
   primary: Array<Record<string, unknown>>,
   secondary: Array<Record<string, unknown>>,
@@ -1970,16 +2038,65 @@ export async function buildOperatorControlPlaneSnapshot(input: {
 }
 
 export async function persistOperatorControlPlaneStore(input: {
+  repositories: Repositories;
   tenantRepositories: TenantRepositories;
   actor: ActorContext;
-  organizationId: string;
+  organizationId?: string | null;
   store: unknown;
-}): Promise<void> {
+}): Promise<{ organizationId: string }> {
+  const accessContext = await input.repositories.findAccessContextByUserId(input.actor.userId);
+  if (!accessContext) {
+    throw new AccessDeniedError("Missing protected access context.");
+  }
+
+  const availableOrganizations = await resolveAvailableOrganizations(
+    input.repositories,
+    input.actor,
+    accessContext,
+  );
+  let organizationId =
+    availableOrganizations.find((entry) => entry.organization.id === input.organizationId)
+      ?.organization.id ??
+    availableOrganizations[0]?.organization.id ??
+    null;
+
+  if (!organizationId) {
+    if (!canBootstrapSingleOrganization(accessContext)) {
+      throw new AccessDeniedError(
+        "No sober-housing organization access is available for this account.",
+      );
+    }
+
+    const candidate = parseOrganizationBootstrapCandidate(input.store);
+    if (!candidate) {
+      throw new AccessDeniedError(
+        "Organization name is required before the first org can be created.",
+      );
+    }
+
+    const organization = await input.repositories.upsertOrganization(
+      input.actor.tenantId,
+      candidate.organization,
+    );
+    await input.repositories.updateUserProfile(input.actor.tenantId, input.actor.userId, {
+      email: candidate.operatorProfile.email,
+      displayName: candidate.operatorProfile.displayName,
+    });
+    await input.repositories.grantOrganizationRole(input.actor.tenantId, {
+      userId: input.actor.userId,
+      role: "org_admin",
+      organizationId: organization.id,
+      grantedByUserId: input.actor.userId,
+    });
+    organizationId = organization.id;
+  }
+
   await input.tenantRepositories.tenantConfig.upsert(
     input.actor,
-    controlPlaneConfigKey(input.organizationId),
+    controlPlaneConfigKey(organizationId),
     {
       store: input.store,
     },
   );
+  return { organizationId };
 }

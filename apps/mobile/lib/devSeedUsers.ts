@@ -363,17 +363,28 @@ function buildResidentSeedStore(linkedUserId: string): SoberHouseSettingsStore {
   return store;
 }
 
-function buildOrganizationSeedStore(linkedUserId: string): SoberHouseSettingsStore {
+function buildOrganizationSeedStore(
+  linkedUserId: string,
+  options?: {
+    organizationName?: string;
+    primaryContactName?: string;
+    primaryPhone?: string;
+    primaryEmail?: string;
+    organizationNotes?: string;
+    houseName?: string;
+    houseNotes?: string;
+  },
+): SoberHouseSettingsStore {
   let store = createDefaultSoberHouseSettingsStore();
   store = upsertOrganization(
     store,
     ACTOR,
     {
-      name: "Bright Path Recovery",
-      primaryContactName: "Olivia Operator",
-      primaryPhone: "(555) 555-9090",
-      primaryEmail: "owner@brightpath.org",
-      notes: "Seeded organization admin context",
+      name: options?.organizationName ?? "Bright Path Recovery",
+      primaryContactName: options?.primaryContactName ?? "Olivia Operator",
+      primaryPhone: options?.primaryPhone ?? "(555) 555-9090",
+      primaryEmail: options?.primaryEmail ?? "owner@brightpath.org",
+      notes: options?.organizationNotes ?? "Seeded organization admin context",
       status: "ACTIVE",
     },
     BASE_TIMESTAMP,
@@ -382,7 +393,7 @@ function buildOrganizationSeedStore(linkedUserId: string): SoberHouseSettingsSto
     store,
     ACTOR,
     {
-      name: "Maple House",
+      name: options?.houseName ?? "Maple House",
       address: "123 Main St",
       phone: "(555) 555-1000",
       geofenceCenterLat: 45.7833,
@@ -390,7 +401,7 @@ function buildOrganizationSeedStore(linkedUserId: string): SoberHouseSettingsSto
       geofenceRadiusFeetDefault: 200,
       houseTypes: ["MEN"],
       bedCount: 12,
-      notes: "Seeded admin house",
+      notes: options?.houseNotes ?? "Seeded admin house",
       status: "ACTIVE",
     },
     "2026-03-01T09:03:00.000Z",
@@ -524,6 +535,33 @@ export const SEEDED_DEV_USERS: SeededDevUser[] = [
     expectedProtectedRoles: [],
   },
   {
+    userId: "demo",
+    displayName: "Demo",
+    summary: "Platform admin demo user on Alpine Recovery Housing",
+    onboardingPath: "RECOVERY",
+    setupComplete: true,
+    sobrietyDateIso: "2025-11-15",
+    participantTracks: buildRecoveryTrackState(),
+    recoveryProfile: buildRecoveryProfile({
+      participantTracks: buildRecoveryTrackState(),
+      onboardingPath: "RECOVERY",
+      sponsorName: "Morgan Sponsor",
+      sponsorPhoneDigits: "5551112222",
+      sponsorEnabled: true,
+      sponsorActive: true,
+    }),
+    soberHouseStore: buildOrganizationSeedStore("demo", {
+      organizationName: "Alpine Recovery Housing",
+      primaryContactName: "Demo Operator",
+      primaryPhone: "(555) 555-2020",
+      primaryEmail: "demo@alpinerecovery.org",
+      organizationNotes: "Seeded Alpine demo organization",
+      houseName: "Alpine House 1",
+      houseNotes: "Seeded Alpine demo house",
+    }),
+    expectedProtectedRoles: ["platform_owner", "org_admin"],
+  },
+  {
     userId: "resident-user",
     displayName: "Riley Resident",
     summary: "Recovery + sober housing resident seeded user",
@@ -543,6 +581,25 @@ export const SEEDED_DEV_USERS: SeededDevUser[] = [
     expectedProtectedRoles: [],
   },
   {
+    userId: "kacy-admin",
+    displayName: "Kacy Housing Admin",
+    summary: "Approved housing admin seeded for first-organization bootstrap QA",
+    onboardingPath: "SOBER_HOUSE_ORG_ADMIN",
+    setupComplete: false,
+    sobrietyDateIso: "2025-10-10",
+    participantTracks: buildRecoveryTrackState(),
+    recoveryProfile: buildRecoveryProfile({
+      participantTracks: buildRecoveryTrackState(),
+      onboardingPath: "SOBER_HOUSE_ORG_ADMIN",
+      sponsorName: "",
+      sponsorPhoneDigits: "",
+      sponsorEnabled: false,
+      sponsorActive: false,
+    }),
+    soberHouseStore: null,
+    expectedProtectedRoles: ["org_admin"],
+  },
+  {
     userId: "organization-user",
     displayName: "Olivia Operator",
     summary: "Protected organization user seeded for backend-authorized QA",
@@ -560,6 +617,33 @@ export const SEEDED_DEV_USERS: SeededDevUser[] = [
     }),
     soberHouseStore: buildOrganizationSeedStore("organization-user"),
     expectedProtectedRoles: ["org_admin"],
+  },
+  {
+    userId: "jason-admin",
+    displayName: "Jason SaaS Admin",
+    summary: "Cross-org SaaS admin seeded for platform-owner QA",
+    onboardingPath: "RECOVERY",
+    setupComplete: true,
+    sobrietyDateIso: "2025-09-01",
+    participantTracks: buildRecoveryTrackState(),
+    recoveryProfile: buildRecoveryProfile({
+      participantTracks: buildRecoveryTrackState(),
+      onboardingPath: "RECOVERY",
+      sponsorName: "Dana Sponsor",
+      sponsorPhoneDigits: "5559990000",
+      sponsorEnabled: false,
+      sponsorActive: false,
+    }),
+    soberHouseStore: buildOrganizationSeedStore("jason-admin", {
+      organizationName: "Alpine Recovery Housing",
+      primaryContactName: "Jason Lehman",
+      primaryPhone: "(555) 555-3030",
+      primaryEmail: "jason@alpinerecovery.org",
+      organizationNotes: "Seeded SaaS admin fallback context",
+      houseName: "Alpine House 1",
+      houseNotes: "Seeded SaaS admin house",
+    }),
+    expectedProtectedRoles: ["platform_owner"],
   },
   {
     userId: "platform-user",

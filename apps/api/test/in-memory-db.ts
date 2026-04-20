@@ -1293,6 +1293,64 @@ export class InMemoryDb implements DbPool {
     }
 
     if (
+      normalized.includes("insert into organizations") &&
+      normalized.includes("on conflict (tenant_id, id) do update")
+    ) {
+      const [id, tenantId, name] = params as [string, string, string];
+      const existingIndex = this.organizations.findIndex(
+        (entry) => entry.id === id && entry.tenant_id === tenantId,
+      );
+      const existing = existingIndex >= 0 ? this.organizations[existingIndex] : null;
+      const row: Organization = {
+        id,
+        tenant_id: tenantId,
+        name,
+        created_at: existing?.created_at ?? new Date().toISOString(),
+      };
+      if (existingIndex >= 0) {
+        this.organizations[existingIndex] = row;
+      } else {
+        this.organizations.push(row);
+      }
+      return {
+        rowCount: 1,
+        rows: [{ ...row } as Row],
+      };
+    }
+
+    if (normalized.includes("insert into user_roles") && normalized.includes("organization_id")) {
+      const [tenantId, userId, role, organizationId, grantedByUserId] = params as [
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+      ];
+      const duplicate = this.userRoles.find(
+        (entry) =>
+          entry.tenant_id === tenantId &&
+          entry.user_id === userId &&
+          entry.role === role &&
+          (entry.organization_id ?? null) === (organizationId ?? null) &&
+          entry.is_active !== false &&
+          entry.revoked_at === null,
+      );
+      if (!duplicate) {
+        this.addUserRole({
+          tenant_id: tenantId,
+          user_id: userId,
+          role,
+          organization_id: organizationId,
+          granted_by_user_id: grantedByUserId,
+        });
+      }
+      return {
+        rowCount: duplicate ? 0 : 1,
+        rows: [],
+      };
+    }
+
+    if (
       normalized.includes("from organizations") &&
       normalized.includes("where tenant_id = $1") &&
       normalized.includes("order by name asc")
@@ -1509,6 +1567,57 @@ export class InMemoryDb implements DbPool {
             created_at: user.created_at,
           } as Row,
         ],
+      };
+    }
+
+    if (
+      normalized.includes("update users") &&
+      normalized.includes("display_name = coalesce($4, display_name)")
+    ) {
+      const [tenantId, userId, email, displayName] = params as [
+        string,
+        string,
+        string | null,
+        string | null,
+      ];
+      const user = this.users.find((entry) => entry.tenant_id === tenantId && entry.id === userId);
+      if (!user) {
+        return { rowCount: 0, rows: [] };
+      }
+
+      user.email = email ?? user.email;
+      user.display_name = displayName ?? user.display_name;
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: user.id,
+            tenant_id: user.tenant_id,
+            email: user.email,
+            display_name: user.display_name,
+            created_at: user.created_at,
+          } as Row,
+        ],
+      };
+    }
+
+    if (
+      normalized.includes("insert into users") &&
+      normalized.includes("values ($1, $2, $3, $4)") &&
+      normalized.includes("returning")
+    ) {
+      const [userId, tenantId, email, displayName] = params as [string, string, string, string];
+      const row = {
+        id: userId,
+        tenant_id: tenantId,
+        email,
+        display_name: displayName,
+        created_at: new Date().toISOString(),
+      };
+      this.addUser(row);
+      return {
+        rowCount: 1,
+        rows: [row as Row],
       };
     }
 

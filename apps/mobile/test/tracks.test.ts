@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { buildSeededAccessContext, SEEDED_DEV_USERS, getSeededDevUser } from "../lib/devSeedUsers";
-import { canManageSoberHouseHierarchy, deriveAppAccessRole } from "../lib/access";
+import {
+  canBootstrapSingleSoberHouseOrganization,
+  canManageSoberHouseHierarchy,
+  deriveAppAccessRole,
+  listGrantedOrganizationScopes,
+} from "../lib/access";
 import {
   activateParticipantTrack,
   buildEffectiveOnboardingPathFromTracks,
@@ -76,12 +81,15 @@ describe("participant track model", () => {
 });
 
 describe("seeded dev users", () => {
-  it("includes deterministic qa identities for recovery, resident, organization, and platform users", () => {
+  it("includes deterministic qa identities for recovery, demo, resident, housing admin, and platform users", () => {
     expect(SEEDED_DEV_USERS.map((entry) => entry.userId)).toEqual(
       expect.arrayContaining([
         "recovery-user",
+        "demo",
         "resident-user",
+        "kacy-admin",
         "organization-user",
+        "jason-admin",
         "platform-user",
       ]),
     );
@@ -128,5 +136,26 @@ describe("seeded dev users", () => {
     expect(accessContext?.grants.map((grant) => grant.role)).toContain("org_admin");
     expect(role).toBe("SOBER_HOUSE_ORG_ADMIN");
     expect(canManageSoberHouseHierarchy(role)).toBe(true);
+  });
+
+  it("keeps Kacy bootstrap-eligible until the first organization is created", () => {
+    const accessContext = buildSeededAccessContext("kacy-admin");
+
+    expect(canBootstrapSingleSoberHouseOrganization(accessContext)).toBe(true);
+    expect(listGrantedOrganizationScopes(accessContext, ["org_admin"])).toEqual([]);
+  });
+
+  it("keeps the demo user on Alpine Recovery Housing", () => {
+    const demoUser = getSeededDevUser("demo");
+    const accessContext = buildSeededAccessContext("demo");
+
+    expect(demoUser?.soberHouseStore?.organization?.name).toBe("Alpine Recovery Housing");
+    expect(listGrantedOrganizationScopes(accessContext, ["org_admin"])).toEqual([
+      {
+        organizationId: demoUser?.soberHouseStore?.organization?.id ?? "",
+        organizationName: "Alpine Recovery Housing",
+        role: "org_admin",
+      },
+    ]);
   });
 });

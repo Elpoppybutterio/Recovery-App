@@ -53,6 +53,11 @@ export type AppAccessRole =
 
 export type ProtectedOrgAccessGateOutcome = "idle" | "unauthenticated" | "unauthorized";
 export type ProtectedOrgAccessGateState = "AUTH_REQUIRED" | "ACCESS_DENIED";
+export type GrantedOrganizationScope = {
+  organizationId: string;
+  organizationName: string;
+  role: AccessGrantRole;
+};
 
 const accessGrantRoles: AccessGrantRole[] = [
   "recovery_user",
@@ -135,6 +140,54 @@ export function parseAccessContextResponse(value: unknown): AccessContext | null
       isPlatformOwner: value.capabilities.isPlatformOwner === true,
     },
   };
+}
+
+export function listGrantedOrganizationScopes(
+  accessContext: AccessContext | null | undefined,
+  roles: AccessGrantRole[] = ["resident_user", "org_admin", "house_manager"],
+): GrantedOrganizationScope[] {
+  const scopesByOrganizationId = new Map<string, GrantedOrganizationScope>();
+
+  accessContext?.grants.forEach((grant) => {
+    if (!roles.includes(grant.role) || !grant.organizationId) {
+      return;
+    }
+
+    const existing = scopesByOrganizationId.get(grant.organizationId);
+    if (existing) {
+      return;
+    }
+
+    scopesByOrganizationId.set(grant.organizationId, {
+      organizationId: grant.organizationId,
+      organizationName: grant.organizationName ?? grant.organizationId,
+      role: grant.role,
+    });
+  });
+
+  return Array.from(scopesByOrganizationId.values()).sort((left, right) =>
+    left.organizationName.localeCompare(right.organizationName),
+  );
+}
+
+export function canBootstrapSingleSoberHouseOrganization(
+  accessContext: AccessContext | null | undefined,
+): boolean {
+  if (!accessContext || accessContext.capabilities.isPlatformOwner) {
+    return false;
+  }
+
+  const hasExistingOrganizationScope = accessContext.grants.some(
+    (grant) => grant.organizationId !== null && grant.revokedAt === null,
+  );
+  if (!hasExistingOrganizationScope) {
+    return true;
+  }
+
+  return accessContext.grants.some(
+    (grant) =>
+      grant.role === "org_admin" && grant.organizationId === null && grant.revokedAt === null,
+  );
 }
 
 function hasGrant(

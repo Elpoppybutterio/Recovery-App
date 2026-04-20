@@ -197,6 +197,231 @@ describe("sober-house control plane access", () => {
     await db.end?.();
   });
 
+  it("lets an approved housing admin bootstrap a first sober-housing organization", async () => {
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane",
+      headers: {
+        authorization: "Bearer DEV_kacy-admin",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-a-sober-start-homes",
+            name: "A Sober Start Homes",
+            primaryContactName: "Kacy Housing Admin",
+            primaryPhone: "(555) 555-1000",
+            primaryEmail: "kacy@example.com",
+            notes: "Created from mobile",
+            status: "ACTIVE",
+            createdAt: "2026-04-12T12:00:00.000Z",
+            updatedAt: "2026-04-12T12:00:00.000Z",
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      session: {
+        operatorUserId: "kacy-admin",
+        operatorDisplayName: "Kacy Housing Admin",
+        organizationName: "A Sober Start Homes",
+        availableOrganizations: [
+          {
+            organizationName: "A Sober Start Homes",
+            operatorRole: "ORG_ADMIN",
+          },
+        ],
+      },
+      data: {
+        store: {
+          organization: {
+            name: "A Sober Start Homes",
+            primaryEmail: "kacy@example.com",
+          },
+        },
+      },
+    });
+
+    const accessContextResponse = await app.inject({
+      method: "GET",
+      url: "/v1/me/access-context",
+      headers: {
+        authorization: "Bearer DEV_kacy-admin",
+      },
+    });
+
+    expect(accessContextResponse.statusCode).toBe(200);
+    expect(accessContextResponse.json()).toMatchObject({
+      user: {
+        userId: "kacy-admin",
+        displayName: "Kacy Housing Admin",
+        email: "kacy@example.com",
+      },
+      grants: expect.arrayContaining([
+        expect.objectContaining({
+          role: "org_admin",
+          organizationName: "A Sober Start Homes",
+        }),
+      ]),
+    });
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("prevents a non-platform housing admin from creating a second organization", async () => {
+    const app = createTestApp(db);
+
+    const firstResponse = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane",
+      headers: {
+        authorization: "Bearer DEV_kacy-admin",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-a-sober-start-homes",
+            name: "A Sober Start Homes",
+            primaryContactName: "Kacy Housing Admin",
+            primaryPhone: "(555) 555-1000",
+            primaryEmail: "kacy@example.com",
+            notes: "Created from mobile",
+            status: "ACTIVE",
+            createdAt: "2026-04-12T12:00:00.000Z",
+            updatedAt: "2026-04-12T12:00:00.000Z",
+          },
+        },
+      },
+    });
+    expect(firstResponse.statusCode).toBe(200);
+
+    const secondResponse = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane",
+      headers: {
+        authorization: "Bearer DEV_kacy-admin",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-second-attempt",
+            name: "Second Chance Homes",
+            primaryContactName: "Kacy Housing Admin",
+            primaryPhone: "(555) 555-1000",
+            primaryEmail: "kacy@example.com",
+            notes: "Should not create a second org",
+            status: "ACTIVE",
+            createdAt: "2026-04-12T12:10:00.000Z",
+            updatedAt: "2026-04-12T12:10:00.000Z",
+          },
+        },
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json()).toMatchObject({
+      session: {
+        organizationName: "A Sober Start Homes",
+        availableOrganizations: [
+          {
+            organizationName: "A Sober Start Homes",
+          },
+        ],
+      },
+      data: {
+        store: {
+          organization: {
+            name: "A Sober Start Homes",
+          },
+        },
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
+
+  it("lets an unseeded dev user bootstrap a first sober-housing organization and gains org access", async () => {
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/operator/sober-house/control-plane",
+      headers: {
+        authorization: "Bearer DEV_fresh-bootstrap-admin",
+      },
+      payload: {
+        store: {
+          version: 16,
+          organization: {
+            id: "org-a-sober-start",
+            name: "A Sober Start",
+            primaryContactName: "Kacy Keith",
+            primaryPhone: "(406) 697-4767",
+            primaryEmail: "keithkacy1@gmail.com",
+            notes: "Created from bootstrap flow",
+            status: "ACTIVE",
+            createdAt: "2026-04-17T00:00:00.000Z",
+            updatedAt: "2026-04-17T00:00:00.000Z",
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      session: {
+        operatorUserId: "fresh-bootstrap-admin",
+        operatorDisplayName: "Kacy Keith",
+        organizationName: "A Sober Start",
+      },
+      data: {
+        store: {
+          organization: {
+            name: "A Sober Start",
+            primaryEmail: "keithkacy1@gmail.com",
+          },
+        },
+      },
+    });
+
+    const accessContextResponse = await app.inject({
+      method: "GET",
+      url: "/v1/me/access-context",
+      headers: {
+        authorization: "Bearer DEV_fresh-bootstrap-admin",
+      },
+    });
+
+    expect(accessContextResponse.statusCode).toBe(200);
+    expect(accessContextResponse.json()).toMatchObject({
+      user: {
+        userId: "fresh-bootstrap-admin",
+        displayName: "Kacy Keith",
+        email: "keithkacy1@gmail.com",
+      },
+      grants: expect.arrayContaining([
+        expect.objectContaining({
+          role: "org_admin",
+          organizationName: "A Sober Start",
+        }),
+      ]),
+      capabilities: {
+        canManageOrganizations: true,
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
   it("honors organizationId when a user can switch between organizations", async () => {
     db.addOrganization({
       id: "org-birch",

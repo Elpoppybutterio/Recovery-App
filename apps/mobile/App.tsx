@@ -106,6 +106,7 @@ import {
 import { Dashboard } from "./lib/dashboard/Dashboard";
 import {
   buildPlatformOwnerGrantSql,
+  canBootstrapSingleSoberHouseOrganization,
   canManageCourtHierarchy,
   canManageSoberHouseHierarchy,
   canViewCourtParticipantExperience,
@@ -113,6 +114,7 @@ import {
   canViewSoberHouseResidentExperience,
   courtEntryLabel,
   deriveAppAccessRole,
+  listGrantedOrganizationScopes,
   parseAccessContextResponse,
   soberHouseEntryLabel,
   type AccessContext,
@@ -143,6 +145,18 @@ import {
   type SetupSupervisionMode,
 } from "./lib/onboarding";
 import { buildSeededAccessContext, getSeededDevUser, SEEDED_DEV_USERS } from "./lib/devSeedUsers";
+import {
+  resolveRuntimeDevUserDisplayName,
+  resolveRuntimeDevUserId,
+  resolveStorageScopedDevUserId,
+} from "./lib/devAuth";
+import {
+  DEV_QA_SCENARIOS,
+  filterDevQaResetStorageKeys,
+  getDevQaScenario,
+  resolveDevQaScenarioByUserId,
+  type DevQaScenarioId,
+} from "./lib/devQaHarness";
 import {
   activateParticipantTrack,
   buildEffectiveOnboardingPathFromTracks,
@@ -206,8 +220,16 @@ import {
   type CommunicationMode,
 } from "./lib/communication/summary";
 import { createDefaultSoberHouseSettingsStore } from "./lib/soberHouse/defaults";
+import { buildHousingAdminBootstrapStore } from "./lib/soberHouse/bootstrap";
 import { evaluateResidentCompliance } from "./lib/soberHouse/compliance";
-import { buildSoberHouseResidentDashboardSummary } from "./lib/soberHouse/dashboard";
+import {
+  buildResidentAssignmentDisplayContext,
+  buildSoberHouseResidentDashboardSummary,
+} from "./lib/soberHouse/dashboard";
+import {
+  loadOperatorControlPlaneSnapshot,
+  persistOperatorControlPlaneSnapshot,
+} from "./lib/soberHouse/controlPlaneClient";
 import { currentMonthKey } from "./lib/soberHouse/monthlyWindow";
 import {
   applyHouseDefaultsToResidentDraft,
@@ -222,11 +244,9 @@ import {
   setHouseStatus,
   setStaffAssignmentStatus,
   upsertHouseMeetingAttendanceRecord,
-  upsertOrganization,
   upsertResidentHousingProfile,
   upsertResidentRequirementProfile,
   upsertSponsorCallRecord,
-  upsertStaffAssignment,
   upsertOneOnOneSession,
   upsertUserAccessProfile,
 } from "./lib/soberHouse/mutations";
@@ -2184,8 +2204,15 @@ export default function App() {
   const [devAuthIdentityDraft, setDevAuthIdentityDraft] = useState(devAuthUserId);
   const [devAuthOverrideUserId, setDevAuthOverrideUserId] = useState<string | null>(null);
   const [devAuthSignedOut, setDevAuthSignedOut] = useState(false);
-  const currentDevAuthUserId =
-    devAuthSignedOut === true ? "" : (devAuthOverrideUserId?.trim() || devAuthUserId).trim();
+  const currentDevAuthUserId = resolveRuntimeDevUserId({
+    configuredUserId: devAuthUserId,
+    overrideUserId: devAuthOverrideUserId,
+    signedOut: devAuthSignedOut,
+  });
+  const storageScopedDevUserId = resolveStorageScopedDevUserId({
+    configuredUserId: devAuthUserId,
+    runtimeUserId: currentDevAuthUserId,
+  });
   const activeSeededDevUser = useMemo(
     () => (currentDevAuthUserId ? getSeededDevUser(currentDevAuthUserId) : null),
     [currentDevAuthUserId],
@@ -2194,10 +2221,13 @@ export default function App() {
     () => (currentDevAuthUserId ? buildSeededAccessContext(currentDevAuthUserId) : null),
     [currentDevAuthUserId],
   );
-  const devUserDisplayName =
-    typeof extra.devUserDisplayName === "string" && extra.devUserDisplayName.trim().length > 0
-      ? extra.devUserDisplayName.trim()
-      : (activeSeededDevUser?.displayName ?? devAuthUserId);
+  const devUserDisplayName = resolveRuntimeDevUserDisplayName({
+    explicitDisplayName:
+      typeof extra.devUserDisplayName === "string" ? extra.devUserDisplayName : null,
+    seededDisplayName: activeSeededDevUser?.displayName ?? null,
+    runtimeUserId: currentDevAuthUserId,
+    configuredUserId: devAuthUserId,
+  });
   const meetingFeedUrl =
     typeof extra.meetingFeedUrl === "string" && extra.meetingFeedUrl.trim().length > 0
       ? extra.meetingFeedUrl
@@ -2238,6 +2268,10 @@ export default function App() {
     : currentDevAuthUserId
       ? `${devUserDisplayName} (DEV_${currentDevAuthUserId})`
       : "Signed out";
+  const resolvedDevQaScenario = useMemo(
+    () => resolveDevQaScenarioByUserId(currentDevAuthUserId),
+    [currentDevAuthUserId],
+  );
   const currentAccessRoles = useMemo(
     () => serverAccessContext?.grants.map((grant) => grant.role) ?? [],
     [serverAccessContext],
@@ -2267,68 +2301,89 @@ export default function App() {
     [clockTickMs, deviceTimeZone],
   );
   const dayOptions = useMemo(() => createDayOptions(new Date(clockTickMs)), [deviceDayKey]);
-  const attendanceStorage = useMemo(() => attendanceStorageKey(devAuthUserId), [devAuthUserId]);
+  const attendanceStorage = useMemo(
+    () => attendanceStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
+  );
   const attendanceSignatureMigrationStorage = useMemo(
-    () => attendanceSignatureMigrationStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => attendanceSignatureMigrationStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const signatureStorageSubdirectory = useMemo(
-    () => `signatures/${devAuthUserId}`,
-    [devAuthUserId],
+    () => `signatures/${storageScopedDevUserId}`,
+    [storageScopedDevUserId],
   );
-  const meetingPlansStorage = useMemo(() => meetingPlanStorageKey(devAuthUserId), [devAuthUserId]);
-  const notificationStorage = useMemo(() => notificationStorageKey(devAuthUserId), [devAuthUserId]);
-  const modeStorage = useMemo(() => modeStorageKey(devAuthUserId), [devAuthUserId]);
+  const meetingPlansStorage = useMemo(
+    () => meetingPlanStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
+  );
+  const notificationStorage = useMemo(
+    () => notificationStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
+  );
+  const modeStorage = useMemo(
+    () => modeStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
+  );
   const sponsorUiPrefsStorage = useMemo(
-    () => sponsorUiPrefsStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => sponsorUiPrefsStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const sponsorCalendarEventStorage = useMemo(
-    () => sponsorCalendarEventStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => sponsorCalendarEventStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const sponsorCalendarEventFingerprintStorage = useMemo(
-    () => sponsorCalendarEventFingerprintStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => sponsorCalendarEventFingerprintStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const sponsorAlertFingerprintStorage = useMemo(
-    () => sponsorAlertFingerprintStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => sponsorAlertFingerprintStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const setupCompleteStorage = useMemo(
-    () => setupCompleteStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => setupCompleteStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
-  const sobrietyDateStorage = useMemo(() => sobrietyDateStorageKey(devAuthUserId), [devAuthUserId]);
-  const profileStorage = useMemo(() => profileStorageKey(devAuthUserId), [devAuthUserId]);
+  const sobrietyDateStorage = useMemo(
+    () => sobrietyDateStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
+  );
+  const profileStorage = useMemo(
+    () => profileStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
+  );
   const sponsorCallLogStorage = useMemo(
-    () => sponsorCallLogStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => sponsorCallLogStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const sponsorEnabledAtStorage = useMemo(
-    () => sponsorEnabledAtStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => sponsorEnabledAtStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const ninetyDayGoalStorage = useMemo(
-    () => ninetyDayGoalStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => ninetyDayGoalStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
-  const bootGuardStorage = useMemo(() => bootGuardStorageKey(devAuthUserId), [devAuthUserId]);
+  const bootGuardStorage = useMemo(
+    () => bootGuardStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
+  );
   const sobrietyMilestoneEventIdsStorage = useMemo(
-    () => sobrietyMilestoneEventIdsStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => sobrietyMilestoneEventIdsStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const sobrietyMilestoneSyncDateStorage = useMemo(
-    () => sobrietyMilestoneSyncDateStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => sobrietyMilestoneSyncDateStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const recoveryCelebrationShownStorage = useMemo(
-    () => recoveryCelebrationShownStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => recoveryCelebrationShownStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const meetingAttendanceLogStorage = useMemo(
-    () => meetingAttendanceLogStorageKey(devAuthUserId),
-    [devAuthUserId],
+    () => meetingAttendanceLogStorageKey(storageScopedDevUserId),
+    [storageScopedDevUserId],
   );
   const applySeededRecoveryDefaults = useCallback(
     (input: {
@@ -2508,6 +2563,7 @@ export default function App() {
   const [wizardSupervisionMode, setWizardSupervisionMode] =
     useState<SetupSupervisionMode>("INDEPENDENT");
   const [wizardSoberHouseId, setWizardSoberHouseId] = useState<string | null>(null);
+  const [residentOrganizationStatus, setResidentOrganizationStatus] = useState<string | null>(null);
   const [wizardJusticeTrack, setWizardJusticeTrack] = useState<SetupJusticeTrack>("NONE");
   const [wizardCourtProgramName, setWizardCourtProgramName] = useState("");
   const [wizardCourtSupervisorName, setWizardCourtSupervisorName] = useState("");
@@ -2607,6 +2663,10 @@ export default function App() {
     useState<number | null>(null);
   const [debugTimeCompressionEnabled] = useState(false);
   const [bootstrapped, setBootstrapped] = useState(false);
+  const [qaScenarioStatus, setQaScenarioStatus] = useState<string | null>(null);
+  const [qaScenarioPendingNavigation, setQaScenarioPendingNavigation] =
+    useState<DevQaScenarioId | null>(null);
+  const [qaScenarioRefreshNonce, setQaScenarioRefreshNonce] = useState(0);
 
   const activeAttendanceRef = useRef<AttendanceRecord | null>(null);
   const attendanceRecordsRef = useRef<AttendanceRecord[]>([]);
@@ -2624,6 +2684,7 @@ export default function App() {
   const meetingsRequestInFlightRef = useRef(false);
   const lastMeetingsRequestKeyRef = useRef<string | null>(null);
   const meetingsAutoRefreshKeyRef = useRef<string | null>(null);
+  const operatorControlPlaneHydrationKeyRef = useRef<string | null>(null);
   const refreshMeetingsRef = useRef<
     ((options?: { location?: LocationStamp | null; radiusMiles?: number }) => Promise<void>) | null
   >(null);
@@ -2865,6 +2926,35 @@ export default function App() {
       ),
     [protectedOrgSetupAuthorized],
   );
+  const residentOrganizationOptions = useMemo(
+    () => listGrantedOrganizationScopes(serverAccessContext, ["resident_user"]),
+    [serverAccessContext],
+  );
+  const residentProfileDisplayName = useMemo(() => {
+    const enteredName = `${wizardResidentFirstName} ${wizardResidentLastName}`.trim();
+    if (enteredName.length > 0) {
+      return enteredName;
+    }
+
+    const storedName = `${soberHouseStore.residentHousingProfile?.firstName ?? ""} ${
+      soberHouseStore.residentHousingProfile?.lastName ?? ""
+    }`.trim();
+    return storedName.length > 0 ? storedName : null;
+  }, [
+    soberHouseStore.residentHousingProfile?.firstName,
+    soberHouseStore.residentHousingProfile?.lastName,
+    wizardResidentFirstName,
+    wizardResidentLastName,
+  ]);
+  const residentParticipantOrganizationId =
+    soberHouseStore.organization?.id ?? residentOrganizationOptions[0]?.organizationId ?? null;
+  const participantSyncHouseId =
+    effectiveParticipantOnboardingPath === "SOBER_HOUSE_RESIDENT"
+      ? (wizardSoberHouseId ??
+        soberHouseAccessProfile?.houseId ??
+        soberHouseStore.residentHousingProfile?.houseId ??
+        null)
+      : (soberHouseAccessProfile?.houseId ?? null);
   const participantProfileSyncPayload = useMemo(
     () =>
       buildParticipantProfileSyncPayload({
@@ -2873,15 +2963,20 @@ export default function App() {
         appAccessRole,
         accessContext: serverAccessContext,
         soberHouseRole: soberHouseAccessProfile?.role,
-        houseId: soberHouseAccessProfile?.houseId ?? null,
+        residentDisplayName: residentProfileDisplayName,
+        residentOrganizationId: residentParticipantOrganizationId,
+        houseId: participantSyncHouseId,
       }),
     [
       appAccessRole,
       effectiveParticipantOnboardingPath,
+      participantSyncHouseId,
+      residentParticipantOrganizationId,
+      residentProfileDisplayName,
       serverAccessContext,
       setupComplete,
-      soberHouseAccessProfile?.houseId,
       soberHouseAccessProfile?.role,
+      soberHouseStore.residentHousingProfile?.houseId,
     ],
   );
   const participantObligationSnapshotPayloads = useMemo(
@@ -2892,7 +2987,9 @@ export default function App() {
         appAccessRole,
         accessContext: serverAccessContext,
         soberHouseRole: soberHouseAccessProfile?.role,
-        houseId: soberHouseAccessProfile?.houseId ?? null,
+        residentDisplayName: residentProfileDisplayName,
+        residentOrganizationId: residentParticipantOrganizationId,
+        houseId: participantSyncHouseId,
         sponsor: {
           sponsorCallAvailable,
           sponsorName: normalizedSponsorName,
@@ -2940,10 +3037,12 @@ export default function App() {
       appAccessRole,
       effectiveParticipantOnboardingPath,
       normalizedSponsorName,
+      participantSyncHouseId,
       recurringServiceCommitments,
+      residentParticipantOrganizationId,
+      residentProfileDisplayName,
       serverAccessContext,
       setupComplete,
-      soberHouseAccessProfile?.houseId,
       soberHouseAccessProfile?.role,
       soberHouseEffectiveHouseMeetings,
       soberHouseEffectiveRules,
@@ -2995,6 +3094,14 @@ export default function App() {
         new Date(clockTickMs).toISOString(),
       )
     : null;
+  useEffect(() => {
+    if (
+      wizardSoberHouseId &&
+      !soberHouseStore.houses.some((house) => house.id === wizardSoberHouseId)
+    ) {
+      setWizardSoberHouseId(null);
+    }
+  }, [soberHouseStore.houses, wizardSoberHouseId]);
   const wizardRequiresSponsorDetails =
     wizardSupervisionMode === "SOBER_HOUSE_RESIDENT" &&
     (wizardSelectedSoberHouseRules?.sponsorContact.enabled ?? false);
@@ -3034,6 +3141,10 @@ export default function App() {
   );
   const soberHouseProtectedAdminSessionRequired =
     canManageSoberHouseHierarchy(appAccessRole) && soberHouseRequiresDeviceUnlock;
+  const canBootstrapSingleHousingOrganization = useMemo(
+    () => canBootstrapSingleSoberHouseOrganization(serverAccessContext),
+    [serverAccessContext],
+  );
   const lockSoberHouseAccess = useCallback((status: string | null = null) => {
     setSoberHouseUnlocked(false);
     setSoberHouseUnlockStatus(status);
@@ -4090,9 +4201,17 @@ export default function App() {
 
   const meetingsAttendedTodayCount = useMemo(() => {
     const attendedMeetingIds = new Set<string>();
-    for (const entry of meetingAttendanceLogs) {
-      if (dateKeyForDate(new Date(entry.atIso)) === todayDateKey) {
-        attendedMeetingIds.add(entry.meetingId);
+    if (attendanceRecords.length > 0) {
+      for (const record of attendanceRecords) {
+        if (dateKeyForDate(new Date(record.startAt)) === todayDateKey) {
+          attendedMeetingIds.add(record.meetingId);
+        }
+      }
+    } else {
+      for (const entry of meetingAttendanceLogs) {
+        if (dateKeyForDate(new Date(entry.atIso)) === todayDateKey) {
+          attendedMeetingIds.add(entry.meetingId);
+        }
       }
     }
     if (
@@ -4103,7 +4222,7 @@ export default function App() {
       attendedMeetingIds.add(activeAttendance.meetingId);
     }
     return attendedMeetingIds.size;
-  }, [meetingAttendanceLogs, activeAttendance, todayDateKey]);
+  }, [attendanceRecords, meetingAttendanceLogs, activeAttendance, todayDateKey]);
 
   const morningRoutineDayState = useMemo(
     () => getMorningDayState(routinesStore, routineDateKey),
@@ -4240,6 +4359,14 @@ export default function App() {
       soberHouseComplianceSummary,
       dashboardNextFiveMeetings,
     ],
+  );
+  const residentAssignmentDisplayContext = useMemo(
+    () =>
+      buildResidentAssignmentDisplayContext(
+        soberHouseStore,
+        residentProfileDisplayName ?? serverAccessContext?.user.displayName ?? devUserDisplayName,
+      ),
+    [devUserDisplayName, residentProfileDisplayName, serverAccessContext, soberHouseStore],
   );
   const soberHouseResidentSetupState = useMemo(
     () => getResidentSetupState(soberHouseStore, currentAccessUserId),
@@ -5721,13 +5848,13 @@ export default function App() {
       setRoutinesStore((current) => {
         const next = updater(current);
         logRoutinesDebug("config.persist_request", {
-          userId: devAuthUserId,
+          userId: storageScopedDevUserId,
           enabledItemIds: next.morningTemplate.items
             .filter((item) => item.enabled)
             .map((item) => item.id),
           morningDayCount: Object.keys(next.morningByDate).length,
         });
-        void saveRoutinesStore(devAuthUserId, next).catch(() => {
+        void saveRoutinesStore(storageScopedDevUserId, next).catch(() => {
           setRoutinesStatus("Failed to persist routines data.");
         });
         return next;
@@ -5736,7 +5863,7 @@ export default function App() {
         setRoutinesStatus(statusMessage);
       }
     },
-    [devAuthUserId, logRoutinesDebug],
+    [logRoutinesDebug, storageScopedDevUserId],
   );
 
   const updateMorningTemplate = useCallback(
@@ -6629,6 +6756,184 @@ export default function App() {
     }
   }, [devAuthIdentityDraft, devAuthUserId]);
 
+  const resetDevQaRuntimeState = useCallback(
+    (scenario: {
+      onboardingPath: OnboardingPath;
+      setupStep: SetupStep;
+      setupComplete: boolean;
+    }) => {
+      const legacyWizardState = getLegacyWizardStateForPath(scenario.onboardingPath);
+      lockSoberHouseAccess();
+      setMode("A");
+      setHomeScreen(scenario.setupComplete ? "DASHBOARD" : "SETUP");
+      setToolsScreen("HOME");
+      setSetupStep(scenario.setupStep);
+      setSetupComplete(scenario.setupComplete);
+      setDashboardEligibleBeforeWizard(false);
+      setSetupError(null);
+      setServiceCommitmentStatus(null);
+      setScreen("LIST");
+      setSelectedMeeting(null);
+      setSelectedDayOffset(0);
+      setMeetings([]);
+      setTodayNearbyMeetings([]);
+      setHomeGroupWeekMeetings([]);
+      setLoadingMeetings(false);
+      setMeetingsStatus("Meetings not loaded yet.");
+      setMeetingsError(null);
+      setLastMeetingsApiEvent(null);
+      setAttendanceRecords([]);
+      setActiveAttendance(null);
+      setAttendanceStatus("No active attendance session.");
+      setMeetingPlansByDate({});
+      setSponsorCallLogs([]);
+      setMeetingAttendanceLogs([]);
+      setBackendParticipantObligations([]);
+      setBackendParticipantViolations([]);
+      setParticipantSyncStatus(null);
+      setRecoveryCelebrationShownByKey({});
+      setRoutinesStore(createDefaultRoutinesStore());
+      setRoutinesStatus(null);
+      setSoberHouseStore(createDefaultSoberHouseSettingsStore());
+      setSoberHouseAdminLaunchContext(null);
+      setResidentOrganizationStatus(null);
+      setParticipantTrackState(createDefaultParticipantTrackState());
+      setWizardOnboardingPath(scenario.onboardingPath);
+      setWizardSupervisionMode(legacyWizardState.wizardSupervisionMode);
+      setWizardSoberHouseId(null);
+      setWizardJusticeTrack(legacyWizardState.wizardJusticeTrack);
+      setWizardCourtProgramName("");
+      setWizardCourtSupervisorName("");
+      setWizardCourtRequirementsSummary("");
+      setWizardCourtDeadlineSummary("");
+      setWizardOrganizationName("");
+      setWizardOrganizationPrimaryContactName("");
+      setWizardOrganizationPrimaryPhone("");
+      setWizardOrganizationPrimaryEmail("");
+      setWizardOrganizationNotes("");
+      setWizardResidentFirstName("");
+      setWizardResidentLastName("");
+      setWizardResidentMoveInDate("");
+      setWizardResidentRoomOrBed("");
+      setWizardResidentEmergencyContactName("");
+      setWizardResidentEmergencyContactPhone("");
+      setWizardResidentProgramPhase("");
+      setWizardHasSponsor(null);
+      setWizardHasSponsorCallTime(null);
+      setWizardSponsorKneesSuggested(null);
+      setWizardRecoverySubstances([]);
+      setWizardWantsReminders(null);
+      setWizardHasHomeGroup(null);
+      setWizardMeetingSignatureRequired(null);
+      setSponsorName("");
+      setSponsorPhoneDigits("");
+      setSponsorEnabled(false);
+      setSponsorActive(false);
+      setSponsorEnabledAtIso(null);
+      setSobrietyDateIso(null);
+      setSobrietyDateInput("");
+      setRecoverySubstances([]);
+      setNinetyDayGoalTarget(DEFAULT_NINETY_DAY_GOAL_TARGET);
+      setNinetyDayGoalInput(String(DEFAULT_NINETY_DAY_GOAL_TARGET));
+      setMeetingSignatureRequired(false);
+      setSponsorKneesSuggested(null);
+      setHomeGroupMeetingIds([]);
+      setHomeGroupSeriesKey(null);
+      setHomeGroupName(null);
+      setHomeGroupBirthdayOptIn(false);
+      setHomeGroupBirthdayFirstName("");
+      setHomeGroupBirthdayLastName("");
+      syncedComplianceEventIdsRef.current = new Set();
+      setServerAccessContext(null);
+      setProtectedOrgAccessGateOutcome("idle");
+      setProtectedOrgAccessChecking(false);
+      setBootstrapped(false);
+    },
+    [lockSoberHouseAccess],
+  );
+
+  const applyDevQaScenario = useCallback(
+    async (scenarioId: DevQaScenarioId) => {
+      const scenario = getDevQaScenario(scenarioId);
+      setQaScenarioStatus(`Applying ${scenario.label}...`);
+
+      try {
+        const resetKeys = filterDevQaResetStorageKeys(await AsyncStorage.getAllKeys());
+        if (resetKeys.length > 0) {
+          await AsyncStorage.multiRemove(resetKeys);
+        }
+        const scenarioModeStorage = modeStorageKey(scenario.userId);
+        const scenarioSetupCompleteStorage = setupCompleteStorageKey(scenario.userId);
+        const scenarioProfileStorage = profileStorageKey(scenario.userId);
+        const scenarioNinetyDayGoalStorage = ninetyDayGoalStorageKey(scenario.userId);
+        const scenarioSobrietyDateStorage = sobrietyDateStorageKey(scenario.userId);
+        const scenarioSponsorEnabledAtStorage = sponsorEnabledAtStorageKey(scenario.userId);
+
+        const seededUser = getSeededDevUser(scenario.userId);
+        if (seededUser) {
+          const seededProfile: Record<string, unknown> = {
+            ...(seededUser.recoveryProfile as Record<string, unknown>),
+            participantTracks: seededUser.participantTracks,
+            wizardOnboardingPath: scenario.onboardingPath,
+            wizardLastActiveStep: scenario.setupStep,
+          };
+          const sponsorEnabledAtIso =
+            typeof seededProfile.sponsorEnabledAtIso === "string" &&
+            seededProfile.sponsorEnabledAtIso.trim().length > 0
+              ? seededProfile.sponsorEnabledAtIso
+              : null;
+          const ninetyDayGoalValue =
+            typeof seededProfile.ninetyDayGoalTarget === "number" &&
+            Number.isFinite(seededProfile.ninetyDayGoalTarget)
+              ? String(seededProfile.ninetyDayGoalTarget)
+              : String(DEFAULT_NINETY_DAY_GOAL_TARGET);
+
+          await Promise.all([
+            AsyncStorage.setItem(scenarioModeStorage, "A"),
+            AsyncStorage.setItem(
+              scenarioSetupCompleteStorage,
+              scenario.setupComplete ? "true" : "false",
+            ),
+            AsyncStorage.setItem(scenarioProfileStorage, JSON.stringify(seededProfile)),
+            AsyncStorage.setItem(scenarioNinetyDayGoalStorage, ninetyDayGoalValue),
+            seededUser.sobrietyDateIso
+              ? AsyncStorage.setItem(scenarioSobrietyDateStorage, seededUser.sobrietyDateIso)
+              : AsyncStorage.removeItem(scenarioSobrietyDateStorage),
+            sponsorEnabledAtIso
+              ? AsyncStorage.setItem(scenarioSponsorEnabledAtStorage, sponsorEnabledAtIso)
+              : AsyncStorage.removeItem(scenarioSponsorEnabledAtStorage),
+          ]);
+
+          if (seededUser.soberHouseStore) {
+            await saveSoberHouseSettingsStore(scenario.userId, seededUser.soberHouseStore);
+          }
+        } else {
+          await Promise.all([
+            AsyncStorage.setItem(scenarioModeStorage, "A"),
+            AsyncStorage.setItem(scenarioSetupCompleteStorage, "false"),
+            AsyncStorage.removeItem(scenarioProfileStorage),
+            AsyncStorage.removeItem(scenarioSobrietyDateStorage),
+            AsyncStorage.removeItem(scenarioNinetyDayGoalStorage),
+            AsyncStorage.removeItem(scenarioSponsorEnabledAtStorage),
+          ]);
+        }
+
+        resetDevQaRuntimeState(scenario);
+        setDevAuthIdentityDraft(scenario.userId);
+        setDevAuthOverrideUserId(scenario.userId);
+        setDevAuthSignedOut(false);
+        setServerRoleCheckStatus(`Checking access for DEV_${scenario.userId}...`);
+        setQaScenarioPendingNavigation(scenario.id);
+        bootstrapStartedRef.current = false;
+        setQaScenarioRefreshNonce((current) => current + 1);
+        setQaScenarioStatus(`Rehydrating ${scenario.label}...`);
+      } catch (error) {
+        setQaScenarioStatus(`Failed to apply scenario: ${formatError(error)}`);
+      }
+    },
+    [resetDevQaRuntimeState],
+  );
+
   const refreshServerAccessContext = useCallback(async () => {
     if (!apiUrl || !authHeaders) {
       if (seededAccessContext) {
@@ -6711,7 +7016,13 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [apiUrl, authHeaders, refreshServerAccessContext, seededAccessContext]);
+  }, [
+    apiUrl,
+    authHeaders,
+    qaScenarioRefreshNonce,
+    refreshServerAccessContext,
+    seededAccessContext,
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -6792,6 +7103,315 @@ export default function App() {
       active = false;
     };
   }, [apiUrl, authHeaders, participantObligationSnapshotPayloads, participantProfileSyncPayload]);
+
+  const hydratePersistedAttendanceHistory = useCallback(
+    async (input: {
+      attendanceRaw: string | null;
+      attendanceSignatureMigrationRaw: string | null;
+      meetingAttendanceLogRaw: string | null;
+      source: "startup" | "ios_safe_boot";
+    }) => {
+      let latestOpenRecord: AttendanceRecord | null = null;
+      let didSetStatus = false;
+      let normalizedAttendanceCount = 0;
+      let normalizedLogCount = 0;
+
+      if (input.attendanceRaw) {
+        if (input.attendanceRaw.length > MAX_BOOTSTRAP_ATTENDANCE_RAW_CHARS) {
+          await AsyncStorage.removeItem(attendanceStorage);
+          setAttendanceRecords([]);
+          setActiveAttendance(null);
+          setAttendanceStatus("Local attendance cache was reset because it exceeded size limits.");
+          didSetStatus = true;
+        } else {
+          const parsedAttendance = JSON.parse(input.attendanceRaw) as unknown;
+          if (Array.isArray(parsedAttendance)) {
+            const migrationDone = input.attendanceSignatureMigrationRaw === "true";
+            const fileSystemModule = loadSignatureFileSystemModule();
+            const cappedAttendance = parsedAttendance.slice(0, MAX_BOOTSTRAP_ATTENDANCE_RECORDS);
+            const normalizedAttendance: AttendanceRecord[] = [];
+            let droppedSignatureCount = 0;
+            let migratedSignatureCount = 0;
+            let skippedRecordCount = 0;
+            let missingFileSignatureCount = 0;
+            let clearedCalendarEventIdCount = 0;
+
+            for (let index = 0; index < cappedAttendance.length; index += 1) {
+              const rawRecord = cappedAttendance[index];
+              if (!rawRecord || typeof rawRecord !== "object") {
+                skippedRecordCount += 1;
+                continue;
+              }
+
+              const record = rawRecord as Record<string, unknown>;
+              const schemaVersion =
+                typeof record.schemaVersion === "number" && Number.isFinite(record.schemaVersion)
+                  ? Math.floor(record.schemaVersion)
+                  : 0;
+              if (schemaVersion > ATTENDANCE_SCHEMA_VERSION) {
+                skippedRecordCount += 1;
+                continue;
+              }
+
+              try {
+                const recordId =
+                  typeof record.id === "string" && record.id.trim().length > 0
+                    ? record.id
+                    : createId("attendance-recovered");
+                const rawSignature =
+                  (typeof record.signatureRef === "object" &&
+                  record.signatureRef !== null &&
+                  typeof (record.signatureRef as { uri?: unknown }).uri === "string"
+                    ? ((record.signatureRef as { uri: string }).uri ?? null)
+                    : null) ??
+                  (typeof record.signaturePngBase64 === "string"
+                    ? record.signaturePngBase64
+                    : null);
+
+                const normalizedSignature = await normalizeSignatureValueToRef(rawSignature, {
+                  fileSystem: fileSystemModule,
+                  recordId,
+                  subdirectory: signatureStorageSubdirectory,
+                  verifyFileExists: true,
+                });
+
+                if (rawSignature && !normalizedSignature.ref) {
+                  droppedSignatureCount += 1;
+                  if (normalizedSignature.reason === "missing_file") {
+                    missingFileSignatureCount += 1;
+                  }
+                }
+                if (normalizedSignature.migrated && normalizedSignature.ref) {
+                  migratedSignatureCount += 1;
+                }
+
+                const startAt =
+                  typeof record.startAt === "string" && record.startAt.trim().length > 0
+                    ? record.startAt
+                    : new Date().toISOString();
+                const endAt =
+                  typeof record.endAt === "string" && record.endAt.trim().length > 0
+                    ? record.endAt
+                    : null;
+                const meetingLat = asFiniteNumber(record.meetingLat);
+                const meetingLng = asFiniteNumber(record.meetingLng);
+                const startLat = asFiniteNumber(record.startLat);
+                const startLng = asFiniteNumber(record.startLng);
+                const endLat = asFiniteNumber(record.endLat);
+                const endLng = asFiniteNumber(record.endLng);
+                const meetingName =
+                  typeof record.meetingName === "string" && record.meetingName.trim().length > 0
+                    ? record.meetingName.trim()
+                    : "Recovery Meeting";
+                const meetingAddress =
+                  typeof record.meetingAddress === "string" &&
+                  record.meetingAddress.trim().length > 0
+                    ? record.meetingAddress.trim()
+                    : "Address unavailable";
+                const calendarEventId =
+                  typeof record.calendarEventId === "string" &&
+                  record.calendarEventId.trim().length > 0 &&
+                  record.calendarEventId.trim().length <= CALENDAR_EVENT_ID_MAX_LENGTH
+                    ? record.calendarEventId
+                    : null;
+                if (record.calendarEventId !== undefined && calendarEventId === null) {
+                  clearedCalendarEventIdCount += 1;
+                }
+
+                normalizedAttendance.push({
+                  schemaVersion: ATTENDANCE_SCHEMA_VERSION,
+                  id: recordId,
+                  meetingId:
+                    typeof record.meetingId === "string" && record.meetingId.trim().length > 0
+                      ? record.meetingId
+                      : "unknown",
+                  meetingName,
+                  meetingAddress,
+                  meetingDayOfWeek: normalizeMeetingDayOfWeek(record.meetingDayOfWeek),
+                  scheduledStartsAtLocal:
+                    typeof record.scheduledStartsAtLocal === "string"
+                      ? record.scheduledStartsAtLocal
+                      : null,
+                  meetingLat: meetingLat ?? null,
+                  meetingLng: meetingLng ?? null,
+                  meetingGeoStatus:
+                    normalizeMeetingGeoStatus(record.meetingGeoStatus) ??
+                    (isValidLatLng(meetingLat, meetingLng) ? "verified" : "missing"),
+                  meetingGeoSource: normalizeMeetingGeoSource(record.meetingGeoSource) ?? "unknown",
+                  meetingGeoReason:
+                    typeof record.meetingGeoReason === "string" &&
+                    record.meetingGeoReason.trim().length > 0
+                      ? record.meetingGeoReason
+                      : null,
+                  meetingFormat:
+                    record.meetingFormat === "IN_PERSON" ||
+                    record.meetingFormat === "ONLINE" ||
+                    record.meetingFormat === "HYBRID"
+                      ? record.meetingFormat
+                      : undefined,
+                  captureMethod:
+                    record.captureMethod === "attend-log" || record.captureMethod === "signature"
+                      ? record.captureMethod
+                      : undefined,
+                  startAt,
+                  endAt,
+                  durationSeconds: asFiniteNumber(record.durationSeconds),
+                  startLat: startLat ?? null,
+                  startLng: startLng ?? null,
+                  startAccuracyM: asFiniteNumber(record.startAccuracyM) ?? null,
+                  endLat: endLat ?? null,
+                  endLng: endLng ?? null,
+                  endAccuracyM: asFiniteNumber(record.endAccuracyM) ?? null,
+                  inactive: Boolean(record.inactive),
+                  signaturePromptShown: Boolean(record.signaturePromptShown),
+                  chairName:
+                    typeof record.chairName === "string" && record.chairName.trim().length > 0
+                      ? record.chairName.trim()
+                      : null,
+                  chairRole:
+                    typeof record.chairRole === "string" && record.chairRole.trim().length > 0
+                      ? record.chairRole.trim()
+                      : null,
+                  signatureCapturedAtIso:
+                    typeof record.signatureCapturedAtIso === "string"
+                      ? record.signatureCapturedAtIso
+                      : null,
+                  calendarEventId,
+                  leaveNotificationId:
+                    typeof record.leaveNotificationId === "string" &&
+                    record.leaveNotificationId.trim().length > 0
+                      ? record.leaveNotificationId
+                      : null,
+                  leaveNotificationAtIso:
+                    typeof record.leaveNotificationAtIso === "string" &&
+                    record.leaveNotificationAtIso.trim().length > 0
+                      ? record.leaveNotificationAtIso
+                      : null,
+                  requiresSignature: Boolean(record.requiresSignature),
+                  attendanceAutomationState:
+                    record.attendanceAutomationState === "planned" ||
+                    record.attendanceAutomationState === "eligible_to_start" ||
+                    record.attendanceAutomationState === "started" ||
+                    record.attendanceAutomationState === "awaiting_signature" ||
+                    record.attendanceAutomationState === "completed" ||
+                    record.attendanceAutomationState === "incomplete_or_invalid"
+                      ? record.attendanceAutomationState
+                      : null,
+                  autoStartedAtIso:
+                    typeof record.autoStartedAtIso === "string" &&
+                    record.autoStartedAtIso.trim().length > 0
+                      ? record.autoStartedAtIso
+                      : null,
+                  signatureRef: normalizedSignature.ref ?? null,
+                  signaturePngBase64: null,
+                  pdfUri:
+                    typeof record.pdfUri === "string" && record.pdfUri.trim().length > 0
+                      ? record.pdfUri
+                      : null,
+                });
+              } catch {
+                skippedRecordCount += 1;
+              }
+
+              if (index > 0 && index % SIGNATURE_MIGRATION_BATCH_SIZE === 0) {
+                await yieldToEventLoop();
+              }
+            }
+
+            normalizedAttendance.sort(
+              (left, right) => new Date(right.startAt).getTime() - new Date(left.startAt).getTime(),
+            );
+            normalizedAttendanceCount = normalizedAttendance.length;
+            setAttendanceRecords(normalizedAttendance);
+
+            const shouldPersistAttendance =
+              parsedAttendance.length > MAX_BOOTSTRAP_ATTENDANCE_RECORDS ||
+              droppedSignatureCount > 0 ||
+              migratedSignatureCount > 0 ||
+              skippedRecordCount > 0 ||
+              !migrationDone;
+
+            if (shouldPersistAttendance) {
+              await AsyncStorage.setItem(attendanceStorage, JSON.stringify(normalizedAttendance));
+            }
+            if (!migrationDone) {
+              await AsyncStorage.setItem(attendanceSignatureMigrationStorage, "true");
+            }
+
+            const recoveryMessages: string[] = [];
+            if (migratedSignatureCount > 0) {
+              recoveryMessages.push(`migrated ${migratedSignatureCount} signature file(s)`);
+            }
+            if (droppedSignatureCount > 0) {
+              recoveryMessages.push(`dropped ${droppedSignatureCount} invalid signature(s)`);
+            }
+            if (missingFileSignatureCount > 0) {
+              recoveryMessages.push(`${missingFileSignatureCount} signature file(s) missing`);
+            }
+            if (skippedRecordCount > 0) {
+              recoveryMessages.push(`skipped ${skippedRecordCount} corrupt record(s)`);
+            }
+            if (clearedCalendarEventIdCount > 0) {
+              recoveryMessages.push(
+                `cleared ${clearedCalendarEventIdCount} invalid calendar reference(s)`,
+              );
+            }
+            if (recoveryMessages.length > 0) {
+              setAttendanceStatus(`Recovered local data: ${recoveryMessages.join("; ")}.`);
+              didSetStatus = true;
+            }
+
+            latestOpenRecord = normalizedAttendance.find((record) => !record.endAt) ?? null;
+            if (latestOpenRecord) {
+              setActiveAttendance(latestOpenRecord);
+              setAttendanceStatus(
+                `Attendance in progress for ${latestOpenRecord.meetingName}. End meeting when complete.`,
+              );
+              didSetStatus = true;
+            } else {
+              setActiveAttendance(null);
+            }
+          }
+        }
+      } else {
+        setAttendanceRecords([]);
+        setActiveAttendance(null);
+      }
+
+      if (input.meetingAttendanceLogRaw) {
+        try {
+          const parsedLogs = JSON.parse(input.meetingAttendanceLogRaw) as MeetingAttendanceLog[];
+          const normalizedLogs = Array.isArray(parsedLogs) ? parsedLogs : [];
+          normalizedLogCount = normalizedLogs.length;
+          setMeetingAttendanceLogs(normalizedLogs);
+        } catch (error) {
+          console.log("[setup-persist] read failure", {
+            key: "meetingAttendanceLogs",
+            error: formatError(error),
+            source: input.source,
+          });
+          setMeetingAttendanceLogs([]);
+        }
+      } else {
+        setMeetingAttendanceLogs([]);
+      }
+
+      console.log("[attendance][hydrate]", {
+        source: input.source,
+        recordCount: normalizedAttendanceCount,
+        logCount: normalizedLogCount,
+        activeRecordId: latestOpenRecord?.id ?? null,
+      });
+
+      return {
+        activeRecordId: latestOpenRecord?.id ?? null,
+        didSetStatus,
+        recordCount: normalizedAttendanceCount,
+        logCount: normalizedLogCount,
+      };
+    },
+    [attendanceSignatureMigrationStorage, attendanceStorage, signatureStorageSubdirectory],
+  );
 
   useEffect(() => {
     let active = true;
@@ -7119,11 +7739,152 @@ export default function App() {
 
   const persistSoberHouseStore = useCallback(
     async (nextStore: SoberHouseSettingsStore) => {
-      await saveSoberHouseSettingsStore(devAuthUserId, nextStore);
+      await saveSoberHouseSettingsStore(storageScopedDevUserId, nextStore);
       setSoberHouseStore(nextStore);
     },
-    [devAuthUserId],
+    [storageScopedDevUserId],
   );
+  const loadResidentOrganizationScope = useCallback(
+    async (organizationId: string) => {
+      if (!apiUrl || !authHeader) {
+        setResidentOrganizationStatus("Sign in to load sober housing organizations.");
+        return;
+      }
+
+      setResidentOrganizationStatus("Loading sober housing organization...");
+      try {
+        const snapshot = await loadOperatorControlPlaneSnapshot({
+          apiUrl,
+          authHeader,
+          organizationId,
+        });
+        const timestamp = new Date().toISOString();
+        let nextStore: SoberHouseSettingsStore = {
+          ...snapshot.store,
+          residentHousingProfile: null,
+          residentRequirementProfile: null,
+          residentConsentRecord: null,
+          residentWizardDraft: null,
+        };
+        nextStore = upsertUserAccessProfile(
+          nextStore,
+          { id: storageScopedDevUserId, name: devUserDisplayName },
+          {
+            id: nextStore.userAccessProfile?.id,
+            linkedUserId: storageScopedDevUserId,
+            role: "HOUSE_RESIDENT",
+            organizationId: snapshot.organizationId,
+            houseId: null,
+            houseGroupId: null,
+            status: "ACTIVE",
+          },
+          timestamp,
+        ).store;
+        await persistSoberHouseStore(nextStore);
+        setWizardSoberHouseId((current) =>
+          current && nextStore.houses.some((house) => house.id === current) ? current : null,
+        );
+        setResidentOrganizationStatus(`${snapshot.organizationName} loaded.`);
+      } catch (error) {
+        setResidentOrganizationStatus(
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Unable to load sober housing organization.",
+        );
+      }
+    },
+    [apiUrl, authHeader, devUserDisplayName, persistSoberHouseStore, storageScopedDevUserId],
+  );
+  useEffect(() => {
+    if (!apiUrl || !authHeader || residentOrganizationOptions.length === 0) {
+      return;
+    }
+
+    const activeOrganizationId = soberHouseStore.organization?.id ?? null;
+    const preferredOrganizationId =
+      residentOrganizationOptions.find((entry) => entry.organizationId === activeOrganizationId)
+        ?.organizationId ??
+      residentOrganizationOptions[0]?.organizationId ??
+      null;
+
+    if (!preferredOrganizationId) {
+      return;
+    }
+
+    const hasScopedStore =
+      activeOrganizationId === preferredOrganizationId &&
+      soberHouseStore.houses.some(
+        (house) => (house.organizationId ?? preferredOrganizationId) === preferredOrganizationId,
+      );
+    if (hasScopedStore) {
+      return;
+    }
+
+    void loadResidentOrganizationScope(preferredOrganizationId);
+  }, [
+    apiUrl,
+    authHeader,
+    loadResidentOrganizationScope,
+    residentOrganizationOptions,
+    soberHouseStore.houses,
+    soberHouseStore.organization?.id,
+  ]);
+  useEffect(() => {
+    if (!bootstrapped || !apiUrl || !authHeader || !canManageSoberHouseHierarchy(appAccessRole)) {
+      operatorControlPlaneHydrationKeyRef.current = null;
+      return;
+    }
+    if (canBootstrapSingleHousingOrganization && !soberHouseStore.organization?.id) {
+      operatorControlPlaneHydrationKeyRef.current = null;
+      return;
+    }
+
+    const organizationId = soberHouseStore.organization?.id ?? null;
+    const hydrationKey = [
+      storageScopedDevUserId,
+      currentAccessUserId || "no-access-user",
+      organizationId ?? "default-org",
+      qaScenarioRefreshNonce,
+    ].join(":");
+    if (operatorControlPlaneHydrationKeyRef.current === hydrationKey) {
+      return;
+    }
+    operatorControlPlaneHydrationKeyRef.current = hydrationKey;
+
+    let active = true;
+    void (async () => {
+      try {
+        const snapshot = await loadOperatorControlPlaneSnapshot({
+          apiUrl,
+          authHeader,
+          organizationId,
+        });
+        if (!active) {
+          return;
+        }
+        await persistSoberHouseStore(snapshot.store);
+      } catch {
+        if (active) {
+          operatorControlPlaneHydrationKeyRef.current = null;
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [
+    apiUrl,
+    appAccessRole,
+    authHeader,
+    bootstrapped,
+    canBootstrapSingleHousingOrganization,
+    currentAccessUserId,
+    persistSoberHouseStore,
+    qaScenarioRefreshNonce,
+    soberHouseStore.organization?.id,
+    storageScopedDevUserId,
+  ]);
   const persistSoberHouseInteraction = useCallback(
     async (
       nextStore: SoberHouseSettingsStore,
@@ -7148,7 +7909,7 @@ export default function App() {
       for (const houseId of houseIds) {
         const result = generateHouseMonthlyReport({
           store: nextStore,
-          actor: { id: devAuthUserId, name: devUserDisplayName },
+          actor: { id: storageScopedDevUserId, name: devUserDisplayName },
           houseId,
           monthKey: currentMonthKey(),
           attendanceRecords,
@@ -7171,7 +7932,7 @@ export default function App() {
     },
     [
       attendanceRecords,
-      devAuthUserId,
+      storageScopedDevUserId,
       devUserDisplayName,
       meetingAttendanceLogs,
       persistSoberHouseStore,
@@ -7225,7 +7986,7 @@ export default function App() {
       const timestamp = new Date().toISOString();
       const result = setHouseStatus(
         soberHouseStore,
-        { id: devAuthUserId, name: devUserDisplayName },
+        { id: storageScopedDevUserId, name: devUserDisplayName },
         houseId,
         nextStatus,
         timestamp,
@@ -7235,14 +7996,14 @@ export default function App() {
         `House ${nextStatus === "ACTIVE" ? "reactivated" : "deactivated"} with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
       );
     },
-    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+    [devUserDisplayName, persistSoberHouseStore, soberHouseStore, storageScopedDevUserId],
   );
   const updateOwnerDashboardStaffStatus = useCallback(
     async (staffAssignmentId: string, nextStatus: "ACTIVE" | "INACTIVE") => {
       const timestamp = new Date().toISOString();
       const result = setStaffAssignmentStatus(
         soberHouseStore,
-        { id: devAuthUserId, name: devUserDisplayName },
+        { id: storageScopedDevUserId, name: devUserDisplayName },
         staffAssignmentId,
         nextStatus,
         timestamp,
@@ -7252,7 +8013,7 @@ export default function App() {
         `Staff ${nextStatus === "ACTIVE" ? "reactivated" : "deactivated"} with ${result.auditCount} audit entr${result.auditCount === 1 ? "y" : "ies"}.`,
       );
     },
-    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+    [devUserDisplayName, persistSoberHouseStore, soberHouseStore, storageScopedDevUserId],
   );
   const markOwnerDashboardOneOnOneCompleted = useCallback(
     async (residentId: string) => {
@@ -7284,7 +8045,7 @@ export default function App() {
           : null;
       const result = upsertOneOnOneSession(
         soberHouseStore,
-        { id: devAuthUserId, name: devUserDisplayName },
+        { id: storageScopedDevUserId, name: devUserDisplayName },
         {
           id: existingSession?.id,
           organizationId: membership.organizationId,
@@ -7315,7 +8076,7 @@ export default function App() {
       await persistSoberHouseStore(result.store);
       setOwnerDashboardStatus("Marked the one-on-one as completed.");
     },
-    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+    [devUserDisplayName, persistSoberHouseStore, soberHouseStore, storageScopedDevUserId],
   );
   const logOwnerDashboardSponsorCallCompleted = useCallback(
     async (residentId: string) => {
@@ -7346,7 +8107,7 @@ export default function App() {
           .find((record) => record.status !== "COMPLETED" && record.status !== "EXCUSED") ?? null;
       const result = upsertSponsorCallRecord(
         soberHouseStore,
-        { id: devAuthUserId, name: devUserDisplayName },
+        { id: storageScopedDevUserId, name: devUserDisplayName },
         {
           id: existingRecord?.id,
           residentId,
@@ -7374,7 +8135,7 @@ export default function App() {
           : "Logged the sponsor call. Proof is still pending for this requirement.",
       );
     },
-    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+    [devUserDisplayName, persistSoberHouseStore, soberHouseStore, storageScopedDevUserId],
   );
   const markOwnerDashboardHouseMeetingAttendance = useCallback(
     async (residentId: string, nextStatus: "COMPLETED" | "MISSED") => {
@@ -7428,7 +8189,7 @@ export default function App() {
             ) ?? null);
       const result = upsertHouseMeetingAttendanceRecord(
         soberHouseStore,
-        { id: devAuthUserId, name: devUserDisplayName },
+        { id: storageScopedDevUserId, name: devUserDisplayName },
         {
           id: existingRecord?.id,
           residentId,
@@ -7459,7 +8220,7 @@ export default function App() {
           : "Marked the resident as having missed the house meeting.",
       );
     },
-    [devAuthUserId, devUserDisplayName, persistSoberHouseStore, soberHouseStore],
+    [devUserDisplayName, persistSoberHouseStore, soberHouseStore, storageScopedDevUserId],
   );
 
   const searchMeetingsFromDashboard = useCallback(async () => {
@@ -7490,7 +8251,7 @@ export default function App() {
   const restartSetup = useCallback(() => {
     const residentProfile = soberHouseStore.residentHousingProfile;
     const residentDraft =
-      soberHouseStore.residentWizardDraft?.linkedUserId === devAuthUserId
+      soberHouseStore.residentWizardDraft?.linkedUserId === storageScopedDevUserId
         ? soberHouseStore.residentWizardDraft
         : null;
     const organization = soberHouseStore.organization;
@@ -7563,7 +8324,7 @@ export default function App() {
     soberHouseStore.organization,
     soberHouseStore.userAccessProfile?.houseId,
     soberHouseStore.userAccessProfile?.role,
-    devAuthUserId,
+    storageScopedDevUserId,
     sponsorEnabled,
     sponsorKneesSuggested,
     recoverySubstances,
@@ -9648,11 +10409,11 @@ export default function App() {
     if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
       const assignedHouseId =
         wizardSoberHouseId ?? soberHouseStore.userAccessProfile?.houseId ?? null;
-      let residentDraft = createDefaultResidentWizardDraft(devAuthUserId);
+      let residentDraft = createDefaultResidentWizardDraft(storageScopedDevUserId);
       if (assignedHouseId) {
         residentDraft = applyHouseDefaultsToResidentDraft(
           soberHouseStore,
-          devAuthUserId,
+          storageScopedDevUserId,
           assignedHouseId,
           residentDraft,
         );
@@ -9715,7 +10476,7 @@ export default function App() {
     });
   }, [
     dashboardEligibleBeforeWizard,
-    devAuthUserId,
+    storageScopedDevUserId,
     persistRecoveryStateSnapshot,
     persistSoberHouseStore,
     setupStep,
@@ -9871,10 +10632,10 @@ export default function App() {
       if (shouldClearParticipantRole) {
         const nextStore = upsertUserAccessProfile(
           soberHouseStore,
-          { id: devAuthUserId, name: devUserDisplayName },
+          { id: storageScopedDevUserId, name: devUserDisplayName },
           {
             id: soberHouseStore.userAccessProfile?.id,
-            linkedUserId: devAuthUserId,
+            linkedUserId: storageScopedDevUserId,
             role: "UNASSIGNED",
             organizationId: soberHouseStore.userAccessProfile?.organizationId ?? null,
             houseId: null,
@@ -9891,7 +10652,7 @@ export default function App() {
       setSetupError(null);
     },
     [
-      devAuthUserId,
+      storageScopedDevUserId,
       devUserDisplayName,
       participantTrackState,
       persistSoberHouseStore,
@@ -10021,7 +10782,7 @@ export default function App() {
       };
       const mutation = upsertResidentRequirementProfile(
         soberHouseStore,
-        { id: devAuthUserId, name: devUserDisplayName },
+        { id: storageScopedDevUserId, name: devUserDisplayName },
         nextRequirement,
         nowIso,
       );
@@ -10030,7 +10791,7 @@ export default function App() {
     [
       applyScheduleTime,
       cancelScheduledNotificationIds,
-      devAuthUserId,
+      storageScopedDevUserId,
       devUserDisplayName,
       ensureNotificationPermission,
       persistSoberHouseStore,
@@ -10157,6 +10918,15 @@ export default function App() {
         }
       }
       if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
+        if (!canBootstrapSingleHousingOrganization) {
+          setSetupError(
+            soberHouseStore.organization?.name
+              ? `This account already manages ${soberHouseStore.organization.name}. Open the sober-house admin hub from Settings instead of creating another organization.`
+              : "This account already manages one sober-housing organization. Open the sober-house admin hub from Settings instead of creating another organization.",
+          );
+          setSetupStep(2);
+          return;
+        }
         if (!wizardOrganizationName.trim()) {
           setSetupError("Enter your organization name.");
           setSetupStep(2);
@@ -10339,66 +11109,21 @@ export default function App() {
           soberHouseTimestamp,
         );
       }
-      const actor = { id: devAuthUserId, name: devUserDisplayName };
+      const actor = { id: storageScopedDevUserId, name: devUserDisplayName };
       if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
-        nextSoberHouseStore = upsertOrganization(
-          nextSoberHouseStore,
-          actor,
-          {
-            id: nextSoberHouseStore.organization?.id,
-            name: wizardOrganizationName.trim(),
-            primaryContactName: wizardOrganizationPrimaryContactName.trim(),
-            primaryPhone: formatUsPhoneDisplay(wizardOrganizationPrimaryPhone),
-            primaryEmail: wizardOrganizationPrimaryEmail.trim(),
-            notes: wizardOrganizationNotes.trim(),
-            status: "ACTIVE",
+        nextSoberHouseStore = buildHousingAdminBootstrapStore({
+          userId: storageScopedDevUserId,
+          actorName: devUserDisplayName,
+          timestamp: soberHouseTimestamp,
+          fields: {
+            organizationId: null,
+            organizationName: wizardOrganizationName,
+            primaryContactName: wizardOrganizationPrimaryContactName,
+            primaryPhone: wizardOrganizationPrimaryPhone,
+            primaryEmail: wizardOrganizationPrimaryEmail,
+            notes: wizardOrganizationNotes,
           },
-          soberHouseTimestamp,
-        ).store;
-        const existingOwnerAssignment = nextSoberHouseStore.staffAssignments.find(
-          (assignment) =>
-            assignment.role === "OWNER" &&
-            assignment.email.trim().toLowerCase() ===
-              wizardOrganizationPrimaryEmail.trim().toLowerCase(),
-        );
-        nextSoberHouseStore = upsertStaffAssignment(
-          nextSoberHouseStore,
-          actor,
-          {
-            id: existingOwnerAssignment?.id,
-            firstName:
-              wizardOrganizationPrimaryContactName.trim().split(" ").slice(0, 1).join(" ") ||
-              "Owner",
-            lastName:
-              wizardOrganizationPrimaryContactName.trim().split(" ").slice(1).join(" ") ||
-              "Operator",
-            phone: formatUsPhoneDisplay(wizardOrganizationPrimaryPhone),
-            email: wizardOrganizationPrimaryEmail.trim(),
-            role: "OWNER",
-            assignedHouseIds: existingOwnerAssignment?.assignedHouseIds ?? [],
-            receiveRealTimeViolationAlerts: true,
-            receiveNearMissAlerts: true,
-            receiveMonthlyReports: true,
-            canApproveExceptions: true,
-            canIssueCorrectiveActions: true,
-            canViewResidentEvidence: true,
-            status: "ACTIVE",
-          },
-          soberHouseTimestamp,
-        ).store;
-        nextSoberHouseStore = upsertUserAccessProfile(
-          nextSoberHouseStore,
-          actor,
-          {
-            linkedUserId: devAuthUserId,
-            role: "OWNER_OPERATOR",
-            organizationId: nextSoberHouseStore.organization?.id ?? null,
-            houseId: null,
-            houseGroupId: null,
-            status: "ACTIVE",
-          },
-          soberHouseTimestamp,
-        ).store;
+        });
       } else if (wizardOnboardingPath === "SOBER_HOUSE_RESIDENT") {
         const residentHouse =
           nextSoberHouseStore.houses.find((house) => house.id === wizardSoberHouseId) ?? null;
@@ -10406,7 +11131,7 @@ export default function App() {
           nextSoberHouseStore,
           actor,
           {
-            linkedUserId: devAuthUserId,
+            linkedUserId: storageScopedDevUserId,
             role: "HOUSE_RESIDENT",
             organizationId: nextSoberHouseStore.organization?.id ?? null,
             houseId: wizardSoberHouseId,
@@ -10417,9 +11142,9 @@ export default function App() {
         ).store;
         const baseResidentDraft = applyHouseDefaultsToResidentDraft(
           nextSoberHouseStore,
-          devAuthUserId,
+          storageScopedDevUserId,
           wizardSoberHouseId,
-          createDefaultResidentWizardDraft(devAuthUserId),
+          createDefaultResidentWizardDraft(storageScopedDevUserId),
         );
         const residentDraft = {
           ...baseResidentDraft,
@@ -10442,7 +11167,7 @@ export default function App() {
         };
         const residentHousingProfile = createResidentHousingProfileFromDraft(
           nextSoberHouseStore,
-          devAuthUserId,
+          storageScopedDevUserId,
           residentDraft,
           soberHouseTimestamp,
         );
@@ -10454,7 +11179,7 @@ export default function App() {
         ).store;
         const residentRequirementProfile = createResidentRequirementProfileFromDraft(
           nextSoberHouseStore,
-          devAuthUserId,
+          storageScopedDevUserId,
           residentDraft,
           soberHouseTimestamp,
         );
@@ -10480,7 +11205,7 @@ export default function App() {
           nextSoberHouseStore,
           actor,
           {
-            linkedUserId: devAuthUserId,
+            linkedUserId: storageScopedDevUserId,
             role:
               wizardJusticeTrack === "DRUG_COURT"
                 ? "DRUG_COURT_PARTICIPANT"
@@ -10509,7 +11234,7 @@ export default function App() {
           nextSoberHouseStore,
           actor,
           {
-            linkedUserId: devAuthUserId,
+            linkedUserId: storageScopedDevUserId,
             role: "UNASSIGNED",
             organizationId: nextSoberHouseStore.organization?.id ?? null,
             houseId: null,
@@ -10519,6 +11244,36 @@ export default function App() {
           soberHouseTimestamp,
         ).store;
       }
+
+      if (wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN") {
+        if (!apiUrl || !authHeader) {
+          setSetupError(
+            "A live authenticated backend session is required to create a sober housing organization.",
+          );
+          setSetupStep(2);
+          return;
+        }
+
+        try {
+          const snapshot = await persistOperatorControlPlaneSnapshot({
+            apiUrl,
+            authHeader,
+            organizationId: nextSoberHouseStore.organization?.id ?? null,
+            store: nextSoberHouseStore,
+          });
+          nextSoberHouseStore = snapshot.store;
+          await refreshServerAccessContext();
+        } catch (error) {
+          setSetupError(
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : "Unable to create the sober housing organization.",
+          );
+          setSetupStep(2);
+          return;
+        }
+      }
+
       await persistSoberHouseStore(nextSoberHouseStore);
       setParticipantTrackState(nextParticipantTrackState);
       const legacyTrackState = buildLegacyWizardStateFromTracks(nextParticipantTrackState);
@@ -10592,9 +11347,11 @@ export default function App() {
       setSetupFinishing(false);
     }
   }, [
+    apiUrl,
+    authHeader,
     cancelNotificationBucket,
     completeSetupIntoDashboard,
-    devAuthUserId,
+    storageScopedDevUserId,
     devUserDisplayName,
     currentHomeGroupSelection,
     homeGroupMeetingIds.length,
@@ -10614,6 +11371,7 @@ export default function App() {
     soberHouseStore,
     sobrietyDateInput,
     sobrietyDateIso,
+    refreshServerAccessContext,
     sponsorEnabledAtIso,
     wizardOrganizationName,
     wizardOrganizationNotes,
@@ -10650,6 +11408,7 @@ export default function App() {
     sponsorEnabled,
     sponsorActive,
     sponsorKneesSuggested,
+    canBootstrapSingleHousingOrganization,
     syncHomeGroupBirthdayConfig,
     recoverySubstances,
     ninetyDayGoalTarget,
@@ -13495,21 +14254,27 @@ export default function App() {
           const [
             modeRaw,
             sponsorUiPrefsRaw,
+            attendanceRaw,
+            attendanceSignatureMigrationRaw,
             setupCompleteRaw,
             sobrietyDateRaw,
             profileRaw,
             ninetyDayGoalRaw,
             sponsorEnabledAtRaw,
+            meetingAttendanceLogRaw,
             loadedRoutinesStore,
           ] = await Promise.all([
             AsyncStorage.getItem(modeStorage),
             AsyncStorage.getItem(sponsorUiPrefsStorage),
+            AsyncStorage.getItem(attendanceStorage),
+            AsyncStorage.getItem(attendanceSignatureMigrationStorage),
             AsyncStorage.getItem(setupCompleteStorage),
             AsyncStorage.getItem(sobrietyDateStorage),
             AsyncStorage.getItem(profileStorage),
             AsyncStorage.getItem(ninetyDayGoalStorage),
             AsyncStorage.getItem(sponsorEnabledAtStorage),
-            loadRoutinesStore(devAuthUserId),
+            AsyncStorage.getItem(meetingAttendanceLogStorage),
+            loadRoutinesStore(storageScopedDevUserId),
           ]);
           const seededDefaults = applySeededRecoveryDefaults({
             setupCompleteRaw,
@@ -13532,10 +14297,16 @@ export default function App() {
           }
           setRoutinesStore(loadedRoutinesStore);
           logRoutinesDebug("hydrate.safe_mode_loaded", {
-            userId: devAuthUserId,
+            userId: storageScopedDevUserId,
             enabledItemIds: loadedRoutinesStore.morningTemplate.items
               .filter((item) => item.enabled)
               .map((item) => item.id),
+          });
+          const attendanceHydration = await hydratePersistedAttendanceHistory({
+            attendanceRaw,
+            attendanceSignatureMigrationRaw,
+            meetingAttendanceLogRaw,
+            source: "ios_safe_boot",
           });
           await refreshMeetings();
           setMeetingsStatus(
@@ -13543,11 +14314,13 @@ export default function App() {
               ? "Recovered mode enabled: meetings loaded without startup location."
               : "iOS launch-safe mode enabled: meetings loaded without startup location.",
           );
-          setAttendanceStatus(
-            recoveredModeFromPreviousCrash
-              ? "Recovered mode enabled: local attendance history loads after app stabilization."
-              : "iOS launch-safe mode enabled: attendance history loads after app stabilization.",
-          );
+          if (!attendanceHydration.didSetStatus) {
+            setAttendanceStatus(
+              recoveredModeFromPreviousCrash
+                ? "Recovered mode enabled: local attendance history restored."
+                : "iOS launch-safe mode enabled: local attendance history restored.",
+            );
+          }
           bootstrapCompletedSuccessfully = true;
         } catch {
           setMeetingsStatus("Unable to load meetings.");
@@ -13610,7 +14383,7 @@ export default function App() {
           AsyncStorage.getItem(sponsorEnabledAtStorage),
           AsyncStorage.getItem(meetingAttendanceLogStorage),
           AsyncStorage.getItem(recoveryCelebrationShownStorage),
-          loadRoutinesStore(devAuthUserId),
+          loadRoutinesStore(storageScopedDevUserId),
           readCurrentLocation(false),
         ]);
         const seededDefaults = applySeededRecoveryDefaults({
@@ -13637,261 +14410,12 @@ export default function App() {
           ninetyDayGoalRaw: seededDefaults.ninetyDayGoalRaw,
           sponsorEnabledAtRaw: seededDefaults.sponsorEnabledAtRaw,
         });
-
-        if (attendanceRaw) {
-          if (attendanceRaw.length > MAX_BOOTSTRAP_ATTENDANCE_RAW_CHARS) {
-            await AsyncStorage.removeItem(attendanceStorage);
-            setAttendanceStatus(
-              "Local attendance cache was reset because it exceeded size limits.",
-            );
-          } else {
-            const parsedAttendance = JSON.parse(attendanceRaw) as unknown;
-            if (Array.isArray(parsedAttendance)) {
-              const migrationDone = attendanceSignatureMigrationRaw === "true";
-              const fileSystemModule = loadSignatureFileSystemModule();
-              const cappedAttendance = parsedAttendance.slice(0, MAX_BOOTSTRAP_ATTENDANCE_RECORDS);
-              const normalizedAttendance: AttendanceRecord[] = [];
-              let droppedSignatureCount = 0;
-              let migratedSignatureCount = 0;
-              let skippedRecordCount = 0;
-              let missingFileSignatureCount = 0;
-              let clearedCalendarEventIdCount = 0;
-
-              for (let index = 0; index < cappedAttendance.length; index += 1) {
-                const rawRecord = cappedAttendance[index];
-                if (!rawRecord || typeof rawRecord !== "object") {
-                  skippedRecordCount += 1;
-                  continue;
-                }
-
-                const record = rawRecord as Record<string, unknown>;
-                const schemaVersion =
-                  typeof record.schemaVersion === "number" && Number.isFinite(record.schemaVersion)
-                    ? Math.floor(record.schemaVersion)
-                    : 0;
-                if (schemaVersion > ATTENDANCE_SCHEMA_VERSION) {
-                  skippedRecordCount += 1;
-                  continue;
-                }
-
-                try {
-                  const recordId =
-                    typeof record.id === "string" && record.id.trim().length > 0
-                      ? record.id
-                      : createId("attendance-recovered");
-                  const rawSignature =
-                    (typeof record.signatureRef === "object" &&
-                    record.signatureRef !== null &&
-                    typeof (record.signatureRef as { uri?: unknown }).uri === "string"
-                      ? ((record.signatureRef as { uri: string }).uri ?? null)
-                      : null) ??
-                    (typeof record.signaturePngBase64 === "string"
-                      ? record.signaturePngBase64
-                      : null);
-
-                  const normalizedSignature = await normalizeSignatureValueToRef(rawSignature, {
-                    fileSystem: fileSystemModule,
-                    recordId,
-                    subdirectory: signatureStorageSubdirectory,
-                    verifyFileExists: true,
-                  });
-
-                  if (rawSignature && !normalizedSignature.ref) {
-                    droppedSignatureCount += 1;
-                    if (normalizedSignature.reason === "missing_file") {
-                      missingFileSignatureCount += 1;
-                    }
-                  }
-                  if (normalizedSignature.migrated && normalizedSignature.ref) {
-                    migratedSignatureCount += 1;
-                  }
-
-                  const startAt =
-                    typeof record.startAt === "string" && record.startAt.trim().length > 0
-                      ? record.startAt
-                      : new Date().toISOString();
-                  const endAt =
-                    typeof record.endAt === "string" && record.endAt.trim().length > 0
-                      ? record.endAt
-                      : null;
-                  const meetingLat = asFiniteNumber(record.meetingLat);
-                  const meetingLng = asFiniteNumber(record.meetingLng);
-                  const startLat = asFiniteNumber(record.startLat);
-                  const startLng = asFiniteNumber(record.startLng);
-                  const endLat = asFiniteNumber(record.endLat);
-                  const endLng = asFiniteNumber(record.endLng);
-                  const meetingName =
-                    typeof record.meetingName === "string" && record.meetingName.trim().length > 0
-                      ? record.meetingName.trim()
-                      : "Recovery Meeting";
-                  const meetingAddress =
-                    typeof record.meetingAddress === "string" &&
-                    record.meetingAddress.trim().length > 0
-                      ? record.meetingAddress.trim()
-                      : "Address unavailable";
-                  const calendarEventId =
-                    typeof record.calendarEventId === "string" &&
-                    record.calendarEventId.trim().length > 0 &&
-                    record.calendarEventId.trim().length <= CALENDAR_EVENT_ID_MAX_LENGTH
-                      ? record.calendarEventId
-                      : null;
-                  if (record.calendarEventId !== undefined && calendarEventId === null) {
-                    clearedCalendarEventIdCount += 1;
-                  }
-
-                  normalizedAttendance.push({
-                    schemaVersion: ATTENDANCE_SCHEMA_VERSION,
-                    id: recordId,
-                    meetingId:
-                      typeof record.meetingId === "string" && record.meetingId.trim().length > 0
-                        ? record.meetingId
-                        : "unknown",
-                    meetingName,
-                    meetingAddress,
-                    meetingDayOfWeek: normalizeMeetingDayOfWeek(record.meetingDayOfWeek),
-                    scheduledStartsAtLocal:
-                      typeof record.scheduledStartsAtLocal === "string"
-                        ? record.scheduledStartsAtLocal
-                        : null,
-                    meetingLat: meetingLat ?? null,
-                    meetingLng: meetingLng ?? null,
-                    meetingGeoStatus:
-                      normalizeMeetingGeoStatus(record.meetingGeoStatus) ??
-                      (isValidLatLng(meetingLat, meetingLng) ? "verified" : "missing"),
-                    meetingGeoSource:
-                      normalizeMeetingGeoSource(record.meetingGeoSource) ?? "unknown",
-                    meetingGeoReason:
-                      typeof record.meetingGeoReason === "string" &&
-                      record.meetingGeoReason.trim().length > 0
-                        ? record.meetingGeoReason
-                        : null,
-                    meetingFormat:
-                      record.meetingFormat === "IN_PERSON" ||
-                      record.meetingFormat === "ONLINE" ||
-                      record.meetingFormat === "HYBRID"
-                        ? record.meetingFormat
-                        : undefined,
-                    captureMethod:
-                      record.captureMethod === "attend-log" || record.captureMethod === "signature"
-                        ? record.captureMethod
-                        : undefined,
-                    startAt,
-                    endAt,
-                    durationSeconds: asFiniteNumber(record.durationSeconds),
-                    startLat: startLat ?? null,
-                    startLng: startLng ?? null,
-                    startAccuracyM: asFiniteNumber(record.startAccuracyM) ?? null,
-                    endLat: endLat ?? null,
-                    endLng: endLng ?? null,
-                    endAccuracyM: asFiniteNumber(record.endAccuracyM) ?? null,
-                    inactive: Boolean(record.inactive),
-                    signaturePromptShown: Boolean(record.signaturePromptShown),
-                    chairName:
-                      typeof record.chairName === "string" && record.chairName.trim().length > 0
-                        ? record.chairName.trim()
-                        : null,
-                    chairRole:
-                      typeof record.chairRole === "string" && record.chairRole.trim().length > 0
-                        ? record.chairRole.trim()
-                        : null,
-                    signatureCapturedAtIso:
-                      typeof record.signatureCapturedAtIso === "string"
-                        ? record.signatureCapturedAtIso
-                        : null,
-                    calendarEventId,
-                    leaveNotificationId:
-                      typeof record.leaveNotificationId === "string" &&
-                      record.leaveNotificationId.trim().length > 0
-                        ? record.leaveNotificationId
-                        : null,
-                    leaveNotificationAtIso:
-                      typeof record.leaveNotificationAtIso === "string" &&
-                      record.leaveNotificationAtIso.trim().length > 0
-                        ? record.leaveNotificationAtIso
-                        : null,
-                    requiresSignature: Boolean(record.requiresSignature),
-                    attendanceAutomationState:
-                      record.attendanceAutomationState === "planned" ||
-                      record.attendanceAutomationState === "eligible_to_start" ||
-                      record.attendanceAutomationState === "started" ||
-                      record.attendanceAutomationState === "awaiting_signature" ||
-                      record.attendanceAutomationState === "completed" ||
-                      record.attendanceAutomationState === "incomplete_or_invalid"
-                        ? record.attendanceAutomationState
-                        : null,
-                    autoStartedAtIso:
-                      typeof record.autoStartedAtIso === "string" &&
-                      record.autoStartedAtIso.trim().length > 0
-                        ? record.autoStartedAtIso
-                        : null,
-                    signatureRef: normalizedSignature.ref ?? null,
-                    signaturePngBase64: null,
-                    pdfUri:
-                      typeof record.pdfUri === "string" && record.pdfUri.trim().length > 0
-                        ? record.pdfUri
-                        : null,
-                  });
-                } catch {
-                  skippedRecordCount += 1;
-                }
-
-                if (index > 0 && index % SIGNATURE_MIGRATION_BATCH_SIZE === 0) {
-                  await yieldToEventLoop();
-                }
-              }
-
-              normalizedAttendance.sort(
-                (left, right) =>
-                  new Date(right.startAt).getTime() - new Date(left.startAt).getTime(),
-              );
-              setAttendanceRecords(normalizedAttendance);
-
-              const shouldPersistAttendance =
-                parsedAttendance.length > MAX_BOOTSTRAP_ATTENDANCE_RECORDS ||
-                droppedSignatureCount > 0 ||
-                migratedSignatureCount > 0 ||
-                skippedRecordCount > 0 ||
-                !migrationDone;
-
-              if (shouldPersistAttendance) {
-                await AsyncStorage.setItem(attendanceStorage, JSON.stringify(normalizedAttendance));
-              }
-              if (!migrationDone) {
-                await AsyncStorage.setItem(attendanceSignatureMigrationStorage, "true");
-              }
-
-              const recoveryMessages: string[] = [];
-              if (migratedSignatureCount > 0) {
-                recoveryMessages.push(`migrated ${migratedSignatureCount} signature file(s)`);
-              }
-              if (droppedSignatureCount > 0) {
-                recoveryMessages.push(`dropped ${droppedSignatureCount} invalid signature(s)`);
-              }
-              if (missingFileSignatureCount > 0) {
-                recoveryMessages.push(`${missingFileSignatureCount} signature file(s) missing`);
-              }
-              if (skippedRecordCount > 0) {
-                recoveryMessages.push(`skipped ${skippedRecordCount} corrupt record(s)`);
-              }
-              if (clearedCalendarEventIdCount > 0) {
-                recoveryMessages.push(
-                  `cleared ${clearedCalendarEventIdCount} invalid calendar reference(s)`,
-                );
-              }
-              if (recoveryMessages.length > 0) {
-                setAttendanceStatus(`Recovered local data: ${recoveryMessages.join("; ")}.`);
-              }
-
-              const latestOpenRecord = normalizedAttendance.find((record) => !record.endAt) ?? null;
-              if (latestOpenRecord) {
-                setActiveAttendance(latestOpenRecord);
-                setAttendanceStatus(
-                  `Attendance in progress for ${latestOpenRecord.meetingName}. End meeting when complete.`,
-                );
-              }
-            }
-          }
-        }
+        await hydratePersistedAttendanceHistory({
+          attendanceRaw,
+          attendanceSignatureMigrationRaw,
+          meetingAttendanceLogRaw,
+          source: "startup",
+        });
 
         if (planRaw) {
           try {
@@ -13925,20 +14449,6 @@ export default function App() {
           }
         }
 
-        if (meetingAttendanceLogRaw) {
-          try {
-            const parsedLogs = JSON.parse(meetingAttendanceLogRaw) as MeetingAttendanceLog[];
-            if (Array.isArray(parsedLogs)) {
-              setMeetingAttendanceLogs(parsedLogs);
-            }
-          } catch (error) {
-            console.log("[setup-persist] read failure", {
-              key: "meetingAttendanceLogs",
-              error: formatError(error),
-            });
-          }
-        }
-
         if (recoveryCelebrationShownRaw) {
           try {
             const parsedShown = JSON.parse(recoveryCelebrationShownRaw) as Record<string, unknown>;
@@ -13961,7 +14471,7 @@ export default function App() {
 
         setRoutinesStore(loadedRoutinesStore);
         logRoutinesDebug("hydrate.loaded", {
-          userId: devAuthUserId,
+          userId: storageScopedDevUserId,
           enabledItemIds: loadedRoutinesStore.morningTemplate.items
             .filter((item) => item.enabled)
             .map((item) => item.id),
@@ -14010,11 +14520,12 @@ export default function App() {
     meetingAttendanceLogStorage,
     recoveryCelebrationShownStorage,
     bootGuardStorage,
-    devAuthUserId,
+    storageScopedDevUserId,
     enableSponsorApiSync,
     fetchSponsorConfig,
     logRoutinesDebug,
     applySeededRecoveryDefaults,
+    hydratePersistedAttendanceHistory,
     hydratePersistedRecoverySettings,
     readCurrentLocation,
     refreshMeetings,
@@ -14024,12 +14535,13 @@ export default function App() {
     appVersion,
     buildNumber,
     resolvedAppEnv,
+    qaScenarioRefreshNonce,
   ]);
 
   useEffect(() => {
     let active = true;
     void (async () => {
-      const loadedStore = await loadSoberHouseSettingsStore(devAuthUserId);
+      const loadedStore = await loadSoberHouseSettingsStore(storageScopedDevUserId);
       if (!active) {
         return;
       }
@@ -14043,7 +14555,7 @@ export default function App() {
         loadedStore.houseRuleSets.length === 0;
       const nextStore = shouldUseSeededSoberHouseStore ? seededSoberHouseStore : loadedStore;
       if (shouldUseSeededSoberHouseStore) {
-        await saveSoberHouseSettingsStore(devAuthUserId, nextStore);
+        await saveSoberHouseSettingsStore(storageScopedDevUserId, nextStore);
       }
       setSoberHouseStore(nextStore);
       const role = nextStore.userAccessProfile?.role;
@@ -14110,13 +14622,60 @@ export default function App() {
     };
   }, [
     activeSeededDevUser?.soberHouseStore,
-    devAuthUserId,
+    storageScopedDevUserId,
     homeScreen,
     mode,
+    qaScenarioRefreshNonce,
     setupComplete,
     wizardJusticeTrack,
     wizardOnboardingPath,
     wizardSupervisionMode,
+  ]);
+
+  useEffect(() => {
+    if (!qaScenarioPendingNavigation || !bootstrapped) {
+      return;
+    }
+
+    const scenario = getDevQaScenario(qaScenarioPendingNavigation);
+
+    if (scenario.startTarget === "SOBER_HOUSE_ADMIN") {
+      if (!canOpenSoberHouseEntry) {
+        return;
+      }
+
+      void (async () => {
+        await openSoberHousingSettings({ module: "HUB" });
+        setQaScenarioStatus(`${scenario.label} ready.`);
+        setQaScenarioPendingNavigation(null);
+      })();
+      return;
+    }
+
+    if (scenario.startTarget === "DASHBOARD") {
+      openDashboard();
+      setQaScenarioStatus(`${scenario.label} ready.`);
+      setQaScenarioPendingNavigation(null);
+      return;
+    }
+
+    selectOnboardingPath(scenario.onboardingPath);
+    setDashboardEligibleBeforeWizard(false);
+    setSetupComplete(false);
+    setMode("A");
+    setHomeScreen("SETUP");
+    setSetupStep(scenario.setupStep);
+    setScreen("LIST");
+    setSelectedMeeting(null);
+    setQaScenarioStatus(`${scenario.label} ready.`);
+    setQaScenarioPendingNavigation(null);
+  }, [
+    bootstrapped,
+    canOpenSoberHouseEntry,
+    openDashboard,
+    openSoberHousingSettings,
+    qaScenarioPendingNavigation,
+    selectOnboardingPath,
   ]);
 
   useEffect(() => {
@@ -15441,15 +16000,23 @@ export default function App() {
                         {wizardOnboardingPath === "SOBER_HOUSE_ORG_ADMIN" ? (
                           <>
                             <Text style={styles.sectionMeta}>
-                              Verified admin access is active for this account. Complete the
-                              organization bootstrap below.
+                              {canBootstrapSingleHousingOrganization
+                                ? "Signed-in access is active for this account. Save this form to create the sober-house organization and mint the backend admin access for it."
+                                : "Verified admin access is active for this account. This account already manages one sober-housing organization, so additional organization creation is disabled."}
                             </Text>
+                            {!canBootstrapSingleHousingOrganization &&
+                            soberHouseStore.organization?.name ? (
+                              <Text style={styles.sectionMeta}>
+                                Current organization: {soberHouseStore.organization.name}
+                              </Text>
+                            ) : null}
                             <Text style={styles.label}>Organization name</Text>
                             <TextInput
                               style={styles.input}
                               value={wizardOrganizationName}
                               onChangeText={setWizardOrganizationName}
                               placeholder="Serenity Homes"
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                             <Text style={styles.label}>Primary contact name</Text>
                             <TextInput
@@ -15457,6 +16024,7 @@ export default function App() {
                               value={wizardOrganizationPrimaryContactName}
                               onChangeText={setWizardOrganizationPrimaryContactName}
                               placeholder="Owner / operator"
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                             <Text style={styles.label}>Primary phone</Text>
                             <TextInput
@@ -15467,6 +16035,7 @@ export default function App() {
                               }
                               placeholder="(555) 555-1234"
                               keyboardType="phone-pad"
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                             <Text style={styles.label}>Primary email</Text>
                             <TextInput
@@ -15476,6 +16045,7 @@ export default function App() {
                               placeholder="owner@example.com"
                               autoCapitalize="none"
                               keyboardType="email-address"
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                             <Text style={styles.label}>Notes</Text>
                             <TextInput
@@ -15484,6 +16054,7 @@ export default function App() {
                               onChangeText={setWizardOrganizationNotes}
                               placeholder="Optional organization notes"
                               multiline
+                              editable={canBootstrapSingleHousingOrganization}
                             />
                           </>
                         ) : (
@@ -16441,6 +17012,54 @@ export default function App() {
                       <>
                         {wizardOnboardingPath === "SOBER_HOUSE_RESIDENT" ? (
                           <>
+                            {residentOrganizationOptions.length > 0 ? (
+                              <>
+                                <Text style={styles.label}>
+                                  Select your sober housing organization
+                                </Text>
+                                <View style={styles.chipRow}>
+                                  {residentOrganizationOptions.map((scope) => (
+                                    <Pressable
+                                      key={scope.organizationId}
+                                      style={[
+                                        styles.chip,
+                                        soberHouseStore.organization?.id === scope.organizationId
+                                          ? styles.chipSelected
+                                          : null,
+                                      ]}
+                                      onPress={() => {
+                                        if (
+                                          soberHouseStore.organization?.id === scope.organizationId
+                                        ) {
+                                          return;
+                                        }
+                                        void loadResidentOrganizationScope(scope.organizationId);
+                                      }}
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.chipText,
+                                          soberHouseStore.organization?.id === scope.organizationId
+                                            ? styles.chipTextSelected
+                                            : null,
+                                        ]}
+                                      >
+                                        {scope.organizationName}
+                                      </Text>
+                                    </Pressable>
+                                  ))}
+                                </View>
+                                <Text style={styles.sectionMeta}>
+                                  Current organization:{" "}
+                                  {soberHouseStore.organization?.name ?? "Not selected"}
+                                </Text>
+                                {residentOrganizationStatus ? (
+                                  <Text style={styles.sectionMeta}>
+                                    {residentOrganizationStatus}
+                                  </Text>
+                                ) : null}
+                              </>
+                            ) : null}
                             <Text style={styles.label}>Select your sober house</Text>
                             <View style={styles.chipRow}>
                               {soberHouseStore.houses.map((house) => (
@@ -16468,6 +17087,14 @@ export default function App() {
                             <Text style={styles.sectionMeta}>
                               This resident setup only collects participant-facing details and house
                               requirements.
+                            </Text>
+                            <Text style={styles.sectionMeta}>
+                              House group:{" "}
+                              {wizardSelectedSoberHouse?.houseGroupId
+                                ? (soberHouseStore.houseGroups.find(
+                                    (group) => group.id === wizardSelectedSoberHouse.houseGroupId,
+                                  )?.name ?? "Unassigned")
+                                : "Unassigned"}
                             </Text>
                             <Text style={styles.label}>Resident first name</Text>
                             <TextInput
@@ -16938,7 +17565,7 @@ export default function App() {
                     </GlassCard>
                     <SoberHouseChatSection
                       store={soberHouseStore}
-                      actor={{ id: devAuthUserId, name: devUserDisplayName }}
+                      actor={{ id: storageScopedDevUserId, name: devUserDisplayName }}
                       isSaving={false}
                       chatIntent={soberHouseChatIntent}
                       onChatIntentHandled={() => setSoberHouseChatIntent(null)}
@@ -18242,6 +18869,12 @@ export default function App() {
                       <Text style={styles.sectionMeta}>
                         Current DEV user: {currentDevAuthUserId || "Signed out"}
                       </Text>
+                      <Text style={styles.sectionMeta}>
+                        Resolved scenario: {resolvedDevQaScenario.label}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Resolved identity: {currentAccessIdentityLabel}
+                      </Text>
                       <Text style={styles.sectionMeta}>App role: {appAccessRole}</Text>
                       <Text style={styles.sectionMeta}>
                         Active tracks:{" "}
@@ -18260,6 +18893,44 @@ export default function App() {
                         house {soberHouseAccessProfile?.houseId ?? "none"} • group{" "}
                         {soberHouseAccessProfile?.houseGroupId ?? "none"}
                       </Text>
+                    </GlassCard>
+                  ) : null}
+
+                  {usesDevAuthShim && isDiagnosticsEnabled ? (
+                    <GlassCard style={styles.card} strong>
+                      <Text style={styles.sectionTitle}>QA Scenario Harness</Text>
+                      <Text style={styles.sectionMeta}>
+                        One tap resets app-owned local state, applies the selected DEV identity,
+                        rehydrates access context, and routes to the expected start screen.
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Active scenario: {resolvedDevQaScenario.label} • identity{" "}
+                        {currentDevAuthUserId ? `DEV_${currentDevAuthUserId}` : "Signed out"}
+                      </Text>
+                      <Text style={styles.sectionMeta}>Status: {qaScenarioStatus ?? "Idle"}</Text>
+                      <View style={styles.chipRow}>
+                        {DEV_QA_SCENARIOS.map((scenario) => (
+                          <Pressable
+                            key={scenario.id}
+                            style={[
+                              styles.chip,
+                              resolvedDevQaScenario.id === scenario.id ? styles.chipSelected : null,
+                            ]}
+                            onPress={() => void applyDevQaScenario(scenario.id)}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                resolvedDevQaScenario.id === scenario.id
+                                  ? styles.chipTextSelected
+                                  : null,
+                              ]}
+                            >
+                              {scenario.label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
                     </GlassCard>
                   ) : null}
 
@@ -18406,7 +19077,16 @@ export default function App() {
                     <GlassCard style={styles.card} strong>
                       <Text style={styles.sectionTitle}>Sober House Program Requirements</Text>
                       <Text style={styles.sectionMeta}>
-                        Assigned house: {soberHouseAssignedHouse?.name ?? "Not assigned"}
+                        Resident: {residentAssignmentDisplayContext.residentName}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Organization: {residentAssignmentDisplayContext.organizationName}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        Assigned house: {residentAssignmentDisplayContext.houseName}
+                      </Text>
+                      <Text style={styles.sectionMeta}>
+                        House group: {residentAssignmentDisplayContext.groupName ?? "Unassigned"}
                       </Text>
                       <Text style={styles.sectionMeta}>
                         Meetings per week:{" "}
@@ -19467,10 +20147,10 @@ export default function App() {
                   ) : null}
                   <SoberHouseSettingsScreen
                     key={soberHouseSettingsScreenKey}
-                    userId={devAuthUserId}
+                    userId={storageScopedDevUserId}
                     apiUrl={apiUrl}
                     authHeader={authHeader}
-                    actorId={devAuthUserId}
+                    actorId={storageScopedDevUserId}
                     actorName={devUserDisplayName}
                     viewerRole={appAccessRole}
                     adminLaunchContext={soberHouseAdminLaunchContext}

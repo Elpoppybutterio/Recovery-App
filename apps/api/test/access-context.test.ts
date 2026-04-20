@@ -197,4 +197,37 @@ describe("access context", () => {
     await app.close();
     await db.end?.();
   });
+
+  it("auto-creates a dev-auth user profile when the backend has never seen the user id before", async () => {
+    const app = createTestApp(db);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/me/access-context",
+      headers: {
+        authorization: "Bearer DEV_new-housing-admin",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      user: {
+        userId: "new-housing-admin",
+        tenantId: "tenant-a",
+        email: "new-housing-admin@dev.soberai.local",
+        displayName: "New Housing Admin",
+      },
+      grants: [],
+      capabilities: {
+        participantRoles: [],
+        protectedRoles: [],
+        canManageOrganizations: false,
+        canManageCourtPrograms: false,
+        isPlatformOwner: false,
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
 });

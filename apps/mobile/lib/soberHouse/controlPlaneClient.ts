@@ -112,15 +112,15 @@ export async function loadOperatorControlPlaneSnapshot(input: {
 export async function persistOperatorControlPlaneSnapshot(input: {
   apiUrl: string;
   authHeader: string;
-  organizationId: string;
+  organizationId?: string | null;
   store: SoberHouseSettingsStore;
   fetchImpl?: FetchLike;
 }): Promise<OperatorControlPlaneSnapshot> {
   const fetchImpl = input.fetchImpl ?? fetch;
-  const url = buildControlPlaneUrl(input.apiUrl, input.organizationId);
+  const url = buildControlPlaneUrl(input.apiUrl, input.organizationId ?? null);
   debugControlPlane("save.request", {
     url,
-    organizationId: input.organizationId,
+    organizationId: input.organizationId ?? null,
     houseIds: input.store.houses.map((house) => house.id),
     houseCount: input.store.houses.length,
   });
@@ -139,7 +139,7 @@ export async function persistOperatorControlPlaneSnapshot(input: {
   if (!response.ok) {
     debugControlPlane("save.error", {
       status: response.status,
-      organizationId: input.organizationId,
+      organizationId: input.organizationId ?? null,
     });
     throw new Error(
       buildErrorMessage(response.status, payload, "Unable to persist sober-house control plane"),

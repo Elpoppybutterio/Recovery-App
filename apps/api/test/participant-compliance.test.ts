@@ -118,6 +118,53 @@ describe("participant compliance foundation", () => {
     await db.end?.();
   });
 
+  it("persists the resident-entered display name and assignment context for dashboard reads", async () => {
+    const app = createTestApp(db);
+
+    const profileResponse = await app.inject({
+      method: "PUT",
+      url: "/v1/me/participant-profile",
+      headers: { authorization: "Bearer DEV_resident-user" },
+      payload: {
+        displayName: "Riley Resident",
+        participantType: "resident_user",
+        organizationId: "org-alpine",
+        houseId: "house-alpine-1",
+        courtProgramId: null,
+        status: "ACTIVE",
+      },
+    });
+
+    expect(profileResponse.statusCode).toBe(200);
+    expect(profileResponse.json()).toMatchObject({
+      participantProfile: {
+        user_id: "resident-user",
+        display_name: "Riley Resident",
+        organization_id: "org-alpine",
+        house_id: "house-alpine-1",
+      },
+    });
+
+    const getResponse = await app.inject({
+      method: "GET",
+      url: "/v1/me/participant-profile",
+      headers: { authorization: "Bearer DEV_resident-user" },
+    });
+
+    expect(getResponse.statusCode).toBe(200);
+    expect(getResponse.json()).toMatchObject({
+      participantProfile: {
+        user_id: "resident-user",
+        display_name: "Riley Resident",
+        organization_id: "org-alpine",
+        house_id: "house-alpine-1",
+      },
+    });
+
+    await app.close();
+    await db.end?.();
+  });
+
   it("limits org-scoped admin queries to their authorized organization", async () => {
     const app = createTestApp(db);
 

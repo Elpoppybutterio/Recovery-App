@@ -156,6 +156,8 @@ type SyncInputs = {
   appAccessRole: AppAccessRole;
   accessContext: AccessContext | null;
   soberHouseRole: SoberHouseAccessRole | null | undefined;
+  residentDisplayName: string | null;
+  residentOrganizationId: string | null;
   houseId: string | null;
   sponsor: SponsorInputs;
   court: CourtInputs;
@@ -253,6 +255,8 @@ export function buildParticipantProfileSyncPayload(
     | "appAccessRole"
     | "accessContext"
     | "soberHouseRole"
+    | "residentDisplayName"
+    | "residentOrganizationId"
     | "houseId"
   >,
 ): ParticipantProfileSyncPayload | null {
@@ -265,10 +269,13 @@ export function buildParticipantProfileSyncPayload(
     input.onboardingPath === "SOBER_HOUSE_RESIDENT" ||
     input.appAccessRole === "SOBER_HOUSE_RESIDENT"
   ) {
+    const normalizedResidentDisplayName = input.residentDisplayName?.trim().length
+      ? input.residentDisplayName.trim()
+      : null;
     return {
-      displayName: input.accessContext?.user.displayName ?? null,
+      displayName: normalizedResidentDisplayName ?? input.accessContext?.user.displayName ?? null,
       participantType: "resident_user",
-      organizationId: residentGrant?.organizationId ?? null,
+      organizationId: input.residentOrganizationId ?? residentGrant?.organizationId ?? null,
       houseId: input.houseId,
       courtProgramId: null,
       status: input.setupComplete ? "ACTIVE" : "PENDING",
