@@ -46,6 +46,13 @@ export async function loadAttendanceRecords(userId: string): Promise<AttendanceR
   }
 }
 
+export async function saveAttendanceRecords(
+  userId: string,
+  records: AttendanceRecordSummary[],
+): Promise<void> {
+  await AsyncStorage.setItem(attendanceStorageKey(userId), JSON.stringify(records));
+}
+
 export async function loadMeetingAttendanceLogs(
   userId: string,
 ): Promise<MeetingAttendanceLogRecord[]> {
@@ -55,4 +62,11 @@ export async function loadMeetingAttendanceLogs(
   } catch {
     return [];
   }
+}
+
+export async function saveMeetingAttendanceLogs(
+  userId: string,
+  records: MeetingAttendanceLogRecord[],
+): Promise<void> {
+  await AsyncStorage.setItem(meetingAttendanceLogStorageKey(userId), JSON.stringify(records));
 }
